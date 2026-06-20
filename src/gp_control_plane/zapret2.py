@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
-from .strategies import list_local_strategies
+from .models import StrategySelection
+from .strategies import list_local_strategies, load_strategy_dir
 
 
 def check_install() -> dict[str, str | bool]:
@@ -25,13 +28,67 @@ def list_strategies(strategies_repo: Path) -> list[Path]:
 def run_check(domain: str, strategy_path: Path, timeout_seconds: int = 60) -> subprocess.CompletedProcess[str]:
     if not strategy_path.exists():
         raise FileNotFoundError(strategy_path)
+    strategy = load_strategy_dir(strategy_path)
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
+    env = blockcheck_env(domain, strategy)
     return subprocess.run(
-        [blockcheck, domain],
+        [blockcheck],
         text=True,
         capture_output=True,
+        env=env,
         timeout=timeout_seconds,
         check=False,
     )
+
+
+def blockcheck_env(domain: str, strategy: StrategySelection) -> dict[str, str]:
+    env = os.environ.copy()
+    metadata = strategy.metadata
+    blockcheck = metadata.get("blockcheck")
+    if not isinstance(blockcheck, dict):
+        blockcheck = {}
+
+    env["BATCH"] = "1"
+    env["DOMAINS"] = domain
+    env["IPVS"] = str(blockcheck.get("ip_versions") or "4")
+    env["TEST"] = str(blockcheck.get("test") or "custom")
+    env["SKIP_DNSCHECK"] = "1" if bool(blockcheck.get("skip_dnscheck", True)) else "0"
+
+    checks = blockcheck.get("checks")
+    if not isinstance(checks, dict):
+        checks = {}
+    protocols = {str(protocol) for protocol in metadata.get("protocols") or []}
+    env["ENABLE_HTTP"] = _flag(checks.get("http", "http" in protocols))
+    env["ENABLE_HTTPS_TLS12"] = _flag(checks.get("https_tls12", "tls" in protocols))
+    env["ENABLE_HTTPS_TLS13"] = _flag(checks.get("https_tls13", False))
+    env["ENABLE_HTTP3"] = _flag(checks.get("http3", "quic" in protocols))
+
+    _set_strategy_lists(env, strategy, blockcheck)
+    return env
+
+
+def _set_strategy_lists(env: dict[str, str], strategy: StrategySelection, blockcheck: dict[str, Any]) -> None:
+    lists = blockcheck.get("lists")
+    if not isinstance(lists, dict):
+        lists = {"https_tls12": strategy.nfqws2_config.name}
+
+    mapping = {
+        "http": "LIST_HTTP",
+        "https_tls12": "LIST_HTTPS_TLS12",
+        "https_tls13": "LIST_HTTPS_TLS13",
+        "quic": "LIST_QUIC",
+    }
+    for key, env_name in mapping.items():
+        value = lists.get(key)
+        if not value:
+            continue
+        path = Path(str(value))
+        if not path.is_absolute():
+            path = (strategy.path / path).resolve()
+        env[env_name] = str(path)
+
+
+def _flag(value: Any) -> str:
+    return "1" if bool(value) else "0"
