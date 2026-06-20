@@ -212,6 +212,20 @@ which nfqws2 || true
 which blockcheck2.sh || which blockcheck.sh || true
 ```
 
+Если `zapret2` установлен в `~/opt/zapret2`, можно добавить wrappers в `~/.local/bin`. Важно: wrappers записывают абсолютный путь к `zapret2`, чтобы они одинаково работали из SSH-сессии и из `systemd`:
+
+```bash
+ZAPRET2_DIR="$(realpath "$HOME/opt/zapret2")"
+mkdir -p "$HOME/.local/bin"
+
+printf '#!/bin/sh\nexec %s/blockcheck2.sh "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/blockcheck2.sh"
+printf '#!/bin/sh\nexec %s/nfq2/nfqws2 "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/nfqws2"
+printf '#!/bin/sh\nexec %s/mdig/mdig "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/mdig"
+printf '#!/bin/sh\nexec %s/ip2net/ip2net "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/ip2net"
+
+chmod +x "$HOME/.local/bin/blockcheck2.sh" "$HOME/.local/bin/nfqws2" "$HOME/.local/bin/mdig" "$HOME/.local/bin/ip2net"
+```
+
 После установки `zapret2` проверка в этом проекте должна вернуть `true` для найденных компонентов:
 
 ```bash
@@ -488,6 +502,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/pi/gp/GP-access-control-plane
+Environment=HOME=/home/pi
+Environment=PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/home/pi/gp/GP-access-control-plane/.venv/bin/gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=5
@@ -496,7 +512,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Если пользователь не `pi`, замените `/home/pi` на свой путь.
+Если пользователь не `pi`, замените `/home/pi` на свой путь во всех строках unit-файла. `HOME` и `PATH` важны для запуска `zapret2` wrappers из веб-панели.
 
 Включить:
 
@@ -504,6 +520,12 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now gp-control-plane-web.service
 sudo systemctl status gp-control-plane-web.service
+```
+
+После `git pull` в `GP-access-control-plane` перезапустите сервис, иначе веб-панель продолжит работать на старом загруженном Python-коде:
+
+```bash
+sudo systemctl restart gp-control-plane-web.service
 ```
 
 Логи:
