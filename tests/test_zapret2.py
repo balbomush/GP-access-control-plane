@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -8,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.strategies import load_strategy_dir
-from gp_control_plane.zapret2 import blockcheck_env
+from gp_control_plane.zapret2 import _run_blockcheck, blockcheck_env
 
 
 class Zapret2Tests(unittest.TestCase):
@@ -53,6 +55,25 @@ blockcheck:
             self.assertEqual(env["ENABLE_HTTPS_TLS13"], "0")
             self.assertEqual(env["ENABLE_HTTP3"], "0")
             self.assertEqual(env["LIST_HTTPS_TLS12"], str((strategy / "nfqws2.conf").resolve()))
+
+    def test_run_blockcheck_returns_completed_process(self) -> None:
+        result = _run_blockcheck(
+            [sys.executable, "-c", "import sys; print('ok'); print('err', file=sys.stderr)"],
+            os.environ.copy(),
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "ok")
+        self.assertEqual(result.stderr.strip(), "err")
+
+    def test_run_blockcheck_raises_on_timeout(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired):
+            _run_blockcheck(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                os.environ.copy(),
+                timeout=1,
+            )
 
 
 if __name__ == "__main__":

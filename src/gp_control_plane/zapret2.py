@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import subprocess
 from pathlib import Path
@@ -33,13 +34,10 @@ def run_check(domain: str, strategy_path: Path, timeout_seconds: int = 60) -> su
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
     env = blockcheck_env(domain, strategy)
-    return subprocess.run(
+    return _run_blockcheck(
         [blockcheck],
-        text=True,
-        capture_output=True,
         env=env,
         timeout=timeout_seconds,
-        check=False,
     )
 
 
@@ -92,3 +90,40 @@ def _set_strategy_lists(env: dict[str, str], strategy: StrategySelection, blockc
 
 def _flag(value: Any) -> str:
     return "1" if bool(value) else "0"
+
+
+def _run_blockcheck(command: list[str], env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=hasattr(os, "setsid"),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _stop_process_group(process)
+        stdout, stderr = process.communicate()
+        exc.output = stdout
+        exc.stderr = stderr
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _stop_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if hasattr(os, "killpg"):
+        os.killpg(process.pid, signal.SIGTERM)
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        process.wait(timeout=5)
