@@ -40,6 +40,16 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             else:
                 self._not_found()
 
+        def do_HEAD(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path == "/":
+                data = index_html().encode("utf-8")
+                self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
+            elif path in {"/api/status", "/api/rules", "/api/strategies", "/api/jobs", "/api/healthchecks"}:
+                self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
+            else:
+                self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             try:
@@ -86,6 +96,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _head(self, status: HTTPStatus, content_type: str, content_length: int) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(content_length))
+            self.end_headers()
 
         def _not_found(self) -> None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
