@@ -1,0 +1,23 @@
+# Local/private config.
+site-local-config/
+local/
+configs/*.local.yaml
+configs/*secret*.yaml
+secrets.yaml
+.env
+.env.*
+
+# Keys and certificates.
+*.key
+*.pem
+*.p12
+*.crt
+
+# Runtime/build artifacts.
+build/
+bin/
+dist/
+tmp/
+__pycache__/
+.pytest_cache/
+*.log
