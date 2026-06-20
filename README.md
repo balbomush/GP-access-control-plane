@@ -212,10 +212,20 @@ which nfqws2 || true
 which blockcheck2.sh || which blockcheck.sh || true
 ```
 
-Если `zapret2` установлен в `~/opt/zapret2`, можно добавить wrappers в `~/.local/bin`. Важно: wrappers записывают абсолютный путь к `zapret2`, чтобы они одинаково работали из SSH-сессии и из `systemd`:
+Для реальной проверки стратегий лучше держать `zapret2` в `/opt/zapret2`, а не внутри домашней директории. `nfqws2` может сбрасывать привилегии, и при правах вроде `/home/user = 700` стратегии с Lua не смогут прочитать файлы `zapret2/lua`.
+
+Если исходники уже лежат в `~/opt/zapret2`, перенесите установленную копию в `/opt/zapret2`:
 
 ```bash
-ZAPRET2_DIR="$(realpath "$HOME/opt/zapret2")"
+sudo cp -a "$HOME/opt/zapret2" /opt/zapret2
+sudo chown -R root:root /opt/zapret2
+sudo chmod -R a+rX /opt/zapret2
+```
+
+После этого добавьте wrappers в `~/.local/bin`. Важно: wrappers записывают абсолютный путь к `zapret2`, чтобы они одинаково работали из SSH-сессии и из `systemd`:
+
+```bash
+ZAPRET2_DIR="/opt/zapret2"
 mkdir -p "$HOME/.local/bin"
 
 printf '#!/bin/sh\nexec %s/blockcheck2.sh "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/blockcheck2.sh"
