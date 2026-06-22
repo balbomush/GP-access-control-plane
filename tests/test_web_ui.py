@@ -29,6 +29,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("scrollLogToBottom", html)
         self.assertIn("runSummary(row)", html)
         self.assertIn("jobSummary(row)", html)
+        self.assertIn("effectiveJobStatus(row)", html)
         self.assertIn("latestById", html)
         self.assertNotIn("{label: 'Лог'", html)
         self.assertNotIn("{label: 'Детали'", html)

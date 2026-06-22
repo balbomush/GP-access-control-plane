@@ -695,6 +695,10 @@ function jobSummary(row){
   if (row.status === 'success') return 'завершено';
   return '-';
 }
+function effectiveJobStatus(row){
+  const result = row.result || {};
+  return result.status || row.status || '-';
+}
 function conciseError(value){
   const text = String(value || '').replace(/\\s+/g, ' ').trim();
   if (!text) return 'ошибка без деталей';
@@ -727,7 +731,10 @@ function renderJobs(){
   table('jobs-table', [
     {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
     {label: 'Задание', render: (row) => esc(jobNames[row.name] || row.name || '-')},
-    {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
+    {label: 'Статус', render: (row) => {
+      const status = effectiveJobStatus(row);
+      return badge(status, statusTone[status] || '');
+    }},
     {label: 'Итог', render: (row) => esc(jobSummary(row))}
   ], jobs, 'Заданий подбора пока не было');
 }
