@@ -61,9 +61,8 @@ COVERAGE_DOMAINS = [
     "cloudflare-ech.com",
 ]
 
-ATTEMPT_ETA_SAMPLE_SIZE = 20
+ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
 _ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
-_PROGRESS_TRACKERS: dict[str, dict[str, Any]] = {}
 _ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
 _SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
 
@@ -191,13 +190,15 @@ def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
     sections = _summary_sections(stdout)
     summary = sections["summary"]
     common = sections["common"]
-    candidates = _candidate_lines(summary, scope="domain")
+    live_summary = _live_available_lines(stdout)
+    candidates = _dedupe_candidate_lines([*_candidate_lines(summary, scope="domain"), *_candidate_lines(live_summary, scope="domain")])
     common_candidates = _candidate_lines(common, scope="common")
     results = [_parse_result_line(line) for line in summary if _parse_result_line(line)]
     common_results = [_parse_result_line(line) for line in common if _parse_result_line(line)]
     return {
         "summary": summary,
         "common": common,
+        "live_summary": live_summary,
         "candidates": candidates,
         "common_candidates": common_candidates,
         "results": results,
@@ -468,7 +469,7 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     else:
         percent = (script_index / script_total * 100.0) if script_total else None
     elapsed = _elapsed_seconds(run.get("timestamp"))
-    eta, eta_pending = _eta_from_recent_attempts(run, attempted, attempt_total, finished)
+    eta = _eta_from_remaining_attempts(attempted, attempt_total, completed)
     return {
         "attempted": attempted,
         "attempt_total": attempt_total,
@@ -482,8 +483,7 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
         "percent": percent,
         "elapsed_seconds": elapsed,
         "eta_seconds": eta,
-        "eta_pending": eta_pending,
-        "eta_sample_size": ATTEMPT_ETA_SAMPLE_SIZE,
+        "eta_estimate_ms_per_attempt": ATTEMPT_TIMEOUT_ESTIMATE_MS,
         "attempt_plan_source": attempt_plan.get("source") or "",
     }
 
@@ -699,55 +699,15 @@ def _shell_word_count(value: str) -> int:
         return len([part for part in value.split() if part])
 
 
-def _eta_from_recent_attempts(
-    run: dict[str, Any],
-    attempted: int,
-    attempt_total: int,
-    finished: bool,
-) -> tuple[int | None, bool]:
-    if finished:
-        return 0, False
+def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: bool) -> int | None:
+    if completed:
+        return 0
     if not attempt_total:
-        return None, False
+        return None
     remaining = max(0, attempt_total - attempted)
     if remaining <= 0:
-        return 0, False
-    run_id = str(run.get("id") or run.get("run_id") or "")
-    observed_at = _observed_at(run)
-    if not run_id:
-        return None, True
-    tracker = _PROGRESS_TRACKERS.get(run_id)
-    if not tracker or attempted < int(tracker.get("last_attempted") or 0):
-        tracker = {"last_attempted": attempted, "last_seen": observed_at, "durations": []}
-        _PROGRESS_TRACKERS[run_id] = tracker
-    else:
-        last_attempted = int(tracker.get("last_attempted") or 0)
-        last_seen = float(tracker.get("last_seen") or observed_at)
-        delta_attempts = attempted - last_attempted
-        delta_seconds = max(0.0, observed_at - last_seen)
-        if delta_attempts > 0 and delta_seconds > 0:
-            per_attempt = delta_seconds / delta_attempts
-            durations = list(tracker.get("durations") or [])
-            durations.extend([per_attempt] * min(delta_attempts, ATTEMPT_ETA_SAMPLE_SIZE))
-            tracker["durations"] = durations[-ATTEMPT_ETA_SAMPLE_SIZE:]
-        tracker["last_attempted"] = attempted
-        tracker["last_seen"] = observed_at
-
-    durations = [float(item) for item in tracker.get("durations") or []]
-    if len(durations) < ATTEMPT_ETA_SAMPLE_SIZE:
-        return None, True
-    average = sum(durations[-ATTEMPT_ETA_SAMPLE_SIZE:]) / ATTEMPT_ETA_SAMPLE_SIZE
-    return max(0, int(average * remaining)), False
-
-
-def _observed_at(run: dict[str, Any]) -> float:
-    raw = run.get("_observed_at")
-    if raw is not None:
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            pass
-    return time.time()
+        return 0
+    return max(0, int((remaining * ATTEMPT_TIMEOUT_ESTIMATE_MS) / 1000))
 
 
 def _truthy(value: Any, default: bool) -> bool:
@@ -790,6 +750,24 @@ def _summary_sections(stdout: str) -> dict[str, list[str]]:
 
 def _summary_lines(stdout: str) -> list[str]:
     return _summary_sections(stdout)["summary"]
+
+
+def _dedupe_candidate_lines(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for candidate in candidates:
+        key = (
+            str(candidate.get("scope") or ""),
+            str(candidate.get("test") or ""),
+            str(candidate.get("ip_version") or ""),
+            str(candidate.get("domain") or ""),
+            str(candidate.get("args") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
 
 
 def _candidate_lines(summary: list[str], scope: str) -> list[dict[str, Any]]:
@@ -849,6 +827,37 @@ def _live_success_lines(stdout: str) -> list[str]:
                 f"nfqws2 {match.group('args').strip()}"
             )
     return result
+
+
+def _live_available_lines(stdout: str) -> list[str]:
+    result: list[str] = []
+    pending: str | None = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        attempt = _live_attempt_line(line)
+        if attempt:
+            pending = attempt
+            continue
+        if line == "!!!!! AVAILABLE !!!!!" and pending:
+            result.append(pending)
+            pending = None
+            continue
+        if line.startswith("UNAVAILABLE") or line.startswith("FAILED"):
+            pending = None
+    return result
+
+
+def _live_attempt_line(line: str) -> str | None:
+    if not line.startswith("- "):
+        return None
+    normalized = line[2:].strip()
+    parsed = _parse_result_line(normalized)
+    if not parsed:
+        return None
+    result = str(parsed.get("result") or "")
+    if result.startswith("nfqws2 ") and result != "nfqws2 not working":
+        return normalized
+    return None
 
 
 def _standard_script_total() -> int:

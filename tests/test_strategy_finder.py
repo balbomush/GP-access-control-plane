@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.state import append_jsonl
 from gp_control_plane.strategy_finder import (
-    _PROGRESS_TRACKERS,
     _standard_attempt_plan,
     candidate_id_for,
     latest_log_tail,
@@ -111,6 +110,36 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
         self.assertEqual(len(parsed["candidates"]), 1)
         self.assertEqual(parsed["candidates"][0]["domain"], "youtube.com")
 
+    def test_parse_live_available_attempt_without_summary(self) -> None:
+        stdout = """
+* script : standard/20-multi.sh
+- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+!!!!! AVAILABLE !!!!!
+- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=multisplit:pos=1
+UNAVAILABLE code=28
+"""
+
+        parsed = parse_blockcheck_stdout(stdout)
+
+        self.assertEqual(len(parsed["candidates"]), 1)
+        self.assertEqual(parsed["candidates"][0]["domain"], "youtube.com")
+        self.assertIn("multidisorder", parsed["candidates"][0]["args"])
+
+    def test_upsert_candidates_persists_stopped_live_available_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stdout = """
+- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=multidisorder:pos=host+1
+!!!!! AVAILABLE !!!!!
+"""
+            parsed = parse_blockcheck_stdout(stdout)
+
+            upsert_candidates(state_dir, parsed, {"id": "stopped-run", "status": "stopped"})
+            candidates = read_candidates(state_dir)
+
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["seen"][0]["run_id"], "stopped-run")
+
     def test_progress_counts_attempts_and_successes(self) -> None:
         stdout = """
 * script : standard/15-misc.sh
@@ -154,34 +183,20 @@ pktws_check_http3()
             self.assertEqual(plan["scripts"]["standard/10-test.sh"], 8)
             self.assertEqual(plan["total"], 8)
 
-    def test_progress_uses_attempt_total_and_recent_eta_window(self) -> None:
-        _PROGRESS_TRACKERS.clear()
+    def test_progress_uses_attempt_total_and_timeout_eta(self) -> None:
         plan = {
             "total": 40,
             "scripts": {"standard/10-test.sh": 40},
             "script_order": ["standard/10-test.sh"],
             "source": "test",
         }
-        first_stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 10)
+        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 30)
+        progress = progress_from_stdout(stdout, {"id": "run-eta", "status": "running", "attempt_plan": plan})
 
-        first = progress_from_stdout(
-            first_stdout,
-            {"id": "run-eta", "status": "running", "attempt_plan": plan, "_observed_at": 100.0},
-        )
-
-        self.assertEqual(first["attempted"], 10)
-        self.assertEqual(first["attempt_total"], 40)
-        self.assertTrue(first["eta_pending"])
-        self.assertIsNone(first["eta_seconds"])
-
-        second_stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 30)
-        second = progress_from_stdout(
-            second_stdout,
-            {"id": "run-eta", "status": "running", "attempt_plan": plan, "_observed_at": 120.0},
-        )
-
-        self.assertFalse(second["eta_pending"])
-        self.assertEqual(second["eta_seconds"], 10)
+        self.assertEqual(progress["attempted"], 30)
+        self.assertEqual(progress["attempt_total"], 40)
+        self.assertEqual(progress["eta_seconds"], 21)
+        self.assertEqual(progress["eta_estimate_ms_per_attempt"], 2100)
 
     def test_stopped_progress_keeps_attempt_percent(self) -> None:
         plan = {

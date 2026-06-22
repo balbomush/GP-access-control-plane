@@ -732,6 +732,13 @@ pre {
         </div>
         <div id="candidates-table"></div>
       </section>
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Запуски с находками</h2>
+          <span class="badge" id="candidate-runs-count">0</span>
+        </div>
+        <div id="candidate-runs-table"></div>
+      </section>
     </section>
 
     <section class="tab-page terminal-page" data-tab-page="terminal">
@@ -757,7 +764,7 @@ pre {
               <div class="progress-value" id="progress-successful">-</div>
             </div>
             <div class="progress-cell">
-              <div class="progress-label">Файл набора</div>
+              <div class="progress-label">Текущий файл</div>
               <div class="progress-value" id="progress-scripts">-</div>
             </div>
             <div class="progress-cell">
@@ -938,6 +945,7 @@ function renderCandidates(){
   } else {
     renderDomainCandidates(domainRows);
   }
+  renderCandidateRuns();
 }
 function renderDomainCandidates(rows){
   const groups = candidateGroups(rows);
@@ -1065,6 +1073,21 @@ function strategyItem(row, index){
     <code>${esc(row.args || '')}</code>
   </div>`;
 }
+function renderCandidateRuns(){
+  const rows = state.finderRuns
+    .filter((row) => Number(row.candidate_count || 0) > 0 || Number(row.common_candidate_count || 0) > 0)
+    .slice()
+    .reverse()
+    .slice(0, 12);
+  setText('candidate-runs-count', String(rows.length));
+  table('candidate-runs-table', [
+    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
+    {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
+    {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
+    {label: 'Стратегии', render: (row) => badge(String(Number(row.candidate_count || 0) + Number(row.common_candidate_count || 0)), 'good')},
+    {label: 'Итог', render: (row) => esc(runSummary(row))}
+  ], rows, 'Запусков с найденными стратегиями пока нет');
+}
 async function copyText(text){
   if (!text) return false;
   if (navigator.clipboard && window.isSecureContext) {
@@ -1115,6 +1138,7 @@ function runSummary(row){
   const count = Number(row.candidate_count || 0);
   if (row.status === 'running') return 'идет поиск';
   if (row.status === 'timeout') return `остановлено по лимиту, найдено: ${count}`;
+  if (row.status === 'stopped') return count > 0 ? `остановлено, сохранено: ${count}` : 'остановлено, кандидатов нет';
   if (row.status === 'success') return count > 0 ? `найдено: ${count}` : 'завершено, кандидатов нет';
   if (row.status === 'failed') return `ошибка, код: ${row.returncode ?? '-'}`;
   return count > 0 ? `найдено: ${count}` : '-';
@@ -1161,22 +1185,18 @@ function renderProgress(progress){
   setText('progress-attempted', attemptTotal ? `${attempted} / ${attemptTotal}` : String(progress.attempted ?? 0));
   setText('progress-successful', String(progress.successful ?? 0));
   if (progress.script_total) {
-    const scriptParts = [`${progress.script_index || 0} / ${progress.script_total}`];
+    const scriptParts = [`Файл ${progress.script_index || 0} из ${progress.script_total}`];
     if (progress.current_script_attempt_total) {
-      scriptParts.push(`${progress.current_script_attempted || 0} / ${progress.current_script_attempt_total} в файле`);
+      scriptParts.push(`попыток в файле: ${progress.current_script_attempted || 0} из ${progress.current_script_attempt_total}`);
     }
-    setText('progress-scripts', scriptParts.join(' · '));
+    setText('progress-scripts', scriptParts.join(', '));
   } else {
     setText('progress-scripts', '-');
   }
-  if (progress.eta_pending) {
-    setText('progress-eta', 'Расчитывается время');
-  } else {
-    setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
-  }
+  setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
   const current = progress.current_script ? `Текущий файл: ${progress.current_script}. ` : '';
   const total = attemptTotal ? `Всего попыток рассчитано по файлам zapret2: ${attemptTotal}. ` : '';
-  const eta = progress.eta_pending ? `Оставшееся время появится после ${progress.eta_sample_size || 20} попыток. ` : '';
+  const eta = progress.eta_estimate_ms_per_attempt ? `Время считается как оставшиеся попытки × ${progress.eta_estimate_ms_per_attempt} мс. ` : '';
   setText('progress-note', `${current}${total}${eta}Прогресс считается по live-логу blockcheck2.`);
 }
 function formatDuration(seconds){
