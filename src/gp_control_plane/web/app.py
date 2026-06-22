@@ -295,6 +295,31 @@ button.secondary:hover { background: #edf4ff; }
 button:disabled { opacity: .55; cursor: default; }
 .button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+.tab-button {
+  background: #ffffff;
+  color: var(--blue);
+  border-color: var(--line-strong);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.tab-button.active {
+  background: var(--blue);
+  color: #ffffff;
+  border-color: var(--blue);
+}
+.tab-page { display: none; min-width: 0; }
+.tab-page.active { display: block; }
+.terminal-panel pre {
+  max-height: none;
+  min-height: 420px;
+  height: calc(100vh - 260px);
+}
 .message {
   min-height: 36px;
   border: 1px solid var(--line);
@@ -370,6 +395,7 @@ pre {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
   .status-grid, .button-row, .fill-row { grid-template-columns: 1fr; }
+  .tabs { display: grid; grid-template-columns: 1fr; }
   h1 { font-size: 22px; }
   .metric-value { font-size: 18px; }
   button { width: 100%; }
@@ -411,6 +437,12 @@ pre {
       </div>
     </section>
 
+    <nav class="tabs" role="tablist" aria-label="Разделы">
+      <button class="tab-button active" data-tab="finder" type="button">Подбор</button>
+      <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
+    </nav>
+
+    <section class="tab-page active" data-tab-page="finder">
     <div class="layout">
       <div class="stack">
         <section class="panel">
@@ -470,19 +502,23 @@ pre {
           <div id="finder-runs-table"></div>
         </section>
 
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Живой лог</h2>
-            <span class="badge" id="finder-log-status">-</span>
-          </div>
-          <pre id="finder-log">Лога пока нет</pre>
-        </section>
       </div>
     </div>
+    </section>
+
+    <section class="tab-page terminal-page" data-tab-page="terminal">
+      <section class="panel terminal-panel">
+        <div class="panel-header">
+          <h2>Терминал</h2>
+          <span class="badge" id="finder-log-status">-</span>
+        </div>
+        <pre id="finder-log">Лога пока нет</pre>
+      </section>
+    </section>
   </main>
 </div>
 <script>
-const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null };
+const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder' };
 const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
@@ -541,6 +577,17 @@ function table(targetId, columns, rows, emptyText){
     return `<td>${value}</td>`;
   }).join('') + '</tr>').join('');
   el(targetId).innerHTML = `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function setActiveTab(tabName){
+  state.activeTab = tabName;
+  document.querySelectorAll('[data-tab]').forEach((button) => {
+    const active = button.dataset.tab === tabName;
+    button.classList.toggle('active', active);
+  });
+  document.querySelectorAll('[data-tab-page]').forEach((page) => {
+    page.classList.toggle('active', page.dataset.tabPage === tabName);
+  });
+  if (tabName === 'terminal') scrollLogToBottom();
 }
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
@@ -619,8 +666,16 @@ function renderRuns(){
     {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
     {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
     {label: 'Кандидаты', render: (row) => badge(String(row.candidate_count ?? 0), Number(row.candidate_count || 0) > 0 ? 'good' : '')},
-    {label: 'Лог', render: (row) => `<span title="${esc(row.stdout_log)}">${esc(shortPath(row.stdout_log))}</span>`}
+    {label: 'Итог', render: (row) => esc(runSummary(row))}
   ], state.finderRuns.slice().reverse().slice(0, 12), 'Запусков пока не было');
+}
+function runSummary(row){
+  const count = Number(row.candidate_count || 0);
+  if (row.status === 'running') return 'идет поиск';
+  if (row.status === 'timeout') return `остановлено по лимиту, найдено: ${count}`;
+  if (row.status === 'success') return count > 0 ? `найдено: ${count}` : 'завершено, кандидатов нет';
+  if (row.status === 'failed') return `ошибка, код: ${row.returncode ?? '-'}`;
+  return count > 0 ? `найдено: ${count}` : '-';
 }
 function renderLog(){
   const log = state.finderLog || {};
@@ -631,7 +686,16 @@ function renderLog(){
   const parts = [];
   if (log.stdout_tail) parts.push(log.stdout_tail);
   if (log.stderr_tail) parts.push('--- stderr ---\\n' + log.stderr_tail);
-  el('finder-log').textContent = parts.join('\\n\\n') || 'Лога пока нет';
+  const logNode = el('finder-log');
+  logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
+  scrollLogToBottom();
+}
+function scrollLogToBottom(){
+  const logNode = el('finder-log');
+  if (!logNode) return;
+  requestAnimationFrame(() => {
+    logNode.scrollTop = logNode.scrollHeight;
+  });
 }
 function renderJobs(){
   const jobs = state.jobs.filter((job) => finderJobs.has(job.name)).slice().reverse().slice(0, 8);
@@ -650,6 +714,7 @@ function renderAll(){
   renderRuns();
   renderLog();
   renderJobs();
+  setActiveTab(state.activeTab);
 }
 async function refresh(){
   try {
@@ -686,6 +751,7 @@ async function startJob(url, payload, text){
 document.addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
+  if (button.dataset.tab) setActiveTab(button.dataset.tab);
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.fill) fillDomains(button.dataset.fill);
   if (button.dataset.action === 'standard-discovery') {
