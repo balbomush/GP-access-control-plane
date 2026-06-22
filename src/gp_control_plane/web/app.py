@@ -679,6 +679,10 @@ pre {
               <label for="finder-timeout-hours">Лимит поиска, часов</label>
               <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
             </div>
+            <div class="field">
+              <label for="curl-parallelism">Параллельных curl в режиме стратегия -> домены</label>
+              <input id="curl-parallelism" type="number" min="1" max="16" step="1" value="4">
+            </div>
             <label class="checkbox-row">
               <input id="include-quic" type="checkbox" checked>
               <span>Проверять QUIC/HTTP3</span>
@@ -895,6 +899,11 @@ function finderDomains(){
 function timeoutSeconds(){
   const hours = Number(el('finder-timeout-hours').value || 6);
   return Math.max(60, Math.round(hours * 3600));
+}
+function curlParallelism(){
+  const value = Number(el('curl-parallelism').value || 4);
+  if (!Number.isFinite(value)) return 4;
+  return Math.max(1, Math.min(16, Math.round(value)));
 }
 function renderMetrics(){
   const status = state.status || {};
@@ -1172,7 +1181,9 @@ function renderProgress(progress){
   setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
   const current = progress.current_script ? `Текущий файл: ${progress.current_script}. ` : '';
   const total = attemptTotal ? `Всего попыток рассчитано по файлам zapret2: ${attemptTotal}. ` : '';
-  const eta = progress.eta_estimate_ms_per_attempt ? `Время считается как оставшиеся попытки × ${progress.eta_estimate_ms_per_attempt} мс. ` : '';
+  const parallelism = Number(progress.eta_parallelism || 1);
+  const parallelText = parallelism > 1 ? `, параллельных curl: ${parallelism}` : '';
+  const eta = progress.eta_estimate_ms_per_attempt ? `Время считается как оставшиеся попытки × ${progress.eta_estimate_ms_per_attempt} мс${parallelText}. ` : '';
   setText('progress-note', `${current}${total}${eta}Прогресс считается по live-логу blockcheck2.`);
 }
 function formatDuration(seconds){
@@ -1277,7 +1288,8 @@ document.addEventListener('click', (event) => {
       domains: finderDomains(),
       include_quic: el('include-quic').checked,
       timeout_seconds: timeoutSeconds(),
-      scan_level: 'standard'
+      scan_level: 'standard',
+      curl_parallelism: curlParallelism()
     }, 'Стратегия -> домены');
   }
   if (button.dataset.action === 'stop-current') stopCurrentJob();
@@ -1401,6 +1413,7 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         timeout_seconds=int(payload.get("timeout_seconds") or 21600),
         include_quic=bool(payload.get("include_quic", True)),
         scan_level=str(payload.get("scan_level") or "standard"),
+        curl_parallelism=int(payload.get("curl_parallelism") or 4),
         stop_event=stop_event,
     )
 

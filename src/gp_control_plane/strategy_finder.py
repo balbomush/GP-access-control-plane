@@ -100,6 +100,7 @@ def run_multi_domain_discovery(
     timeout_seconds: int,
     include_quic: bool = True,
     scan_level: str = "standard",
+    curl_parallelism: int = 4,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     return _run_multidomain_blockcheck_live(
@@ -108,6 +109,7 @@ def run_multi_domain_discovery(
         timeout_seconds=timeout_seconds,
         include_quic=include_quic,
         scan_level=scan_level,
+        curl_parallelism=curl_parallelism,
         stop_event=stop_event,
     )
 
@@ -434,6 +436,7 @@ def _run_multidomain_blockcheck_live(
     timeout_seconds: int,
     include_quic: bool,
     scan_level: str,
+    curl_parallelism: int,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
@@ -443,6 +446,7 @@ def _run_multidomain_blockcheck_live(
     normalized_scan_level = scan_level if scan_level in {"quick", "standard", "force"} else "standard"
     blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     zapret_base = blockcheck_path.parent
+    normalized_parallelism = _bounded_int(curl_parallelism, default=4, minimum=1, maximum=16)
 
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -461,6 +465,7 @@ def _run_multidomain_blockcheck_live(
                 "ENABLE_HTTPS_TLS13": "0",
                 "ENABLE_HTTP3": "1" if include_quic else "0",
                 "SCANLEVEL": normalized_scan_level,
+                "GP_MD_CURL_PARALLELISM": str(normalized_parallelism),
                 "ZAPRET_BASE": str(zapret_base),
                 "ZAPRET_RW": str(zapret_base),
             }
@@ -476,6 +481,7 @@ def _run_multidomain_blockcheck_live(
             enable_tls=True,
             enable_quic=include_quic,
             scan_level=normalized_scan_level,
+            curl_parallelism=normalized_parallelism,
             stop_event=stop_event,
         )
 
@@ -491,6 +497,7 @@ def _run_blockcheck_command_live(
     enable_tls: bool,
     enable_quic: bool,
     scan_level: str = "",
+    curl_parallelism: int | None = None,
     candidate_id: str = "",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
@@ -523,6 +530,7 @@ def _run_blockcheck_command_live(
         "enable_tls": enable_tls,
         "enable_quic": enable_quic,
         "scan_level": scan_level,
+        "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
     append_jsonl(root / "runs.jsonl", started)
@@ -590,6 +598,7 @@ def _run_blockcheck_command_live(
         "enable_tls": enable_tls,
         "enable_quic": enable_quic,
         "scan_level": scan_level,
+        "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
     run["progress"] = progress_from_stdout(stdout, run)
@@ -659,7 +668,8 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     else:
         percent = (script_index / script_total * 100.0) if script_total else None
     elapsed = _elapsed_seconds(run.get("timestamp"))
-    eta = _eta_from_remaining_attempts(attempted, attempt_total, completed)
+    eta_parallelism = _eta_parallelism_for_run(run)
+    eta = _eta_from_remaining_attempts(attempted, attempt_total, completed, eta_parallelism)
     return {
         "attempted": attempted,
         "attempt_total": attempt_total,
@@ -674,6 +684,7 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
         "elapsed_seconds": elapsed,
         "eta_seconds": eta,
         "eta_estimate_ms_per_attempt": ATTEMPT_TIMEOUT_ESTIMATE_MS,
+        "eta_parallelism": eta_parallelism,
         "attempt_plan_source": attempt_plan.get("source") or "",
     }
 
@@ -889,7 +900,13 @@ def _shell_word_count(value: str) -> int:
         return len([part for part in value.split() if part])
 
 
-def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: bool) -> int | None:
+def _eta_parallelism_for_run(run: dict[str, Any]) -> int:
+    if str(run.get("kind") or "") != "multi-domain-discovery":
+        return 1
+    return _bounded_int(run.get("curl_parallelism"), default=4, minimum=1, maximum=16)
+
+
+def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: bool, parallelism: int = 1) -> int | None:
     if completed:
         return 0
     if not attempt_total:
@@ -897,7 +914,8 @@ def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: 
     remaining = max(0, attempt_total - attempted)
     if remaining <= 0:
         return 0
-    return max(0, int((remaining * ATTEMPT_TIMEOUT_ESTIMATE_MS) / 1000))
+    effective_remaining = (remaining + max(1, parallelism) - 1) // max(1, parallelism)
+    return max(0, int((effective_remaining * ATTEMPT_TIMEOUT_ESTIMATE_MS) / 1000))
 
 
 def _truthy(value: Any, default: bool) -> bool:
@@ -913,6 +931,14 @@ def _truthy(value: Any, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
 
 
 def _summary_sections(stdout: str) -> dict[str, list[str]]:
@@ -1173,31 +1199,114 @@ gp_md_resolve_all_ips()
 	echo "$all_ips" | tr ' ' '\n' | sort -u | tr '\n' ' '
 }
 
+gp_md_parallel_limit()
+{
+	local n="${GP_MD_CURL_PARALLELISM:-4}"
+	case "$n" in
+		""|*[!0-9]*) n=4 ;;
+	esac
+	n=$((n + 0))
+	[ "$n" -lt 1 ] && n=1
+	[ "$n" -gt 16 ] && n=16
+	echo "$n"
+}
+
+gp_md_out_file()
+{
+	echo "${PARALLEL_OUT}_md_$1.out"
+}
+
+gp_md_code_file()
+{
+	echo "${PARALLEL_OUT}_md_$1.code"
+}
+
+gp_md_run_domain_curl()
+{
+	# $1 - index
+	# $2 - test function
+	# $3 - domain
+	local idx=$1 testf=$2 gp_domain="$3" code out codefile
+	out="$(gp_md_out_file "$idx")"
+	codefile="$(gp_md_code_file "$idx")"
+	curl_test "$testf" "$gp_domain" >"$out" 2>&1
+	code=$?
+	echo "$code" >"$codefile"
+	return 0
+}
+
+gp_md_collect_record()
+{
+	# $1 - pid:index:domain
+	# $2 - test function
+	# $3 - strategy text
+	local record="$1" testf=$2 strategy_text="$3" pid rest idx gp_domain code out codefile
+	pid="${record%%:*}"
+	rest="${record#*:}"
+	idx="${rest%%:*}"
+	gp_domain="${rest#*:}"
+
+	wait "$pid" 2>/dev/null
+	out="$(gp_md_out_file "$idx")"
+	codefile="$(gp_md_code_file "$idx")"
+	code="$(cat "$codefile" 2>/dev/null)"
+	[ -n "$code" ] || code=1
+
+	echo "- $testf ipv$IPV $gp_domain : $PKTWSD ${WF:+$WF }$strategy_text"
+	[ -f "$out" ] && cat "$out"
+	rm -f "$out" "$codefile"
+	if [ "$code" = 0 ]; then
+		report_append "$gp_domain" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy_text"
+		return 0
+	fi
+	echo "GP-MULTIDOMAIN unavailable code=$code"
+	return 1
+}
+
 pktws_curl_test_update()
 {
 	# $1 - curl test function
 	# $2 - sample domain from the standard zapret2 script
 	# $3+ - nfqws2 args
-	local testf=$1 dom="$2" strategy code ok=0 total=0 gp_domain
+	local testf=$1 dom="$2" strategy ok=0 total=0 gp_domain idx=0 limit active=0 pending record
 	shift
 	shift
 	strategy="$*"
+	limit="$(gp_md_parallel_limit)"
+	rm -f "${PARALLEL_OUT}_md_"*
 
 	echo
-	echo "- gp_multidomain_strategy ipv$IPV : $PKTWSD ${WF:+$WF }$strategy"
+	echo "- gp_multidomain_strategy ipv$IPV parallel=$limit : $PKTWSD ${WF:+$WF }$strategy"
 	pktws_start "$@"
 	for gp_domain in $DOMAINS; do
+		idx=$(($idx + 1))
 		total=$(($total + 1))
-		echo "- $testf ipv$IPV $gp_domain : $PKTWSD ${WF:+$WF }$strategy"
-		if curl_test "$testf" "$gp_domain"; then
-			report_append "$gp_domain" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy"
-			ok=$(($ok + 1))
-		else
-			code=$?
-			echo "GP-MULTIDOMAIN unavailable code=$code"
+		gp_md_run_domain_curl "$idx" "$testf" "$gp_domain" &
+		record="$!:$idx:$gp_domain"
+		pending="${pending:+$pending }$record"
+		active=$(($active + 1))
+		if [ "$active" -ge "$limit" ]; then
+			record="${pending%% *}"
+			if [ "$record" = "$pending" ]; then
+				pending=
+			else
+				pending="${pending#* }"
+			fi
+			gp_md_collect_record "$record" "$testf" "$strategy" && ok=$(($ok + 1))
+			active=$(($active - 1))
 		fi
 	done
+	while [ -n "$pending" ]; do
+		record="${pending%% *}"
+		if [ "$record" = "$pending" ]; then
+			pending=
+		else
+			pending="${pending#* }"
+		fi
+		gp_md_collect_record "$record" "$testf" "$strategy" && ok=$(($ok + 1))
+	done
 	ws_kill
+	rm -f "${PARALLEL_OUT}_md_"*
 	echo "GP-MULTIDOMAIN result: $ok/$total domains available"
 	[ "$ok" = "$total" ]
 }

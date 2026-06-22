@@ -260,6 +260,9 @@ pktws_check_http3()
             self.assertIn("gp_md_run_protocol pktws_check_https_tls12", text)
             self.assertIn("for gp_domain in $DOMAINS", text)
             self.assertIn('pktws_start "$@"', text)
+            self.assertIn("GP_MD_CURL_PARALLELISM", text)
+            self.assertIn('gp_md_run_domain_curl "$idx" "$testf" "$gp_domain" &', text)
+            self.assertIn("gp_md_collect_record", text)
             self.assertIn('curl_test "$testf" "$gp_domain"', text)
             self.assertNotIn("echo stock main", text)
 
@@ -272,6 +275,30 @@ pktws_check_http3()
             wrapper.write_text("#!/bin/sh\nexec real-blockcheck2.sh \"$@\"\n", encoding="utf-8")
 
             self.assertEqual(_resolve_blockcheck_script(wrapper), real.resolve())
+
+    def test_multidomain_progress_eta_uses_curl_parallelism(self) -> None:
+        plan = {
+            "total": 40,
+            "scripts": {"standard/10-test.sh": 40},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 20)
+
+        progress = progress_from_stdout(
+            stdout,
+            {
+                "id": "run-parallel",
+                "kind": "multi-domain-discovery",
+                "status": "running",
+                "attempt_plan": plan,
+                "curl_parallelism": 4,
+            },
+        )
+
+        self.assertEqual(progress["remaining_attempts"], 20)
+        self.assertEqual(progress["eta_parallelism"], 4)
+        self.assertEqual(progress["eta_seconds"], 10)
 
 
 if __name__ == "__main__":

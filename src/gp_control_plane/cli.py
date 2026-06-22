@@ -81,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     finder_multi.add_argument("--timeout-seconds", type=int, default=21600)
     finder_multi.add_argument("--no-quic", action="store_true")
     finder_multi.add_argument("--scan-level", choices=["quick", "standard", "force"], default="standard")
+    finder_multi.add_argument("--curl-parallelism", type=int, default=4)
     finder_custom = finder_subparsers.add_parser("custom-verification", help="Verify a saved candidate with custom list")
     finder_custom.add_argument("--candidate-id", required=True)
     finder_custom.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
@@ -196,6 +197,7 @@ def _main(args: argparse.Namespace) -> int:
                 timeout_seconds=args.timeout_seconds,
                 include_quic=not args.no_quic,
                 scan_level=args.scan_level,
+                curl_parallelism=args.curl_parallelism,
             )
             _print_json(run)
             return 0

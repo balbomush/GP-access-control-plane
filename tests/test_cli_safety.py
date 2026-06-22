@@ -28,6 +28,12 @@ class CliSafetyTests(unittest.TestCase):
             "multi-domain-discovery",
         )
         self.assertEqual(
+            parser.parse_args(
+                ["strategy-finder", "multi-domain-discovery", "--domain", "youtube.com", "--curl-parallelism", "6"]
+            ).curl_parallelism,
+            6,
+        )
+        self.assertEqual(
             parser.parse_args(["strategy-finder", "custom-verification", "--candidate-id", "tls-test"]).finder_command,
             "custom-verification",
         )
