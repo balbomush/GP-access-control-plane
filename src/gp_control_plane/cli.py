@@ -14,6 +14,13 @@ from .healthcheck import check_domains_direct, write_report
 from .render import render_dry_run
 from .rules import extract_hostlist, load_stable_rules
 from .state import now_iso
+from .strategy_finder import (
+    domain_sets,
+    find_candidate,
+    read_candidates,
+    run_custom_verification,
+    run_standard_discovery,
+)
 from .validation import validate_all
 from .web.app import serve
 from .zapret2 import check_install, list_strategies, run_check
@@ -56,6 +63,20 @@ def build_parser() -> argparse.ArgumentParser:
     zapret_run.add_argument("--domain", required=True)
     zapret_run.add_argument("--strategy", required=True)
     zapret_run.add_argument("--timeout-seconds", type=int, default=60)
+
+    finder_parser = subparsers.add_parser("strategy-finder", help="Find and verify local zapret2 strategies")
+    finder_subparsers = finder_parser.add_subparsers(dest="finder_command", required=True)
+    finder_subparsers.add_parser("domains", help="Print built-in test domain sets")
+    finder_subparsers.add_parser("candidates", help="Print saved local candidate strategies")
+    finder_standard = finder_subparsers.add_parser("standard-discovery", help="Run blockcheck2 standard discovery")
+    finder_standard.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
+    finder_standard.add_argument("--timeout-seconds", type=int, default=900)
+    finder_standard.add_argument("--no-quic", action="store_true")
+    finder_custom = finder_subparsers.add_parser("custom-verification", help="Verify a saved candidate with custom list")
+    finder_custom.add_argument("--candidate-id", required=True)
+    finder_custom.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
+    finder_custom.add_argument("--timeout-seconds", type=int, default=300)
+    finder_custom.add_argument("--no-quic", action="store_true")
 
     web_parser = subparsers.add_parser("web", help="Run local Raspberry Pi web UI")
     web_parser.add_argument("--host", default="0.0.0.0")
@@ -142,6 +163,35 @@ def _main(args: argparse.Namespace) -> int:
             )
             return 0
         raise ValueError("unsupported zapret2 command")
+
+    if args.command == "strategy-finder":
+        if args.finder_command == "domains":
+            _print_json(domain_sets())
+            return 0
+        if args.finder_command == "candidates":
+            _print_json({"candidates": read_candidates(config.output.state_dir)})
+            return 0
+        if args.finder_command == "standard-discovery":
+            run = run_standard_discovery(
+                args.domain,
+                config.output.state_dir,
+                timeout_seconds=args.timeout_seconds,
+                include_quic=not args.no_quic,
+            )
+            _print_json(run)
+            return 0
+        if args.finder_command == "custom-verification":
+            candidate = find_candidate(config.output.state_dir, args.candidate_id)
+            run = run_custom_verification(
+                candidate,
+                args.domain,
+                config.output.state_dir,
+                timeout_seconds=args.timeout_seconds,
+                include_quic=not args.no_quic,
+            )
+            _print_json(run)
+            return 0
+        raise ValueError("unsupported strategy-finder command")
 
     if args.command == "web":
         serve(config, host=args.host, port=args.port)

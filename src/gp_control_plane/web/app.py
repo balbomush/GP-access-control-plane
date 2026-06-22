@@ -14,6 +14,14 @@ from ..jobs import JobRunner
 from ..render import render_dry_run
 from ..rules import extract_hostlist, load_stable_rules
 from ..state import append_jsonl, now_iso, read_jsonl, read_state, write_state
+from ..strategy_finder import (
+    domain_sets,
+    find_candidate,
+    read_candidates,
+    read_runs,
+    run_custom_verification,
+    run_standard_discovery,
+)
 from ..strategies import list_local_strategies
 from ..validation import validate_all
 from ..zapret2 import check_install, run_check
@@ -37,6 +45,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json({"jobs": read_jsonl(config.output.state_dir / "jobs.jsonl")})
             elif path == "/api/healthchecks":
                 self._json({"healthchecks": read_jsonl(config.output.state_dir / "healthchecks.jsonl")})
+            elif path == "/api/strategy-finder/domains":
+                self._json(domain_sets())
+            elif path == "/api/strategy-finder/candidates":
+                self._json({"candidates": read_candidates(config.output.state_dir)})
+            elif path == "/api/strategy-finder/runs":
+                self._json({"runs": read_runs(config.output.state_dir)})
             else:
                 self._not_found()
 
@@ -45,7 +59,16 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             if path == "/":
                 data = index_html().encode("utf-8")
                 self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
-            elif path in {"/api/status", "/api/rules", "/api/strategies", "/api/jobs", "/api/healthchecks"}:
+            elif path in {
+                "/api/status",
+                "/api/rules",
+                "/api/strategies",
+                "/api/jobs",
+                "/api/healthchecks",
+                "/api/strategy-finder/domains",
+                "/api/strategy-finder/candidates",
+                "/api/strategy-finder/runs",
+            }:
                 self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
             else:
                 self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
@@ -65,6 +88,14 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/jobs/zapret-strategy-check": (
                     "zapret-strategy-check",
                     lambda: _job_zapret_strategy_check(config, payload),
+                ),
+                "/api/jobs/zapret-standard-discovery": (
+                    "zapret-standard-discovery",
+                    lambda: _job_zapret_standard_discovery(config, payload),
+                ),
+                "/api/jobs/zapret-custom-verification": (
+                    "zapret-custom-verification",
+                    lambda: _job_zapret_custom_verification(config, payload),
                 ),
             }
             if path not in jobs:
@@ -284,6 +315,14 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { color: var(--text-soft); font-size: 12px; font-weight: 700; background: var(--surface-soft); }
 tr:last-child td { border-bottom: 0; }
+code {
+  display: block;
+  max-width: 420px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .empty {
   min-height: 92px;
   display: grid;
@@ -419,6 +458,26 @@ pre {
 
         <section class="panel">
           <div class="panel-header">
+            <h2>Подбор стратегий</h2>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="finder-domains">Домены для подбора</label>
+              <input id="finder-domains" placeholder="youtube.com googlevideo.com discord.com discordcdn.com" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="finder-timeout">Таймаут поиска, сек</label>
+              <input id="finder-timeout" type="number" min="30" max="1800" step="30" value="900">
+            </div>
+            <div class="button-row">
+              <button data-action="standard-discovery">Standard discovery</button>
+              <button data-action="custom-verification">Custom verification</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
             <h2>Пути</h2>
           </div>
           <div class="path-list" id="paths"></div>
@@ -426,6 +485,22 @@ pre {
       </div>
 
       <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Найденные стратегии</h2>
+            <span class="badge" id="candidates-count">0</span>
+          </div>
+          <div id="candidates-table"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Запуски подбора</h2>
+            <span class="badge" id="finder-runs-count">0</span>
+          </div>
+          <div id="finder-runs-table"></div>
+        </section>
+
         <section class="panel">
           <div class="panel-header">
             <h2>Стратегии zapret</h2>
@@ -461,13 +536,15 @@ pre {
   </main>
 </div>
 <script>
-const state = { status: null, rules: [], strategies: [], jobs: [], healthchecks: [] };
+const state = { status: null, rules: [], strategies: [], jobs: [], healthchecks: [], candidates: [], finderRuns: [], domainSets: null, selectedCandidateId: null };
 const jobNames = {
   'validate': 'Проверка',
   'sync-pull-only': 'Синхронизация',
   'render-dry-run': 'Сборка dry-run',
   'healthcheck-direct': 'Прямой доступ',
-  'zapret-strategy-check': 'Проверка стратегии'
+  'zapret-strategy-check': 'Проверка стратегии',
+  'zapret-standard-discovery': 'Поиск стратегий',
+  'zapret-custom-verification': 'Проверка candidate'
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn' };
 
@@ -532,6 +609,10 @@ function renderStatus(){
   const status = state.status || {};
   const board = status.state || {};
   const counts = routeCounts();
+  const finderInput = el('finder-domains');
+  if (finderInput && !finderInput.value && state.domainSets && Array.isArray(state.domainSets.critical)) {
+    finderInput.value = state.domainSets.critical.join(' ');
+  }
   const currentJob = Boolean(board.current_job);
   setText('metric-board', currentJob ? 'Занята' : 'Свободна');
   setText('metric-board-note', currentJob ? `Задание ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
@@ -546,11 +627,11 @@ function renderStatus(){
   const jobBadge = el('job-badge');
   jobBadge.textContent = currentJob ? 'В работе' : 'Свободна';
   jobBadge.className = currentJob ? 'badge warn' : 'badge good';
-  document.querySelectorAll('button[data-job], button[data-action="healthcheck-default"], button[data-action="healthcheck-domain"], button[data-action="strategy-check"]').forEach((button) => {
+  document.querySelectorAll('button[data-job], button[data-action="healthcheck-default"], button[data-action="healthcheck-domain"], button[data-action="strategy-check"], button[data-action="standard-discovery"], button[data-action="custom-verification"]').forEach((button) => {
     button.disabled = currentJob;
   });
   renderPaths(status);
-  el('raw').textContent = JSON.stringify({status: state.status, rules: state.rules, strategies: state.strategies}, null, 2);
+  el('raw').textContent = JSON.stringify({status: state.status, rules: state.rules, strategies: state.strategies, candidates: state.candidates, finderRuns: state.finderRuns}, null, 2);
 }
 function renderPaths(status){
   const repos = status.repos || {};
@@ -578,6 +659,32 @@ function renderStrategies(){
     {label: 'Путь', render: (row) => `<span title="${esc(row.path)}">${esc(shortPath(row.path))}</span>`}
   ], state.strategies, 'Стратегий пока нет');
 }
+function renderCandidates(){
+  setText('candidates-count', String(state.candidates.length));
+  table('candidates-table', [
+    {label: 'ID', render: (row) => `<button class="secondary" data-candidate="${esc(row.id)}" title="Выбрать для custom verification">${esc(row.id === state.selectedCandidateId ? '✓ ' : '')}${esc(row.id)}</button>`},
+    {label: 'Protocol', render: (row) => badge(row.protocol || '-', row.protocol === 'quic' ? 'warn' : 'good')},
+    {label: 'Проверка', render: (row) => esc(candidateRate(row))},
+    {label: 'Строка для копирования', render: (row) => `<code title="${esc(row.args)}">nfqws2 ${esc(row.args)}</code>`}
+  ], state.candidates, 'Найденных candidate-стратегий пока нет');
+}
+function renderFinderRuns(){
+  setText('finder-runs-count', String(state.finderRuns.length));
+  table('finder-runs-table', [
+    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
+    {label: 'Тип', render: (row) => esc(row.kind || '-')},
+    {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
+    {label: 'Candidates', render: (row) => badge(String(row.candidate_count ?? 0), Number(row.candidate_count || 0) > 0 ? 'good' : 'warn')},
+    {label: 'Лог', render: (row) => `<span title="${esc(row.stdout_log)}">${esc(shortPath(row.stdout_log))}</span>`}
+  ], state.finderRuns.slice().reverse().slice(0, 10), 'Запусков подбора пока не было');
+}
+function candidateRate(row){
+  const list = Array.isArray(row.verifications) ? row.verifications : [];
+  if (!list.length) return 'не проверялась';
+  const last = list[list.length - 1] || {};
+  const rate = Math.round(Number(last.success_rate || 0) * 100);
+  return `${rate}% (${last.success || 0}/${last.total || 0})`;
+}
 function renderJobs(){
   setText('jobs-count', String(state.jobs.length));
   table('jobs-table', [
@@ -598,20 +705,28 @@ function renderHealthchecks(){
 }
 async function refresh(){
   try {
-    const [status, rules, strategies, jobs, healthchecks] = await Promise.all([
+    const [status, rules, strategies, jobs, healthchecks, candidates, finderRuns, domainSets] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/rules'),
       getJson('/api/strategies'),
       getJson('/api/jobs'),
-      getJson('/api/healthchecks')
+      getJson('/api/healthchecks'),
+      getJson('/api/strategy-finder/candidates'),
+      getJson('/api/strategy-finder/runs'),
+      getJson('/api/strategy-finder/domains')
     ]);
     state.status = status;
     state.rules = rules.rules || [];
     state.strategies = strategies.strategies || [];
     state.jobs = jobs.jobs || [];
     state.healthchecks = healthchecks.healthchecks || [];
+    state.candidates = candidates.candidates || [];
+    state.finderRuns = finderRuns.runs || [];
+    state.domainSets = domainSets;
     renderStatus();
     renderStrategies();
+    renderCandidates();
+    renderFinderRuns();
     renderJobs();
     renderHealthchecks();
   } catch (error) {
@@ -632,9 +747,18 @@ async function startJob(url, payload, text){
 function selectedDomain(){
   return el('domain').value.trim();
 }
+function finderDomains(){
+  return el('finder-domains').value.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean);
+}
 document.addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
+  if (button.dataset.candidate) {
+    state.selectedCandidateId = button.dataset.candidate;
+    renderCandidates();
+    setMessage(`Candidate ${button.dataset.candidate} выбран для custom verification`, 'good');
+    return;
+  }
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.job) startJob(button.dataset.job, {}, button.textContent.trim());
   if (button.dataset.action === 'healthcheck-default') startJob('/api/jobs/healthcheck-direct', {}, 'Проверка доступа');
@@ -658,6 +782,26 @@ document.addEventListener('click', (event) => {
       strategy_path: strategy,
       timeout_seconds: Number(el('timeout').value || 60)
     }, 'Проверка стратегии');
+  }
+  if (button.dataset.action === 'standard-discovery') {
+    const domains = finderDomains();
+    startJob('/api/jobs/zapret-standard-discovery', {
+      domains: domains,
+      include_quic: true,
+      timeout_seconds: Number(el('finder-timeout').value || 900)
+    }, 'Поиск стратегий');
+  }
+  if (button.dataset.action === 'custom-verification') {
+    if (!state.selectedCandidateId) {
+      setMessage('Выберите candidate в таблице найденных стратегий', 'warn');
+      return;
+    }
+    startJob('/api/jobs/zapret-custom-verification', {
+      candidate_id: state.selectedCandidateId,
+      domains: finderDomains(),
+      include_quic: true,
+      timeout_seconds: Number(el('finder-timeout').value || 300)
+    }, 'Custom verification');
   }
 });
 refresh();
@@ -749,6 +893,31 @@ def _job_healthcheck(config: AppConfig, payload: dict[str, Any]) -> dict[str, An
     return {"report": str(report), "checked": len(results)}
 
 
+def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    domains = _payload_domains(payload)
+    return run_standard_discovery(
+        domains,
+        config.output.state_dir,
+        timeout_seconds=int(payload.get("timeout_seconds") or 900),
+        include_quic=bool(payload.get("include_quic", True)),
+    )
+
+
+def _job_zapret_custom_verification(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = str(payload.get("candidate_id") or "").strip()
+    if not candidate_id:
+        raise ValueError("candidate_id is required")
+    candidate = find_candidate(config.output.state_dir, candidate_id)
+    domains = _payload_domains(payload)
+    return run_custom_verification(
+        candidate,
+        domains,
+        config.output.state_dir,
+        timeout_seconds=int(payload.get("timeout_seconds") or 300),
+        include_quic=bool(payload.get("include_quic", True)),
+    )
+
+
 def _job_zapret_strategy_check(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
     domain = str(payload.get("domain") or "").strip()
     strategy_path = str(payload.get("strategy_path") or "").strip()
@@ -769,3 +938,12 @@ def _job_zapret_strategy_check(config: AppConfig, payload: dict[str, Any]) -> di
         "stdout_log": str(out_dir / f"{stamp}.stdout.log"),
         "stderr_log": str(out_dir / f"{stamp}.stderr.log"),
     }
+
+
+def _payload_domains(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("domains") or []
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    if not isinstance(raw, list):
+        raw = []
+    return [str(domain).strip() for domain in raw if str(domain).strip()]
