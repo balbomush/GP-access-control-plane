@@ -140,13 +140,11 @@ def _cleanup_blockcheck_processes() -> None:
         "/opt/zapret2/nfq2/nfqws2",
         "curl --connect-to",
     )
+    sudo = shutil.which("sudo")
     for pattern in patterns:
-        command = [pkill, "-f", pattern]
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
-        if result.returncode not in {0, 1}:
-            sudo = shutil.which("sudo")
-            if sudo:
-                subprocess.run([sudo, "-n", pkill, "-f", pattern], text=True, capture_output=True, check=False)
+        subprocess.run([pkill, "-f", pattern], text=True, capture_output=True, check=False)
+        if sudo:
+            subprocess.run([sudo, "-n", pkill, "-f", pattern], text=True, capture_output=True, check=False)
 
 
 def _cleanup_nft_blockcheck_tables() -> None:
