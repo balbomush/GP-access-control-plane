@@ -1268,7 +1268,7 @@ document.addEventListener('click', (event) => {
         showToast(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
       } else {
         showCopyFallback(groupText);
-        showToast('Не удалось скопировать автоматически. Текст выделен выше, нажмите Ctrl+C.', 'warn');
+        showToast('Не удалось скопировать автоматически. Текст выделен на странице, нажмите Ctrl+C.', 'warn');
       }
     }).catch((error) => showToast(`Не удалось скопировать: ${error.message}`, 'bad'));
     return;
