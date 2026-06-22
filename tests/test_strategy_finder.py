@@ -7,7 +7,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.strategy_finder import candidate_id_for, parse_blockcheck_stdout, read_candidates, upsert_candidates
+from gp_control_plane.state import append_jsonl
+from gp_control_plane.strategy_finder import (
+    candidate_id_for,
+    latest_log_tail,
+    parse_blockcheck_stdout,
+    read_candidates,
+    upsert_candidates,
+)
 
 
 class StrategyFinderTests(unittest.TestCase):
@@ -50,6 +57,33 @@ curl_test_https_tls12 ipv4 web.telegram.org : nfqws2 not working
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["id"], candidate_id_for("tls", "--payload tls_client_hello --lua-desync=fake"))
             self.assertEqual(len(candidates[0]["seen"]), 2)
+
+    def test_latest_log_tail_reads_recent_run_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            logs = root / "logs"
+            logs.mkdir(parents=True)
+            stdout = logs / "run.stdout.log"
+            stderr = logs / "run.stderr.log"
+            stdout.write_text("a\nb\nc\n", encoding="utf-8")
+            stderr.write_text("err\n", encoding="utf-8")
+            append_jsonl(
+                root / "runs.jsonl",
+                {
+                    "id": "run",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout),
+                    "stderr_log": str(stderr),
+                },
+            )
+
+            tail = latest_log_tail(state_dir, max_lines=2)
+
+            self.assertEqual(tail["run_id"], "run")
+            self.assertEqual(tail["stdout_tail"], "b\nc")
+            self.assertEqual(tail["stderr_tail"], "err")
 
 
 if __name__ == "__main__":

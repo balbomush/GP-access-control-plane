@@ -6,11 +6,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
 from .state import append_jsonl, now_iso
-from .zapret2 import _run_blockcheck
+from .zapret2 import _cleanup_nft_blockcheck_tables, _stop_process_group
 
 
 CRITICAL_DOMAINS = ["youtube.com", "googlevideo.com", "discord.com", "discordcdn.com"]
@@ -70,14 +71,15 @@ def run_standard_discovery(
     timeout_seconds: int,
     include_quic: bool = True,
 ) -> dict[str, Any]:
-    result = _run_blockcheck_with_env(
+    return _run_blockcheck_live(
+        state_dir=state_dir,
+        kind="standard-discovery",
         domains=domains,
         timeout_seconds=timeout_seconds,
         test="standard",
         enable_tls=True,
         enable_quic=include_quic,
     )
-    return _store_run(state_dir, "standard-discovery", domains, result)
 
 
 def run_custom_verification(
@@ -95,15 +97,17 @@ def run_custom_verification(
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         lists = _write_custom_lists(tmp, args, protocol, include_quic)
-        result = _run_blockcheck_with_env(
+        run = _run_blockcheck_live(
+            state_dir=state_dir,
+            kind="custom-verification",
             domains=domains,
             timeout_seconds=timeout_seconds,
             test="custom",
             enable_tls=protocol in {"tls", "http"},
             enable_quic=include_quic and protocol == "quic",
             list_paths=lists,
+            candidate_id=str(candidate.get("id") or ""),
         )
-    run = _store_run(state_dir, "custom-verification", domains, result, candidate_id=str(candidate.get("id") or ""))
     _update_candidate_verification(state_dir, candidate, run)
     return run
 
@@ -130,6 +134,26 @@ def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 result.append(parsed)
     return result
+
+
+def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
+    for run in reversed(read_runs(state_dir, limit=200)):
+        stdout_log = Path(str(run.get("stdout_log") or ""))
+        if not stdout_log.exists():
+            continue
+        lines = stdout_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        stderr_log = Path(str(run.get("stderr_log") or ""))
+        stderr_lines = stderr_log.read_text(encoding="utf-8", errors="replace").splitlines() if stderr_log.exists() else []
+        return {
+            "run_id": run.get("id"),
+            "kind": run.get("kind"),
+            "status": run.get("status"),
+            "stdout_tail": "\n".join(lines[-max_lines:]),
+            "stderr_tail": "\n".join(stderr_lines[-max_lines:]),
+            "stdout_log": str(stdout_log),
+            "stderr_log": str(stderr_log) if stderr_log else "",
+        }
+    return {"run_id": None, "kind": None, "status": None, "stdout_tail": "", "stderr_tail": ""}
 
 
 def find_candidate(state_dir: Path, candidate_id: str) -> dict[str, Any]:
@@ -191,68 +215,103 @@ def candidate_id_for(protocol: str, args: str) -> str:
     return f"{protocol}-{digest}"
 
 
-def _run_blockcheck_with_env(
+def _run_blockcheck_live(
+    state_dir: Path,
+    kind: str,
     domains: list[str],
     timeout_seconds: int,
     test: str,
     enable_tls: bool,
     enable_quic: bool,
     list_paths: dict[str, Path] | None = None,
-) -> subprocess.CompletedProcess[str]:
+    candidate_id: str = "",
+) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
-    env = {
-        "BATCH": "1",
-        "DOMAINS": " ".join(_clean_domains(domains)),
-        "IPVS": "4",
-        "TEST": test,
-        "SKIP_DNSCHECK": "1",
-        "ENABLE_HTTP": "0",
-        "ENABLE_HTTPS_TLS12": "1" if enable_tls else "0",
-        "ENABLE_HTTPS_TLS13": "0",
-        "ENABLE_HTTP3": "1" if enable_quic else "0",
-    }
+    clean_domains = _clean_domains(domains)
     full_env = os.environ.copy()
-    full_env.update(env)
+    full_env.update(
+        {
+            "BATCH": "1",
+            "DOMAINS": " ".join(clean_domains),
+            "IPVS": "4",
+            "TEST": test,
+            "SKIP_DNSCHECK": "1",
+            "ENABLE_HTTP": "0",
+            "ENABLE_HTTPS_TLS12": "1" if enable_tls else "0",
+            "ENABLE_HTTPS_TLS13": "0",
+            "ENABLE_HTTP3": "1" if enable_quic else "0",
+        }
+    )
     for key, value in (list_paths or {}).items():
         full_env[key] = str(value)
-    return _run_blockcheck([blockcheck], env=full_env, timeout=timeout_seconds)
 
-
-def _store_run(
-    state_dir: Path,
-    kind: str,
-    domains: list[str],
-    result: subprocess.CompletedProcess[str],
-    candidate_id: str = "",
-) -> dict[str, Any]:
     root = _finder_dir(state_dir)
     logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    run_id = now_iso().replace(":", "").replace("-", "")
+    run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
-    stdout_log.write_text(result.stdout or "", encoding="utf-8")
-    stderr_log.write_text(result.stderr or "", encoding="utf-8")
-    parsed = parse_blockcheck_stdout(result.stdout or "")
+    started = {
+        "id": run_id,
+        "kind": kind,
+        "candidate_id": candidate_id,
+        "status": "running",
+        "timestamp": now_iso(),
+        "domains": clean_domains,
+        "returncode": None,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "candidate_count": 0,
+    }
+    append_jsonl(root / "runs.jsonl", started)
+
+    status = "success"
+    returncode: int | None = None
+    timed_out = False
+    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
+        process = subprocess.Popen(
+            [blockcheck],
+            text=True,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            env=full_env,
+            start_new_session=hasattr(os, "setsid"),
+        )
+        try:
+            returncode = process.wait(timeout=timeout_seconds)
+            if returncode != 0:
+                status = "failed"
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            status = "timeout"
+            _stop_process_group(process)
+            _cleanup_nft_blockcheck_tables()
+            returncode = process.returncode
+
+    stdout = stdout_log.read_text(encoding="utf-8", errors="replace")
+    parsed = parse_blockcheck_stdout(stdout)
     run = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
+        "status": status,
         "timestamp": now_iso(),
-        "domains": _clean_domains(domains),
-        "returncode": result.returncode,
+        "domains": clean_domains,
+        "returncode": returncode,
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
+        "timed_out": timed_out,
+        "timeout_seconds": timeout_seconds,
     }
-    append_jsonl(root / "runs.jsonl", run)
     if kind == "standard-discovery":
         candidates = upsert_candidates(state_dir, parsed, run)
         run["total_candidates"] = len(candidates)
+    append_jsonl(root / "runs.jsonl", run)
     return run
 
 

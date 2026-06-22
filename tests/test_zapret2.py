@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.strategies import load_strategy_dir
-from gp_control_plane.zapret2 import _run_blockcheck, blockcheck_env
+from gp_control_plane.zapret2 import _blockcheck_nft_tables, _run_blockcheck, blockcheck_env
 
 
 class Zapret2Tests(unittest.TestCase):
@@ -74,6 +74,16 @@ blockcheck:
                 os.environ.copy(),
                 timeout=1,
             )
+
+    def test_blockcheck_nft_tables_extracts_only_temporary_tables(self) -> None:
+        output = """
+table inet blockcheck1460063
+table ip filter
+table inet blockcheckabc
+table inet blockcheck42
+"""
+
+        self.assertEqual(_blockcheck_nft_tables(output), [("inet", "blockcheck1460063"), ("inet", "blockcheck42")])
 
 
 if __name__ == "__main__":

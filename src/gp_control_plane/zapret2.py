@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -105,6 +106,7 @@ def _run_blockcheck(command: list[str], env: dict[str, str], timeout: int) -> su
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _stop_process_group(process)
+        _cleanup_nft_blockcheck_tables()
         stdout, stderr = process.communicate()
         exc.output = stdout
         exc.stderr = stderr
@@ -127,3 +129,27 @@ def _stop_process_group(process: subprocess.Popen[str]) -> None:
         else:
             process.kill()
         process.wait(timeout=5)
+
+
+def _cleanup_nft_blockcheck_tables() -> None:
+    nft = shutil.which("nft")
+    if not nft:
+        return
+    command = [nft]
+    listed = subprocess.run(command + ["list", "tables"], text=True, capture_output=True, check=False)
+    if listed.returncode != 0 and shutil.which("sudo"):
+        command = ["sudo", "-n", nft]
+        listed = subprocess.run(command + ["list", "tables"], text=True, capture_output=True, check=False)
+    if listed.returncode != 0:
+        return
+    for family, table in _blockcheck_nft_tables(listed.stdout):
+        subprocess.run(command + ["delete", "table", family, table], text=True, capture_output=True, check=False)
+
+
+def _blockcheck_nft_tables(output: str) -> list[tuple[str, str]]:
+    tables: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        match = re.match(r"\s*table\s+(\S+)\s+(blockcheck\d+)\s*$", line)
+        if match:
+            tables.append((match.group(1), match.group(2)))
+    return tables

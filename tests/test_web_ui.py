@@ -25,6 +25,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Подбор стратегий", html)
         self.assertIn("Найденные стратегии", html)
         self.assertIn("Запуски подбора", html)
+        self.assertIn("Текущий лог подбора", html)
         self.assertIn("Стратегии zapret", html)
         self.assertIn("Журнал заданий", html)
         self.assertIn("Проверки доступности", html)

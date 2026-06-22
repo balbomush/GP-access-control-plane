@@ -17,6 +17,7 @@ from ..state import append_jsonl, now_iso, read_jsonl, read_state, write_state
 from ..strategy_finder import (
     domain_sets,
     find_candidate,
+    latest_log_tail,
     read_candidates,
     read_runs,
     run_custom_verification,
@@ -51,6 +52,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json({"candidates": read_candidates(config.output.state_dir)})
             elif path == "/api/strategy-finder/runs":
                 self._json({"runs": read_runs(config.output.state_dir)})
+            elif path == "/api/strategy-finder/latest-log":
+                self._json(latest_log_tail(config.output.state_dir))
             else:
                 self._not_found()
 
@@ -68,6 +71,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/strategy-finder/domains",
                 "/api/strategy-finder/candidates",
                 "/api/strategy-finder/runs",
+                "/api/strategy-finder/latest-log",
             }:
                 self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
             else:
@@ -467,7 +471,7 @@ pre {
             </div>
             <div class="field">
               <label for="finder-timeout">Таймаут поиска, сек</label>
-              <input id="finder-timeout" type="number" min="30" max="1800" step="30" value="900">
+              <input id="finder-timeout" type="number" min="300" max="43200" step="300" value="21600">
             </div>
             <div class="button-row">
               <button data-action="standard-discovery">Standard discovery</button>
@@ -499,6 +503,14 @@ pre {
             <span class="badge" id="finder-runs-count">0</span>
           </div>
           <div id="finder-runs-table"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Текущий лог подбора</h2>
+            <span class="badge" id="finder-log-status">-</span>
+          </div>
+          <pre id="finder-log">Лога пока нет</pre>
         </section>
 
         <section class="panel">
@@ -536,7 +548,7 @@ pre {
   </main>
 </div>
 <script>
-const state = { status: null, rules: [], strategies: [], jobs: [], healthchecks: [], candidates: [], finderRuns: [], domainSets: null, selectedCandidateId: null };
+const state = { status: null, rules: [], strategies: [], jobs: [], healthchecks: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, selectedCandidateId: null };
 const jobNames = {
   'validate': 'Проверка',
   'sync-pull-only': 'Синхронизация',
@@ -673,10 +685,22 @@ function renderFinderRuns(){
   table('finder-runs-table', [
     {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
     {label: 'Тип', render: (row) => esc(row.kind || '-')},
+    {label: 'Статус', render: (row) => badge(row.status || '-', row.status === 'success' ? 'good' : row.status === 'running' ? 'warn' : 'bad')},
     {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
     {label: 'Candidates', render: (row) => badge(String(row.candidate_count ?? 0), Number(row.candidate_count || 0) > 0 ? 'good' : 'warn')},
     {label: 'Лог', render: (row) => `<span title="${esc(row.stdout_log)}">${esc(shortPath(row.stdout_log))}</span>`}
   ], state.finderRuns.slice().reverse().slice(0, 10), 'Запусков подбора пока не было');
+}
+function renderFinderLog(){
+  const log = state.finderLog || {};
+  const status = log.status || '-';
+  const badgeNode = el('finder-log-status');
+  badgeNode.textContent = status;
+  badgeNode.className = 'badge ' + (status === 'success' ? 'good' : status === 'running' ? 'warn' : status === '-' ? '' : 'bad');
+  const parts = [];
+  if (log.stdout_tail) parts.push(log.stdout_tail);
+  if (log.stderr_tail) parts.push('--- stderr ---\n' + log.stderr_tail);
+  el('finder-log').textContent = parts.join('\n\n') || 'Лога пока нет';
 }
 function candidateRate(row){
   const list = Array.isArray(row.verifications) ? row.verifications : [];
@@ -705,7 +729,7 @@ function renderHealthchecks(){
 }
 async function refresh(){
   try {
-    const [status, rules, strategies, jobs, healthchecks, candidates, finderRuns, domainSets] = await Promise.all([
+    const [status, rules, strategies, jobs, healthchecks, candidates, finderRuns, finderLog, domainSets] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/rules'),
       getJson('/api/strategies'),
@@ -713,6 +737,7 @@ async function refresh(){
       getJson('/api/healthchecks'),
       getJson('/api/strategy-finder/candidates'),
       getJson('/api/strategy-finder/runs'),
+      getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains')
     ]);
     state.status = status;
@@ -722,11 +747,13 @@ async function refresh(){
     state.healthchecks = healthchecks.healthchecks || [];
     state.candidates = candidates.candidates || [];
     state.finderRuns = finderRuns.runs || [];
+    state.finderLog = finderLog;
     state.domainSets = domainSets;
     renderStatus();
     renderStrategies();
     renderCandidates();
     renderFinderRuns();
+    renderFinderLog();
     renderJobs();
     renderHealthchecks();
   } catch (error) {
@@ -898,7 +925,7 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any]) -
     return run_standard_discovery(
         domains,
         config.output.state_dir,
-        timeout_seconds=int(payload.get("timeout_seconds") or 900),
+        timeout_seconds=int(payload.get("timeout_seconds") or 21600),
         include_quic=bool(payload.get("include_quic", True)),
     )
 
@@ -913,7 +940,7 @@ def _job_zapret_custom_verification(config: AppConfig, payload: dict[str, Any]) 
         candidate,
         domains,
         config.output.state_dir,
-        timeout_seconds=int(payload.get("timeout_seconds") or 300),
+        timeout_seconds=int(payload.get("timeout_seconds") or 3600),
         include_quic=bool(payload.get("include_quic", True)),
     )
 
