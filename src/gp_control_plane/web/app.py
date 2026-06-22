@@ -228,16 +228,17 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 .metric-note { color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
 .layout {
   display: grid;
-  grid-template-columns: minmax(300px, 430px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 430px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
-.stack { display: grid; gap: 16px; }
+.stack { display: grid; gap: 16px; min-width: 0; }
 .panel {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 16px;
+  min-width: 0;
 }
 .panel-header {
   display: flex;
@@ -275,6 +276,7 @@ input:focus, textarea:focus {
 .checkbox-row input { width: 18px; min-height: 18px; }
 button {
   min-height: 38px;
+  min-width: 0;
   border: 1px solid var(--blue);
   background: var(--blue);
   color: #ffffff;
@@ -284,6 +286,8 @@ button {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
 button.secondary { background: #ffffff; color: var(--blue); }
@@ -321,14 +325,14 @@ button:disabled { opacity: .55; cursor: default; }
 .badge.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
 .badge.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
 .badge.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; min-width: 0; max-width: 100%; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 th { color: var(--text-soft); font-size: 12px; font-weight: 700; background: var(--surface-soft); }
 tr:last-child td { border-bottom: 0; }
 code {
   display: block;
-  max-width: 520px;
+  max-width: 100%;
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
   white-space: normal;
