@@ -686,6 +686,21 @@ function runSummary(row){
   if (row.status === 'failed') return `ошибка, код: ${row.returncode ?? '-'}`;
   return count > 0 ? `найдено: ${count}` : '-';
 }
+function jobSummary(row){
+  if (row.status === 'queued') return 'ожидает запуска';
+  if (row.status === 'running') return 'выполняется';
+  if (row.status === 'failed') return conciseError(row.error);
+  const result = row.result || {};
+  if (result.status) return runSummary(result);
+  if (row.status === 'success') return 'завершено';
+  return '-';
+}
+function conciseError(value){
+  const text = String(value || '').replace(/\\s+/g, ' ').trim();
+  if (!text) return 'ошибка без деталей';
+  if (text.includes('timed out')) return 'остановлено по таймауту';
+  return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+}
 function renderLog(){
   const log = state.finderLog || {};
   const status = log.status || '-';
@@ -713,7 +728,7 @@ function renderJobs(){
     {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
     {label: 'Задание', render: (row) => esc(jobNames[row.name] || row.name || '-')},
     {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
-    {label: 'Детали', render: (row) => esc(row.error || (row.result ? JSON.stringify(row.result) : '-'))}
+    {label: 'Итог', render: (row) => esc(jobSummary(row))}
   ], jobs, 'Заданий подбора пока не было');
 }
 function renderAll(){
