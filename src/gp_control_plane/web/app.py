@@ -226,6 +226,17 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 .metric-label { color: var(--text-soft); font-size: 12px; text-transform: uppercase; }
 .metric-value { font-size: 20px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
 .metric-note { color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.metric-button {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  white-space: normal;
+  cursor: pointer;
+}
+.metric-button:hover {
+  background: var(--surface-soft);
+  border-color: var(--line-strong);
+}
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 430px) minmax(0, 1fr);
@@ -295,6 +306,18 @@ button.secondary:hover { background: #edf4ff; }
 button:disabled { opacity: .55; cursor: default; }
 .button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.candidate-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.candidate-summary {
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
 .tabs {
   display: flex;
   gap: 8px;
@@ -394,8 +417,9 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .candidate-toolbar { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
+  .candidate-summary { white-space: normal; }
   h1 { font-size: 22px; }
   .metric-value { font-size: 18px; }
   button { width: 100%; }
@@ -425,11 +449,11 @@ pre {
         <div class="metric-value" id="metric-job">-</div>
         <div class="metric-note" id="metric-job-note">-</div>
       </div>
-      <div class="metric">
+      <button class="metric metric-button" data-tab="candidates" type="button">
         <div class="metric-label">Кандидаты</div>
         <div class="metric-value" id="metric-candidates">0</div>
         <div class="metric-note" id="metric-candidates-note">найдено blockcheck2</div>
-      </div>
+      </button>
       <div class="metric">
         <div class="metric-label">Последний запуск</div>
         <div class="metric-value" id="metric-last-run">-</div>
@@ -439,6 +463,7 @@ pre {
 
     <nav class="tabs" role="tablist" aria-label="Разделы">
       <button class="tab-button active" data-tab="finder" type="button">Подбор</button>
+      <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
     </nav>
 
@@ -488,14 +513,6 @@ pre {
       <div class="stack">
         <section class="panel">
           <div class="panel-header">
-            <h2>Найденные стратегии</h2>
-            <span class="badge" id="candidates-count">0</span>
-          </div>
-          <div id="candidates-table"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
             <h2>История запусков</h2>
             <span class="badge" id="finder-runs-count">0</span>
           </div>
@@ -504,6 +521,23 @@ pre {
 
       </div>
     </div>
+    </section>
+
+    <section class="tab-page candidates-page" data-tab-page="candidates">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Найденные стратегии</h2>
+          <span class="badge" id="candidates-count">0</span>
+        </div>
+        <div class="candidate-toolbar">
+          <div class="field">
+            <label for="candidate-filter">Фильтр по домену, протоколу или аргументам</label>
+            <input id="candidate-filter" autocomplete="off" placeholder="youtube.com, quic, multisplit">
+          </div>
+          <div class="candidate-summary" id="candidate-summary">-</div>
+        </div>
+        <div id="candidates-table"></div>
+      </section>
     </section>
 
     <section class="tab-page terminal-page" data-tab-page="terminal">
@@ -518,7 +552,7 @@ pre {
   </main>
 </div>
 <script>
-const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder' };
+const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateFilter: '' };
 const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
@@ -637,35 +671,48 @@ function renderMetrics(){
   setText('metric-job', busy ? 'В работе' : 'Свободна');
   setText('metric-job-note', busy ? `ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
   setText('metric-candidates', String(state.candidates.length));
-  setText('metric-candidates-note', `${verifiedCount()} с повторной проверкой`);
+  setText('metric-candidates-note', 'перейти к списку');
   setText('metric-last-run', run ? (run.status || '-') : '-');
   setText('metric-last-run-note', run ? friendlyDate(run.timestamp) : 'запусков еще не было');
   const jobBadge = el('job-badge');
   jobBadge.textContent = busy ? 'В работе' : 'Свободна';
   jobBadge.className = busy ? 'badge warn' : 'badge good';
-  document.querySelectorAll('button[data-action="standard-discovery"], button[data-candidate-verify]').forEach((button) => {
+  document.querySelectorAll('button[data-action="standard-discovery"]').forEach((button) => {
     button.disabled = busy;
   });
 }
-function verifiedCount(){
-  return state.candidates.filter((item) => Array.isArray(item.verifications) && item.verifications.length > 0).length;
-}
-function candidateRate(row){
-  const list = Array.isArray(row.verifications) ? row.verifications : [];
-  if (!list.length) return 'не проверялась';
-  const last = list[list.length - 1] || {};
-  const rate = Math.round(Number(last.success_rate || 0) * 100);
-  return `${rate}% (${last.success || 0}/${last.total || 0})`;
-}
 function renderCandidates(){
+  const rows = filteredCandidates();
   setText('candidates-count', String(state.candidates.length));
+  setText('candidate-summary', `Показано ${rows.length} из ${state.candidates.length}`);
   table('candidates-table', [
     {label: 'ID', render: (row) => esc(row.id || '-')},
     {label: 'Протокол', render: (row) => badge(row.protocol || '-', row.protocol === 'quic' ? 'warn' : 'good')},
-    {label: 'Проверка', render: (row) => esc(candidateRate(row))},
-    {label: 'Стратегия', render: (row) => `<code>nfqws2 ${esc(row.args || '')}</code>`},
-    {label: 'Действие', render: (row) => `<button class="secondary" data-candidate-verify="${esc(row.id)}">Проверить</button>`}
-  ], state.candidates, 'Кандидатов пока нет');
+    {label: 'Домены', render: (row) => esc(candidateDomains(row).join(', ') || '-')},
+    {label: 'Найдено', render: (row) => badge(String(candidateSeenCount(row)), '')},
+    {label: 'Аргументы стратегии', render: (row) => `<code>${esc(row.args || '')}</code>`}
+  ], rows, state.candidates.length ? 'По фильтру ничего не найдено' : 'Кандидатов пока нет');
+}
+function filteredCandidates(){
+  const query = state.candidateFilter.trim().toLowerCase();
+  if (!query) return state.candidates;
+  return state.candidates.filter((row) => {
+    const haystack = [
+      row.id,
+      row.protocol,
+      row.args,
+      ...candidateDomains(row)
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+}
+function candidateDomains(row){
+  const seen = Array.isArray(row.seen) ? row.seen : [];
+  return [...new Set(seen.map((item) => String(item.domain || '').trim()).filter(Boolean))];
+}
+function candidateSeenCount(row){
+  const seen = Array.isArray(row.seen) ? row.seen : [];
+  return seen.length;
 }
 function renderRuns(){
   setText('finder-runs-count', String(state.finderRuns.length));
@@ -792,13 +839,11 @@ document.addEventListener('click', (event) => {
       timeout_seconds: timeoutSeconds()
     }, 'Поиск стратегий');
   }
-  if (button.dataset.candidateVerify) {
-    startJob('/api/jobs/zapret-custom-verification', {
-      candidate_id: button.dataset.candidateVerify,
-      domains: finderDomains(),
-      include_quic: el('include-quic').checked,
-      timeout_seconds: timeoutSeconds()
-    }, 'Проверка кандидата');
+});
+document.addEventListener('input', (event) => {
+  if (event.target && event.target.id === 'candidate-filter') {
+    state.candidateFilter = event.target.value;
+    renderCandidates();
   }
 });
 refresh();
