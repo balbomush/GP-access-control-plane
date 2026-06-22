@@ -423,7 +423,7 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     )
     scripts = [line.strip().removeprefix("* script :").strip() for line in lines if line.strip().startswith("* script :")]
     current_script = scripts[-1] if scripts else ""
-    script_total = _standard_script_total()
+    script_total = _standard_script_total() if current_script.startswith("standard/") else 0
     script_index = _standard_script_index(current_script) if current_script else 0
     if script_total and script_index > script_total:
         script_index = script_total
