@@ -33,6 +33,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("strategy-list", html)
         self.assertIn("data-copy-candidate-group", html)
         self.assertIn("Копировать группу", html)
+        self.assertIn("copy-fallback", html)
+        self.assertIn("showCopyFallback", html)
         self.assertIn("Терминал", html)
         self.assertIn("scrollLogToBottom", html)
         self.assertIn("runSummary(row)", html)

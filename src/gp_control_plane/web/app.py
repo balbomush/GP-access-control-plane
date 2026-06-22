@@ -320,6 +320,16 @@ button:disabled { opacity: .55; cursor: default; }
   font-size: 13px;
   white-space: nowrap;
 }
+.copy-fallback {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.copy-fallback[hidden] { display: none; }
+.copy-fallback textarea {
+  min-height: 160px;
+  max-height: 260px;
+}
 .candidate-groups {
   display: grid;
   gap: 14px;
@@ -591,6 +601,10 @@ pre {
           </div>
           <div class="candidate-summary" id="candidate-summary">-</div>
         </div>
+        <div class="copy-fallback" id="copy-fallback" hidden>
+          <label for="copy-fallback-text">Группа для ручного копирования</label>
+          <textarea id="copy-fallback-text" readonly spellcheck="false"></textarea>
+        </div>
         <div id="candidates-table"></div>
       </section>
     </section>
@@ -819,14 +833,32 @@ async function copyText(text){
   }
   const area = document.createElement('textarea');
   area.value = text;
+  area.readOnly = true;
   area.style.position = 'fixed';
-  area.style.left = '-9999px';
+  area.style.top = '0';
+  area.style.left = '0';
+  area.style.width = '1px';
+  area.style.height = '1px';
+  area.style.opacity = '0';
   document.body.appendChild(area);
-  area.focus();
+  area.focus({preventScroll: true});
   area.select();
+  area.setSelectionRange(0, area.value.length);
   const ok = document.execCommand('copy');
   document.body.removeChild(area);
   return ok;
+}
+function showCopyFallback(text){
+  const panel = el('copy-fallback');
+  const field = el('copy-fallback-text');
+  field.value = text;
+  panel.hidden = false;
+  field.focus();
+  field.select();
+}
+function hideCopyFallback(){
+  const panel = el('copy-fallback');
+  if (panel) panel.hidden = true;
 }
 function renderRuns(){
   setText('finder-runs-count', String(state.finderRuns.length));
@@ -947,8 +979,15 @@ document.addEventListener('click', (event) => {
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.fill) fillDomains(button.dataset.fill);
   if (button.dataset.copyCandidateGroup) {
-    copyText(state.candidateCopyGroups[button.dataset.copyCandidateGroup] || '').then((ok) => {
-      setMessage(ok ? 'Группа стратегий скопирована' : 'Не удалось скопировать группу', ok ? 'good' : 'bad');
+    const groupText = state.candidateCopyGroups[button.dataset.copyCandidateGroup] || '';
+    copyText(groupText).then((ok) => {
+      if (ok) {
+        hideCopyFallback();
+        setMessage('Группа стратегий скопирована', 'good');
+      } else {
+        showCopyFallback(groupText);
+        setMessage('Браузер заблокировал буфер. Текст выделен ниже', 'warn');
+      }
     }).catch((error) => setMessage(`Не удалось скопировать: ${error.message}`, 'bad'));
     return;
   }
