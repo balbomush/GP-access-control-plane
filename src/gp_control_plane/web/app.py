@@ -522,7 +522,9 @@ const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLo
 const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
-  'zapret-custom-verification': 'Проверка кандидата'
+  'zapret-custom-verification': 'Проверка кандидата',
+  'standard-discovery': 'Поиск стратегий',
+  'custom-verification': 'Проверка кандидата'
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', timeout: 'warn' };
 
@@ -577,6 +579,13 @@ function table(targetId, columns, rows, emptyText){
     return `<td>${value}</td>`;
   }).join('') + '</tr>').join('');
   el(targetId).innerHTML = `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function latestById(rows){
+  const byId = new Map();
+  rows.forEach((row, index) => {
+    byId.set(row.id || `row-${index}`, row);
+  });
+  return Array.from(byId.values()).sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
 }
 function setActiveTab(tabName){
   state.activeTab = tabName;
@@ -727,9 +736,9 @@ async function refresh(){
       getJson('/api/strategy-finder/domains')
     ]);
     state.status = status;
-    state.jobs = jobs.jobs || [];
+    state.jobs = latestById(jobs.jobs || []);
     state.candidates = candidates.candidates || [];
-    state.finderRuns = finderRuns.runs || [];
+    state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
     renderAll();

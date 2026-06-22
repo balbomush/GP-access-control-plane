@@ -28,6 +28,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Терминал", html)
         self.assertIn("scrollLogToBottom", html)
         self.assertIn("runSummary(row)", html)
+        self.assertIn("latestById", html)
         self.assertNotIn("{label: 'Лог'", html)
         self.assertNotIn("Синхронизировать", html)
         self.assertNotIn("dry-run", html)
