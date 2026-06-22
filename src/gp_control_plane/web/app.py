@@ -229,6 +229,8 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 .metric-button {
   width: 100%;
   text-align: left;
+  background: var(--surface);
+  border-color: var(--line);
   color: inherit;
   white-space: normal;
   cursor: pointer;
@@ -317,6 +319,58 @@ button:disabled { opacity: .55; cursor: default; }
   color: var(--text-soft);
   font-size: 13px;
   white-space: nowrap;
+}
+.candidate-groups {
+  display: grid;
+  gap: 14px;
+}
+.domain-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+.domain-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+.domain-title {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.protocol-group {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.protocol-group:last-child { border-bottom: 0; }
+.protocol-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.strategy-list {
+  display: grid;
+  gap: 8px;
+}
+.strategy-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+.strategy-index {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
 }
 .tabs {
   display: flex;
@@ -420,6 +474,7 @@ pre {
   .status-grid, .button-row, .fill-row, .candidate-toolbar { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
   .candidate-summary { white-space: normal; }
+  .domain-header, .protocol-header { align-items: stretch; flex-direction: column; }
   h1 { font-size: 22px; }
   .metric-value { font-size: 18px; }
   button { width: 100%; }
@@ -552,7 +607,7 @@ pre {
   </main>
 </div>
 <script>
-const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateFilter: '' };
+const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateFilter: '', candidateCopyGroups: {} };
 const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
@@ -623,7 +678,7 @@ function latestById(rows){
 }
 function setActiveTab(tabName){
   state.activeTab = tabName;
-  document.querySelectorAll('[data-tab]').forEach((button) => {
+  document.querySelectorAll('.tab-button[data-tab]').forEach((button) => {
     const active = button.dataset.tab === tabName;
     button.classList.toggle('active', active);
   });
@@ -683,15 +738,40 @@ function renderMetrics(){
 }
 function renderCandidates(){
   const rows = filteredCandidates();
+  const groups = candidateGroups(rows);
   setText('candidates-count', String(state.candidates.length));
   setText('candidate-summary', `Показано ${rows.length} из ${state.candidates.length}`);
-  table('candidates-table', [
-    {label: 'ID', render: (row) => esc(row.id || '-')},
-    {label: 'Протокол', render: (row) => badge(row.protocol || '-', row.protocol === 'quic' ? 'warn' : 'good')},
-    {label: 'Домены', render: (row) => esc(candidateDomains(row).join(', ') || '-')},
-    {label: 'Найдено', render: (row) => badge(String(candidateSeenCount(row)), '')},
-    {label: 'Аргументы стратегии', render: (row) => `<code>${esc(row.args || '')}</code>`}
-  ], rows, state.candidates.length ? 'По фильтру ничего не найдено' : 'Кандидатов пока нет');
+  state.candidateCopyGroups = {};
+  if (!groups.length) {
+    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'По фильтру ничего не найдено' : 'Кандидатов пока нет'}</div>`;
+    return;
+  }
+  let groupIndex = 0;
+  el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
+    const total = domainGroup.protocols.reduce((sum, item) => sum + item.rows.length, 0);
+    return `<section class="domain-group">
+      <div class="domain-header">
+        <div class="domain-title">${esc(domainGroup.domain)}</div>
+        ${badge(`${total} стратегий`, '')}
+      </div>
+      ${domainGroup.protocols.map((protocolGroup) => {
+        const copyKey = `group-${groupIndex++}`;
+        state.candidateCopyGroups[copyKey] = protocolGroup.rows.map((row) => row.args || '').filter(Boolean).join('\\n');
+        return `<div class="protocol-group">
+          <div class="protocol-header">
+            <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')} ${badge(`${protocolGroup.rows.length} стратегий`, '')}</div>
+            <button class="secondary" data-copy-candidate-group="${copyKey}" type="button">Копировать группу</button>
+          </div>
+          <div class="strategy-list">
+            ${protocolGroup.rows.map((row, index) => `<div class="strategy-item">
+              <div class="strategy-index">Стратегия ${index + 1}</div>
+              <code>${esc(row.args || '')}</code>
+            </div>`).join('')}
+          </div>
+        </div>`;
+      }).join('')}
+    </section>`;
+  }).join('')}</div>`;
 }
 function filteredCandidates(){
   const query = state.candidateFilter.trim().toLowerCase();
@@ -710,9 +790,43 @@ function candidateDomains(row){
   const seen = Array.isArray(row.seen) ? row.seen : [];
   return [...new Set(seen.map((item) => String(item.domain || '').trim()).filter(Boolean))];
 }
-function candidateSeenCount(row){
-  const seen = Array.isArray(row.seen) ? row.seen : [];
-  return seen.length;
+function candidateGroups(rows){
+  const domainMap = new Map();
+  rows.forEach((row) => {
+    const domains = candidateDomains(row);
+    (domains.length ? domains : ['unknown']).forEach((domain) => {
+      if (!domainMap.has(domain)) domainMap.set(domain, new Map());
+      const protocol = String(row.protocol || 'unknown');
+      const protocolMap = domainMap.get(domain);
+      if (!protocolMap.has(protocol)) protocolMap.set(protocol, []);
+      protocolMap.get(protocol).push(row);
+    });
+  });
+  return Array.from(domainMap.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([domain, protocolMap]) => ({
+      domain,
+      protocols: Array.from(protocolMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([protocol, protocolRows]) => ({ protocol, rows: protocolRows }))
+    }));
+}
+async function copyText(text){
+  if (!text) return false;
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.style.position = 'fixed';
+  area.style.left = '-9999px';
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(area);
+  return ok;
 }
 function renderRuns(){
   setText('finder-runs-count', String(state.finderRuns.length));
@@ -832,6 +946,12 @@ document.addEventListener('click', (event) => {
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.fill) fillDomains(button.dataset.fill);
+  if (button.dataset.copyCandidateGroup) {
+    copyText(state.candidateCopyGroups[button.dataset.copyCandidateGroup] || '').then((ok) => {
+      setMessage(ok ? 'Группа стратегий скопирована' : 'Не удалось скопировать группу', ok ? 'good' : 'bad');
+    }).catch((error) => setMessage(`Не удалось скопировать: ${error.message}`, 'bad'));
+    return;
+  }
   if (button.dataset.action === 'standard-discovery') {
     startJob('/api/jobs/zapret-standard-discovery', {
       domains: finderDomains(),
