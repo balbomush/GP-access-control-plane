@@ -686,14 +686,6 @@ pre {
             <div class="message" id="message">Готово</div>
           </div>
         </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Задания подбора</h2>
-            <span class="badge" id="jobs-count">0</span>
-          </div>
-          <div id="jobs-table"></div>
-        </section>
       </div>
 
       <div class="stack">
@@ -731,13 +723,6 @@ pre {
           <textarea id="copy-fallback-text" readonly spellcheck="false"></textarea>
         </div>
         <div id="candidates-table"></div>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Запуски с находками</h2>
-          <span class="badge" id="candidate-runs-count">0</span>
-        </div>
-        <div id="candidate-runs-table"></div>
       </section>
     </section>
 
@@ -781,8 +766,7 @@ pre {
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
 <script>
-const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {}, openCandidateDomains: {} };
-const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
+const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {}, openCandidateDomains: {} };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-custom-verification': 'Проверка кандидата',
@@ -945,7 +929,6 @@ function renderCandidates(){
   } else {
     renderDomainCandidates(domainRows);
   }
-  renderCandidateRuns();
 }
 function renderDomainCandidates(rows){
   const groups = candidateGroups(rows);
@@ -1073,21 +1056,6 @@ function strategyItem(row, index){
     <code>${esc(row.args || '')}</code>
   </div>`;
 }
-function renderCandidateRuns(){
-  const rows = state.finderRuns
-    .filter((row) => Number(row.candidate_count || 0) > 0 || Number(row.common_candidate_count || 0) > 0)
-    .slice()
-    .reverse()
-    .slice(0, 12);
-  setText('candidate-runs-count', String(rows.length));
-  table('candidate-runs-table', [
-    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
-    {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
-    {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
-    {label: 'Стратегии', render: (row) => badge(String(Number(row.candidate_count || 0) + Number(row.common_candidate_count || 0)), 'good')},
-    {label: 'Итог', render: (row) => esc(runSummary(row))}
-  ], rows, 'Запусков с найденными стратегиями пока нет');
-}
 async function copyText(text){
   if (!text) return false;
   if (navigator.clipboard && window.isSecureContext) {
@@ -1124,18 +1092,19 @@ function hideCopyFallback(){
   if (panel) panel.hidden = true;
 }
 function renderRuns(){
-  setText('finder-runs-count', String(state.finderRuns.length));
+  const rows = state.finderRuns.filter((row) => row.kind === 'standard-discovery');
+  setText('finder-runs-count', String(rows.length));
   table('finder-runs-table', [
     {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
-    {label: 'Тип', render: (row) => esc(jobNames[row.kind] || row.kind || '-')},
     {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
     {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
-    {label: 'Кандидаты', render: (row) => badge(String(row.candidate_count ?? 0), Number(row.candidate_count || 0) > 0 ? 'good' : '')},
+    {label: 'Стратегии', render: (row) => badge(String(runCandidateCount(row)), runCandidateCount(row) > 0 ? 'good' : '')},
+    {label: 'Попытки', render: (row) => esc(runProgressText(row))},
     {label: 'Итог', render: (row) => esc(runSummary(row))}
-  ], state.finderRuns.slice().reverse().slice(0, 12), 'Запусков пока не было');
+  ], rows.slice().reverse().slice(0, 12), 'Запусков поиска пока не было');
 }
 function runSummary(row){
-  const count = Number(row.candidate_count || 0);
+  const count = runCandidateCount(row);
   if (row.status === 'running') return 'идет поиск';
   if (row.status === 'timeout') return `остановлено по лимиту, найдено: ${count}`;
   if (row.status === 'stopped') return count > 0 ? `остановлено, сохранено: ${count}` : 'остановлено, кандидатов нет';
@@ -1143,24 +1112,16 @@ function runSummary(row){
   if (row.status === 'failed') return `ошибка, код: ${row.returncode ?? '-'}`;
   return count > 0 ? `найдено: ${count}` : '-';
 }
-function jobSummary(row){
-  if (row.status === 'queued') return 'ожидает запуска';
-  if (row.status === 'running') return 'выполняется';
-  if (row.status === 'failed') return conciseError(row.error);
-  const result = row.result || {};
-  if (result.status) return runSummary(result);
-  if (row.status === 'success') return 'завершено';
+function runCandidateCount(row){
+  return Number(row.candidate_count || 0) + Number(row.common_candidate_count || 0);
+}
+function runProgressText(row){
+  const progress = row.progress || {};
+  const attempted = Number(progress.attempted || 0);
+  const total = Number(progress.attempt_total || 0);
+  if (total) return `${attempted} из ${total}`;
+  if (attempted) return String(attempted);
   return '-';
-}
-function effectiveJobStatus(row){
-  const result = row.result || {};
-  return result.status || row.status || '-';
-}
-function conciseError(value){
-  const text = String(value || '').replace(/\\s+/g, ' ').trim();
-  if (!text) return 'ошибка без деталей';
-  if (text.includes('timed out')) return 'остановлено по таймауту';
-  return text.length > 120 ? `${text.slice(0, 117)}...` : text;
 }
 function renderLog(){
   const log = state.finderLog || {};
@@ -1215,40 +1176,24 @@ function scrollLogToBottom(){
     logNode.scrollTop = logNode.scrollHeight;
   });
 }
-function renderJobs(){
-  const jobs = state.jobs.filter((job) => finderJobs.has(job.name)).slice().reverse().slice(0, 8);
-  setText('jobs-count', String(jobs.length));
-  table('jobs-table', [
-    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
-    {label: 'Задание', render: (row) => esc(jobNames[row.name] || row.name || '-')},
-    {label: 'Статус', render: (row) => {
-      const status = effectiveJobStatus(row);
-      return badge(status, statusTone[status] || '');
-    }},
-    {label: 'Итог', render: (row) => esc(jobSummary(row))}
-  ], jobs, 'Заданий подбора пока не было');
-}
 function renderAll(){
   if (!el('finder-domains').value && state.domainSets) fillDomains('critical');
   renderMetrics();
   renderCandidates();
   renderRuns();
   renderLog();
-  renderJobs();
   setActiveTab(state.activeTab);
 }
 async function refresh(){
   try {
-    const [status, jobs, candidates, finderRuns, finderLog, domainSets] = await Promise.all([
+    const [status, candidates, finderRuns, finderLog, domainSets] = await Promise.all([
       getJson('/api/status'),
-      getJson('/api/jobs'),
       getJson('/api/strategy-finder/candidates'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains')
     ]);
     state.status = status;
-    state.jobs = latestById(jobs.jobs || []);
     state.candidates = candidates.candidates || [];
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
