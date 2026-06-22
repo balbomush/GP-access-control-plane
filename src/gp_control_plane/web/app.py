@@ -512,6 +512,32 @@ button:disabled { opacity: .55; cursor: default; }
 .message.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
 .message.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
 .message.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 50;
+  max-width: min(420px, calc(100vw - 36px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 14px;
+  background: #ffffff;
+  color: #17212b;
+  box-shadow: 0 10px 30px rgba(23, 33, 43, .16);
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity .16s ease, transform .16s ease;
+  pointer-events: none;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+.toast.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
+.toast.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
+.toast.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
 .badge {
   display: inline-flex;
   align-items: center;
@@ -704,7 +730,6 @@ pre {
           <label for="copy-fallback-text">Группа для ручного копирования</label>
           <textarea id="copy-fallback-text" readonly spellcheck="false"></textarea>
         </div>
-        <div class="message" id="candidate-message">Готово</div>
         <div id="candidates-table"></div>
       </section>
     </section>
@@ -746,6 +771,7 @@ pre {
       </section>
     </section>
   </main>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
 <script>
 const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {}, openCandidateDomains: {} };
@@ -757,6 +783,7 @@ const jobNames = {
   'custom-verification': 'Проверка кандидата'
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
+let toastTimer = null;
 
 function el(id){ return document.getElementById(id); }
 function esc(value){
@@ -770,10 +797,20 @@ function setMessage(text, tone){
   node.textContent = text;
   node.className = 'message' + (tone ? ' ' + tone : '');
 }
-function setCandidateMessage(text, tone){
-  const node = el('candidate-message');
+function showToast(text, tone){
+  const node = el('toast');
+  if (toastTimer) clearTimeout(toastTimer);
   node.textContent = text;
-  node.className = 'message' + (tone ? ' ' + tone : '');
+  node.className = 'toast' + (tone ? ' ' + tone : '');
+  node.hidden = false;
+  requestAnimationFrame(() => node.classList.add('show'));
+  toastTimer = setTimeout(() => {
+    node.classList.remove('show');
+    toastTimer = setTimeout(() => {
+      node.hidden = true;
+      toastTimer = null;
+    }, 180);
+  }, 2000);
 }
 async function getJson(url){
   const response = await fetch(url);
@@ -1228,12 +1265,12 @@ document.addEventListener('click', (event) => {
     copyText(groupText).then((ok) => {
       if (ok) {
         hideCopyFallback();
-        setCandidateMessage(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
+        showToast(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
       } else {
         showCopyFallback(groupText);
-        setCandidateMessage('Не удалось скопировать автоматически. Текст выделен выше, нажмите Ctrl+C.', 'warn');
+        showToast('Не удалось скопировать автоматически. Текст выделен выше, нажмите Ctrl+C.', 'warn');
       }
-    }).catch((error) => setCandidateMessage(`Не удалось скопировать: ${error.message}`, 'bad'));
+    }).catch((error) => showToast(`Не удалось скопировать: ${error.message}`, 'bad'));
     return;
   }
   if (button.dataset.action === 'standard-discovery') {
