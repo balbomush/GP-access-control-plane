@@ -704,6 +704,7 @@ pre {
           <label for="copy-fallback-text">Группа для ручного копирования</label>
           <textarea id="copy-fallback-text" readonly spellcheck="false"></textarea>
         </div>
+        <div class="message" id="candidate-message">Готово</div>
         <div id="candidates-table"></div>
       </section>
     </section>
@@ -766,6 +767,11 @@ function esc(value){
 function setText(id, value){ el(id).textContent = value; }
 function setMessage(text, tone){
   const node = el('message');
+  node.textContent = text;
+  node.className = 'message' + (tone ? ' ' + tone : '');
+}
+function setCandidateMessage(text, tone){
+  const node = el('candidate-message');
   node.textContent = text;
   node.className = 'message' + (tone ? ' ' + tone : '');
 }
@@ -1222,12 +1228,12 @@ document.addEventListener('click', (event) => {
     copyText(groupText).then((ok) => {
       if (ok) {
         hideCopyFallback();
-        setMessage(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
+        setCandidateMessage(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
       } else {
         showCopyFallback(groupText);
-        setMessage('Браузер заблокировал буфер. Текст выделен ниже', 'warn');
+        setCandidateMessage('Не удалось скопировать автоматически. Текст выделен выше, нажмите Ctrl+C.', 'warn');
       }
-    }).catch((error) => setMessage(`Не удалось скопировать: ${error.message}`, 'bad'));
+    }).catch((error) => setCandidateMessage(`Не удалось скопировать: ${error.message}`, 'bad'));
     return;
   }
   if (button.dataset.action === 'standard-discovery') {
