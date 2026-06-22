@@ -94,6 +94,24 @@ def run_standard_discovery(
     )
 
 
+def run_multi_domain_discovery(
+    domains: list[str],
+    state_dir: Path,
+    timeout_seconds: int,
+    include_quic: bool = True,
+    scan_level: str = "standard",
+    stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    return _run_multidomain_blockcheck_live(
+        state_dir=state_dir,
+        domains=domains,
+        timeout_seconds=timeout_seconds,
+        include_quic=include_quic,
+        scan_level=scan_level,
+        stop_event=stop_event,
+    )
+
+
 def run_custom_verification(
     candidate: dict[str, Any],
     domains: list[str],
@@ -403,7 +421,179 @@ def _run_blockcheck_live(
         "attempt_plan": attempt_plan,
     }
     run["progress"] = progress_from_stdout(stdout, run)
-    if kind == "standard-discovery":
+    if kind in {"standard-discovery", "multi-domain-discovery"}:
+        candidates = upsert_candidates(state_dir, parsed, run)
+        run["total_candidates"] = len(candidates)
+    append_jsonl(root / "runs.jsonl", run)
+    return run
+
+
+def _run_multidomain_blockcheck_live(
+    state_dir: Path,
+    domains: list[str],
+    timeout_seconds: int,
+    include_quic: bool,
+    scan_level: str,
+    stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
+    if not blockcheck:
+        raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
+    clean_domains = _clean_domains(domains)
+    normalized_scan_level = scan_level if scan_level in {"quick", "standard", "force"} else "standard"
+    blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
+    zapret_base = blockcheck_path.parent
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        runner = _write_multidomain_runner(tmp, blockcheck_path)
+        full_env = os.environ.copy()
+        full_env.update(
+            {
+                "BATCH": "1",
+                "DOMAINS": " ".join(clean_domains),
+                "IPVS": "4",
+                "TEST": "standard",
+                "SKIP_DNSCHECK": "1",
+                "SKIP_IPBLOCK": "1",
+                "ENABLE_HTTP": "0",
+                "ENABLE_HTTPS_TLS12": "1",
+                "ENABLE_HTTPS_TLS13": "0",
+                "ENABLE_HTTP3": "1" if include_quic else "0",
+                "SCANLEVEL": normalized_scan_level,
+                "ZAPRET_BASE": str(zapret_base),
+                "ZAPRET_RW": str(zapret_base),
+            }
+        )
+        return _run_blockcheck_command_live(
+            command=[str(runner)],
+            env=full_env,
+            state_dir=state_dir,
+            kind="multi-domain-discovery",
+            domains=clean_domains,
+            timeout_seconds=timeout_seconds,
+            test="standard",
+            enable_tls=True,
+            enable_quic=include_quic,
+            scan_level=normalized_scan_level,
+            stop_event=stop_event,
+        )
+
+
+def _run_blockcheck_command_live(
+    command: list[str],
+    env: dict[str, str],
+    state_dir: Path,
+    kind: str,
+    domains: list[str],
+    timeout_seconds: int,
+    test: str,
+    enable_tls: bool,
+    enable_quic: bool,
+    scan_level: str = "",
+    candidate_id: str = "",
+    stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    root = _finder_dir(state_dir)
+    logs = root / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
+    stdout_log = logs / f"{run_id}.{kind}.stdout.log"
+    stderr_log = logs / f"{run_id}.{kind}.stderr.log"
+    attempt_plan = _standard_attempt_plan(
+        domains=domains,
+        test=test,
+        enable_http=False,
+        enable_tls=enable_tls,
+        enable_tls13=False,
+        enable_quic=enable_quic,
+    )
+    started = {
+        "id": run_id,
+        "kind": kind,
+        "candidate_id": candidate_id,
+        "status": "running",
+        "timestamp": now_iso(),
+        "domains": domains,
+        "returncode": None,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "candidate_count": 0,
+        "test": test,
+        "enable_tls": enable_tls,
+        "enable_quic": enable_quic,
+        "scan_level": scan_level,
+        "attempt_plan": attempt_plan,
+    }
+    append_jsonl(root / "runs.jsonl", started)
+
+    status = "success"
+    returncode: int | None = None
+    timed_out = False
+    stopped = False
+    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
+        process = subprocess.Popen(
+            command,
+            text=True,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            env=env,
+            start_new_session=hasattr(os, "setsid"),
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                status = "stopped"
+                _stop_process_group(process)
+                _cleanup_blockcheck_processes()
+                _cleanup_nft_blockcheck_tables()
+                returncode = process.returncode
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                status = "timeout"
+                _stop_process_group(process)
+                _cleanup_blockcheck_processes()
+                _cleanup_nft_blockcheck_tables()
+                returncode = process.returncode
+                break
+            try:
+                returncode = process.wait(timeout=min(1.0, remaining))
+                if returncode != 0:
+                    status = "failed"
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+    stdout = stdout_log.read_text(encoding="utf-8", errors="replace")
+    parsed = parse_blockcheck_stdout(stdout)
+    run = {
+        "id": run_id,
+        "kind": kind,
+        "candidate_id": candidate_id,
+        "status": status,
+        "timestamp": now_iso(),
+        "domains": domains,
+        "returncode": returncode,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "summary": parsed["summary"],
+        "results": parsed["results"],
+        "candidate_count": len(parsed["candidates"]),
+        "common_candidate_count": len(parsed["common_candidates"]),
+        "timed_out": timed_out,
+        "stopped": stopped,
+        "timeout_seconds": timeout_seconds,
+        "test": test,
+        "enable_tls": enable_tls,
+        "enable_quic": enable_quic,
+        "scan_level": scan_level,
+        "attempt_plan": attempt_plan,
+    }
+    run["progress"] = progress_from_stdout(stdout, run)
+    if kind in {"standard-discovery", "multi-domain-discovery"}:
         candidates = upsert_candidates(state_dir, parsed, run)
         run["total_candidates"] = len(candidates)
     append_jsonl(root / "runs.jsonl", run)
@@ -910,6 +1100,176 @@ def _write_custom_lists(root: Path, args: str, protocol: str, include_quic: bool
         "LIST_HTTPS_TLS13": empty,
         "LIST_QUIC": quic,
     }
+
+
+def _write_multidomain_runner(root: Path, blockcheck: Path) -> Path:
+    source = blockcheck.read_text(encoding="utf-8", errors="replace")
+    marker = "\nfsleep_setup\n"
+    if marker not in source:
+        raise RuntimeError("unsupported blockcheck2.sh layout: main marker not found")
+    prefix = source.split(marker, 1)[0]
+    runner = root / "gp-multidomain-blockcheck.sh"
+    runner.write_text(prefix + MULTIDOMAIN_BLOCKCHECK_MAIN, encoding="utf-8")
+    runner.chmod(0o700)
+    return runner
+
+
+def _resolve_blockcheck_script(path: Path) -> Path:
+    current = path.resolve()
+    seen: set[Path] = set()
+    for _ in range(5):
+        if current in seen:
+            break
+        seen.add(current)
+        try:
+            text = current.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return current
+        if "\nfsleep_setup\n" in text:
+            return current
+        target = _exec_target_from_shell_wrapper(text)
+        if not target:
+            return current
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = current.parent / candidate
+        current = candidate.resolve()
+    return current
+
+
+def _exec_target_from_shell_wrapper(text: str) -> str:
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("exec "):
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            continue
+        for part in parts[1:]:
+            if part.endswith(("blockcheck2.sh", "blockcheck.sh")):
+                return part
+    return ""
+
+
+MULTIDOMAIN_BLOCKCHECK_MAIN = r'''
+
+gp_md_primary_domain()
+{
+	local d
+	for d in $DOMAINS; do
+		echo "$d"
+		return
+	done
+}
+
+gp_md_resolve_all_ips()
+{
+	local d ips all_ips
+	for d in $DOMAINS; do
+		mdig_resolve_all $IPV ips "$d"
+		all_ips="${all_ips:+$all_ips }$ips"
+	done
+	echo "$all_ips" | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
+pktws_curl_test_update()
+{
+	# $1 - curl test function
+	# $2 - sample domain from the standard zapret2 script
+	# $3+ - nfqws2 args
+	local testf=$1 dom="$2" strategy code ok=0 total=0 gp_domain
+	shift
+	shift
+	strategy="$*"
+
+	echo
+	echo "- gp_multidomain_strategy ipv$IPV : $PKTWSD ${WF:+$WF }$strategy"
+	pktws_start "$@"
+	for gp_domain in $DOMAINS; do
+		total=$(($total + 1))
+		echo "- $testf ipv$IPV $gp_domain : $PKTWSD ${WF:+$WF }$strategy"
+		if curl_test "$testf" "$gp_domain"; then
+			report_append "$gp_domain" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy"
+			ok=$(($ok + 1))
+		else
+			code=$?
+			echo "GP-MULTIDOMAIN unavailable code=$code"
+		fi
+	done
+	ws_kill
+	echo "GP-MULTIDOMAIN result: $ok/$total domains available"
+	[ "$ok" = "$total" ]
+}
+
+gp_md_run_protocol()
+{
+	# $1 - standard script function
+	# $2 - curl test function
+	# $3 - tcp/udp
+	# $4 - port
+	local func=$1 testf=$2 proto=$3 port=$4 ips primary
+	primary="$(gp_md_primary_domain)"
+	[ -n "$primary" ] || return 1
+	ips="$(gp_md_resolve_all_ips)"
+	[ -n "$ips" ] || {
+		echo "GP-MULTIDOMAIN no resolved ip addresses for $proto/$port"
+		return 1
+	}
+
+	echo
+	echo "GP-MULTIDOMAIN preparing $PKTWSD redirection for $proto/$port"
+	case "$proto" in
+		tcp) pktws_ipt_prepare_tcp "$port" "$ips" ;;
+		udp) pktws_ipt_prepare_udp "$port" "$ips" ;;
+		*) return 1 ;;
+	esac
+	test_runner "$func" "$testf" "$primary"
+	echo "GP-MULTIDOMAIN clearing $PKTWSD redirection for $proto/$port"
+	case "$proto" in
+		tcp) pktws_ipt_unprepare_tcp "$port" ;;
+		udp) pktws_ipt_unprepare_udp "$port" ;;
+	esac
+}
+
+fsleep_setup
+fix_sbin_path
+check_system
+check_already
+[ "$UNAME" != CYGWIN  -a "$SKIP_PKTWS" != 1 ] && require_root
+check_prerequisites
+trap sigint_cleanup INT
+check_dns
+check_virt
+ask_params
+trap - INT
+
+PID=
+NREPORT=
+unset WF
+trap sigint INT
+trap sigsilent PIPE
+trap sigsilent HUP
+for IPV in $IPVS; do
+	configure_ip_version
+	[ "$ENABLE_HTTPS_TLS12" = 1 ] && gp_md_run_protocol pktws_check_https_tls12 curl_test_https_tls12 tcp "$HTTPS_PORT"
+	[ "$ENABLE_HTTP3" = 1 ] && gp_md_run_protocol pktws_check_http3 curl_test_http3 udp "$QUIC_PORT"
+done
+trap - HUP
+trap - PIPE
+trap - INT
+
+cleanup
+
+echo
+echo \* SUMMARY
+report_print
+[ "$DOMAINS_COUNT" -gt 1 ] && {
+	echo
+	echo \* COMMON
+	result_intersection_print
+}
+'''
 
 
 def _clean_domains(domains: list[str]) -> list[str]:

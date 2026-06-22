@@ -19,6 +19,7 @@ from .strategy_finder import (
     find_candidate,
     read_candidates,
     run_custom_verification,
+    run_multi_domain_discovery,
     run_standard_discovery,
 )
 from .validation import validate_all
@@ -72,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     finder_standard.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
     finder_standard.add_argument("--timeout-seconds", type=int, default=21600)
     finder_standard.add_argument("--no-quic", action="store_true")
+    finder_multi = finder_subparsers.add_parser(
+        "multi-domain-discovery",
+        help="Run experimental strategy-first discovery across multiple domains",
+    )
+    finder_multi.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
+    finder_multi.add_argument("--timeout-seconds", type=int, default=21600)
+    finder_multi.add_argument("--no-quic", action="store_true")
+    finder_multi.add_argument("--scan-level", choices=["quick", "standard", "force"], default="standard")
     finder_custom = finder_subparsers.add_parser("custom-verification", help="Verify a saved candidate with custom list")
     finder_custom.add_argument("--candidate-id", required=True)
     finder_custom.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
@@ -177,6 +186,16 @@ def _main(args: argparse.Namespace) -> int:
                 config.output.state_dir,
                 timeout_seconds=args.timeout_seconds,
                 include_quic=not args.no_quic,
+            )
+            _print_json(run)
+            return 0
+        if args.finder_command == "multi-domain-discovery":
+            run = run_multi_domain_discovery(
+                args.domain,
+                config.output.state_dir,
+                timeout_seconds=args.timeout_seconds,
+                include_quic=not args.no_quic,
+                scan_level=args.scan_level,
             )
             _print_json(run)
             return 0

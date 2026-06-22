@@ -21,6 +21,7 @@ from ..strategy_finder import (
     read_candidates,
     read_runs,
     run_custom_verification,
+    run_multi_domain_discovery,
     run_standard_discovery,
 )
 from ..strategies import list_local_strategies
@@ -104,6 +105,10 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/jobs/zapret-standard-discovery": (
                     "zapret-standard-discovery",
                     lambda stop: _job_zapret_standard_discovery(config, payload, stop),
+                ),
+                "/api/jobs/zapret-multi-domain-discovery": (
+                    "zapret-multi-domain-discovery",
+                    lambda stop: _job_zapret_multi_domain_discovery(config, payload, stop),
                 ),
                 "/api/jobs/zapret-custom-verification": (
                     "zapret-custom-verification",
@@ -318,7 +323,7 @@ button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
 button.secondary.danger { background: #ffffff; color: var(--red); }
 button.secondary.danger:hover { background: var(--red-soft); }
 button:disabled { opacity: .55; cursor: default; }
-.button-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.button-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .candidate-toolbar {
   display: grid;
@@ -680,6 +685,7 @@ pre {
             </label>
             <div class="button-row">
               <button data-action="standard-discovery">Запустить поиск</button>
+              <button class="secondary" data-action="multi-domain-discovery">Стратегия -> домены</button>
               <button class="secondary" data-action="refresh">Обновить</button>
               <button class="secondary danger" data-action="stop-current" disabled>Остановить</button>
             </div>
@@ -769,8 +775,10 @@ pre {
 const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {}, openCandidateDomains: {} };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
+  'zapret-multi-domain-discovery': 'Стратегия -> домены',
   'zapret-custom-verification': 'Проверка кандидата',
   'standard-discovery': 'Поиск стратегий',
+  'multi-domain-discovery': 'Стратегия -> домены',
   'custom-verification': 'Проверка кандидата'
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
@@ -906,7 +914,7 @@ function renderMetrics(){
   const jobBadge = el('job-badge');
   jobBadge.textContent = busy ? 'В работе' : 'Свободна';
   jobBadge.className = busy ? 'badge warn' : 'badge good';
-  document.querySelectorAll('button[data-action="standard-discovery"]').forEach((button) => {
+  document.querySelectorAll('button[data-action="standard-discovery"], button[data-action="multi-domain-discovery"]').forEach((button) => {
     button.disabled = busy;
   });
   document.querySelectorAll('button[data-action="stop-current"]').forEach((button) => {
@@ -1092,16 +1100,23 @@ function hideCopyFallback(){
   if (panel) panel.hidden = true;
 }
 function renderRuns(){
-  const rows = state.finderRuns.filter((row) => row.kind === 'standard-discovery');
+  const rows = state.finderRuns.filter((row) => isDiscoveryRun(row));
   setText('finder-runs-count', String(rows.length));
   table('finder-runs-table', [
     {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
+    {label: 'Режим', render: (row) => esc(runMode(row))},
     {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
     {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
     {label: 'Стратегии', render: (row) => badge(String(runCandidateCount(row)), runCandidateCount(row) > 0 ? 'good' : '')},
     {label: 'Попытки', render: (row) => esc(runProgressText(row))},
     {label: 'Итог', render: (row) => esc(runSummary(row))}
   ], rows.slice().reverse().slice(0, 12), 'Запусков поиска пока не было');
+}
+function isDiscoveryRun(row){
+  return row.kind === 'standard-discovery' || row.kind === 'multi-domain-discovery';
+}
+function runMode(row){
+  return row.kind === 'multi-domain-discovery' ? 'стратегия -> домены' : 'обычный';
 }
 function runSummary(row){
   const count = runCandidateCount(row);
@@ -1257,6 +1272,14 @@ document.addEventListener('click', (event) => {
       timeout_seconds: timeoutSeconds()
     }, 'Поиск стратегий');
   }
+  if (button.dataset.action === 'multi-domain-discovery') {
+    startJob('/api/jobs/zapret-multi-domain-discovery', {
+      domains: finderDomains(),
+      include_quic: el('include-quic').checked,
+      timeout_seconds: timeoutSeconds(),
+      scan_level: 'standard'
+    }, 'Стратегия -> домены');
+  }
   if (button.dataset.action === 'stop-current') stopCurrentJob();
 });
 document.addEventListener('input', (event) => {
@@ -1366,6 +1389,18 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         config.output.state_dir,
         timeout_seconds=int(payload.get("timeout_seconds") or 21600),
         include_quic=bool(payload.get("include_quic", True)),
+        stop_event=stop_event,
+    )
+
+
+def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
+    domains = _payload_domains(payload)
+    return run_multi_domain_discovery(
+        domains,
+        config.output.state_dir,
+        timeout_seconds=int(payload.get("timeout_seconds") or 21600),
+        include_quic=bool(payload.get("include_quic", True)),
+        scan_level=str(payload.get("scan_level") or "standard"),
         stop_event=stop_event,
     )
 

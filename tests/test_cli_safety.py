@@ -24,6 +24,10 @@ class CliSafetyTests(unittest.TestCase):
             "standard-discovery",
         )
         self.assertEqual(
+            parser.parse_args(["strategy-finder", "multi-domain-discovery", "--domain", "youtube.com"]).finder_command,
+            "multi-domain-discovery",
+        )
+        self.assertEqual(
             parser.parse_args(["strategy-finder", "custom-verification", "--candidate-id", "tls-test"]).finder_command,
             "custom-verification",
         )

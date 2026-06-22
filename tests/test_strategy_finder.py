@@ -9,7 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.state import append_jsonl
 from gp_control_plane.strategy_finder import (
+    _resolve_blockcheck_script,
     _standard_attempt_plan,
+    _write_multidomain_runner,
     candidate_id_for,
     latest_log_tail,
     parse_blockcheck_stdout,
@@ -239,6 +241,37 @@ pktws_check_http3()
             self.assertEqual(tail["run_id"], "run")
             self.assertEqual(tail["stdout_tail"], "b\nc")
             self.assertEqual(tail["stderr_tail"], "err")
+
+    def test_multidomain_runner_overrides_strategy_check_order(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            blockcheck = tmp / "blockcheck2.sh"
+            blockcheck.write_text(
+                "#!/bin/sh\n"
+                "pktws_curl_test_update() { echo stock; }\n"
+                "\nfsleep_setup\n"
+                "echo stock main\n",
+                encoding="utf-8",
+            )
+
+            runner = _write_multidomain_runner(tmp, blockcheck)
+            text = runner.read_text(encoding="utf-8")
+
+            self.assertIn("gp_md_run_protocol pktws_check_https_tls12", text)
+            self.assertIn("for gp_domain in $DOMAINS", text)
+            self.assertIn('pktws_start "$@"', text)
+            self.assertIn('curl_test "$testf" "$gp_domain"', text)
+            self.assertNotIn("echo stock main", text)
+
+    def test_resolve_blockcheck_script_follows_exec_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            real = tmp / "real-blockcheck2.sh"
+            real.write_text("#!/bin/sh\n\nfsleep_setup\necho real\n", encoding="utf-8")
+            wrapper = tmp / "blockcheck2.sh"
+            wrapper.write_text("#!/bin/sh\nexec real-blockcheck2.sh \"$@\"\n", encoding="utf-8")
+
+            self.assertEqual(_resolve_blockcheck_script(wrapper), real.resolve())
 
 
 if __name__ == "__main__":
