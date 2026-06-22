@@ -370,6 +370,7 @@ button:disabled { opacity: .55; cursor: default; }
   background: #ffffff;
 }
 .domain-group[open] .domain-header { border-bottom: 1px solid var(--line); }
+.domain-group:not([open]) > :not(summary) { display: none; }
 .domain-group summary { cursor: pointer; list-style: none; }
 .domain-group summary::-webkit-details-marker { display: none; }
 .domain-header {
