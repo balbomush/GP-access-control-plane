@@ -133,18 +133,24 @@ def _stop_process_group(process: subprocess.Popen[str]) -> None:
 
 
 def _cleanup_blockcheck_processes() -> None:
-    pkill = shutil.which("pkill")
-    if not pkill:
+    pgrep = shutil.which("pgrep")
+    if not pgrep:
         return
     patterns = (
         "/opt/zapret2/nfq2/nfqws2",
         "curl --connect-to",
     )
-    sudo = shutil.which("sudo")
+    pids: list[str] = []
     for pattern in patterns:
-        subprocess.run([pkill, "-f", pattern], text=True, capture_output=True, check=False)
-        if sudo:
-            subprocess.run([sudo, "-n", pkill, "-f", pattern], text=True, capture_output=True, check=False)
+        found = subprocess.run([pgrep, "-f", pattern], text=True, capture_output=True, check=False)
+        if found.returncode == 0:
+            pids.extend(pid for pid in found.stdout.split() if pid.isdigit() and int(pid) != os.getpid())
+    if not pids:
+        return
+    subprocess.run(["kill", "-TERM", *pids], text=True, capture_output=True, check=False)
+    sudo = shutil.which("sudo")
+    if sudo:
+        subprocess.run([sudo, "-n", "kill", "-TERM", *pids], text=True, capture_output=True, check=False)
 
 
 def _cleanup_nft_blockcheck_tables() -> None:
