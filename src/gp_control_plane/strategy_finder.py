@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .state import append_jsonl, now_iso
-from .zapret2 import _cleanup_nft_blockcheck_tables, _stop_process_group
+from .zapret2 import _cleanup_blockcheck_processes, _cleanup_nft_blockcheck_tables, _stop_process_group
 
 
 CRITICAL_DOMAINS = ["youtube.com", "googlevideo.com", "discord.com", "discordcdn.com"]
@@ -287,6 +287,7 @@ def _run_blockcheck_live(
             timed_out = True
             status = "timeout"
             _stop_process_group(process)
+            _cleanup_blockcheck_processes()
             _cleanup_nft_blockcheck_tables()
             returncode = process.returncode
 

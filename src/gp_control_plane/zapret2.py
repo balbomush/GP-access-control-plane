@@ -5,6 +5,7 @@ import re
 import signal
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -133,24 +134,39 @@ def _stop_process_group(process: subprocess.Popen[str]) -> None:
 
 
 def _cleanup_blockcheck_processes() -> None:
-    pgrep = shutil.which("pgrep")
-    if not pgrep:
-        return
     patterns = (
         "/opt/zapret2/nfq2/nfqws2",
         "curl --connect-to",
     )
+    pids = _blockcheck_process_pids(patterns)
+    if not pids:
+        return
+    _signal_pids("TERM", pids)
+    time.sleep(1)
+    remaining = _blockcheck_process_pids(patterns)
+    if remaining:
+        _signal_pids("KILL", remaining)
+
+
+def _blockcheck_process_pids(patterns: tuple[str, ...]) -> list[str]:
+    pgrep = shutil.which("pgrep")
+    if not pgrep:
+        return []
     pids: list[str] = []
     for pattern in patterns:
         found = subprocess.run([pgrep, "-f", pattern], text=True, capture_output=True, check=False)
         if found.returncode == 0:
             pids.extend(pid for pid in found.stdout.split() if pid.isdigit() and int(pid) != os.getpid())
+    return sorted(set(pids), key=int)
+
+
+def _signal_pids(signal_name: str, pids: list[str]) -> None:
     if not pids:
         return
-    subprocess.run(["kill", "-TERM", *pids], text=True, capture_output=True, check=False)
+    subprocess.run(["kill", f"-{signal_name}", *pids], text=True, capture_output=True, check=False)
     sudo = shutil.which("sudo")
     if sudo:
-        subprocess.run([sudo, "-n", "kill", "-TERM", *pids], text=True, capture_output=True, check=False)
+        subprocess.run([sudo, "-n", "kill", f"-{signal_name}", *pids], text=True, capture_output=True, check=False)
 
 
 def _cleanup_nft_blockcheck_tables() -> None:

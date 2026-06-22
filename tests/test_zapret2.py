@@ -6,11 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.strategies import load_strategy_dir
-from gp_control_plane.zapret2 import _blockcheck_nft_tables, _run_blockcheck, blockcheck_env
+from gp_control_plane.zapret2 import _blockcheck_nft_tables, _cleanup_blockcheck_processes, _run_blockcheck, blockcheck_env
 
 
 class Zapret2Tests(unittest.TestCase):
@@ -84,6 +85,35 @@ table inet blockcheck42
 """
 
         self.assertEqual(_blockcheck_nft_tables(output), [("inet", "blockcheck1460063"), ("inet", "blockcheck42")])
+
+    def test_cleanup_blockcheck_processes_kills_remaining_pids(self) -> None:
+        pgrep_outputs = iter(
+            [
+                subprocess.CompletedProcess(["pgrep"], 0, "101\n", ""),
+                subprocess.CompletedProcess(["pgrep"], 0, "102\n", ""),
+                subprocess.CompletedProcess(["pgrep"], 1, "", ""),
+                subprocess.CompletedProcess(["pgrep"], 0, "102\n", ""),
+            ]
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command[0] == "pgrep":
+                return next(pgrep_outputs)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=lambda name: name if name in {"pgrep", "sudo"} else None),
+            mock.patch("gp_control_plane.zapret2.subprocess.run", side_effect=fake_run),
+            mock.patch("gp_control_plane.zapret2.time.sleep"),
+        ):
+            _cleanup_blockcheck_processes()
+
+        self.assertIn(["kill", "-TERM", "101", "102"], calls)
+        self.assertIn(["sudo", "-n", "kill", "-TERM", "101", "102"], calls)
+        self.assertIn(["kill", "-KILL", "102"], calls)
+        self.assertIn(["sudo", "-n", "kill", "-KILL", "102"], calls)
 
 
 if __name__ == "__main__":
