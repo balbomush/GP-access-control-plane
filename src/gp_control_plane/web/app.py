@@ -747,7 +747,7 @@ pre {
   </main>
 </div>
 <script>
-const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {} };
+const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {}, openCandidateDomains: {} };
 const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
@@ -904,8 +904,8 @@ function renderDomainCandidates(rows){
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
     const total = domainGroup.protocols.reduce((sum, item) => sum + item.rows.length, 0);
-    const open = state.candidateFilter ? ' open' : '';
-    return `<details class="domain-group"${open}>
+    const open = state.candidateFilter || state.openCandidateDomains[domainGroup.domain] ? ' open' : '';
+    return `<details class="domain-group" data-domain="${esc(domainGroup.domain)}"${open}>
       <summary class="domain-header">
         <div class="domain-title">${esc(domainGroup.domain)}</div>
         <div class="domain-meta">${badge(`${total} стратегий`, '')}</div>
@@ -1245,6 +1245,11 @@ document.addEventListener('input', (event) => {
     renderCandidates();
   }
 });
+document.addEventListener('toggle', (event) => {
+  const details = event.target;
+  if (!details || !details.matches || !details.matches('details.domain-group[data-domain]')) return;
+  state.openCandidateDomains[details.dataset.domain] = details.open;
+}, true);
 refresh();
 setInterval(refresh, 5000);
 </script>
