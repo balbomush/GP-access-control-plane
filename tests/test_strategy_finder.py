@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.state import append_jsonl
 from gp_control_plane.strategy_finder import (
+    _PROGRESS_TRACKERS,
+    _standard_attempt_plan,
     candidate_id_for,
     latest_log_tail,
     parse_blockcheck_stdout,
@@ -122,6 +124,79 @@ UNAVAILABLE code=28
         self.assertEqual(progress["attempted"], 1)
         self.assertEqual(progress["successful"], 1)
         self.assertEqual(progress["current_script"], "standard/15-misc.sh")
+
+    def test_standard_attempt_plan_counts_file_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "10-test.sh").write_text(
+                """
+pktws_check_https_tls12()
+{
+    for repeats in 1 2 3; do
+        pktws_curl_test_update "$1" "$2" --payload=tls
+    done
+}
+pktws_check_http3()
+{
+    pktws_curl_test_update "$1" "$2" --payload=quic
+}
+""",
+                encoding="utf-8",
+            )
+
+            plan = _standard_attempt_plan(
+                domains=["youtube.com", "discord.com"],
+                enable_tls=True,
+                enable_quic=True,
+                root=root,
+            )
+
+            self.assertEqual(plan["scripts"]["standard/10-test.sh"], 8)
+            self.assertEqual(plan["total"], 8)
+
+    def test_progress_uses_attempt_total_and_recent_eta_window(self) -> None:
+        _PROGRESS_TRACKERS.clear()
+        plan = {
+            "total": 40,
+            "scripts": {"standard/10-test.sh": 40},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+        first_stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 10)
+
+        first = progress_from_stdout(
+            first_stdout,
+            {"id": "run-eta", "status": "running", "attempt_plan": plan, "_observed_at": 100.0},
+        )
+
+        self.assertEqual(first["attempted"], 10)
+        self.assertEqual(first["attempt_total"], 40)
+        self.assertTrue(first["eta_pending"])
+        self.assertIsNone(first["eta_seconds"])
+
+        second_stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 30)
+        second = progress_from_stdout(
+            second_stdout,
+            {"id": "run-eta", "status": "running", "attempt_plan": plan, "_observed_at": 120.0},
+        )
+
+        self.assertFalse(second["eta_pending"])
+        self.assertEqual(second["eta_seconds"], 10)
+
+    def test_stopped_progress_keeps_attempt_percent(self) -> None:
+        plan = {
+            "total": 100,
+            "scripts": {"standard/10-test.sh": 100},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 25)
+
+        progress = progress_from_stdout(stdout, {"id": "run-stopped", "status": "stopped", "attempt_plan": plan})
+
+        self.assertEqual(progress["attempted"], 25)
+        self.assertEqual(progress["percent"], 25.0)
+        self.assertEqual(progress["script_index"], 1)
 
     def test_latest_log_tail_reads_recent_run_output(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,12 @@ COVERAGE_DOMAINS = [
     "speedtest.net",
     "cloudflare-ech.com",
 ]
+
+ATTEMPT_ETA_SAMPLE_SIZE = 20
+_ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_PROGRESS_TRACKERS: dict[str, dict[str, Any]] = {}
+_ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
+_SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
 
 
 def domain_sets() -> dict[str, list[str]]:
@@ -304,6 +311,14 @@ def _run_blockcheck_live(
     run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
+    attempt_plan = _standard_attempt_plan(
+        domains=clean_domains,
+        test=test,
+        enable_http=False,
+        enable_tls=enable_tls,
+        enable_tls13=False,
+        enable_quic=enable_quic,
+    )
     started = {
         "id": run_id,
         "kind": kind,
@@ -315,6 +330,10 @@ def _run_blockcheck_live(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "candidate_count": 0,
+        "test": test,
+        "enable_tls": enable_tls,
+        "enable_quic": enable_quic,
+        "attempt_plan": attempt_plan,
     }
     append_jsonl(root / "runs.jsonl", started)
 
@@ -377,6 +396,10 @@ def _run_blockcheck_live(
         "timed_out": timed_out,
         "stopped": stopped,
         "timeout_seconds": timeout_seconds,
+        "test": test,
+        "enable_tls": enable_tls,
+        "enable_quic": enable_quic,
+        "attempt_plan": attempt_plan,
     }
     run["progress"] = progress_from_stdout(stdout, run)
     if kind == "standard-discovery":
@@ -413,7 +436,8 @@ def _update_candidate_verification(state_dir: Path, candidate: dict[str, Any], r
 
 def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     lines = stdout.splitlines()
-    attempted = sum(1 for line in lines if re.match(r"^-\s+curl_test_", line.strip()))
+    attempted = sum(1 for line in lines if _ATTEMPT_RE.match(line.strip()))
+    attempts_by_script = _attempts_by_script(lines)
     parsed = parse_blockcheck_stdout(stdout)
     successful = len(
         {
@@ -421,32 +445,324 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
             for item in [*parsed["candidates"], *parsed["common_candidates"]]
         }
     )
-    scripts = [line.strip().removeprefix("* script :").strip() for line in lines if line.strip().startswith("* script :")]
+    scripts = [_script_name_from_line(line) for line in lines if _script_name_from_line(line)]
     current_script = scripts[-1] if scripts else ""
-    script_total = _standard_script_total() if current_script.startswith("standard/") else 0
-    script_index = _standard_script_index(current_script) if current_script else 0
+    attempt_plan = _attempt_plan_for_run(run, current_script)
+    script_order = [str(item) for item in attempt_plan.get("script_order") or []]
+    script_attempt_totals = attempt_plan.get("scripts") if isinstance(attempt_plan.get("scripts"), dict) else {}
+    attempt_total = int(attempt_plan.get("total") or 0)
+    current_script_attempted = attempts_by_script.get(current_script, 0)
+    current_script_attempt_total = int(script_attempt_totals.get(current_script) or 0)
+    remaining_attempts = max(0, attempt_total - attempted) if attempt_total else None
+    script_total = len(script_order) if script_order else (_standard_script_total() if current_script.startswith("standard/") else 0)
+    script_index = _standard_script_index(current_script, script_order) if current_script else 0
     if script_total and script_index > script_total:
         script_index = script_total
-    finished = str(run.get("status") or "") in {"success", "failed", "timeout", "stopped"}
-    if finished and script_total:
+    status = str(run.get("status") or "")
+    finished = status in {"success", "failed", "timeout", "stopped"}
+    completed = status == "success"
+    if completed and script_total:
         script_index = script_total
-    percent = (script_index / script_total * 100.0) if script_total else None
+    if attempt_total:
+        percent = 100.0 if completed else min(100.0, (attempted / attempt_total) * 100.0)
+    else:
+        percent = (script_index / script_total * 100.0) if script_total else None
     elapsed = _elapsed_seconds(run.get("timestamp"))
-    eta = None
-    if not finished and elapsed is not None and script_total and script_index > 0:
-        eta = max(0, int((elapsed / script_index) * (script_total - script_index)))
-    elif finished:
-        eta = 0
+    eta, eta_pending = _eta_from_recent_attempts(run, attempted, attempt_total, finished)
     return {
         "attempted": attempted,
+        "attempt_total": attempt_total,
+        "remaining_attempts": remaining_attempts,
         "successful": successful,
         "current_script": current_script,
+        "current_script_attempted": current_script_attempted,
+        "current_script_attempt_total": current_script_attempt_total,
         "script_index": script_index,
         "script_total": script_total,
         "percent": percent,
         "elapsed_seconds": elapsed,
         "eta_seconds": eta,
+        "eta_pending": eta_pending,
+        "eta_sample_size": ATTEMPT_ETA_SAMPLE_SIZE,
+        "attempt_plan_source": attempt_plan.get("source") or "",
     }
+
+
+def _attempts_by_script(lines: list[str]) -> dict[str, int]:
+    current_script = ""
+    result: dict[str, int] = {}
+    for line in lines:
+        script = _script_name_from_line(line)
+        if script:
+            current_script = script
+            result.setdefault(current_script, 0)
+            continue
+        if _ATTEMPT_RE.match(line.strip()):
+            result[current_script] = result.get(current_script, 0) + 1
+    return result
+
+
+def _script_name_from_line(line: str) -> str:
+    match = _SCRIPT_RE.match(line.strip())
+    return match.group(1).strip() if match else ""
+
+
+def _attempt_plan_for_run(run: dict[str, Any], current_script: str) -> dict[str, Any]:
+    raw_plan = run.get("attempt_plan")
+    if isinstance(raw_plan, dict) and int(raw_plan.get("total") or 0) > 0:
+        return raw_plan
+    if not current_script.startswith("standard/") and str(run.get("test") or "standard") != "standard":
+        return _empty_attempt_plan(str(run.get("test") or ""))
+    return _standard_attempt_plan(
+        domains=[str(item) for item in run.get("domains") or []],
+        test=str(run.get("test") or "standard"),
+        enable_http=_truthy(run.get("enable_http"), default=False),
+        enable_tls=_truthy(run.get("enable_tls"), default=True),
+        enable_tls13=_truthy(run.get("enable_tls13"), default=False),
+        enable_quic=_truthy(run.get("enable_quic"), default=True),
+    )
+
+
+def _standard_attempt_plan(
+    domains: list[str],
+    test: str = "standard",
+    enable_http: bool = False,
+    enable_tls: bool = True,
+    enable_tls13: bool = False,
+    enable_quic: bool = True,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    if test != "standard":
+        return _empty_attempt_plan(test)
+    root = root or _blockcheck_test_dir(test)
+    if not root.exists():
+        return _empty_attempt_plan(test)
+    scripts = _standard_scripts(root)
+    domain_count = len(_clean_domains(domains))
+    fingerprint = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in scripts)
+    key = (
+        str(root),
+        fingerprint,
+        domain_count,
+        bool(enable_http),
+        bool(enable_tls),
+        bool(enable_tls13),
+        bool(enable_quic),
+    )
+    cached = _ATTEMPT_PLAN_CACHE.get(key)
+    if cached:
+        return cached
+
+    enabled_functions: list[str] = []
+    if enable_http:
+        enabled_functions.append("pktws_check_http")
+    if enable_tls:
+        enabled_functions.append("pktws_check_https_tls12")
+    if enable_tls13:
+        enabled_functions.append("pktws_check_https_tls13")
+    if enable_quic:
+        enabled_functions.append("pktws_check_http3")
+
+    script_totals: dict[str, int] = {}
+    script_order: list[str] = []
+    source = "shell"
+    for script in scripts:
+        name = f"{test}/{script.name}"
+        script_order.append(name)
+        per_domain = 0
+        for function_name in enabled_functions:
+            counted = _count_script_function_attempts(root, script, function_name)
+            if counted is None:
+                source = "static"
+                per_domain = _count_script_attempts_static(script)
+                break
+            per_domain += counted
+        script_totals[name] = per_domain * domain_count
+
+    total = sum(script_totals.values())
+    plan = {
+        "test": test,
+        "total": total,
+        "scripts": script_totals,
+        "script_order": script_order,
+        "domain_count": domain_count,
+        "source": source if total else "",
+    }
+    _ATTEMPT_PLAN_CACHE[key] = plan
+    return plan
+
+
+def _empty_attempt_plan(test: str) -> dict[str, Any]:
+    return {"test": test, "total": 0, "scripts": {}, "script_order": [], "domain_count": 0, "source": ""}
+
+
+def _blockcheck_test_dir(test: str) -> Path:
+    base = Path(os.environ.get("GP_BLOCKCHECK2D", "/opt/zapret2/blockcheck2.d"))
+    return base / test
+
+
+def _standard_scripts(root: Path | None = None) -> list[Path]:
+    root = root or _blockcheck_test_dir("standard")
+    if not root.exists():
+        return []
+    return sorted(path for path in root.glob("*.sh") if path.is_file() and path.name != "def.inc")
+
+
+def _count_script_function_attempts(root: Path, script: Path, function_name: str) -> int | None:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", function_name):
+        return None
+    shell = shutil.which("sh")
+    if not shell:
+        return None
+    probe = "\n".join(
+        [
+            f"TESTDIR={shlex.quote(str(root))}",
+            "SCANLEVEL=force",
+            "IPV=4",
+            "IPVV=",
+            "UNAME=Linux",
+            "pktws_curl_test_update() { echo __GP_ATTEMPT__; return 1; }",
+            f". {shlex.quote(str(script))}",
+            f"if command -v {function_name} >/dev/null 2>&1; then {function_name} curl_test_probe example.com; fi",
+        ]
+    )
+    try:
+        result = subprocess.run(
+            [shell, "-c", probe],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    count = sum(1 for line in result.stdout.splitlines() if line.strip() == "__GP_ATTEMPT__")
+    if result.returncode != 0 and count == 0:
+        return None
+    return count
+
+
+def _count_script_attempts_static(script: Path) -> int:
+    try:
+        text = script.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    loop_stack: list[int] = []
+    total = 0
+    for raw_line in text.splitlines():
+        line = _strip_shell_comment(raw_line).strip()
+        if not line:
+            continue
+        loop_match = re.match(r"^for\s+\w+\s+in\s+(.+?);?\s+do\s*$", line)
+        if loop_match:
+            loop_stack.append(max(1, _shell_word_count(loop_match.group(1))))
+            continue
+        if "pktws_curl_test_update" in line:
+            multiplier = 1
+            for value in loop_stack:
+                multiplier *= value
+            total += multiplier
+        if line == "done" or line.endswith("; done"):
+            if loop_stack:
+                loop_stack.pop()
+    return total
+
+
+def _strip_shell_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    result: list[str] = []
+    for char in line:
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            result.append(char)
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            break
+        result.append(char)
+    return "".join(result)
+
+
+def _shell_word_count(value: str) -> int:
+    try:
+        return len(shlex.split(value))
+    except ValueError:
+        return len([part for part in value.split() if part])
+
+
+def _eta_from_recent_attempts(
+    run: dict[str, Any],
+    attempted: int,
+    attempt_total: int,
+    finished: bool,
+) -> tuple[int | None, bool]:
+    if finished:
+        return 0, False
+    if not attempt_total:
+        return None, False
+    remaining = max(0, attempt_total - attempted)
+    if remaining <= 0:
+        return 0, False
+    run_id = str(run.get("id") or run.get("run_id") or "")
+    observed_at = _observed_at(run)
+    if not run_id:
+        return None, True
+    tracker = _PROGRESS_TRACKERS.get(run_id)
+    if not tracker or attempted < int(tracker.get("last_attempted") or 0):
+        tracker = {"last_attempted": attempted, "last_seen": observed_at, "durations": []}
+        _PROGRESS_TRACKERS[run_id] = tracker
+    else:
+        last_attempted = int(tracker.get("last_attempted") or 0)
+        last_seen = float(tracker.get("last_seen") or observed_at)
+        delta_attempts = attempted - last_attempted
+        delta_seconds = max(0.0, observed_at - last_seen)
+        if delta_attempts > 0 and delta_seconds > 0:
+            per_attempt = delta_seconds / delta_attempts
+            durations = list(tracker.get("durations") or [])
+            durations.extend([per_attempt] * min(delta_attempts, ATTEMPT_ETA_SAMPLE_SIZE))
+            tracker["durations"] = durations[-ATTEMPT_ETA_SAMPLE_SIZE:]
+        tracker["last_attempted"] = attempted
+        tracker["last_seen"] = observed_at
+
+    durations = [float(item) for item in tracker.get("durations") or []]
+    if len(durations) < ATTEMPT_ETA_SAMPLE_SIZE:
+        return None, True
+    average = sum(durations[-ATTEMPT_ETA_SAMPLE_SIZE:]) / ATTEMPT_ETA_SAMPLE_SIZE
+    return max(0, int(average * remaining)), False
+
+
+def _observed_at(run: dict[str, Any]) -> float:
+    raw = run.get("_observed_at")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return time.time()
+
+
+def _truthy(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _summary_sections(stdout: str) -> dict[str, list[str]]:
@@ -536,20 +852,15 @@ def _live_success_lines(stdout: str) -> list[str]:
 
 
 def _standard_script_total() -> int:
-    root = Path("/opt/zapret2/blockcheck2.d/standard")
-    if not root.exists():
-        return 0
-    return len([path for path in root.glob("*.sh") if path.is_file()])
+    return len(_standard_scripts())
 
 
-def _standard_script_index(current_script: str) -> int:
-    root = Path("/opt/zapret2/blockcheck2.d/standard")
-    if not root.exists() or not current_script.startswith("standard/"):
+def _standard_script_index(current_script: str, script_order: list[str] | None = None) -> int:
+    if not current_script.startswith("standard/"):
         return 0
-    scripts = sorted(path.name for path in root.glob("*.sh") if path.is_file())
-    current = current_script.split("/", 1)[1]
+    scripts = script_order or [f"standard/{path.name}" for path in _standard_scripts()]
     try:
-        return scripts.index(current) + 1
+        return scripts.index(current_script) + 1
     except ValueError:
         return 0
 

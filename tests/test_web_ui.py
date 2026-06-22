@@ -43,6 +43,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("progress-fill", html)
         self.assertIn("progress-attempted", html)
         self.assertIn("progress-successful", html)
+        self.assertIn("attempt_total", html)
+        self.assertIn("Расчитывается время", html)
         self.assertIn("data-action=\"stop-current\"", html)
         self.assertIn("Терминал", html)
         self.assertIn("scrollLogToBottom", html)

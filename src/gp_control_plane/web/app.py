@@ -1156,16 +1156,28 @@ function renderProgress(progress){
   const percent = Number(progress.percent || 0);
   const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
   el('progress-fill').style.width = `${safePercent}%`;
-  setText('progress-attempted', String(progress.attempted ?? 0));
+  const attempted = Number(progress.attempted ?? 0);
+  const attemptTotal = Number(progress.attempt_total ?? 0);
+  setText('progress-attempted', attemptTotal ? `${attempted} / ${attemptTotal}` : String(progress.attempted ?? 0));
   setText('progress-successful', String(progress.successful ?? 0));
   if (progress.script_total) {
-    setText('progress-scripts', `${progress.script_index || 0} / ${progress.script_total}`);
+    const scriptParts = [`${progress.script_index || 0} / ${progress.script_total}`];
+    if (progress.current_script_attempt_total) {
+      scriptParts.push(`${progress.current_script_attempted || 0} / ${progress.current_script_attempt_total} в файле`);
+    }
+    setText('progress-scripts', scriptParts.join(' · '));
   } else {
     setText('progress-scripts', '-');
   }
-  setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
+  if (progress.eta_pending) {
+    setText('progress-eta', 'Расчитывается время');
+  } else {
+    setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
+  }
   const current = progress.current_script ? `Текущий файл: ${progress.current_script}. ` : '';
-  setText('progress-note', `${current}Прогресс по файлам набора, количество попыток считается по live-логу.`);
+  const total = attemptTotal ? `Всего попыток рассчитано по файлам zapret2: ${attemptTotal}. ` : '';
+  const eta = progress.eta_pending ? `Оставшееся время появится после ${progress.eta_sample_size || 20} попыток. ` : '';
+  setText('progress-note', `${current}${total}${eta}Прогресс считается по live-логу blockcheck2.`);
 }
 function formatDuration(seconds){
   if (!Number.isFinite(seconds)) return '-';
