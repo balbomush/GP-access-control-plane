@@ -514,9 +514,9 @@ button:disabled { opacity: .55; cursor: default; }
 .message.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
 .toast {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 50;
+  top: max(14px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 9999;
   max-width: min(420px, calc(100vw - 36px));
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -527,13 +527,13 @@ button:disabled { opacity: .55; cursor: default; }
   font-size: 13px;
   line-height: 1.4;
   opacity: 0;
-  transform: translateY(8px);
+  transform: translate(-50%, -10px);
   transition: opacity .16s ease, transform .16s ease;
   pointer-events: none;
 }
 .toast.show {
   opacity: 1;
-  transform: translateY(0);
+  transform: translate(-50%, 0);
 }
 .toast.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
 .toast.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
