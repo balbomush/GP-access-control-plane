@@ -3,10 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +74,7 @@ def run_standard_discovery(
     state_dir: Path,
     timeout_seconds: int,
     include_quic: bool = True,
+    stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     return _run_blockcheck_live(
         state_dir=state_dir,
@@ -79,6 +84,7 @@ def run_standard_discovery(
         test="standard",
         enable_tls=True,
         enable_quic=include_quic,
+        stop_event=stop_event,
     )
 
 
@@ -88,6 +94,7 @@ def run_custom_verification(
     state_dir: Path,
     timeout_seconds: int,
     include_quic: bool = True,
+    stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     args = str(candidate.get("args") or "").strip()
     protocol = str(candidate.get("protocol") or "tls")
@@ -107,6 +114,7 @@ def run_custom_verification(
             enable_quic=include_quic and protocol == "quic",
             list_paths=lists,
             candidate_id=str(candidate.get("id") or ""),
+            stop_event=stop_event,
         )
     _update_candidate_verification(state_dir, candidate, run)
     return run
@@ -144,6 +152,7 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
         lines = stdout_log.read_text(encoding="utf-8", errors="replace").splitlines()
         stderr_log = Path(str(run.get("stderr_log") or ""))
         stderr_lines = stderr_log.read_text(encoding="utf-8", errors="replace").splitlines() if stderr_log.exists() else []
+        stdout = "\n".join(lines)
         return {
             "run_id": run.get("id"),
             "kind": run.get("kind"),
@@ -152,8 +161,16 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
             "stderr_tail": "\n".join(stderr_lines[-max_lines:]),
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log) if stderr_log else "",
+            "progress": progress_from_stdout(stdout, run),
         }
-    return {"run_id": None, "kind": None, "status": None, "stdout_tail": "", "stderr_tail": ""}
+    return {
+        "run_id": None,
+        "kind": None,
+        "status": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "progress": progress_from_stdout("", {}),
+    }
 
 
 def find_candidate(state_dir: Path, candidate_id: str) -> dict[str, Any]:
@@ -164,13 +181,20 @@ def find_candidate(state_dir: Path, candidate_id: str) -> dict[str, Any]:
 
 
 def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
-    summary = _summary_lines(stdout)
-    candidates = _candidate_lines(summary)
+    sections = _summary_sections(stdout)
+    summary = sections["summary"]
+    common = sections["common"]
+    candidates = _candidate_lines(summary, scope="domain")
+    common_candidates = _candidate_lines(common, scope="common")
     results = [_parse_result_line(line) for line in summary if _parse_result_line(line)]
+    common_results = [_parse_result_line(line) for line in common if _parse_result_line(line)]
     return {
         "summary": summary,
+        "common": common,
         "candidates": candidates,
+        "common_candidates": common_candidates,
         "results": results,
+        "common_results": common_results,
         "direct_available": [item for item in results if item.get("result") == "working without bypass"],
         "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
     }
@@ -205,6 +229,32 @@ def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, An
                 }
             )
         existing[candidate_id] = item
+    for raw in parsed.get("common_candidates") or []:
+        if not isinstance(raw, dict):
+            continue
+        candidate_id = candidate_id_for(str(raw.get("protocol")), str(raw.get("args")))
+        item = existing.get(candidate_id) or {
+            "id": candidate_id,
+            "protocol": raw.get("protocol"),
+            "args": raw.get("args"),
+            "status": "candidate",
+            "first_seen_at": now,
+            "seen": [],
+            "verifications": [],
+        }
+        item["last_seen_at"] = now
+        common_seen = item.setdefault("common_seen", [])
+        if isinstance(common_seen, list):
+            common_seen.append(
+                {
+                    "run_id": run["id"],
+                    "domains": run.get("domains") or [],
+                    "test": raw.get("test"),
+                    "ip_version": raw.get("ip_version"),
+                    "seen_at": now,
+                }
+            )
+        existing[candidate_id] = item
     candidates = sorted(existing.values(), key=lambda item: str(item.get("last_seen_at") or ""), reverse=True)
     _write_candidates(state_dir, candidates)
     return candidates
@@ -225,6 +275,7 @@ def _run_blockcheck_live(
     enable_quic: bool,
     list_paths: dict[str, Path] | None = None,
     candidate_id: str = "",
+    stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
@@ -270,6 +321,7 @@ def _run_blockcheck_live(
     status = "success"
     returncode: int | None = None
     timed_out = False
+    stopped = False
     with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
         process = subprocess.Popen(
             [blockcheck],
@@ -279,17 +331,32 @@ def _run_blockcheck_live(
             env=full_env,
             start_new_session=hasattr(os, "setsid"),
         )
-        try:
-            returncode = process.wait(timeout=timeout_seconds)
-            if returncode != 0:
-                status = "failed"
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            status = "timeout"
-            _stop_process_group(process)
-            _cleanup_blockcheck_processes()
-            _cleanup_nft_blockcheck_tables()
-            returncode = process.returncode
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                status = "stopped"
+                _stop_process_group(process)
+                _cleanup_blockcheck_processes()
+                _cleanup_nft_blockcheck_tables()
+                returncode = process.returncode
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                status = "timeout"
+                _stop_process_group(process)
+                _cleanup_blockcheck_processes()
+                _cleanup_nft_blockcheck_tables()
+                returncode = process.returncode
+                break
+            try:
+                returncode = process.wait(timeout=min(1.0, remaining))
+                if returncode != 0:
+                    status = "failed"
+                break
+            except subprocess.TimeoutExpired:
+                continue
 
     stdout = stdout_log.read_text(encoding="utf-8", errors="replace")
     parsed = parse_blockcheck_stdout(stdout)
@@ -306,9 +373,12 @@ def _run_blockcheck_live(
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
+        "common_candidate_count": len(parsed["common_candidates"]),
         "timed_out": timed_out,
+        "stopped": stopped,
         "timeout_seconds": timeout_seconds,
     }
+    run["progress"] = progress_from_stdout(stdout, run)
     if kind == "standard-discovery":
         candidates = upsert_candidates(state_dir, parsed, run)
         run["total_candidates"] = len(candidates)
@@ -341,15 +411,72 @@ def _update_candidate_verification(state_dir: Path, candidate: dict[str, Any], r
     _write_candidates(state_dir, candidates)
 
 
-def _summary_lines(stdout: str) -> list[str]:
+def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
+    lines = stdout.splitlines()
+    attempted = sum(1 for line in lines if re.match(r"^-\s+curl_test_", line.strip()))
+    parsed = parse_blockcheck_stdout(stdout)
+    successful = len(
+        {
+            (str(item.get("protocol") or ""), str(item.get("args") or ""))
+            for item in [*parsed["candidates"], *parsed["common_candidates"]]
+        }
+    )
+    scripts = [line.strip().removeprefix("* script :").strip() for line in lines if line.strip().startswith("* script :")]
+    current_script = scripts[-1] if scripts else ""
+    script_total = _standard_script_total()
+    script_index = _standard_script_index(current_script) if current_script else 0
+    if script_total and script_index > script_total:
+        script_index = script_total
+    finished = str(run.get("status") or "") in {"success", "failed", "timeout", "stopped"}
+    if finished and script_total:
+        script_index = script_total
+    percent = (script_index / script_total * 100.0) if script_total else None
+    elapsed = _elapsed_seconds(run.get("timestamp"))
+    eta = None
+    if not finished and elapsed is not None and script_total and script_index > 0:
+        eta = max(0, int((elapsed / script_index) * (script_total - script_index)))
+    elif finished:
+        eta = 0
+    return {
+        "attempted": attempted,
+        "successful": successful,
+        "current_script": current_script,
+        "script_index": script_index,
+        "script_total": script_total,
+        "percent": percent,
+        "elapsed_seconds": elapsed,
+        "eta_seconds": eta,
+    }
+
+
+def _summary_sections(stdout: str) -> dict[str, list[str]]:
     lines = [line.strip() for line in stdout.splitlines()]
+    summary: list[str] = []
+    common: list[str] = []
+    section = ""
     for index, line in enumerate(lines):
         if line == "* SUMMARY":
-            return [item for item in lines[index + 1 :] if item]
-    return [line for line in lines if " : " in line]
+            section = "summary"
+            continue
+        if line == "* COMMON":
+            section = "common"
+            continue
+        if not line:
+            continue
+        if section == "summary":
+            summary.append(line)
+        elif section == "common":
+            common.append(line)
+    if summary or common:
+        return {"summary": summary, "common": common}
+    return {"summary": _live_success_lines(stdout), "common": []}
 
 
-def _candidate_lines(summary: list[str]) -> list[dict[str, Any]]:
+def _summary_lines(stdout: str) -> list[str]:
+    return _summary_sections(stdout)["summary"]
+
+
+def _candidate_lines(summary: list[str], scope: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for line in summary:
         parsed = _parse_result_line(line)
@@ -367,6 +494,7 @@ def _candidate_lines(summary: list[str]) -> list[dict[str, Any]]:
                 "protocol": _protocol_from_test(str(parsed["test"])),
                 "args": args,
                 "raw": line,
+                "scope": scope,
             }
         )
     return candidates
@@ -377,14 +505,68 @@ def _parse_result_line(line: str) -> dict[str, Any] | None:
     if not sep:
         return None
     parts = left.split()
-    if len(parts) < 3 or not parts[1].startswith("ipv"):
+    if len(parts) == 2 and parts[1].startswith("ipv"):
+        domain = ""
+    elif len(parts) >= 3 and parts[1].startswith("ipv"):
+        domain = parts[2]
+    else:
         return None
     return {
         "test": parts[0],
         "ip_version": parts[1].removeprefix("ipv"),
-        "domain": parts[2],
+        "domain": domain,
         "result": result.strip(),
     }
+
+
+def _live_success_lines(stdout: str) -> list[str]:
+    result: list[str] = []
+    pattern = re.compile(
+        r"^!!!!!\s+(?P<test>\S+): working strategy found for ipv(?P<ip_version>\d+)\s+"
+        r"(?P<domain>\S+)\s+:\s+nfqws2\s+(?P<args>.*?)\s+!!!!!$"
+    )
+    for line in stdout.splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            result.append(
+                f"{match.group('test')} ipv{match.group('ip_version')} {match.group('domain')} : "
+                f"nfqws2 {match.group('args').strip()}"
+            )
+    return result
+
+
+def _standard_script_total() -> int:
+    root = Path("/opt/zapret2/blockcheck2.d/standard")
+    if not root.exists():
+        return 0
+    return len([path for path in root.glob("*.sh") if path.is_file()])
+
+
+def _standard_script_index(current_script: str) -> int:
+    root = Path("/opt/zapret2/blockcheck2.d/standard")
+    if not root.exists() or not current_script.startswith("standard/"):
+        return 0
+    scripts = sorted(path.name for path in root.glob("*.sh") if path.is_file())
+    current = current_script.split("/", 1)[1]
+    try:
+        return scripts.index(current) + 1
+    except ValueError:
+        return 0
+
+
+def _elapsed_seconds(value: Any) -> int | None:
+    if not value:
+        return None
+    text = str(value).replace("Z", "+00:00")
+    try:
+        started = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        now = datetime.now()
+    else:
+        now = datetime.now(started.tzinfo)
+    return max(0, int((now - started).total_seconds()))
 
 
 def _protocol_from_test(test: str) -> str:

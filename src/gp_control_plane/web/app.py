@@ -84,22 +84,30 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             except Exception as exc:  # noqa: BLE001
                 self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
+            if path == "/api/jobs/stop-current":
+                try:
+                    job = runner.cancel_active()
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                    return
+                self._json({"job": job}, status=HTTPStatus.ACCEPTED)
+                return
             jobs: dict[str, Any] = {
-                "/api/jobs/validate": ("validate", lambda: _job_validate(config)),
-                "/api/jobs/sync-pull-only": ("sync-pull-only", lambda: _job_sync(config)),
-                "/api/jobs/render-dry-run": ("render-dry-run", lambda: _job_render(config)),
-                "/api/jobs/healthcheck-direct": ("healthcheck-direct", lambda: _job_healthcheck(config, payload)),
+                "/api/jobs/validate": ("validate", lambda _stop: _job_validate(config)),
+                "/api/jobs/sync-pull-only": ("sync-pull-only", lambda _stop: _job_sync(config)),
+                "/api/jobs/render-dry-run": ("render-dry-run", lambda _stop: _job_render(config)),
+                "/api/jobs/healthcheck-direct": ("healthcheck-direct", lambda _stop: _job_healthcheck(config, payload)),
                 "/api/jobs/zapret-strategy-check": (
                     "zapret-strategy-check",
-                    lambda: _job_zapret_strategy_check(config, payload),
+                    lambda _stop: _job_zapret_strategy_check(config, payload),
                 ),
                 "/api/jobs/zapret-standard-discovery": (
                     "zapret-standard-discovery",
-                    lambda: _job_zapret_standard_discovery(config, payload),
+                    lambda stop: _job_zapret_standard_discovery(config, payload, stop),
                 ),
                 "/api/jobs/zapret-custom-verification": (
                     "zapret-custom-verification",
-                    lambda: _job_zapret_custom_verification(config, payload),
+                    lambda stop: _job_zapret_custom_verification(config, payload, stop),
                 ),
             }
             if path not in jobs:
@@ -305,8 +313,12 @@ button {
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
 button.secondary { background: #ffffff; color: var(--blue); }
 button.secondary:hover { background: #edf4ff; }
+button.danger { border-color: var(--red); background: var(--red); color: #ffffff; }
+button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
+button.secondary.danger { background: #ffffff; color: var(--red); }
+button.secondary.danger:hover { background: var(--red-soft); }
 button:disabled { opacity: .55; cursor: default; }
-.button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.button-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .candidate-toolbar {
   display: grid;
@@ -319,6 +331,23 @@ button:disabled { opacity: .55; cursor: default; }
   color: var(--text-soft);
   font-size: 13px;
   white-space: nowrap;
+}
+.candidate-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.subtab-button {
+  min-height: 34px;
+  background: #ffffff;
+  color: var(--blue);
+  border-color: var(--line-strong);
+}
+.subtab-button.active {
+  background: var(--blue);
+  color: #ffffff;
+  border-color: var(--blue);
 }
 .copy-fallback {
   display: grid;
@@ -340,17 +369,25 @@ button:disabled { opacity: .55; cursor: default; }
   overflow: hidden;
   background: #ffffff;
 }
+.domain-group[open] .domain-header { border-bottom: 1px solid var(--line); }
+.domain-group summary { cursor: pointer; list-style: none; }
+.domain-group summary::-webkit-details-marker { display: none; }
 .domain-header {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
   background: var(--surface-soft);
-  border-bottom: 1px solid var(--line);
 }
 .domain-title {
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+.domain-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .protocol-group {
   display: grid;
@@ -376,6 +413,12 @@ button:disabled { opacity: .55; cursor: default; }
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #ffffff;
+}
+.strategy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .strategy-index {
   color: var(--text-soft);
@@ -406,6 +449,55 @@ button:disabled { opacity: .55; cursor: default; }
   max-height: none;
   min-height: 420px;
   height: calc(100vh - 260px);
+}
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.progress-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.progress-bar {
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--blue);
+  transition: width .2s ease;
+}
+.progress-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.progress-cell {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #ffffff;
+}
+.progress-label {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+.progress-value {
+  margin-top: 4px;
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.progress-note {
+  color: var(--text-soft);
+  font-size: 12px;
 }
 .message {
   min-height: 36px;
@@ -482,6 +574,7 @@ pre {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
   .status-grid, .button-row, .fill-row, .candidate-toolbar { grid-template-columns: 1fr; }
+  .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
   .candidate-summary { white-space: normal; }
   .domain-header, .protocol-header { align-items: stretch; flex-direction: column; }
@@ -561,6 +654,7 @@ pre {
             <div class="button-row">
               <button data-action="standard-discovery">Запустить поиск</button>
               <button class="secondary" data-action="refresh">Обновить</button>
+              <button class="secondary danger" data-action="stop-current" disabled>Остановить</button>
             </div>
             <div class="message" id="message">Готово</div>
           </div>
@@ -601,6 +695,10 @@ pre {
           </div>
           <div class="candidate-summary" id="candidate-summary">-</div>
         </div>
+        <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
+          <button class="subtab-button active" data-candidate-view="domain" type="button">По доменам</button>
+          <button class="subtab-button" data-candidate-view="common" type="button">Общие стратегии</button>
+        </div>
         <div class="copy-fallback" id="copy-fallback" hidden>
           <label for="copy-fallback-text">Группа для ручного копирования</label>
           <textarea id="copy-fallback-text" readonly spellcheck="false"></textarea>
@@ -613,7 +711,34 @@ pre {
       <section class="panel terminal-panel">
         <div class="panel-header">
           <h2>Терминал</h2>
-          <span class="badge" id="finder-log-status">-</span>
+          <div class="terminal-actions">
+            <span class="badge" id="finder-log-status">-</span>
+            <button class="secondary danger" data-action="stop-current" disabled>Остановить</button>
+          </div>
+        </div>
+        <div class="progress-panel">
+          <div class="progress-bar" aria-label="Прогресс подбора">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-grid">
+            <div class="progress-cell">
+              <div class="progress-label">Проверено попыток</div>
+              <div class="progress-value" id="progress-attempted">-</div>
+            </div>
+            <div class="progress-cell">
+              <div class="progress-label">Найдено стратегий</div>
+              <div class="progress-value" id="progress-successful">-</div>
+            </div>
+            <div class="progress-cell">
+              <div class="progress-label">Файл набора</div>
+              <div class="progress-value" id="progress-scripts">-</div>
+            </div>
+            <div class="progress-cell">
+              <div class="progress-label">Осталось</div>
+              <div class="progress-value" id="progress-eta">-</div>
+            </div>
+          </div>
+          <div class="progress-note" id="progress-note">Прогресс оценочный: blockcheck2 не отдает общий счетчик стратегий до старта.</div>
         </div>
         <pre id="finder-log">Лога пока нет</pre>
       </section>
@@ -621,7 +746,7 @@ pre {
   </main>
 </div>
 <script>
-const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateFilter: '', candidateCopyGroups: {} };
+const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {} };
 const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
@@ -629,7 +754,7 @@ const jobNames = {
   'standard-discovery': 'Поиск стратегий',
   'custom-verification': 'Проверка кандидата'
 };
-const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', timeout: 'warn' };
+const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 
 function el(id){ return document.getElementById(id); }
 function esc(value){
@@ -749,42 +874,80 @@ function renderMetrics(){
   document.querySelectorAll('button[data-action="standard-discovery"]').forEach((button) => {
     button.disabled = busy;
   });
+  document.querySelectorAll('button[data-action="stop-current"]').forEach((button) => {
+    button.disabled = !busy;
+  });
 }
 function renderCandidates(){
   const rows = filteredCandidates();
-  const groups = candidateGroups(rows);
+  const domainRows = rows.filter((row) => candidateDomains(row).length);
+  const commonRows = rows.filter((row) => commonSeen(row).length);
+  const activeRows = state.candidateView === 'common' ? commonRows : domainRows;
   setText('candidates-count', String(state.candidates.length));
-  setText('candidate-summary', `Показано ${rows.length} из ${state.candidates.length}`);
+  setText('candidate-summary', `Показано ${activeRows.length} из ${state.candidates.length}`);
+  document.querySelectorAll('[data-candidate-view]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.candidateView === state.candidateView);
+  });
   state.candidateCopyGroups = {};
+  if (state.candidateView === 'common') {
+    renderCommonCandidates(commonRows);
+  } else {
+    renderDomainCandidates(domainRows);
+  }
+}
+function renderDomainCandidates(rows){
+  const groups = candidateGroups(rows);
   if (!groups.length) {
-    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'По фильтру ничего не найдено' : 'Кандидатов пока нет'}</div>`;
+    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'По фильтру ничего не найдено' : 'Кандидатов по доменам пока нет'}</div>`;
     return;
   }
-  let groupIndex = 0;
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
     const total = domainGroup.protocols.reduce((sum, item) => sum + item.rows.length, 0);
-    return `<section class="domain-group">
-      <div class="domain-header">
+    const open = state.candidateFilter ? ' open' : '';
+    return `<details class="domain-group"${open}>
+      <summary class="domain-header">
         <div class="domain-title">${esc(domainGroup.domain)}</div>
-        ${badge(`${total} стратегий`, '')}
-      </div>
+        <div class="domain-meta">${badge(`${total} стратегий`, '')}</div>
+      </summary>
       ${domainGroup.protocols.map((protocolGroup) => {
-        const copyKey = `group-${groupIndex++}`;
-        state.candidateCopyGroups[copyKey] = protocolGroup.rows.map((row) => row.args || '').filter(Boolean).join('\\n');
+        const copyKey = registerCopyText(protocolGroup.rows.map((row) => row.args || '').filter(Boolean).join('\\n'));
         return `<div class="protocol-group">
           <div class="protocol-header">
             <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')} ${badge(`${protocolGroup.rows.length} стратегий`, '')}</div>
             <button class="secondary" data-copy-candidate-group="${copyKey}" type="button">Копировать группу</button>
           </div>
           <div class="strategy-list">
-            ${protocolGroup.rows.map((row, index) => `<div class="strategy-item">
-              <div class="strategy-index">Стратегия ${index + 1}</div>
-              <code>${esc(row.args || '')}</code>
-            </div>`).join('')}
+            ${protocolGroup.rows.map((row, index) => strategyItem(row, index)).join('')}
           </div>
         </div>`;
       }).join('')}
-    </section>`;
+    </details>`;
+  }).join('')}</div>`;
+}
+function renderCommonCandidates(rows){
+  const groups = protocolGroups(rows);
+  if (!groups.length) {
+    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'Общих стратегий пока нет. Они появятся, если blockcheck2 напечатает блок COMMON.' : 'Кандидатов пока нет'}</div>`;
+    return;
+  }
+  el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
+    const copyKey = registerCopyText(protocolGroup.rows.map((row) => row.args || '').filter(Boolean).join('\\n'));
+    const domains = [...new Set(protocolGroup.rows.flatMap((row) => commonDomains(row)))];
+    return `<details class="domain-group" open>
+      <summary class="domain-header">
+        <div class="domain-title">${esc(protocolGroup.protocol)}</div>
+        <div class="domain-meta">${badge(`${protocolGroup.rows.length} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}</div>
+      </summary>
+      <div class="protocol-group">
+        <div class="protocol-header">
+          <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из запуска blockcheck2'}</div>
+          <button class="secondary" data-copy-candidate-group="${copyKey}" type="button">Копировать группу</button>
+        </div>
+        <div class="strategy-list">
+          ${protocolGroup.rows.map((row, index) => strategyItem(row, index)).join('')}
+        </div>
+      </div>
+    </details>`;
   }).join('')}</div>`;
 }
 function filteredCandidates(){
@@ -795,7 +958,8 @@ function filteredCandidates(){
       row.id,
       row.protocol,
       row.args,
-      ...candidateDomains(row)
+      ...candidateDomains(row),
+      ...commonDomains(row)
     ].join(' ').toLowerCase();
     return haystack.includes(query);
   });
@@ -803,6 +967,12 @@ function filteredCandidates(){
 function candidateDomains(row){
   const seen = Array.isArray(row.seen) ? row.seen : [];
   return [...new Set(seen.map((item) => String(item.domain || '').trim()).filter(Boolean))];
+}
+function commonSeen(row){
+  return Array.isArray(row.common_seen) ? row.common_seen : [];
+}
+function commonDomains(row){
+  return [...new Set(commonSeen(row).flatMap((item) => Array.isArray(item.domains) ? item.domains : []).map((item) => String(item || '').trim()).filter(Boolean))];
 }
 function candidateGroups(rows){
   const domainMap = new Map();
@@ -824,6 +994,32 @@ function candidateGroups(rows){
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([protocol, protocolRows]) => ({ protocol, rows: protocolRows }))
     }));
+}
+function protocolGroups(rows){
+  const protocolMap = new Map();
+  rows.forEach((row) => {
+    const protocol = String(row.protocol || 'unknown');
+    if (!protocolMap.has(protocol)) protocolMap.set(protocol, []);
+    protocolMap.get(protocol).push(row);
+  });
+  return Array.from(protocolMap.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([protocol, protocolRows]) => ({ protocol, rows: protocolRows }));
+}
+function registerCopyText(text){
+  const key = `copy-${Object.keys(state.candidateCopyGroups).length}`;
+  state.candidateCopyGroups[key] = text;
+  return key;
+}
+function strategyItem(row, index){
+  const copyKey = registerCopyText(row.args || '');
+  return `<div class="strategy-item">
+    <div class="strategy-header">
+      <div class="strategy-index">Стратегия ${index + 1}</div>
+      <button class="secondary" data-copy-candidate-strategy="${copyKey}" type="button">Копировать</button>
+    </div>
+    <code>${esc(row.args || '')}</code>
+  </div>`;
 }
 async function copyText(text){
   if (!text) return false;
@@ -909,7 +1105,32 @@ function renderLog(){
   if (log.stderr_tail) parts.push('--- stderr ---\\n' + log.stderr_tail);
   const logNode = el('finder-log');
   logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
+  renderProgress(log.progress || {});
   scrollLogToBottom();
+}
+function renderProgress(progress){
+  const percent = Number(progress.percent || 0);
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  el('progress-fill').style.width = `${safePercent}%`;
+  setText('progress-attempted', String(progress.attempted ?? 0));
+  setText('progress-successful', String(progress.successful ?? 0));
+  if (progress.script_total) {
+    setText('progress-scripts', `${progress.script_index || 0} / ${progress.script_total}`);
+  } else {
+    setText('progress-scripts', '-');
+  }
+  setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
+  const current = progress.current_script ? `Текущий файл: ${progress.current_script}. ` : '';
+  setText('progress-note', `${current}Прогресс по файлам набора, количество попыток считается по live-логу.`);
+}
+function formatDuration(seconds){
+  if (!Number.isFinite(seconds)) return '-';
+  if (seconds <= 0) return '0 мин';
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
 }
 function scrollLogToBottom(){
   const logNode = el('finder-log');
@@ -972,18 +1193,35 @@ async function startJob(url, payload, text){
     await refresh();
   }
 }
+async function stopCurrentJob(){
+  try {
+    setMessage('Остановка подбора запрошена', 'warn');
+    await postJson('/api/jobs/stop-current', {});
+    await refresh();
+  } catch (error) {
+    setMessage(error.message, 'bad');
+    await refresh();
+  }
+}
 document.addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
+  if (button.dataset.candidateView) {
+    state.candidateView = button.dataset.candidateView;
+    renderCandidates();
+    return;
+  }
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.fill) fillDomains(button.dataset.fill);
-  if (button.dataset.copyCandidateGroup) {
-    const groupText = state.candidateCopyGroups[button.dataset.copyCandidateGroup] || '';
+  if (button.dataset.copyCandidateGroup || button.dataset.copyCandidateStrategy) {
+    const copyKey = button.dataset.copyCandidateGroup || button.dataset.copyCandidateStrategy;
+    const groupText = state.candidateCopyGroups[copyKey] || '';
+    const single = Boolean(button.dataset.copyCandidateStrategy);
     copyText(groupText).then((ok) => {
       if (ok) {
         hideCopyFallback();
-        setMessage('Группа стратегий скопирована', 'good');
+        setMessage(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
       } else {
         showCopyFallback(groupText);
         setMessage('Браузер заблокировал буфер. Текст выделен ниже', 'warn');
@@ -998,6 +1236,7 @@ document.addEventListener('click', (event) => {
       timeout_seconds: timeoutSeconds()
     }, 'Поиск стратегий');
   }
+  if (button.dataset.action === 'stop-current') stopCurrentJob();
 });
 document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'candidate-filter') {
@@ -1094,17 +1333,18 @@ def _job_healthcheck(config: AppConfig, payload: dict[str, Any]) -> dict[str, An
     return {"report": str(report), "checked": len(results)}
 
 
-def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
     domains = _payload_domains(payload)
     return run_standard_discovery(
         domains,
         config.output.state_dir,
         timeout_seconds=int(payload.get("timeout_seconds") or 21600),
         include_quic=bool(payload.get("include_quic", True)),
+        stop_event=stop_event,
     )
 
 
-def _job_zapret_custom_verification(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+def _job_zapret_custom_verification(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
     candidate_id = str(payload.get("candidate_id") or "").strip()
     if not candidate_id:
         raise ValueError("candidate_id is required")
@@ -1116,6 +1356,7 @@ def _job_zapret_custom_verification(config: AppConfig, payload: dict[str, Any]) 
         config.output.state_dir,
         timeout_seconds=int(payload.get("timeout_seconds") or 3600),
         include_quic=bool(payload.get("include_quic", True)),
+        stop_event=stop_event,
     )
 
 

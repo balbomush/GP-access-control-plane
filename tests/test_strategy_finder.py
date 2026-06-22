@@ -12,6 +12,7 @@ from gp_control_plane.strategy_finder import (
     candidate_id_for,
     latest_log_tail,
     parse_blockcheck_stdout,
+    progress_from_stdout,
     read_candidates,
     upsert_candidates,
 )
@@ -57,6 +58,70 @@ curl_test_https_tls12 ipv4 web.telegram.org : nfqws2 not working
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["id"], candidate_id_for("tls", "--payload tls_client_hello --lua-desync=fake"))
             self.assertEqual(len(candidates[0]["seen"]), 2)
+
+    def test_parse_blockcheck_common_extracts_common_candidates(self) -> None:
+        stdout = """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload tls_client_hello --lua-desync=fake
+curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload tls_client_hello --lua-desync=fake
+
+* COMMON
+curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
+"""
+
+        parsed = parse_blockcheck_stdout(stdout)
+
+        self.assertEqual(len(parsed["candidates"]), 2)
+        self.assertEqual(len(parsed["common_candidates"]), 1)
+        self.assertEqual(parsed["common_candidates"][0]["scope"], "common")
+        self.assertEqual(parsed["common_candidates"][0]["domain"], "")
+
+    def test_upsert_candidates_persists_common_seen(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            parsed = {
+                "candidates": [],
+                "common_candidates": [
+                    {
+                        "domain": "",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=fake",
+                    }
+                ],
+            }
+            run = {"id": "run1", "domains": ["youtube.com", "discord.com"]}
+
+            upsert_candidates(state_dir, parsed, run)
+            candidates = read_candidates(state_dir)
+
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["common_seen"][0]["domains"], ["youtube.com", "discord.com"])
+
+    def test_parse_live_success_without_summary(self) -> None:
+        stdout = """
+!!!!! curl_test_https_tls12: working strategy found for ipv4 youtube.com : nfqws2 --payload tls_client_hello --lua-desync=fake !!!!!
+"""
+
+        parsed = parse_blockcheck_stdout(stdout)
+
+        self.assertEqual(len(parsed["candidates"]), 1)
+        self.assertEqual(parsed["candidates"][0]["domain"], "youtube.com")
+
+    def test_progress_counts_attempts_and_successes(self) -> None:
+        stdout = """
+* script : standard/15-misc.sh
+- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload one
+UNAVAILABLE code=28
+!!!!! curl_test_https_tls12: working strategy found for ipv4 youtube.com : nfqws2 --payload tls_client_hello --lua-desync=fake !!!!!
+"""
+
+        progress = progress_from_stdout(stdout, {"timestamp": "2026-06-20T00:00:00Z", "status": "running"})
+
+        self.assertEqual(progress["attempted"], 1)
+        self.assertEqual(progress["successful"], 1)
+        self.assertEqual(progress["current_script"], "standard/15-misc.sh")
 
     def test_latest_log_tail_reads_recent_run_output(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
