@@ -511,6 +511,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=pi
+Group=pi
 WorkingDirectory=/home/pi/gp/GP-access-control-plane
 Environment=HOME=/home/pi
 Environment=PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -522,7 +524,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Если пользователь не `pi`, замените `/home/pi` на свой путь во всех строках unit-файла. `HOME` и `PATH` важны для запуска `zapret2` wrappers из веб-панели.
+Если пользователь не `pi`, замените `User`, `Group` и `/home/pi` на своего пользователя и путь во всех строках unit-файла. `HOME` и `PATH` важны для запуска `zapret2` wrappers из веб-панели. Сервис лучше запускать от обычного пользователя: `blockcheck2.sh` сам поднимет нужные root-права через `sudo`, а локальные state/log файлы останутся доступными CLI и веб-панели.
 
 Включить:
 

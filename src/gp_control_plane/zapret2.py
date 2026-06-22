@@ -106,6 +106,7 @@ def _run_blockcheck(command: list[str], env: dict[str, str], timeout: int) -> su
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _stop_process_group(process)
+        _cleanup_blockcheck_processes()
         _cleanup_nft_blockcheck_tables()
         stdout, stderr = process.communicate()
         exc.output = stdout
@@ -129,6 +130,23 @@ def _stop_process_group(process: subprocess.Popen[str]) -> None:
         else:
             process.kill()
         process.wait(timeout=5)
+
+
+def _cleanup_blockcheck_processes() -> None:
+    pkill = shutil.which("pkill")
+    if not pkill:
+        return
+    patterns = (
+        "/opt/zapret2/nfq2/nfqws2",
+        "curl --connect-to",
+    )
+    for pattern in patterns:
+        command = [pkill, "-f", pattern]
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        if result.returncode not in {0, 1}:
+            sudo = shutil.which("sudo")
+            if sudo:
+                subprocess.run([sudo, "-n", pkill, "-f", pattern], text=True, capture_output=True, check=False)
 
 
 def _cleanup_nft_blockcheck_tables() -> None:
