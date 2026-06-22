@@ -164,18 +164,18 @@ def index_html() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GP Control Plane</title>
+<title>GP Strategy Finder</title>
 <style>
 :root {
   color-scheme: light;
   font-family: Inter, "Segoe UI", Arial, sans-serif;
   background: #eef1f4;
-  color: #18212a;
+  color: #17212b;
   --surface: #ffffff;
-  --surface-soft: #f8fafb;
+  --surface-soft: #f7f9fb;
   --line: #d8e0e7;
-  --line-strong: #bdc9d4;
-  --text-soft: #60707f;
+  --line-strong: #bcc9d5;
+  --text-soft: #607282;
   --blue: #2166d1;
   --blue-strong: #174ea6;
   --green: #197a4a;
@@ -218,7 +218,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 14px;
-  min-height: 96px;
+  min-height: 94px;
   display: grid;
   align-content: space-between;
   gap: 8px;
@@ -228,7 +228,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 .metric-note { color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
 .layout {
   display: grid;
-  grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 430px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -247,25 +247,32 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   margin-bottom: 14px;
 }
 h2 { font-size: 16px; line-height: 1.3; margin: 0; letter-spacing: 0; }
-.actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .form-grid { display: grid; gap: 10px; }
 .field { display: grid; gap: 6px; min-width: 0; }
 label { color: var(--text-soft); font-size: 12px; font-weight: 600; }
-input, select {
+input, textarea {
   width: 100%;
   min-width: 0;
-  min-height: 38px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
-  padding: 0 10px;
+  padding: 9px 10px;
   background: #ffffff;
-  color: #18212a;
+  color: #17212b;
   font-size: 14px;
 }
-input:focus, select:focus {
+input { min-height: 38px; }
+textarea { min-height: 118px; resize: vertical; line-height: 1.45; }
+input:focus, textarea:focus {
   outline: 2px solid #b7cdf5;
   border-color: var(--blue);
 }
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+}
+.checkbox-row input { width: 18px; min-height: 18px; }
 button {
   min-height: 38px;
   border: 1px solid var(--blue);
@@ -283,6 +290,7 @@ button.secondary { background: #ffffff; color: var(--blue); }
 button.secondary:hover { background: #edf4ff; }
 button:disabled { opacity: .55; cursor: default; }
 .button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .message {
   min-height: 36px;
   border: 1px solid var(--line);
@@ -291,7 +299,6 @@ button:disabled { opacity: .55; cursor: default; }
   background: var(--surface-soft);
   color: var(--text-soft);
   font-size: 13px;
-  margin-top: 10px;
 }
 .message.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
 .message.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
@@ -321,7 +328,7 @@ th { color: var(--text-soft); font-size: 12px; font-weight: 700; background: var
 tr:last-child td { border-bottom: 0; }
 code {
   display: block;
-  max-width: 420px;
+  max-width: 520px;
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
   white-space: normal;
@@ -338,28 +345,9 @@ code {
   text-align: center;
   padding: 16px;
 }
-.path-list { display: grid; gap: 8px; }
-.path-item {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: 10px;
-  font-size: 13px;
-}
-.path-key { color: var(--text-soft); }
-.path-value {
-  font-family: Consolas, "SFMono-Regular", monospace;
-  overflow-wrap: anywhere;
-  color: #24313c;
-}
-.raw {
-  margin-top: 12px;
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
-}
-summary { cursor: pointer; color: var(--text-soft); font-size: 13px; }
 pre {
-  margin: 10px 0 0;
-  max-height: 360px;
+  margin: 0;
+  max-height: 470px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -377,11 +365,10 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .actions, .button-row { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row { grid-template-columns: 1fr; }
   h1 { font-size: 22px; }
   .metric-value { font-size: 18px; }
   button { width: 100%; }
-  .path-item { grid-template-columns: 1fr; gap: 2px; }
 }
 </style>
 </head>
@@ -390,8 +377,8 @@ pre {
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">
-        <h1>Панель доступа</h1>
-        <div class="subtitle">Локальный control plane на Raspberry Pi</div>
+        <h1>Подбор стратегий zapret2</h1>
+        <div class="subtitle">Raspberry Pi · blockcheck2 · live-лог</div>
       </div>
       <button class="secondary" data-action="refresh">Обновить</button>
     </div>
@@ -399,24 +386,24 @@ pre {
   <main class="main">
     <section class="status-grid" aria-label="Сводка">
       <div class="metric">
-        <div class="metric-label">Плата</div>
-        <div class="metric-value" id="metric-board">Загрузка</div>
-        <div class="metric-note" id="metric-board-note">-</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">Правила</div>
-        <div class="metric-value" id="metric-rules">-</div>
-        <div class="metric-note" id="metric-rules-note">direct / zapret / vpn</div>
-      </div>
-      <div class="metric">
         <div class="metric-label">zapret2</div>
-        <div class="metric-value" id="metric-zapret">-</div>
-        <div class="metric-note" id="metric-zapret-note">nfqws2 и blockcheck</div>
+        <div class="metric-value" id="metric-zapret">Загрузка</div>
+        <div class="metric-note" id="metric-zapret-note">-</div>
       </div>
       <div class="metric">
-        <div class="metric-label">Последняя ошибка</div>
-        <div class="metric-value" id="metric-error">-</div>
-        <div class="metric-note" id="metric-error-note">-</div>
+        <div class="metric-label">Задание</div>
+        <div class="metric-value" id="metric-job">-</div>
+        <div class="metric-note" id="metric-job-note">-</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Кандидаты</div>
+        <div class="metric-value" id="metric-candidates">0</div>
+        <div class="metric-note" id="metric-candidates-note">найдено blockcheck2</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Последний запуск</div>
+        <div class="metric-value" id="metric-last-run">-</div>
+        <div class="metric-note" id="metric-last-run-note">-</div>
       </div>
     </section>
 
@@ -424,67 +411,41 @@ pre {
       <div class="stack">
         <section class="panel">
           <div class="panel-header">
-            <h2>Управление</h2>
+            <h2>Запуск поиска</h2>
             <span class="badge" id="job-badge">Свободна</span>
           </div>
-          <div class="actions">
-            <button data-job="/api/jobs/validate">Проверить</button>
-            <button data-job="/api/jobs/sync-pull-only">Синхронизировать</button>
-            <button data-job="/api/jobs/render-dry-run">Собрать dry-run</button>
-            <button data-action="healthcheck-default">Проверить доступ</button>
-          </div>
-          <div class="message" id="message">Готово</div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Проверка домена</h2>
-          </div>
           <div class="form-grid">
             <div class="field">
-              <label for="domain">Домен</label>
-              <input id="domain" placeholder="youtube.com" autocomplete="off">
+              <label for="finder-domains">Домены</label>
+              <textarea id="finder-domains" autocomplete="off" spellcheck="false"></textarea>
+            </div>
+            <div class="fill-row">
+              <button class="secondary" data-fill="critical">Критичные</button>
+              <button class="secondary" data-fill="coverage">Покрытие</button>
+              <button class="secondary" data-fill="all">Все</button>
             </div>
             <div class="field">
-              <label for="strategy">Стратегия zapret</label>
-              <select id="strategy"></select>
+              <label for="finder-timeout-hours">Лимит поиска, часов</label>
+              <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
             </div>
-            <div class="field">
-              <label for="timeout">Таймаут, сек</label>
-              <input id="timeout" type="number" min="5" max="300" step="5" value="60">
-            </div>
+            <label class="checkbox-row">
+              <input id="include-quic" type="checkbox" checked>
+              <span>Проверять QUIC/HTTP3</span>
+            </label>
             <div class="button-row">
-              <button data-action="healthcheck-domain">Прямой доступ</button>
-              <button data-action="strategy-check">Проверить стратегию</button>
+              <button data-action="standard-discovery">Запустить поиск</button>
+              <button class="secondary" data-action="refresh">Обновить</button>
             </div>
+            <div class="message" id="message">Готово</div>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-header">
-            <h2>Подбор стратегий</h2>
+            <h2>Задания подбора</h2>
+            <span class="badge" id="jobs-count">0</span>
           </div>
-          <div class="form-grid">
-            <div class="field">
-              <label for="finder-domains">Домены для подбора</label>
-              <input id="finder-domains" placeholder="youtube.com googlevideo.com discord.com discordcdn.com" autocomplete="off">
-            </div>
-            <div class="field">
-              <label for="finder-timeout">Таймаут поиска, сек</label>
-              <input id="finder-timeout" type="number" min="300" max="43200" step="300" value="21600">
-            </div>
-            <div class="button-row">
-              <button data-action="standard-discovery">Standard discovery</button>
-              <button data-action="custom-verification">Custom verification</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Пути</h2>
-          </div>
-          <div class="path-list" id="paths"></div>
+          <div id="jobs-table"></div>
         </section>
       </div>
 
@@ -499,7 +460,7 @@ pre {
 
         <section class="panel">
           <div class="panel-header">
-            <h2>Запуски подбора</h2>
+            <h2>История запусков</h2>
             <span class="badge" id="finder-runs-count">0</span>
           </div>
           <div id="finder-runs-table"></div>
@@ -507,58 +468,23 @@ pre {
 
         <section class="panel">
           <div class="panel-header">
-            <h2>Текущий лог подбора</h2>
+            <h2>Живой лог</h2>
             <span class="badge" id="finder-log-status">-</span>
           </div>
           <pre id="finder-log">Лога пока нет</pre>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Стратегии zapret</h2>
-            <span class="badge" id="strategies-count">0</span>
-          </div>
-          <div id="strategies-table"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Журнал заданий</h2>
-            <span class="badge" id="jobs-count">0</span>
-          </div>
-          <div id="jobs-table"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Проверки доступности</h2>
-            <span class="badge" id="healthchecks-count">0</span>
-          </div>
-          <div id="healthchecks-table"></div>
-        </section>
-
-        <section class="panel raw">
-          <details>
-            <summary>Технические данные</summary>
-            <pre id="raw">Loading...</pre>
-          </details>
         </section>
       </div>
     </div>
   </main>
 </div>
 <script>
-const state = { status: null, rules: [], strategies: [], jobs: [], healthchecks: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null, selectedCandidateId: null };
+const state = { status: null, jobs: [], candidates: [], finderRuns: [], finderLog: null, domainSets: null };
+const finderJobs = new Set(['zapret-standard-discovery', 'zapret-custom-verification']);
 const jobNames = {
-  'validate': 'Проверка',
-  'sync-pull-only': 'Синхронизация',
-  'render-dry-run': 'Сборка dry-run',
-  'healthcheck-direct': 'Прямой доступ',
-  'zapret-strategy-check': 'Проверка стратегии',
   'zapret-standard-discovery': 'Поиск стратегий',
-  'zapret-custom-verification': 'Проверка candidate'
+  'zapret-custom-verification': 'Проверка кандидата'
 };
-const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn' };
+const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', timeout: 'warn' };
 
 function el(id){ return document.getElementById(id); }
 function esc(value){
@@ -597,11 +523,6 @@ function shortPath(value){
   const parts = String(value).split(/[\\\\/]/).filter(Boolean);
   return parts.length > 3 ? '...' + parts.slice(-3).join('/') : String(value);
 }
-function routeCounts(){
-  const counts = { direct: 0, zapret: 0, vpn: 0 };
-  state.rules.forEach((rule) => { if (counts[rule.route] !== undefined) counts[rule.route] += 1; });
-  return counts;
-}
 function badge(text, tone){
   return `<span class="badge ${esc(tone || '')}">${esc(text)}</span>`;
 }
@@ -617,90 +538,57 @@ function table(targetId, columns, rows, emptyText){
   }).join('') + '</tr>').join('');
   el(targetId).innerHTML = `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
-function renderStatus(){
+function latestRun(){
+  return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
+}
+function isBusy(){
+  const board = (state.status || {}).state || {};
+  return Boolean(board.current_job);
+}
+function defaultDomains(kind){
+  const sets = state.domainSets || {};
+  if (kind === 'all') {
+    return [...(sets.critical || []), ...(sets.coverage || []), ...(sets.diagnostic || [])];
+  }
+  return sets[kind] || [];
+}
+function fillDomains(kind){
+  const domains = [...new Set(defaultDomains(kind))];
+  el('finder-domains').value = domains.join('\\n');
+}
+function finderDomains(){
+  const raw = el('finder-domains').value.trim();
+  if (!raw) return defaultDomains('critical');
+  return raw.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean);
+}
+function timeoutSeconds(){
+  const hours = Number(el('finder-timeout-hours').value || 6);
+  return Math.max(60, Math.round(hours * 3600));
+}
+function renderMetrics(){
   const status = state.status || {};
   const board = status.state || {};
-  const counts = routeCounts();
-  const finderInput = el('finder-domains');
-  if (finderInput && !finderInput.value && state.domainSets && Array.isArray(state.domainSets.critical)) {
-    finderInput.value = state.domainSets.critical.join(' ');
-  }
-  const currentJob = Boolean(board.current_job);
-  setText('metric-board', currentJob ? 'Занята' : 'Свободна');
-  setText('metric-board-note', currentJob ? `Задание ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
-  setText('metric-rules', String(state.rules.length));
-  setText('metric-rules-note', `${counts.direct} direct / ${counts.zapret} zapret / ${counts.vpn} vpn`);
   const zapret = status.zapret2 || {};
-  const zapretReady = Boolean(zapret.nfqws2_found && zapret.blockcheck_found);
-  setText('metric-zapret', zapretReady ? 'Готов' : 'Не найден');
+  const ready = Boolean(zapret.nfqws2_found && zapret.blockcheck_found);
+  const busy = isBusy();
+  const run = latestRun();
+  setText('metric-zapret', ready ? 'Готов' : 'Не готов');
   setText('metric-zapret-note', `nfqws2: ${zapret.nfqws2_found ? 'да' : 'нет'}, blockcheck: ${zapret.blockcheck_found ? 'да' : 'нет'}`);
-  setText('metric-error', board.last_error ? 'Есть' : 'Нет');
-  setText('metric-error-note', board.last_error || 'Ошибок не было');
+  setText('metric-job', busy ? 'В работе' : 'Свободна');
+  setText('metric-job-note', busy ? `ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
+  setText('metric-candidates', String(state.candidates.length));
+  setText('metric-candidates-note', `${verifiedCount()} с повторной проверкой`);
+  setText('metric-last-run', run ? (run.status || '-') : '-');
+  setText('metric-last-run-note', run ? friendlyDate(run.timestamp) : 'запусков еще не было');
   const jobBadge = el('job-badge');
-  jobBadge.textContent = currentJob ? 'В работе' : 'Свободна';
-  jobBadge.className = currentJob ? 'badge warn' : 'badge good';
-  document.querySelectorAll('button[data-job], button[data-action="healthcheck-default"], button[data-action="healthcheck-domain"], button[data-action="strategy-check"], button[data-action="standard-discovery"], button[data-action="custom-verification"]').forEach((button) => {
-    button.disabled = currentJob;
+  jobBadge.textContent = busy ? 'В работе' : 'Свободна';
+  jobBadge.className = busy ? 'badge warn' : 'badge good';
+  document.querySelectorAll('button[data-action="standard-discovery"], button[data-candidate-verify]').forEach((button) => {
+    button.disabled = busy;
   });
-  renderPaths(status);
-  el('raw').textContent = JSON.stringify({status: state.status, rules: state.rules, strategies: state.strategies, candidates: state.candidates, finderRuns: state.finderRuns}, null, 2);
 }
-function renderPaths(status){
-  const repos = status.repos || {};
-  const paths = status.paths || {};
-  const items = [
-    ['rules', repos.rules],
-    ['strategies', repos.strategies],
-    ['rendered', paths.rendered_dir],
-    ['evidence', paths.evidence_dir],
-    ['state', paths.state_dir]
-  ];
-  el('paths').innerHTML = items.map(([key, value]) => (
-    `<div class="path-item"><div class="path-key">${esc(key)}</div><div class="path-value" title="${esc(value)}">${esc(shortPath(value))}</div></div>`
-  )).join('');
-}
-function renderStrategies(){
-  setText('strategies-count', String(state.strategies.length));
-  const select = el('strategy');
-  const previous = select.value;
-  select.innerHTML = state.strategies.map((item) => `<option value="${esc(item.path)}">${esc(item.id)} (${esc(item.status)})</option>`).join('');
-  if (previous) select.value = previous;
-  table('strategies-table', [
-    {label: 'ID', render: (row) => esc(row.id)},
-    {label: 'Статус', render: (row) => badge(row.status || 'unknown', row.status === 'stable' ? 'good' : 'warn')},
-    {label: 'Путь', render: (row) => `<span title="${esc(row.path)}">${esc(shortPath(row.path))}</span>`}
-  ], state.strategies, 'Стратегий пока нет');
-}
-function renderCandidates(){
-  setText('candidates-count', String(state.candidates.length));
-  table('candidates-table', [
-    {label: 'ID', render: (row) => `<button class="secondary" data-candidate="${esc(row.id)}" title="Выбрать для custom verification">${esc(row.id === state.selectedCandidateId ? '✓ ' : '')}${esc(row.id)}</button>`},
-    {label: 'Protocol', render: (row) => badge(row.protocol || '-', row.protocol === 'quic' ? 'warn' : 'good')},
-    {label: 'Проверка', render: (row) => esc(candidateRate(row))},
-    {label: 'Строка для копирования', render: (row) => `<code title="${esc(row.args)}">nfqws2 ${esc(row.args)}</code>`}
-  ], state.candidates, 'Найденных candidate-стратегий пока нет');
-}
-function renderFinderRuns(){
-  setText('finder-runs-count', String(state.finderRuns.length));
-  table('finder-runs-table', [
-    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
-    {label: 'Тип', render: (row) => esc(row.kind || '-')},
-    {label: 'Статус', render: (row) => badge(row.status || '-', row.status === 'success' ? 'good' : row.status === 'running' ? 'warn' : 'bad')},
-    {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
-    {label: 'Candidates', render: (row) => badge(String(row.candidate_count ?? 0), Number(row.candidate_count || 0) > 0 ? 'good' : 'warn')},
-    {label: 'Лог', render: (row) => `<span title="${esc(row.stdout_log)}">${esc(shortPath(row.stdout_log))}</span>`}
-  ], state.finderRuns.slice().reverse().slice(0, 10), 'Запусков подбора пока не было');
-}
-function renderFinderLog(){
-  const log = state.finderLog || {};
-  const status = log.status || '-';
-  const badgeNode = el('finder-log-status');
-  badgeNode.textContent = status;
-  badgeNode.className = 'badge ' + (status === 'success' ? 'good' : status === 'running' ? 'warn' : status === '-' ? '' : 'bad');
-  const parts = [];
-  if (log.stdout_tail) parts.push(log.stdout_tail);
-  if (log.stderr_tail) parts.push('--- stderr ---\n' + log.stderr_tail);
-  el('finder-log').textContent = parts.join('\n\n') || 'Лога пока нет';
+function verifiedCount(){
+  return state.candidates.filter((item) => Array.isArray(item.verifications) && item.verifications.length > 0).length;
 }
 function candidateRate(row){
   const list = Array.isArray(row.verifications) ? row.verifications : [];
@@ -709,53 +597,73 @@ function candidateRate(row){
   const rate = Math.round(Number(last.success_rate || 0) * 100);
   return `${rate}% (${last.success || 0}/${last.total || 0})`;
 }
+function renderCandidates(){
+  setText('candidates-count', String(state.candidates.length));
+  table('candidates-table', [
+    {label: 'ID', render: (row) => esc(row.id || '-')},
+    {label: 'Протокол', render: (row) => badge(row.protocol || '-', row.protocol === 'quic' ? 'warn' : 'good')},
+    {label: 'Проверка', render: (row) => esc(candidateRate(row))},
+    {label: 'Стратегия', render: (row) => `<code>nfqws2 ${esc(row.args || '')}</code>`},
+    {label: 'Действие', render: (row) => `<button class="secondary" data-candidate-verify="${esc(row.id)}">Проверить</button>`}
+  ], state.candidates, 'Кандидатов пока нет');
+}
+function renderRuns(){
+  setText('finder-runs-count', String(state.finderRuns.length));
+  table('finder-runs-table', [
+    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
+    {label: 'Тип', render: (row) => esc(jobNames[row.kind] || row.kind || '-')},
+    {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
+    {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
+    {label: 'Кандидаты', render: (row) => badge(String(row.candidate_count ?? 0), Number(row.candidate_count || 0) > 0 ? 'good' : '')},
+    {label: 'Лог', render: (row) => `<span title="${esc(row.stdout_log)}">${esc(shortPath(row.stdout_log))}</span>`}
+  ], state.finderRuns.slice().reverse().slice(0, 12), 'Запусков пока не было');
+}
+function renderLog(){
+  const log = state.finderLog || {};
+  const status = log.status || '-';
+  const badgeNode = el('finder-log-status');
+  badgeNode.textContent = status;
+  badgeNode.className = 'badge ' + (statusTone[status] || '');
+  const parts = [];
+  if (log.stdout_tail) parts.push(log.stdout_tail);
+  if (log.stderr_tail) parts.push('--- stderr ---\\n' + log.stderr_tail);
+  el('finder-log').textContent = parts.join('\\n\\n') || 'Лога пока нет';
+}
 function renderJobs(){
-  setText('jobs-count', String(state.jobs.length));
+  const jobs = state.jobs.filter((job) => finderJobs.has(job.name)).slice().reverse().slice(0, 8);
+  setText('jobs-count', String(jobs.length));
   table('jobs-table', [
     {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
     {label: 'Задание', render: (row) => esc(jobNames[row.name] || row.name || '-')},
     {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
     {label: 'Детали', render: (row) => esc(row.error || (row.result ? JSON.stringify(row.result) : '-'))}
-  ], state.jobs.slice().reverse().slice(0, 12), 'Заданий пока не было');
+  ], jobs, 'Заданий подбора пока не было');
 }
-function renderHealthchecks(){
-  setText('healthchecks-count', String(state.healthchecks.length));
-  table('healthchecks-table', [
-    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
-    {label: 'Проверено', render: (row) => esc(row.checked ?? 0)},
-    {label: 'Успешно', render: (row) => badge(String(row.success ?? 0), Number(row.success || 0) === Number(row.checked || 0) ? 'good' : 'warn')},
-    {label: 'Отчет', render: (row) => `<span title="${esc(row.report)}">${esc(shortPath(row.report))}</span>`}
-  ], state.healthchecks.slice().reverse().slice(0, 10), 'Проверок пока не было');
+function renderAll(){
+  if (!el('finder-domains').value && state.domainSets) fillDomains('critical');
+  renderMetrics();
+  renderCandidates();
+  renderRuns();
+  renderLog();
+  renderJobs();
 }
 async function refresh(){
   try {
-    const [status, rules, strategies, jobs, healthchecks, candidates, finderRuns, finderLog, domainSets] = await Promise.all([
+    const [status, jobs, candidates, finderRuns, finderLog, domainSets] = await Promise.all([
       getJson('/api/status'),
-      getJson('/api/rules'),
-      getJson('/api/strategies'),
       getJson('/api/jobs'),
-      getJson('/api/healthchecks'),
       getJson('/api/strategy-finder/candidates'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains')
     ]);
     state.status = status;
-    state.rules = rules.rules || [];
-    state.strategies = strategies.strategies || [];
     state.jobs = jobs.jobs || [];
-    state.healthchecks = healthchecks.healthchecks || [];
     state.candidates = candidates.candidates || [];
     state.finderRuns = finderRuns.runs || [];
     state.finderLog = finderLog;
     state.domainSets = domainSets;
-    renderStatus();
-    renderStrategies();
-    renderCandidates();
-    renderFinderRuns();
-    renderFinderLog();
-    renderJobs();
-    renderHealthchecks();
+    renderAll();
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   }
@@ -771,64 +679,25 @@ async function startJob(url, payload, text){
     await refresh();
   }
 }
-function selectedDomain(){
-  return el('domain').value.trim();
-}
-function finderDomains(){
-  return el('finder-domains').value.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean);
-}
 document.addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
-  if (button.dataset.candidate) {
-    state.selectedCandidateId = button.dataset.candidate;
-    renderCandidates();
-    setMessage(`Candidate ${button.dataset.candidate} выбран для custom verification`, 'good');
-    return;
-  }
   if (button.dataset.action === 'refresh') refresh();
-  if (button.dataset.job) startJob(button.dataset.job, {}, button.textContent.trim());
-  if (button.dataset.action === 'healthcheck-default') startJob('/api/jobs/healthcheck-direct', {}, 'Проверка доступа');
-  if (button.dataset.action === 'healthcheck-domain') {
-    const domain = selectedDomain();
-    startJob('/api/jobs/healthcheck-direct', domain ? {domains: [domain]} : {}, 'Проверка домена');
-  }
-  if (button.dataset.action === 'strategy-check') {
-    const domain = selectedDomain();
-    const strategy = el('strategy').value;
-    if (!domain) {
-      setMessage('Укажите домен', 'warn');
-      return;
-    }
-    if (!strategy) {
-      setMessage('Выберите стратегию', 'warn');
-      return;
-    }
-    startJob('/api/jobs/zapret-strategy-check', {
-      domain: domain,
-      strategy_path: strategy,
-      timeout_seconds: Number(el('timeout').value || 60)
-    }, 'Проверка стратегии');
-  }
+  if (button.dataset.fill) fillDomains(button.dataset.fill);
   if (button.dataset.action === 'standard-discovery') {
-    const domains = finderDomains();
     startJob('/api/jobs/zapret-standard-discovery', {
-      domains: domains,
-      include_quic: true,
-      timeout_seconds: Number(el('finder-timeout').value || 900)
+      domains: finderDomains(),
+      include_quic: el('include-quic').checked,
+      timeout_seconds: timeoutSeconds()
     }, 'Поиск стратегий');
   }
-  if (button.dataset.action === 'custom-verification') {
-    if (!state.selectedCandidateId) {
-      setMessage('Выберите candidate в таблице найденных стратегий', 'warn');
-      return;
-    }
+  if (button.dataset.candidateVerify) {
     startJob('/api/jobs/zapret-custom-verification', {
-      candidate_id: state.selectedCandidateId,
+      candidate_id: button.dataset.candidateVerify,
       domains: finderDomains(),
-      include_quic: true,
-      timeout_seconds: Number(el('finder-timeout').value || 300)
-    }, 'Custom verification');
+      include_quic: el('include-quic').checked,
+      timeout_seconds: timeoutSeconds()
+    }, 'Проверка кандидата');
   }
 });
 refresh();

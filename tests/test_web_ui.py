@@ -16,20 +16,20 @@ from gp_control_plane.web.app import index_html, serve
 
 
 class WebUiTests(unittest.TestCase):
-    def test_index_html_has_human_friendly_dashboard_sections(self) -> None:
+    def test_index_html_is_focused_on_strategy_finder_only(self) -> None:
         html = index_html()
 
-        self.assertIn("Панель доступа", html)
-        self.assertIn("Управление", html)
-        self.assertIn("Проверка домена", html)
-        self.assertIn("Подбор стратегий", html)
+        self.assertIn("Подбор стратегий zapret2", html)
+        self.assertIn("Запуск поиска", html)
         self.assertIn("Найденные стратегии", html)
-        self.assertIn("Запуски подбора", html)
-        self.assertIn("Текущий лог подбора", html)
-        self.assertIn("Стратегии zapret", html)
-        self.assertIn("Журнал заданий", html)
-        self.assertIn("Проверки доступности", html)
-        self.assertIn("Технические данные", html)
+        self.assertIn("История запусков", html)
+        self.assertIn("Живой лог", html)
+        self.assertIn("Задания подбора", html)
+        self.assertNotIn("Синхронизировать", html)
+        self.assertNotIn("dry-run", html)
+        self.assertNotIn("Проверка домена", html)
+        self.assertNotIn("Проверки доступности", html)
+        self.assertNotIn("Технические данные", html)
 
     def test_head_root_returns_ok_for_curl_i(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
