@@ -913,7 +913,7 @@ pre {
 <script>
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
-const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, expandedStrategyLists: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1175,6 +1175,7 @@ function renderMetrics(){
   });
 }
 function renderCandidates(){
+  rememberStrategyEditorScrolls();
   const rows = filteredCandidates();
   const domainRows = rows.filter((row) => candidateDomains(row).length);
   const commonRows = dynamicCommonRows(rows);
@@ -1192,6 +1193,7 @@ function renderCandidates(){
   } else {
     renderDomainCandidates(domainRows);
   }
+  restoreStrategyEditorScrolls();
 }
 function renderDomainCandidates(rows){
   const groups = candidateGroups(rows);
@@ -1399,6 +1401,27 @@ function updateAllEditorLineNumbers(){
   updateEditorLineNumbers('finder-domains');
   updateEditorLineNumbers('common-domains');
 }
+function strategyEditorScrollKey(field){
+  return field?.dataset?.strategyCodeKey || field?.closest?.('[data-strategy-list]')?.dataset?.strategyList || '';
+}
+function rememberStrategyEditorScrolls(){
+  document.querySelectorAll('.strategy-code').forEach((field) => {
+    const key = strategyEditorScrollKey(field);
+    if (key) state.strategyEditorScrolls[key] = field.scrollTop;
+  });
+}
+function restoreStrategyEditorScrolls(){
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.strategy-code').forEach((field) => {
+      const key = strategyEditorScrollKey(field);
+      if (!key || state.strategyEditorScrolls[key] == null) return;
+      const scrollTop = Math.min(Number(state.strategyEditorScrolls[key] || 0), Math.max(0, field.scrollHeight - field.clientHeight));
+      field.scrollTop = scrollTop;
+      const gutter = field.previousElementSibling;
+      if (gutter) gutter.scrollTop = scrollTop;
+    });
+  });
+}
 function strategyEditor(key, rows, title){
   const list = strategyListState(key, rows);
   const lines = list.visible;
@@ -1418,7 +1441,7 @@ function strategyEditor(key, rows, title){
     </div>
     <div class="code-editor">
       <pre class="line-numbers" aria-hidden="true">${esc(lineNumbers(lineCount))}</pre>
-      <textarea class="strategy-code" readonly spellcheck="false" rows="${rowsAttr}">${esc(lines.join('\\n'))}</textarea>
+      <textarea class="strategy-code" data-strategy-code-key="${esc(key)}" readonly spellcheck="false" rows="${rowsAttr}">${esc(lines.join('\\n'))}</textarea>
     </div>
   </div>`;
 }
@@ -1473,7 +1496,7 @@ function renderLog(){
   const logNode = el('finder-log');
   logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
   renderProgress(log.progress || {});
-  scrollLogToBottom();
+  if (state.activeTab === 'terminal') scrollLogToBottom();
 }
 function renderProgress(progress){
   const percent = Number(progress.percent || 0);
@@ -1644,6 +1667,10 @@ document.addEventListener('scroll', (event) => {
   if (event.target && event.target.matches && event.target.matches('.strategy-code, .line-numbered-textarea')) {
     const gutter = event.target.previousElementSibling;
     if (gutter) gutter.scrollTop = event.target.scrollTop;
+    if (event.target.matches('.strategy-code')) {
+      const key = strategyEditorScrollKey(event.target);
+      if (key) state.strategyEditorScrolls[key] = event.target.scrollTop;
+    }
   }
 }, true);
 document.addEventListener('change', (event) => {
