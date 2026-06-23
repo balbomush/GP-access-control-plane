@@ -180,28 +180,32 @@ def index_html() -> str:
 <title>GP Strategy Finder</title>
 <style>
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   font-family: Inter, "Segoe UI", Arial, sans-serif;
-  background: #eef1f4;
-  color: #17212b;
-  --surface: #ffffff;
-  --surface-soft: #f7f9fb;
-  --line: #d8e0e7;
-  --line-strong: #bcc9d5;
-  --text-soft: #607282;
-  --blue: #2166d1;
-  --blue-strong: #174ea6;
-  --green: #197a4a;
-  --green-soft: #e8f5ee;
-  --amber: #9a5b00;
-  --amber-soft: #fff2d9;
-  --red: #b42318;
-  --red-soft: #fde8e7;
+  background: #161c27;
+  color: #e6edf3;
+  --surface: #1b2434;
+  --surface-soft: #202b3d;
+  --surface-code: #0f1623;
+  --surface-code-gutter: #151d2b;
+  --line: rgba(255, 255, 255, .08);
+  --line-strong: #3a4658;
+  --text-soft: #949b9f;
+  --blue: #0097dc;
+  --blue-strong: #5cc8ff;
+  --green: #22c55e;
+  --green-soft: rgba(34, 197, 94, .14);
+  --amber: #f59e0b;
+  --amber-soft: rgba(245, 158, 11, .14);
+  --red: #ef4444;
+  --red-soft: rgba(239, 68, 68, .14);
+  --code-text: #d7e0ea;
+  --code-muted: #6f7a89;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
 .shell { min-height: 100vh; }
-.topbar { background: #ffffff; border-bottom: 1px solid var(--line); }
+.topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
 .topbar-inner {
   max-width: 1240px;
   margin: 0 auto;
@@ -277,20 +281,21 @@ h2 { font-size: 16px; line-height: 1.3; margin: 0; letter-spacing: 0; }
 .form-grid { display: grid; gap: 10px; }
 .field { display: grid; gap: 6px; min-width: 0; }
 label { color: var(--text-soft); font-size: 12px; font-weight: 600; }
-input, textarea {
+input, textarea, select {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   padding: 9px 10px;
-  background: #ffffff;
-  color: #17212b;
+  background: var(--surface-code);
+  color: #e6edf3;
   font-size: 14px;
 }
 input { min-height: 38px; }
+select { min-height: 38px; }
 textarea { min-height: 118px; resize: vertical; line-height: 1.45; }
-input:focus, textarea:focus {
-  outline: 2px solid #b7cdf5;
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid rgba(0, 151, 220, .55);
   border-color: var(--blue);
 }
 .checkbox-row {
@@ -316,11 +321,11 @@ button {
   text-overflow: ellipsis;
 }
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
-button.secondary { background: #ffffff; color: var(--blue); }
-button.secondary:hover { background: #edf4ff; }
+button.secondary { background: var(--surface-soft); color: var(--blue-strong); }
+button.secondary:hover { background: #243149; }
 button.danger { border-color: var(--red); background: var(--red); color: #ffffff; }
 button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
-button.secondary.danger { background: #ffffff; color: var(--red); }
+button.secondary.danger { background: var(--surface-soft); color: var(--red); }
 button.secondary.danger:hover { background: var(--red-soft); }
 button:disabled { opacity: .55; cursor: default; }
 .button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -378,24 +383,14 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .subtab-button {
   min-height: 34px;
-  background: #ffffff;
-  color: var(--blue);
+  background: var(--surface-soft);
+  color: var(--blue-strong);
   border-color: var(--line-strong);
 }
 .subtab-button.active {
   background: var(--blue);
   color: #ffffff;
   border-color: var(--blue);
-}
-.copy-fallback {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.copy-fallback[hidden] { display: none; }
-.copy-fallback textarea {
-  min-height: 160px;
-  max-height: 260px;
 }
 .candidate-groups {
   display: grid;
@@ -405,7 +400,7 @@ button:disabled { opacity: .55; cursor: default; }
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--surface);
 }
 .domain-group[open] .domain-header { border-bottom: 1px solid var(--line); }
 .domain-group:not([open]) > :not(summary) { display: none; }
@@ -433,6 +428,7 @@ button:disabled { opacity: .55; cursor: default; }
   gap: 10px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface);
 }
 .protocol-group:last-child { border-bottom: 0; }
 .protocol-header {
@@ -441,43 +437,88 @@ button:disabled { opacity: .55; cursor: default; }
   justify-content: space-between;
   gap: 10px;
 }
-.strategy-list {
-  display: grid;
-  gap: 8px;
-}
 .domain-strategy-box {
   display: grid;
   gap: 8px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
-  background: #ffffff;
+  background: var(--surface);
 }
-.strategy-textarea {
-  min-height: 150px;
-  max-height: 360px;
-  font-family: Consolas, "SFMono-Regular", monospace;
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre;
-}
-.strategy-item {
+.strategy-editor {
   display: grid;
-  gap: 4px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #ffffff;
+  gap: 8px;
 }
-.strategy-header {
+.strategy-editor-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
-.strategy-index {
+.strategy-editor-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.strategy-editor-meta {
   color: var(--text-soft);
   font-size: 12px;
-  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.code-editor {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  max-height: 360px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-code);
+}
+.line-numbers,
+.strategy-code,
+.line-numbered-textarea {
+  margin: 0;
+  min-height: 150px;
+  max-height: 360px;
+  font-family: Menlo, Monaco, Consolas, "Andale Mono", "Ubuntu Mono", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.line-numbers {
+  min-width: 46px;
+  overflow: hidden;
+  padding: 10px 10px 10px 8px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-code-gutter);
+  color: var(--code-muted);
+  text-align: right;
+  user-select: none;
+}
+.strategy-code,
+.line-numbered-textarea {
+  width: 100%;
+  min-width: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+  padding: 10px 12px;
+  resize: vertical;
+  background: var(--surface-code);
+  color: var(--code-text);
+  tab-size: 2;
+}
+.text-editor {
+  max-height: 260px;
+}
+.text-editor .line-numbers,
+.text-editor .line-numbered-textarea {
+  min-height: 118px;
+  max-height: 260px;
+}
+.strategy-code:focus,
+.line-numbered-textarea:focus {
+  outline: 2px solid rgba(0, 151, 220, .55);
+  outline-offset: -2px;
 }
 .tabs {
   display: flex;
@@ -486,7 +527,7 @@ button:disabled { opacity: .55; cursor: default; }
   border-bottom: 1px solid var(--line);
 }
 .tab-button {
-  background: #ffffff;
+  background: var(--surface-soft);
   color: var(--blue);
   border-color: var(--line-strong);
   border-bottom-left-radius: 0;
@@ -537,7 +578,7 @@ button:disabled { opacity: .55; cursor: default; }
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 9px 10px;
-  background: #ffffff;
+  background: var(--surface);
 }
 .progress-label {
   color: var(--text-soft);
@@ -574,8 +615,8 @@ button:disabled { opacity: .55; cursor: default; }
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 11px 14px;
-  background: #ffffff;
-  color: #17212b;
+  background: var(--surface);
+  color: #e6edf3;
   box-shadow: 0 10px 30px rgba(23, 33, 43, .16);
   font-size: 13px;
   line-height: 1.4;
@@ -602,7 +643,7 @@ button:disabled { opacity: .55; cursor: default; }
   font-weight: 700;
   border: 1px solid var(--line);
   background: var(--surface-soft);
-  color: #2a3744;
+  color: #e6edf3;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -619,6 +660,7 @@ code {
   max-width: 100%;
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
+  color: var(--code-text);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -641,7 +683,7 @@ pre {
   word-break: break-word;
   font-size: 12px;
   line-height: 1.45;
-  background: #111827;
+  background: var(--surface-code);
   color: #d7e0ea;
   border-radius: 8px;
   padding: 12px;
@@ -716,7 +758,10 @@ pre {
           <div class="form-grid">
             <div class="field">
               <label for="finder-domains">Домены</label>
-              <textarea id="finder-domains" autocomplete="off" spellcheck="false"></textarea>
+              <div class="code-editor text-editor">
+                <pre class="line-numbers" data-line-numbers-for="finder-domains" aria-hidden="true">1</pre>
+                <textarea id="finder-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false"></textarea>
+              </div>
             </div>
             <div class="preset-panel">
               <div class="preset-grid">
@@ -810,7 +855,10 @@ pre {
           </div>
           <div class="field">
             <label for="common-domains">Домены для поиска общих стратегий</label>
-            <textarea id="common-domains" autocomplete="off" spellcheck="false" placeholder="discord.com&#10;discordcdn.com"></textarea>
+            <div class="code-editor text-editor">
+              <pre class="line-numbers" data-line-numbers-for="common-domains" aria-hidden="true">1</pre>
+              <textarea id="common-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="discord.com&#10;discordcdn.com"></textarea>
+            </div>
           </div>
           <div class="domain-picker-row">
             <input id="common-domain-add" list="tested-domain-options" autocomplete="off" placeholder="Начните вводить протестированный домен">
@@ -818,10 +866,6 @@ pre {
           </div>
           <datalist id="tested-domain-options"></datalist>
           <div class="helper-text" id="common-domain-note">Выберите минимум два протестированных домена.</div>
-        </div>
-        <div class="copy-fallback" id="copy-fallback" hidden>
-          <label for="copy-fallback-text">Группа для ручного копирования</label>
-          <textarea id="copy-fallback-text" readonly spellcheck="false"></textarea>
         </div>
         <div id="candidates-table"></div>
       </section>
@@ -868,7 +912,8 @@ pre {
 </div>
 <script>
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
-const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, domainsInitialized: false, domainsTouched: false };
+const STRATEGY_LIST_LIMIT = 200;
+const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, expandedStrategyLists: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -983,6 +1028,7 @@ function defaultDomains(kind){
 function fillDomains(kind){
   const domains = [...new Set(defaultDomains(kind))];
   el('finder-domains').value = domains.join('\\n');
+  updateEditorLineNumbers('finder-domains');
   state.domainsTouched = true;
 }
 function finderDomains(){
@@ -1062,6 +1108,7 @@ function usePreset(target){
   const domains = presetDomains(target, el(`${target}-preset-select`).value);
   const finalDomains = target === 'common' ? filterTestedDomains(domains) : domains;
   el(`${target}-domains`).value = [...new Set(finalDomains)].join('\\n');
+  updateEditorLineNumbers(`${target}-domains`);
   if (target === 'finder') state.domainsTouched = true;
   renderCandidates();
 }
@@ -1153,11 +1200,14 @@ function renderDomainCandidates(rows){
     return;
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
-    const total = domainGroup.protocols.reduce((sum, item) => sum + item.rows.length, 0);
+    const domainRows = domainGroup.protocols.flatMap((protocolGroup) => protocolGroup.rows);
+    const total = uniqueStrategyArgs(domainRows).length;
     const expanded = Boolean(state.candidateFilter || state.openCandidateDomains[domainGroup.domain]);
     const open = expanded ? ' open' : '';
-    const protocolBadges = domainGroup.protocols.map((item) => badge(`${item.protocol}: ${item.rows.length}`, item.protocol === 'quic' ? 'warn' : 'good')).join('');
-    const domainRows = domainGroup.protocols.flatMap((protocolGroup) => protocolGroup.rows);
+    const protocolBadges = domainGroup.protocols.map((item) => {
+      const count = uniqueStrategyArgs(item.rows).length;
+      return badge(`${item.protocol}: ${count}`, item.protocol === 'quic' ? 'warn' : 'good');
+    }).join('');
     return `<details class="domain-group" data-domain="${esc(domainGroup.domain)}"${open}>
       <summary class="domain-header">
         <div class="domain-title">${esc(domainGroup.domain)}</div>
@@ -1166,18 +1216,8 @@ function renderDomainCandidates(rows){
         </div>
       </summary>
       ${expanded ? `<div class="domain-strategy-box">
-        <label for="domain-strategies-${esc(domainGroup.domain)}">Стратегии домена, по одной на строку</label>
-        <textarea id="domain-strategies-${esc(domainGroup.domain)}" class="strategy-textarea" readonly spellcheck="false">${esc(strategyText(domainRows))}</textarea>
-      </div>
-      ${domainGroup.protocols.map((protocolGroup) => {
-        return `<div class="protocol-group">
-          <div class="protocol-header">
-            <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')} ${badge(`${protocolGroup.rows.length} стратегий`, '')}</div>
-            <button class="secondary" data-copy-scope="domain" data-copy-domain="${esc(domainGroup.domain)}" data-copy-protocol="${esc(protocolGroup.protocol)}" title="Копирует стратегии этого протокола для выбранного домена." type="button">Копировать группу</button>
-          </div>
-          <textarea class="strategy-textarea" readonly spellcheck="false">${esc(strategyText(protocolGroup.rows))}</textarea>
-        </div>`;
-      }).join('')}` : ''}
+        ${strategyEditor(`domain:${domainGroup.domain}`, domainRows, 'Стратегии домена')}
+      </div>` : ''}
     </details>`;
   }).join('')}</div>`;
 }
@@ -1195,21 +1235,19 @@ function renderCommonCandidates(rows){
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
     const domains = selectedDomains;
     const expanded = Boolean(state.candidateFilter || state.openCommonProtocols[protocolGroup.protocol]);
+    const total = uniqueStrategyArgs(protocolGroup.rows).length;
     return `<details class="domain-group" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
       <summary class="domain-header">
         <div class="domain-title">${esc(protocolGroup.protocol)}</div>
         <div class="domain-meta">
-          ${badge(`${protocolGroup.rows.length} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}
-          <button class="secondary" data-copy-scope="common" data-copy-protocol="${esc(protocolGroup.protocol)}" title="Копирует стратегии этого протокола, которые есть у всех выбранных доменов." type="button">Копировать группу</button>
+          ${badge(`${total} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}
         </div>
       </summary>
       <div class="protocol-group">
         <div class="protocol-header">
           <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из запуска blockcheck2'}</div>
         </div>
-        ${expanded ? `<div class="strategy-list">
-          ${protocolGroup.rows.map((row, index) => strategyItem(row, index)).join('')}
-        </div>` : ''}
+        ${expanded ? strategyEditor(`common:${protocolGroup.protocol}:${domains.join('|')}`, protocolGroup.rows, 'Общие стратегии') : ''}
       </div>
     </details>`;
   }).join('')}</div>`;
@@ -1325,73 +1363,64 @@ function protocolGroups(rows){
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([protocol, protocolRows]) => ({ protocol, rows: protocolRows }));
 }
-function strategyItem(row, index){
-  const candidateId = esc(row.id || '');
-  return `<div class="strategy-item">
-    <div class="strategy-header">
-      <div class="strategy-index">Стратегия ${index + 1}</div>
-      <button class="secondary" data-copy-candidate-id="${candidateId}" title="Копирует только эту стратегию." type="button">Копировать стратегию</button>
-    </div>
-    <code>${esc(row.args || '')}</code>
-  </div>`;
+function normalizeStrategyArg(value){
+  return String(value || '').trim().replace(/\\s+/g, ' ');
 }
 function uniqueStrategyArgs(rows){
-  return [...new Set(rows.map((row) => String(row.args || '').trim()).filter(Boolean))];
+  const seen = new Set();
+  const result = [];
+  rows.forEach((row) => {
+    const raw = String(row.args || '').trim();
+    const normalized = normalizeStrategyArg(raw);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    result.push(raw);
+  });
+  return result;
 }
-function strategyText(rows){
-  return uniqueStrategyArgs(rows).join('\\n');
+function strategyListState(key, rows){
+  const all = uniqueStrategyArgs(rows);
+  const expanded = Boolean(state.expandedStrategyLists[key]);
+  const visible = expanded ? all : all.slice(0, STRATEGY_LIST_LIMIT);
+  return { all, visible, expanded, hidden: Math.max(0, all.length - visible.length) };
 }
-function copyTextForButton(button){
-  if (button.dataset.copyCandidateId) {
-    const row = state.candidates.find((item) => String(item.id || '') === button.dataset.copyCandidateId);
-    return row ? String(row.args || '') : '';
-  }
-  if (!button.dataset.copyScope) return '';
-  let rows = filteredCandidates();
-  const protocol = button.dataset.copyProtocol || '';
-  if (button.dataset.copyScope === 'domain') {
-    const domain = button.dataset.copyDomain || '';
-    rows = rows.filter((row) => candidateDomains(row).includes(domain));
-  } else if (button.dataset.copyScope === 'common') {
-    rows = dynamicCommonRows(rows);
-  }
-  if (protocol) rows = rows.filter((row) => String(row.protocol || 'unknown') === protocol);
-  return uniqueStrategyArgs(rows).join('\\n');
+function lineNumbers(count){
+  return Array.from({ length: count }, (_item, index) => String(index + 1)).join('\\n');
 }
-async function copyText(text){
-  if (!text) return false;
-  if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-    return true;
-  }
-  const area = document.createElement('textarea');
-  area.value = text;
-  area.readOnly = true;
-  area.style.position = 'fixed';
-  area.style.top = '0';
-  area.style.left = '0';
-  area.style.width = '1px';
-  area.style.height = '1px';
-  area.style.opacity = '0';
-  document.body.appendChild(area);
-  area.focus({preventScroll: true});
-  area.select();
-  area.setSelectionRange(0, area.value.length);
-  const ok = document.execCommand('copy');
-  document.body.removeChild(area);
-  return ok;
+function updateEditorLineNumbers(id){
+  const field = el(id);
+  const gutter = document.querySelector(`[data-line-numbers-for="${id}"]`);
+  if (!field || !gutter) return;
+  const count = Math.max(1, String(field.value || '').split('\\n').length);
+  gutter.textContent = lineNumbers(count);
+  gutter.scrollTop = field.scrollTop;
 }
-function showCopyFallback(text){
-  const panel = el('copy-fallback');
-  const field = el('copy-fallback-text');
-  field.value = text;
-  panel.hidden = false;
-  field.focus();
-  field.select();
+function updateAllEditorLineNumbers(){
+  updateEditorLineNumbers('finder-domains');
+  updateEditorLineNumbers('common-domains');
 }
-function hideCopyFallback(){
-  const panel = el('copy-fallback');
-  if (panel) panel.hidden = true;
+function strategyEditor(key, rows, title){
+  const list = strategyListState(key, rows);
+  const lines = list.visible;
+  const lineCount = Math.max(lines.length, 1);
+  const rowsAttr = Math.min(Math.max(lineCount, 6), 18);
+  const meta = `Показано ${lines.length} из ${list.all.length} уникальных стратегий. Дубликаты строк скрыты.${list.hidden ? ` Скрыто до раскрытия: ${list.hidden}.` : ''}`;
+  const toggle = list.all.length > STRATEGY_LIST_LIMIT
+    ? `<button class="secondary" data-strategy-list-toggle="${esc(key)}" type="button">${list.expanded ? `Свернуть до ${STRATEGY_LIST_LIMIT}` : `Показать все ${list.all.length}`}</button>`
+    : '';
+  return `<div class="strategy-editor" data-strategy-list="${esc(key)}">
+    <div class="strategy-editor-head">
+      <div class="strategy-editor-title">
+        <label>${esc(title)}</label>
+        <div class="strategy-editor-meta">${esc(meta)}</div>
+      </div>
+      ${toggle}
+    </div>
+    <div class="code-editor">
+      <pre class="line-numbers" aria-hidden="true">${esc(lineNumbers(lineCount))}</pre>
+      <textarea class="strategy-code" readonly spellcheck="false" rows="${rowsAttr}">${esc(lines.join('\\n'))}</textarea>
+    </div>
+  </div>`;
 }
 function renderRuns(){
   const rows = state.finderRuns.filter((row) => isDiscoveryRun(row));
@@ -1498,6 +1527,7 @@ function renderAll(){
   renderCandidates();
   renderRuns();
   renderLog();
+  updateAllEditorLineNumbers();
   setActiveTab(state.activeTab);
 }
 async function refresh(){
@@ -1567,20 +1597,10 @@ document.addEventListener('click', (event) => {
     addCommonDomain();
     return;
   }
-  if (button.dataset.copyScope || button.dataset.copyCandidateId) {
-    event.preventDefault();
-    event.stopPropagation();
-    const groupText = copyTextForButton(button);
-    const single = Boolean(button.dataset.copyCandidateId);
-    copyText(groupText).then((ok) => {
-      if (ok) {
-        hideCopyFallback();
-        showToast(single ? 'Стратегия скопирована' : 'Группа стратегий скопирована', 'good');
-      } else {
-        showCopyFallback(groupText);
-        showToast('Не удалось скопировать автоматически. Текст выделен на странице, нажмите Ctrl+C.', 'warn');
-      }
-    }).catch((error) => showToast(`Не удалось скопировать: ${error.message}`, 'bad'));
+  if (button.dataset.strategyListToggle) {
+    const key = button.dataset.strategyListToggle;
+    state.expandedStrategyLists[key] = !state.expandedStrategyLists[key];
+    renderCandidates();
     return;
   }
   if (button.dataset.action === 'standard-discovery') {
@@ -1611,13 +1631,21 @@ document.addEventListener('input', (event) => {
     renderCandidates();
   }
   if (event.target && event.target.id === 'finder-domains') {
+    updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
     renderCandidates();
   }
   if (event.target && event.target.id === 'common-domains') {
+    updateEditorLineNumbers('common-domains');
     renderCandidates();
   }
 });
+document.addEventListener('scroll', (event) => {
+  if (event.target && event.target.matches && event.target.matches('.strategy-code, .line-numbered-textarea')) {
+    const gutter = event.target.previousElementSibling;
+    if (gutter) gutter.scrollTop = event.target.scrollTop;
+  }
+}, true);
 document.addEventListener('change', (event) => {
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
