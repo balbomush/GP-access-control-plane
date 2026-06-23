@@ -12,12 +12,16 @@ def now_iso() -> str:
 
 def read_state(state_dir: Path) -> dict[str, Any]:
     path = state_dir / "state.json"
+    defaults = {
+        "current_job": None,
+        "last_error": None,
+    }
     if not path.exists():
-        return {
-            "current_job": None,
-            "last_error": None,
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
+        return defaults
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return defaults
+    return {key: raw.get(key, value) for key, value in defaults.items()}
 
 
 def write_state(state_dir: Path, state: dict[str, Any]) -> None:
