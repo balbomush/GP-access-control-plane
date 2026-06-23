@@ -3,78 +3,36 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.strategies import load_strategy_dir
-from gp_control_plane.zapret2 import _blockcheck_nft_tables, _cleanup_blockcheck_processes, _run_blockcheck, blockcheck_env
+from gp_control_plane.zapret2 import _blockcheck_nft_tables, _cleanup_blockcheck_processes, _stop_process_group, check_install
 
 
 class Zapret2Tests(unittest.TestCase):
-    def test_blockcheck_env_uses_strategy_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            strategy = Path(raw) / "strategy"
-            strategy.mkdir()
-            (strategy / "metadata.yaml").write_text(
-                """
-version: 1
-id: s1
-status: example
-protocols:
-  - tls
-files:
-  nfqws2_config: nfqws2.conf
-blockcheck:
-  test: custom
-  ip_versions: 4
-  skip_dnscheck: true
-  checks:
-    http: false
-    https_tls12: true
-    https_tls13: false
-    http3: false
-  lists:
-    https_tls12: nfqws2.conf
-""",
-                encoding="utf-8",
-            )
-            (strategy / "nfqws2.conf").write_text("--payload tls_client_hello\n", encoding="utf-8")
+    def test_check_install_reports_available_paths(self) -> None:
+        def fake_which(name: str) -> str | None:
+            return {"nfqws2": "/usr/bin/nfqws2", "blockcheck2.sh": "/usr/bin/blockcheck2.sh"}.get(name)
 
-            env = blockcheck_env("youtube.com", load_strategy_dir(strategy))
+        with mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=fake_which):
+            result = check_install()
 
-            self.assertEqual(env["BATCH"], "1")
-            self.assertEqual(env["DOMAINS"], "youtube.com")
-            self.assertEqual(env["IPVS"], "4")
-            self.assertEqual(env["TEST"], "custom")
-            self.assertEqual(env["SKIP_DNSCHECK"], "1")
-            self.assertEqual(env["ENABLE_HTTP"], "0")
-            self.assertEqual(env["ENABLE_HTTPS_TLS12"], "1")
-            self.assertEqual(env["ENABLE_HTTPS_TLS13"], "0")
-            self.assertEqual(env["ENABLE_HTTP3"], "0")
-            self.assertEqual(env["LIST_HTTPS_TLS12"], str((strategy / "nfqws2.conf").resolve()))
+        self.assertTrue(result["nfqws2_found"])
+        self.assertEqual(result["nfqws2_path"], "/usr/bin/nfqws2")
+        self.assertTrue(result["blockcheck_found"])
+        self.assertEqual(result["blockcheck_path"], "/usr/bin/blockcheck2.sh")
 
-    def test_run_blockcheck_returns_completed_process(self) -> None:
-        result = _run_blockcheck(
-            [sys.executable, "-c", "import sys; print('ok'); print('err', file=sys.stderr)"],
-            os.environ.copy(),
-            timeout=5,
-        )
-
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "ok")
-        self.assertEqual(result.stderr.strip(), "err")
-
-    def test_run_blockcheck_raises_on_timeout(self) -> None:
-        with self.assertRaises(subprocess.TimeoutExpired):
-            _run_blockcheck(
-                [sys.executable, "-c", "import time; time.sleep(10)"],
-                os.environ.copy(),
-                timeout=1,
-            )
+    def test_stop_process_group_terminates_process(self) -> None:
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=hasattr(os, "setsid"))
+        try:
+            _stop_process_group(process)
+            self.assertIsNotNone(process.returncode)
+        finally:
+            if process.poll() is None:
+                process.kill()
 
     def test_blockcheck_nft_tables_extracts_only_temporary_tables(self) -> None:
         output = """

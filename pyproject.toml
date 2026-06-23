@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gp-access-control-plane"
 version = "0.1.0"
-description = "Raspberry Pi control plane for GP traffic policy and zapret strategy dry-run orchestration."
+description = "Raspberry Pi web UI for zapret2 strategy discovery."
 requires-python = ">=3.11"
 dependencies = []
 

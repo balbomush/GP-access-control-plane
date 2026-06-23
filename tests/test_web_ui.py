@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.config import AppConfig, HealthcheckConfig, LocalConfig, OutputConfig, RepoConfig
+from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.web.app import index_html, serve
 
 
@@ -110,6 +110,12 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("timeoutSecondsOrNull", html)
         self.assertIn("title=\"Запускает штатный blockcheck2", html)
         self.assertIn("title=\"Экспериментальный режим", html)
+        self.assertIn("grid-template-columns: minmax(0, 460px) minmax(0, 1fr)", html)
+        self.assertIn("grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))", html)
+        self.assertIn("grid-template-columns: repeat(auto-fit, minmax(150px, 1fr))", html)
+        self.assertIn("class=\"button-row run-actions\"", html)
+        self.assertIn("min-width: 760px", html)
+        self.assertIn("table-layout: auto", html)
         self.assertIn("isDiscoveryRun(row)", html)
         self.assertIn("runMode(row)", html)
         self.assertIn("data-action=\"stop-current\"", html)
@@ -153,30 +159,23 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("Проверка домена", html)
         self.assertNotIn("Проверки доступности", html)
         self.assertNotIn("Технические данные", html)
+        self.assertNotIn("/api/rules", html)
+        self.assertNotIn("/api/strategies", html)
+        self.assertNotIn("/api/healthchecks", html)
+        self.assertNotIn("/api/jobs/validate", html)
+        self.assertNotIn("/api/jobs/sync-pull-only", html)
+        self.assertNotIn("/api/jobs/render-dry-run", html)
+        self.assertNotIn("/api/jobs/healthcheck-direct", html)
+        self.assertNotIn("/api/jobs/zapret-strategy-check", html)
+        self.assertNotIn("/api/jobs/zapret-custom-verification", html)
 
     def test_head_root_returns_ok_for_curl_i(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            rules_repo = tmp / "rules"
-            stable = rules_repo / "stable"
-            stable.mkdir(parents=True)
-            for name in ("direct.yaml", "vpn.yaml", "zapret.yaml"):
-                (stable / name).write_text("version: 1\nrules: []\n", encoding="utf-8")
-            strategies_repo = tmp / "strategies"
-            strategies_repo.mkdir()
             config = AppConfig(
-                repos=RepoConfig(rules=rules_repo, strategies=strategies_repo),
-                local=LocalConfig(
-                    overrides=tmp / "local-overrides.yaml",
-                    devices=tmp / "devices.yaml",
-                    selected_strategy=tmp / "selected-strategy.yaml",
-                ),
                 output=OutputConfig(
-                    rendered_dir=tmp / "rendered",
-                    evidence_dir=tmp / "evidence",
                     state_dir=tmp / "state",
                 ),
-                healthcheck=HealthcheckConfig(),
             )
             port = _free_port()
             thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)

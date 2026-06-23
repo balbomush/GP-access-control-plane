@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.state import append_jsonl
 from gp_control_plane.strategy_finder import (
+    DiscoveryOptions,
     _resolve_blockcheck_script,
     _standard_attempt_plan,
     _write_multidomain_runner,
@@ -22,6 +23,48 @@ from gp_control_plane.strategy_finder import (
 
 
 class StrategyFinderTests(unittest.TestCase):
+    def test_discovery_options_build_blockcheck_env(self) -> None:
+        options = DiscoveryOptions(
+            enable_http=True,
+            enable_tls12=False,
+            enable_tls13=True,
+            enable_quic=False,
+            scan_level="force",
+            repeats=3,
+            repeat_parallel=True,
+            skip_dnscheck=False,
+            skip_ipblock=False,
+        )
+
+        self.assertEqual(
+            options.to_blockcheck_env(),
+            {
+                "SKIP_DNSCHECK": "0",
+                "SKIP_IPBLOCK": "0",
+                "ENABLE_HTTP": "1",
+                "ENABLE_HTTPS_TLS12": "0",
+                "ENABLE_HTTPS_TLS13": "1",
+                "ENABLE_HTTP3": "0",
+                "SCANLEVEL": "force",
+                "REPEATS": "3",
+                "PARALLEL": "1",
+            },
+        )
+        self.assertEqual(options.to_run_fields()["enable_tls"], False)
+        self.assertEqual(options.to_run_fields()["discovery_options"]["scan_level"], "force")
+
+    def test_discovery_options_normalize_scan_and_repeats(self) -> None:
+        options = DiscoveryOptions(scan_level="bad", repeats=99)
+
+        self.assertEqual(options.normalized().scan_level, "standard")
+        self.assertEqual(options.normalized().repeats, 10)
+
+    def test_discovery_options_require_protocol(self) -> None:
+        options = DiscoveryOptions(enable_http=False, enable_tls12=False, enable_tls13=False, enable_quic=False)
+
+        with self.assertRaises(ValueError):
+            options.normalized()
+
     def test_parse_blockcheck_summary_extracts_candidates(self) -> None:
         stdout = """
 noise
@@ -61,6 +104,7 @@ curl_test_https_tls12 ipv4 web.telegram.org : nfqws2 not working
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["id"], candidate_id_for("tls", "--payload tls_client_hello --lua-desync=fake"))
             self.assertEqual(len(candidates[0]["seen"]), 2)
+            self.assertNotIn("verifications", candidates[0])
 
     def test_parse_blockcheck_common_extracts_common_candidates(self) -> None:
         stdout = """

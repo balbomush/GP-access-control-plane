@@ -14,10 +14,6 @@ def read_state(state_dir: Path) -> dict[str, Any]:
     path = state_dir / "state.json"
     if not path.exists():
         return {
-            "last_sync_at": None,
-            "last_validate_at": None,
-            "last_render_at": None,
-            "selected_strategy": None,
             "current_job": None,
             "last_error": None,
         }

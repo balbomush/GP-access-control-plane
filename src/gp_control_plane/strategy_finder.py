@@ -110,6 +110,29 @@ class DiscoveryOptions:
             "skip_ipblock": self.skip_ipblock,
         }
 
+    def to_blockcheck_env(self) -> dict[str, str]:
+        options = self.normalized()
+        return {
+            "SKIP_DNSCHECK": "1" if options.skip_dnscheck else "0",
+            "SKIP_IPBLOCK": "1" if options.skip_ipblock else "0",
+            "ENABLE_HTTP": "1" if options.enable_http else "0",
+            "ENABLE_HTTPS_TLS12": "1" if options.enable_tls12 else "0",
+            "ENABLE_HTTPS_TLS13": "1" if options.enable_tls13 else "0",
+            "ENABLE_HTTP3": "1" if options.enable_quic else "0",
+            "SCANLEVEL": options.scan_level,
+            "REPEATS": str(options.repeats),
+            "PARALLEL": "1" if options.repeat_parallel else "0",
+        }
+
+    def to_run_fields(self) -> dict[str, Any]:
+        options = self.normalized()
+        mapping = options.to_mapping()
+        return {
+            **mapping,
+            "enable_tls": options.enable_tls12,
+            "discovery_options": mapping,
+        }
+
 
 def domain_sets() -> dict[str, list[str]]:
     return {
@@ -193,42 +216,6 @@ def run_multi_domain_discovery(
     )
 
 
-def run_custom_verification(
-    candidate: dict[str, Any],
-    domains: list[str],
-    state_dir: Path,
-    timeout_seconds: int,
-    include_quic: bool = True,
-    stop_event: threading.Event | None = None,
-) -> dict[str, Any]:
-    args = str(candidate.get("args") or "").strip()
-    protocol = str(candidate.get("protocol") or "tls")
-    if not args:
-        raise ValueError("candidate args are required")
-
-    with tempfile.TemporaryDirectory() as raw:
-        tmp = Path(raw)
-        lists = _write_custom_lists(tmp, args, protocol, include_quic)
-        run = _run_blockcheck_live(
-            state_dir=state_dir,
-            kind="custom-verification",
-            domains=domains,
-            timeout_seconds=timeout_seconds,
-            test="custom",
-            options=DiscoveryOptions(
-                enable_http=protocol == "http",
-                enable_tls12=protocol == "tls",
-                enable_tls13=False,
-                enable_quic=include_quic and protocol == "quic",
-            ),
-            list_paths=lists,
-            candidate_id=str(candidate.get("id") or ""),
-            stop_event=stop_event,
-        )
-    _update_candidate_verification(state_dir, candidate, run)
-    return run
-
-
 def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
     path = _finder_dir(state_dir) / "candidates.json"
     if not path.exists():
@@ -282,13 +269,6 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
     }
 
 
-def find_candidate(state_dir: Path, candidate_id: str) -> dict[str, Any]:
-    for candidate in read_candidates(state_dir):
-        if candidate.get("id") == candidate_id:
-            return candidate
-    raise ValueError(f"candidate not found: {candidate_id}")
-
-
 def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
     sections = _summary_sections(stdout)
     summary = sections["summary"]
@@ -325,7 +305,6 @@ def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, An
             "status": "candidate",
             "first_seen_at": now,
             "seen": [],
-            "verifications": [],
         }
         item["last_seen_at"] = now
         seen = item.setdefault("seen", [])
@@ -351,7 +330,6 @@ def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, An
             "status": "candidate",
             "first_seen_at": now,
             "seen": [],
-            "verifications": [],
         }
         item["last_seen_at"] = now
         common_seen = item.setdefault("common_seen", [])
@@ -383,7 +361,6 @@ def _run_blockcheck_live(
     timeout_seconds: int,
     test: str,
     options: DiscoveryOptions,
-    list_paths: dict[str, Path] | None = None,
     candidate_id: str = "",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
@@ -399,19 +376,9 @@ def _run_blockcheck_live(
             "DOMAINS": " ".join(clean_domains),
             "IPVS": "4",
             "TEST": test,
-            "SKIP_DNSCHECK": "1" if options.skip_dnscheck else "0",
-            "SKIP_IPBLOCK": "1" if options.skip_ipblock else "0",
-            "ENABLE_HTTP": "1" if options.enable_http else "0",
-            "ENABLE_HTTPS_TLS12": "1" if options.enable_tls12 else "0",
-            "ENABLE_HTTPS_TLS13": "1" if options.enable_tls13 else "0",
-            "ENABLE_HTTP3": "1" if options.enable_quic else "0",
-            "SCANLEVEL": options.scan_level,
-            "REPEATS": str(options.repeats),
-            "PARALLEL": "1" if options.repeat_parallel else "0",
+            **options.to_blockcheck_env(),
         }
     )
-    for key, value in (list_paths or {}).items():
-        full_env[key] = str(value)
 
     root = _finder_dir(state_dir)
     logs = root / "logs"
@@ -427,7 +394,7 @@ def _run_blockcheck_live(
         enable_tls13=options.enable_tls13,
         enable_quic=options.enable_quic,
     )
-    options_mapping = options.to_mapping()
+    option_fields = options.to_run_fields()
     started = {
         "id": run_id,
         "kind": kind,
@@ -440,16 +407,7 @@ def _run_blockcheck_live(
         "stderr_log": str(stderr_log),
         "candidate_count": 0,
         "test": test,
-        "enable_http": options.enable_http,
-        "enable_tls": options.enable_tls12,
-        "enable_tls13": options.enable_tls13,
-        "enable_quic": options.enable_quic,
-        "scan_level": options.scan_level,
-        "repeats": options.repeats,
-        "repeat_parallel": options.repeat_parallel,
-        "skip_dnscheck": options.skip_dnscheck,
-        "skip_ipblock": options.skip_ipblock,
-        "discovery_options": options_mapping,
+        **option_fields,
         "attempt_plan": attempt_plan,
     }
     append_jsonl(root / "runs.jsonl", started)
@@ -517,16 +475,7 @@ def _run_blockcheck_live(
         "stopped": stopped,
         "timeout_seconds": timeout_seconds,
         "test": test,
-        "enable_http": options.enable_http,
-        "enable_tls": options.enable_tls12,
-        "enable_tls13": options.enable_tls13,
-        "enable_quic": options.enable_quic,
-        "scan_level": options.scan_level,
-        "repeats": options.repeats,
-        "repeat_parallel": options.repeat_parallel,
-        "skip_dnscheck": options.skip_dnscheck,
-        "skip_ipblock": options.skip_ipblock,
-        "discovery_options": options_mapping,
+        **option_fields,
         "attempt_plan": attempt_plan,
     }
     run["progress"] = progress_from_stdout(stdout, run)
@@ -564,15 +513,7 @@ def _run_multidomain_blockcheck_live(
                 "DOMAINS": " ".join(clean_domains),
                 "IPVS": "4",
                 "TEST": "standard",
-                "SKIP_DNSCHECK": "1" if options.skip_dnscheck else "0",
-                "SKIP_IPBLOCK": "1" if options.skip_ipblock else "0",
-                "ENABLE_HTTP": "1" if options.enable_http else "0",
-                "ENABLE_HTTPS_TLS12": "1" if options.enable_tls12 else "0",
-                "ENABLE_HTTPS_TLS13": "1" if options.enable_tls13 else "0",
-                "ENABLE_HTTP3": "1" if options.enable_quic else "0",
-                "SCANLEVEL": options.scan_level,
-                "REPEATS": str(options.repeats),
-                "PARALLEL": "1" if options.repeat_parallel else "0",
+                **options.to_blockcheck_env(),
                 "GP_MD_CURL_PARALLELISM": str(normalized_parallelism),
                 "ZAPRET_BASE": str(zapret_base),
                 "ZAPRET_RW": str(zapret_base),
@@ -620,7 +561,7 @@ def _run_blockcheck_command_live(
         enable_tls13=options.enable_tls13,
         enable_quic=options.enable_quic,
     )
-    options_mapping = options.to_mapping()
+    option_fields = options.to_run_fields()
     started = {
         "id": run_id,
         "kind": kind,
@@ -633,16 +574,7 @@ def _run_blockcheck_command_live(
         "stderr_log": str(stderr_log),
         "candidate_count": 0,
         "test": test,
-        "enable_http": options.enable_http,
-        "enable_tls": options.enable_tls12,
-        "enable_tls13": options.enable_tls13,
-        "enable_quic": options.enable_quic,
-        "scan_level": options.scan_level,
-        "repeats": options.repeats,
-        "repeat_parallel": options.repeat_parallel,
-        "skip_dnscheck": options.skip_dnscheck,
-        "skip_ipblock": options.skip_ipblock,
-        "discovery_options": options_mapping,
+        **option_fields,
         "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
@@ -711,16 +643,7 @@ def _run_blockcheck_command_live(
         "stopped": stopped,
         "timeout_seconds": timeout_seconds,
         "test": test,
-        "enable_http": options.enable_http,
-        "enable_tls": options.enable_tls12,
-        "enable_tls13": options.enable_tls13,
-        "enable_quic": options.enable_quic,
-        "scan_level": options.scan_level,
-        "repeats": options.repeats,
-        "repeat_parallel": options.repeat_parallel,
-        "skip_dnscheck": options.skip_dnscheck,
-        "skip_ipblock": options.skip_ipblock,
-        "discovery_options": options_mapping,
+        **option_fields,
         "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
@@ -730,31 +653,6 @@ def _run_blockcheck_command_live(
         run["total_candidates"] = len(candidates)
     append_jsonl(root / "runs.jsonl", run)
     return run
-
-
-def _update_candidate_verification(state_dir: Path, candidate: dict[str, Any], run: dict[str, Any]) -> None:
-    candidates = read_candidates(state_dir)
-    candidate_id = str(candidate.get("id") or "")
-    for item in candidates:
-        if item.get("id") != candidate_id:
-            continue
-        verifications = item.setdefault("verifications", [])
-        if isinstance(verifications, list):
-            results = run.get("results") if isinstance(run.get("results"), list) else []
-            total = len(results)
-            ok = sum(1 for result in results if str(result.get("result") or "").startswith("nfqws2 "))
-            verifications.append(
-                {
-                    "run_id": run["id"],
-                    "verified_at": run["timestamp"],
-                    "domains": run["domains"],
-                    "total": total,
-                    "success": ok,
-                    "success_rate": (ok / total) if total else 0.0,
-                }
-            )
-        break
-    _write_candidates(state_dir, candidates)
 
 
 def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
@@ -1250,21 +1148,6 @@ def _protocol_from_test(test: str) -> str:
     if "http_" in test and "https" not in test:
         return "http"
     return "tls"
-
-
-def _write_custom_lists(root: Path, args: str, protocol: str, include_quic: bool) -> dict[str, Path]:
-    empty = root / "empty.txt"
-    empty.write_text("", encoding="utf-8")
-    tls = root / "list_https_tls12.txt"
-    quic = root / "list_quic.txt"
-    tls.write_text((args + "\n") if protocol == "tls" else "", encoding="utf-8")
-    quic.write_text((args + "\n") if protocol == "quic" and include_quic else "", encoding="utf-8")
-    return {
-        "LIST_HTTP": empty,
-        "LIST_HTTPS_TLS12": tls,
-        "LIST_HTTPS_TLS13": empty,
-        "LIST_QUIC": quic,
-    }
 
 
 def _write_multidomain_runner(root: Path, blockcheck: Path) -> Path:

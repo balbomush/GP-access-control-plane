@@ -1,17 +1,2 @@
-repos:
-  rules: ../GP-traffic-policy-rules
-  strategies: ../GP-zapret-strategy-catalog
-
-local:
-  overrides: ./site-local-config/local-overrides.yaml
-  devices: ./site-local-config/devices.yaml
-  selected_strategy: ./site-local-config/selected-strategy.yaml
-
 output:
-  rendered_dir: ./build/rendered
-  evidence_dir: ./build/evidence
   state_dir: ./build/state
-
-healthcheck:
-  timeout_seconds: 5
-  retries: 2

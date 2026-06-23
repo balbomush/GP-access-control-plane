@@ -1,725 +1,203 @@
 # GP Access Control Plane
 
-Локальный control plane для Raspberry Pi. На текущем этапе проект только читает правила и стратегии, валидирует их, собирает dry-run артефакты, делает проверки доступности с самой Raspberry Pi и показывает состояние через веб-панель.
+Текущий этап проекта: Raspberry Pi web UI для подбора рабочих стратегий `zapret2` через штатный `blockcheck2.sh`.
 
-## Статус MVP
+Что реализовано сейчас:
 
-Реализовано:
+- запуск веб-интерфейса на Raspberry Pi;
+- запуск обычного `blockcheck2` подбора по доменам;
+- экспериментальный режим `стратегия -> домены`, где одна стратегия проверяется параллельными `curl` по нескольким доменам;
+- настройка реально влияющих параметров `blockcheck2`;
+- остановка долгого подбора с сохранением уже найденных стратегий;
+- просмотр кандидатов, общих стратегий, истории запусков и live-лога;
+- хранение локального состояния в `build/state`.
 
-- чтение репозиториев `GP-traffic-policy-rules` и `GP-zapret-strategy-catalog`;
-- локальная валидация YAML/JSON и правил маршрутизации;
-- dry-run render в `build/rendered/`;
-- прямой healthcheck доменов с Raspberry Pi;
-- локальная запись evidence без push;
-- проверка наличия `zapret2`/`nfqws2` в системе;
-- веб-панель на HTTP-порту.
+Что не реализуется в этой ветке:
 
-На этом этапе намеренно не реализовано:
+- установка или изменение настроек роутера;
+- автоматическая публикация результатов;
+- синхронизация правил маршрутизации;
+- генерация конфигов для других компонентов.
 
-- установка на Keenetic;
-- SSH/API/RCI вызовы к Keenetic;
-- `apply`, `restart` и любые изменения роутера;
-- runtime-интеграция с `sign-craze`.
-
-Если Raspberry Pi выключена, зависла или недоступна, с сетью ничего происходить не должно. Роутер должен продолжать работать на последней успешной конфигурации.
+Критерий приемки текущего этапа: открыть web UI, запустить подбор, найти стратегию, вручную скопировать ее в целевую систему и вручную проверить, что она работает.
 
 ## Подготовка Raspberry Pi
 
-По умолчанию считаем, что на Raspberry Pi уже установлена Raspberry Pi OS/Raspbian и плата подключена к домашней сети.
+Предполагается чистая Raspberry Pi OS.
 
-### 1. Первичная настройка системы
-
-Запустите штатную настройку:
-
-```bash
-sudo raspi-config
-```
-
-Рекомендуемые пункты:
-
-- включить SSH, если планируете работать с платы удаленно;
-- выставить корректный timezone;
-- выставить locale, например `en_US.UTF-8` или `ru_RU.UTF-8`;
-- при необходимости изменить hostname, например `gp-control-plane`;
-- убедиться, что файловая система расширена на всю SD-карту.
-
-После изменений перезагрузите плату:
-
-```bash
-sudo reboot
-```
-
-После перезагрузки проверьте IP-адрес:
-
-```bash
-hostname -I
-```
-
-Этот адрес понадобится для веб-панели:
-
-```text
-http://RASPBERRY_PI_IP:8080
-```
-
-### 2. Обновление системы
+1. Обновить систему:
 
 ```bash
 sudo apt update
-sudo apt full-upgrade -y
-sudo reboot
+sudo apt upgrade -y
 ```
 
-После перезагрузки:
+2. Поставить базовые пакеты:
 
 ```bash
-sudo apt autoremove -y
+sudo apt install -y git python3 python3-venv python3-pip curl nftables iproute2 dnsutils
 ```
 
-### 3. Системные пакеты
+3. Установить и проверить `zapret2`.
 
-Установите базовые пакеты:
+В текущей реализации ожидается, что в `PATH` доступны:
 
 ```bash
-sudo apt install -y \
-  git \
-  curl \
-  ca-certificates \
-  openssh-client \
-  python3 \
-  python3-venv \
-  python3-pip
+nfqws2
+blockcheck2.sh
 ```
 
 Проверка:
 
 ```bash
-python3 --version
-git --version
+command -v nfqws2
+command -v blockcheck2.sh
 ```
 
-Для этого проекта нужен Python `3.11+`. Если `python3 --version` показывает версию ниже `3.11`, лучше обновить Raspberry Pi OS до более свежей версии. Не рекомендуется собирать Python вручную на рабочей плате только ради MVP, потому что это усложнит сопровождение.
+Если `zapret2` установлен в `/opt/zapret2`, но команды не находятся, добавьте wrappers в `~/.local/bin`:
 
-### 4. Пользователь и рабочая директория
+```bash
+mkdir -p ~/.local/bin
 
-Дальше в примерах используется текущий пользователь и директория `~/gp`.
+cat > ~/.local/bin/blockcheck2.sh <<'EOF'
+#!/bin/sh
+exec /opt/zapret2/blockcheck2.sh "$@"
+EOF
 
-Создайте рабочую директорию:
+cat > ~/.local/bin/nfqws2 <<'EOF'
+#!/bin/sh
+exec /opt/zapret2/nfq2/nfqws2 "$@"
+EOF
+
+chmod +x ~/.local/bin/blockcheck2.sh ~/.local/bin/nfqws2
+```
+
+Добавьте `~/.local/bin` в `PATH`, если его там нет:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
+. ~/.profile
+```
+
+## Установка проекта
 
 ```bash
 mkdir -p ~/gp
 cd ~/gp
-```
-
-Если пользователь не `pi`, это нормально. В дальнейшем в `systemd` unit нужно будет заменить `/home/pi` на путь вашего пользователя.
-
-### 5. Доступ к GitHub
-
-Для приватных репозиториев удобнее использовать SSH-ключ.
-
-Проверьте, есть ли ключ:
-
-```bash
-ls -la ~/.ssh
-```
-
-Если ключа нет, создайте:
-
-```bash
-ssh-keygen -t ed25519 -C "raspberry-pi-gp-control-plane"
-```
-
-Показать публичный ключ:
-
-```bash
-cat ~/.ssh/id_ed25519.pub
-```
-
-Добавьте этот публичный ключ в GitHub:
-
-```text
-GitHub -> Settings -> SSH and GPG keys -> New SSH key
-```
-
-Проверка доступа:
-
-```bash
-ssh -T git@github.com
-```
-
-GitHub может ответить, что shell-доступ не предоставляется. Это нормально, если при этом он распознал пользователя.
-
-Минимально настройте Git identity:
-
-```bash
-git config --global user.name "your-name"
-git config --global user.email "your-email@example.com"
-```
-
-### 6. Сеть и порт веб-панели
-
-MVP веб-панель слушает порт `8080`.
-
-Проверить, свободен ли порт:
-
-```bash
-ss -ltnp | grep 8080 || true
-```
-
-Если на плате включен firewall, разрешите вход на порт `8080` только из локальной сети. Для стандартной Raspberry Pi OS firewall обычно не включен по умолчанию.
-
-Проверить доступ с самой Raspberry Pi после запуска веб-панели:
-
-```bash
-curl -I http://127.0.0.1:8080/
-```
-
-Эта команда сработает только если web-сервер уже запущен отдельным процессом. Для ручной проверки откройте два SSH-терминала.
-
-В первом терминале:
-
-```bash
-cd ~/gp/GP-access-control-plane
-PYTHONPATH=src python3 -m gp_control_plane.cli web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-```
-
-Во втором терминале:
-
-```bash
-curl -I http://127.0.0.1:8080/
-```
-
-Ожидаемый ответ:
-
-```text
-HTTP/1.0 200 OK
-Content-Type: text/html; charset=utf-8
-```
-
-Проверить доступ с компьютера:
-
-```text
-http://RASPBERRY_PI_IP:8080
-```
-
-### 7. Подготовка под zapret2
-
-Для первого smoke-теста `zapret2` не обязателен. Control plane можно запустить и проверить без него.
-
-На этапе подбора стратегий нужно будет установить `zapret2` так, чтобы команды были доступны пользователю, от которого запущен control plane:
-
-```bash
-which nfqws2 || true
-which blockcheck2.sh || which blockcheck.sh || true
-```
-
-Для реальной проверки стратегий лучше держать `zapret2` в `/opt/zapret2`, а не внутри домашней директории. `nfqws2` может сбрасывать привилегии, и при правах вроде `/home/user = 700` стратегии с Lua не смогут прочитать файлы `zapret2/lua`.
-
-Если исходники уже лежат в `~/opt/zapret2`, перенесите установленную копию в `/opt/zapret2`:
-
-```bash
-sudo cp -a "$HOME/opt/zapret2" /opt/zapret2
-sudo chown -R root:root /opt/zapret2
-sudo chmod -R a+rX /opt/zapret2
-```
-
-После этого добавьте wrappers в `~/.local/bin`. Важно: wrappers записывают абсолютный путь к `zapret2`, чтобы они одинаково работали из SSH-сессии и из `systemd`:
-
-```bash
-ZAPRET2_DIR="/opt/zapret2"
-mkdir -p "$HOME/.local/bin"
-
-printf '#!/bin/sh\nexec %s/blockcheck2.sh "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/blockcheck2.sh"
-printf '#!/bin/sh\nexec %s/nfq2/nfqws2 "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/nfqws2"
-printf '#!/bin/sh\nexec %s/mdig/mdig "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/mdig"
-printf '#!/bin/sh\nexec %s/ip2net/ip2net "$@"\n' "$ZAPRET2_DIR" > "$HOME/.local/bin/ip2net"
-
-chmod +x "$HOME/.local/bin/blockcheck2.sh" "$HOME/.local/bin/nfqws2" "$HOME/.local/bin/mdig" "$HOME/.local/bin/ip2net"
-```
-
-После установки `zapret2` проверка в этом проекте должна вернуть `true` для найденных компонентов:
-
-```bash
-gp-control-plane zapret2 check-install --config configs/orchestrator.example.yaml
-```
-
-Важно: текущий MVP не меняет маршрутизацию роутера и не запускает apply на Keenetic. Даже при установленном `zapret2` проверки остаются локальными для Raspberry Pi.
-
-## Репозитории
-
-Ожидаемая структура на Raspberry Pi:
-
-```text
-~/gp/
-  GP-access-control-plane/
-  GP-traffic-policy-rules/
-  GP-zapret-strategy-catalog/
-```
-
-Клонирование:
-
-```bash
-mkdir -p ~/gp
-cd ~/gp
-
-git clone git@github.com:balbomush/GP-traffic-policy-rules.git
-git clone git@github.com:balbomush/GP-zapret-strategy-catalog.git
 git clone git@github.com:balbomush/GP-access-control-plane.git
-```
-
-Если репозитории приватные, на Raspberry Pi заранее должен быть настроен доступ к GitHub: SSH key или другой выбранный способ авторизации.
-
-## Требования
-
-Минимально нужно:
-
-- Raspberry Pi OS или другой Debian-like Linux;
-- Python `3.11+`;
-- `git`;
-- доступ к трем GitHub-репозиториям.
-
-Проверка:
-
-```bash
-python3 --version
-git --version
-```
-
-`zapret2` на первом smoke-тесте не обязателен. Без него веб-панель и CLI просто покажут, что `nfqws2`/`blockcheck` не найдены.
-
-## Быстрый запуск без установки пакета
-
-Этот способ удобен для первой проверки после копирования или клонирования:
-
-```bash
-cd ~/gp/GP-access-control-plane
-
-PYTHONPATH=src python3 -m gp_control_plane.cli validate --config configs/orchestrator.example.yaml
-PYTHONPATH=src python3 -m gp_control_plane.cli render --dry-run --config configs/orchestrator.example.yaml
-PYTHONPATH=src python3 -m gp_control_plane.cli zapret2 check-install --config configs/orchestrator.example.yaml
-```
-
-Ожидаемый результат:
-
-- `validate` возвращает `ok: true`;
-- `render --dry-run` создает файлы в `build/rendered/`;
-- `zapret2 check-install` показывает, найдены ли `nfqws2` и `blockcheck`.
-
-Запуск веб-панели:
-
-```bash
-cd ~/gp/GP-access-control-plane
-PYTHONPATH=src python3 -m gp_control_plane.cli web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-```
-
-Открыть с компьютера в той же сети:
-
-```text
-http://RASPBERRY_PI_IP:8080
-```
-
-Остановить ручной запуск можно через `Ctrl+C`.
-
-## Установка в virtualenv
-
-Для постоянной работы удобнее поставить CLI в виртуальное окружение:
-
-```bash
-cd ~/gp/GP-access-control-plane
-
+cd GP-access-control-plane
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
+pip install -e .
 ```
 
-После этого команды можно запускать так:
-
-```bash
-gp-control-plane validate --config configs/orchestrator.example.yaml
-gp-control-plane render --dry-run --config configs/orchestrator.example.yaml
-gp-control-plane zapret2 check-install --config configs/orchestrator.example.yaml
-gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-```
-
-`--config` можно указывать как до команды, так и после команды.
-
-## Локальная конфигурация
-
-Пример общего конфига находится здесь:
-
-```text
-configs/orchestrator.example.yaml
-```
-
-Он ожидает соседние репозитории:
-
-```yaml
-repos:
-  rules: ../GP-traffic-policy-rules
-  strategies: ../GP-zapret-strategy-catalog
-```
-
-Локальные файлы конкретной сети хранятся в `site-local-config/` и не должны попадать в Git:
-
-```text
-site-local-config/
-  local-overrides.yaml
-  devices.yaml
-  selected-strategy.yaml
-```
-
-Для первого запуска эти файлы можно не создавать.
-
-Если нужно выбрать локальную стратегию, создайте:
-
-```bash
-mkdir -p site-local-config
-nano site-local-config/selected-strategy.yaml
-```
-
-Пример:
-
-```yaml
-strategy_path: ../../GP-zapret-strategy-catalog/examples/example-strategy
-```
-
-Путь в `selected-strategy.yaml` считается относительно директории `site-local-config/`. Можно указать абсолютный путь.
-
-## Проверка правил и сборка dry-run
-
-Валидация:
-
-```bash
-gp-control-plane validate --config configs/orchestrator.example.yaml
-```
-
-Dry-run render:
-
-```bash
-gp-control-plane render --dry-run --config configs/orchestrator.example.yaml
-```
-
-После render должны появиться:
-
-```text
-build/rendered/
-  routing.json
-  dpi-hostlist.txt
-  manifest.yaml
-  selected-zapret-strategy/   # только если выбрана стратегия
-```
-
-Эти файлы пока никуда не применяются. Это локальные артефакты для проверки будущей интеграции.
-
-## Проверка доступности домена
-
-Прямая проверка конкретного домена:
-
-```bash
-gp-control-plane healthcheck --direct-only --domain youtube.com --config configs/orchestrator.example.yaml
-```
-
-Проверка делает:
-
-- DNS resolve;
-- TCP connect на `443`;
-- HTTPS `HEAD`.
-
-Результат пишется в:
-
-```text
-build/state/healthchecks/
-```
-
-Если домен не открывается напрямую, это не считается фатальной ошибкой всего запуска. Результат должен попасть в отчет.
-
-## Проверка zapret2
-
-Проверить, видит ли control plane локальные бинарники:
+Проверка команд:
 
 ```bash
 gp-control-plane zapret2 check-install --config configs/orchestrator.example.yaml
+gp-control-plane strategy-finder domains --config configs/orchestrator.example.yaml
 ```
 
-Ожидаемые поля:
+## Запуск web UI
 
-```json
-{
-  "nfqws2_found": true,
-  "blockcheck_found": true
-}
-```
-
-Если значения `false`, нужно установить `zapret2` и убедиться, что `nfqws2` и `blockcheck2.sh` или `blockcheck.sh` доступны в `PATH`.
-
-Список локальных стратегий из каталога:
+Ручной запуск:
 
 ```bash
-gp-control-plane zapret2 list-local --config configs/orchestrator.example.yaml
-```
-
-Ручной запуск проверки стратегии:
-
-```bash
-gp-control-plane zapret2 run-check \
-  --domain youtube.com \
-  --strategy ../GP-zapret-strategy-catalog/examples/example-strategy \
-  --config configs/orchestrator.example.yaml
-```
-
-На текущем MVP это локальный helper. Он не меняет роутер.
-
-## Веб-панель
-
-Запуск:
-
-```bash
+cd ~/gp/GP-access-control-plane
+. .venv/bin/activate
 gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
 ```
 
-В браузере:
+Открыть с компьютера:
 
 ```text
-http://RASPBERRY_PI_IP:8080
+http://<ip-raspberry-pi>:8080/
 ```
 
-В панели доступны:
-
-- статус Raspberry Pi control plane;
-- проверка правил;
-- pull-only синхронизация Git;
-- dry-run сборка;
-- прямой healthcheck домена;
-- список стратегий zapret;
-- запуск локальной проверки стратегии;
-- журнал задач и проверок.
-
-## Автозапуск веб-панели через systemd
-
-Опционально, после проверки вручную:
+Проверка с самой Raspberry Pi:
 
 ```bash
-sudo nano /etc/systemd/system/gp-control-plane-web.service
+curl -I http://127.0.0.1:8080/
 ```
 
-Пример unit-файла:
+## Автозапуск через systemd
 
-```ini
+Создать service:
+
+```bash
+sudo tee /etc/systemd/system/gp-control-plane-web.service >/dev/null <<'EOF'
 [Unit]
-Description=GP Access Control Plane Web UI
+Description=GP Strategy Finder Web UI
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/gp/GP-access-control-plane
-Environment=HOME=/home/pi
-Environment=PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/pi/gp/GP-access-control-plane/.venv/bin/gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
+User=%i
+WorkingDirectory=/home/%i/gp/GP-access-control-plane
+Environment=PATH=/home/%i/gp/GP-access-control-plane/.venv/bin:/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/%i/gp/GP-access-control-plane/.venv/bin/gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-Если пользователь не `pi`, замените `User`, `Group` и `/home/pi` на своего пользователя и путь во всех строках unit-файла. `HOME` и `PATH` важны для запуска `zapret2` wrappers из веб-панели. Сервис лучше запускать от обычного пользователя: `blockcheck2.sh` сам поднимет нужные root-права через `sudo`, а локальные state/log файлы останутся доступными CLI и веб-панели.
-
-Включить:
+Включить сервис для текущего пользователя:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now gp-control-plane-web.service
-sudo systemctl status gp-control-plane-web.service
-```
-
-После `git pull` в `GP-access-control-plane` перезапустите сервис, иначе веб-панель продолжит работать на старом загруженном Python-коде:
-
-```bash
-sudo systemctl restart gp-control-plane-web.service
+sudo systemctl enable --now gp-control-plane-web@$USER.service
+sudo systemctl status gp-control-plane-web@$USER.service
 ```
 
 Логи:
 
 ```bash
-journalctl -u gp-control-plane-web.service -f
+journalctl -u gp-control-plane-web@$USER.service -f
 ```
 
-Остановить:
+## Подбор стратегий
 
-```bash
-sudo systemctl stop gp-control-plane-web.service
-```
+В web UI доступны два режима:
 
-## Git sync
+- обычный поиск: штатный порядок `blockcheck2`, домены проверяются по очереди;
+- эксперимент: одна стратегия запускается один раз, затем выбранные домены проверяются параллельными `curl`.
 
-Синхронизация только подтягивает изменения:
+Настройки:
 
-```bash
-gp-control-plane sync --pull-only --config configs/orchestrator.example.yaml
-```
+- HTTP, TLS 1.2, TLS 1.3, HTTP3/QUIC;
+- уровень поиска `quick`, `standard`, `force`;
+- повторы проверки стратегии;
+- параллельные повторы;
+- пропуск DNS-проверки;
+- пропуск проверки IP/port-блокировки;
+- лимит параллельных `curl` для экспериментального режима.
 
-MVP не делает push. Если рабочее дерево любого из подключенных репозиториев грязное, sync откажется работать. Проверить:
+По умолчанию лимит времени выключен. Подбор может длиться несколько часов. Кнопка остановки завершает текущий запуск и сохраняет уже найденные успешные стратегии.
 
-```bash
-git -C ../GP-traffic-policy-rules status --short
-git -C ../GP-zapret-strategy-catalog status --short
-```
+## Локальные данные
 
-## Evidence без публикации
-
-Локальная запись evidence:
-
-```bash
-gp-control-plane evidence write \
-  --no-push \
-  --rule-id smoke-test \
-  --result success \
-  --checks 1 \
-  --success-rate 1.0 \
-  --config configs/orchestrator.example.yaml
-```
-
-Файлы пишутся в:
+Основные файлы создаются в:
 
 ```text
-build/evidence/
+build/state/
+  state.json
+  jobs.jsonl
+  strategy-finder/
+    candidates.json
+    runs.jsonl
+    logs/
 ```
 
-Evidence не должен содержать внешний IP, локальные IP/MAC, город, провайдера в открытом виде, токены или endpoint-данные.
+Эти данные локальные и не требуют публикации.
 
-## Локальные тесты
-
-В репозитории:
+## Тесты
 
 ```bash
 cd ~/gp/GP-access-control-plane
-python3 -m unittest discover -s tests
-```
-
-При установленном virtualenv:
-
-```bash
 . .venv/bin/activate
 python -m unittest discover -s tests
 ```
-
-## Быстрый чек-лист после переноса на Raspberry Pi
-
-1. `raspi-config` выполнен, SSH/timezone/locale настроены.
-2. Система обновлена через `apt update` и `apt full-upgrade`.
-3. Установлены `git`, `python3`, `python3-venv`, `python3-pip`.
-4. `python3 --version` показывает `3.11+`.
-5. GitHub SSH-доступ проверен через `ssh -T git@github.com`.
-6. Репозитории лежат рядом в `~/gp/`.
-7. `gp-control-plane validate --config configs/orchestrator.example.yaml` возвращает `ok: true`.
-8. `gp-control-plane render --dry-run --config configs/orchestrator.example.yaml` создает `build/rendered/`.
-9. `gp-control-plane healthcheck --direct-only --domain youtube.com --config configs/orchestrator.example.yaml` создает отчет.
-10. `gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080` открывается с компьютера.
-11. `gp-control-plane zapret2 check-install --config configs/orchestrator.example.yaml` показывает реальный статус `zapret2`.
-
-## Troubleshooting
-
-`cd: ~/gp/GP-access-control-plane: No such file or directory`
-
-Это означает, что репозиторий `GP-access-control-plane` не лежит в `~/gp` на Raspberry Pi или называется иначе.
-
-Сначала посмотрите, что реально есть в `~/gp`:
-
-```bash
-pwd
-ls -la ~/gp
-find ~/gp -maxdepth 2 -type d -name "GP-access-control-plane"
-```
-
-Если каталога нет, клонируйте репозитории:
-
-```bash
-cd ~/gp
-git clone git@github.com:balbomush/GP-traffic-policy-rules.git
-git clone git@github.com:balbomush/GP-zapret-strategy-catalog.git
-git clone git@github.com:balbomush/GP-access-control-plane.git
-```
-
-После клонирования проверьте наличие CLI-файла:
-
-```bash
-test -f ~/gp/GP-access-control-plane/src/gp_control_plane/cli.py && echo "control plane code exists"
-```
-
-Если `git clone` скачал пустой или старый репозиторий, значит актуальные изменения еще не были закоммичены и запушены с рабочей машины в GitHub. Сначала нужно сделать commit/push в `GP-access-control-plane`, а также в репозиториях rules и strategies, если они тоже нужны на Raspberry Pi.
-
-`ModuleNotFoundError: No module named gp_control_plane`
-
-Запустите через `PYTHONPATH=src ...` или установите пакет:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e .
-```
-
-`sync` отказывается работать из-за dirty repository
-
-Это ожидаемая защита. Проверьте `git status --short` в репозиториях rules и strategies, затем закоммитьте или уберите локальные изменения.
-
-Веб-панель не открывается с компьютера
-
-Проверьте:
-
-```bash
-hostname -I
-ss -ltnp | grep 8080
-```
-
-Сервер должен быть запущен с `--host 0.0.0.0`, а не только `127.0.0.1`.
-
-`curl: (7) Failed to connect to 127.0.0.1 port 8080`
-
-Это означает, что web-сервер control plane не запущен или сразу завершился с ошибкой.
-
-Проверьте, есть ли процесс на порту:
-
-```bash
-ss -ltnp | grep 8080 || echo "port 8080 is not listening"
-```
-
-Запустите web-сервер в foreground и посмотрите ошибку:
-
-```bash
-cd ~/gp/GP-access-control-plane
-PYTHONPATH=src python3 -m gp_control_plane.cli web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-```
-
-Если пакет установлен в virtualenv:
-
-```bash
-cd ~/gp/GP-access-control-plane
-. .venv/bin/activate
-gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-```
-
-Если команда сразу завершилась, сначала проверьте базовые команды:
-
-```bash
-cd ~/gp/GP-access-control-plane
-PYTHONPATH=src python3 -m gp_control_plane.cli validate --config configs/orchestrator.example.yaml
-PYTHONPATH=src python3 -m gp_control_plane.cli render --dry-run --config configs/orchestrator.example.yaml
-```
-
-Частые причины:
-
-- web-сервер еще не запускали;
-- команда запущена не из `~/gp/GP-access-control-plane`;
-- не указан `PYTHONPATH=src`, если пакет не установлен через `pip install -e .`;
-- репозитории `GP-traffic-policy-rules` и `GP-zapret-strategy-catalog` лежат не рядом с `GP-access-control-plane`;
-- порт `8080` уже занят другим процессом.
-
-`nfqws2_found` или `blockcheck_found` равны `false`
-
-Установите `zapret2` и добавьте его бинарники/скрипты в `PATH` пользователя, от которого запускается control plane.
-
-## Безопасность MVP
-
-На текущем этапе control plane не должен содержать и выполнять команды, которые меняют Keenetic. Все команды ограничены Raspberry Pi/local machine и локальными dry-run артефактами.

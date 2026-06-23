@@ -3,30 +3,21 @@ from __future__ import annotations
 import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from ..config import AppConfig
-from ..githubsync import pull_only
-from ..healthcheck import check_domains_direct, write_report
 from ..jobs import JobRunner
-from ..render import render_dry_run
-from ..rules import extract_hostlist, load_stable_rules
-from ..state import append_jsonl, now_iso, read_jsonl, read_state, write_state
+from ..state import read_state
 from ..strategy_finder import (
     domain_sets,
-    find_candidate,
     latest_log_tail,
     read_candidates,
     read_runs,
-    run_custom_verification,
     run_multi_domain_discovery,
     run_standard_discovery,
 )
-from ..strategies import list_local_strategies
-from ..validation import validate_all
-from ..zapret2 import check_install, run_check
+from ..zapret2 import check_install
 
 
 def serve(config: AppConfig, host: str, port: int) -> None:
@@ -39,14 +30,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._html()
             elif path == "/api/status":
                 self._json(status_payload(config))
-            elif path == "/api/rules":
-                self._json({"rules": [rule.to_mapping() for rule in load_stable_rules(config.repos.rules)]})
-            elif path == "/api/strategies":
-                self._json({"strategies": strategy_payload(config)})
-            elif path == "/api/jobs":
-                self._json({"jobs": read_jsonl(config.output.state_dir / "jobs.jsonl")})
-            elif path == "/api/healthchecks":
-                self._json({"healthchecks": read_jsonl(config.output.state_dir / "healthchecks.jsonl")})
             elif path == "/api/strategy-finder/domains":
                 self._json(domain_sets())
             elif path == "/api/strategy-finder/candidates":
@@ -65,10 +48,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
             elif path in {
                 "/api/status",
-                "/api/rules",
-                "/api/strategies",
-                "/api/jobs",
-                "/api/healthchecks",
                 "/api/strategy-finder/domains",
                 "/api/strategy-finder/candidates",
                 "/api/strategy-finder/runs",
@@ -94,14 +73,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json({"job": job}, status=HTTPStatus.ACCEPTED)
                 return
             jobs: dict[str, Any] = {
-                "/api/jobs/validate": ("validate", lambda _stop: _job_validate(config)),
-                "/api/jobs/sync-pull-only": ("sync-pull-only", lambda _stop: _job_sync(config)),
-                "/api/jobs/render-dry-run": ("render-dry-run", lambda _stop: _job_render(config)),
-                "/api/jobs/healthcheck-direct": ("healthcheck-direct", lambda _stop: _job_healthcheck(config, payload)),
-                "/api/jobs/zapret-strategy-check": (
-                    "zapret-strategy-check",
-                    lambda _stop: _job_zapret_strategy_check(config, payload),
-                ),
                 "/api/jobs/zapret-standard-discovery": (
                     "zapret-standard-discovery",
                     lambda stop: _job_zapret_standard_discovery(config, payload, stop),
@@ -109,10 +80,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/jobs/zapret-multi-domain-discovery": (
                     "zapret-multi-domain-discovery",
                     lambda stop: _job_zapret_multi_domain_discovery(config, payload, stop),
-                ),
-                "/api/jobs/zapret-custom-verification": (
-                    "zapret-custom-verification",
-                    lambda stop: _job_zapret_custom_verification(config, payload, stop),
                 ),
             }
             if path not in jobs:
@@ -258,7 +225,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 }
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 430px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -312,13 +279,13 @@ button {
   background: var(--blue);
   color: #ffffff;
   border-radius: 6px;
-  padding: 0 12px;
+  padding: 8px 12px;
   font-size: 14px;
+  line-height: 1.25;
   font-weight: 600;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
 button.secondary { background: var(--surface-soft); color: var(--blue-strong); }
@@ -328,11 +295,17 @@ button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
 button.secondary.danger { background: var(--surface-soft); color: var(--red); }
 button.secondary.danger:hover { background: var(--red-soft); }
 button:disabled { opacity: .55; cursor: default; }
-.button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.button-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
 .button-row button {
   min-height: 44px;
-  white-space: normal;
-  text-overflow: clip;
+}
+.run-actions button {
+  min-height: 54px;
 }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .time-limit-field[hidden] { display: none; }
@@ -359,7 +332,7 @@ button:disabled { opacity: .55; cursor: default; }
 .preset-actions,
 .domain-picker-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
 }
 .domain-picker-row { grid-template-columns: minmax(0, 1fr) auto; }
@@ -656,7 +629,7 @@ button:disabled { opacity: .55; cursor: default; }
 .badge.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
 .badge.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; min-width: 0; max-width: 100%; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; table-layout: auto; }
 th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 th { color: var(--text-soft); font-size: 12px; font-weight: 700; background: var(--surface-soft); }
 tr:last-child td { border-bottom: 0; }
@@ -846,7 +819,7 @@ pre {
                 <span>Пропустить проверку IP/port-блокировки</span>
               </label>
             </div>
-            <div class="button-row">
+            <div class="button-row run-actions">
               <button data-action="standard-discovery" title="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта.">Обычный поиск: домены по очереди</button>
               <button class="secondary" data-action="multi-domain-discovery" title="Экспериментальный режим: одна стратегия запускается один раз, затем параллельно проверяется на выбранных доменах.">Эксперимент: стратегия сразу по доменам</button>
               <button class="secondary" data-action="refresh" title="Обновляет статус, историю, лог и список найденных кандидатов.">Обновить данные</button>
@@ -967,10 +940,8 @@ const state = { status: null, candidates: [], finderRuns: [], finderLog: null, d
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
-  'zapret-custom-verification': 'Проверка кандидата',
   'standard-discovery': 'Поиск стратегий',
-  'multi-domain-discovery': 'Стратегия -> домены',
-  'custom-verification': 'Проверка кандидата'
+  'multi-domain-discovery': 'Стратегия -> домены'
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 let toastTimer = null;
@@ -1795,83 +1766,11 @@ setInterval(refresh, 5000);
 def status_payload(config: AppConfig) -> dict[str, Any]:
     return {
         "state": read_state(config.output.state_dir),
-        "repos": {
-            "rules": str(config.repos.rules),
-            "strategies": str(config.repos.strategies),
-        },
         "paths": {
-            "rendered_dir": str(config.output.rendered_dir),
-            "evidence_dir": str(config.output.evidence_dir),
             "state_dir": str(config.output.state_dir),
         },
         "zapret2": check_install(),
     }
-
-
-def strategy_payload(config: AppConfig) -> list[dict[str, str]]:
-    items = []
-    for path in list_local_strategies(config.repos.strategies):
-        metadata_path = path / "metadata.yaml"
-        strategy_id = path.name
-        status = "unknown"
-        if metadata_path.exists():
-            for line in metadata_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if line.startswith("id:"):
-                    strategy_id = line.split(":", 1)[1].strip()
-                elif line.startswith("status:"):
-                    status = line.split(":", 1)[1].strip()
-        items.append({"id": strategy_id, "status": status, "path": str(path)})
-    return items
-
-
-def _job_validate(config: AppConfig) -> dict[str, Any]:
-    errors = validate_all(config)
-    state = read_state(config.output.state_dir)
-    state["last_validate_at"] = now_iso()
-    state["last_error"] = "; ".join(errors) if errors else None
-    write_state(config.output.state_dir, state)
-    if errors:
-        raise RuntimeError("; ".join(errors))
-    return {"errors": []}
-
-
-def _job_sync(config: AppConfig) -> dict[str, Any]:
-    pull_only([config.repos.rules, config.repos.strategies])
-    state = read_state(config.output.state_dir)
-    state["last_sync_at"] = now_iso()
-    write_state(config.output.state_dir, state)
-    return {"synced": True}
-
-
-def _job_render(config: AppConfig) -> dict[str, Any]:
-    manifest = render_dry_run(config)
-    state = read_state(config.output.state_dir)
-    state["last_render_at"] = now_iso()
-    state["selected_strategy"] = manifest.get("selected_strategy")
-    write_state(config.output.state_dir, state)
-    return manifest
-
-
-def _job_healthcheck(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
-    raw_domains = payload.get("domains") or []
-    if isinstance(raw_domains, str):
-        raw_domains = [raw_domains]
-    domains = [str(domain).strip() for domain in raw_domains if str(domain).strip()]
-    if not domains:
-        domains = [entry for entry in extract_hostlist(load_stable_rules(config.repos.rules)) if not entry.startswith("#")]
-    results = check_domains_direct(domains, timeout_seconds=config.healthcheck.timeout_seconds)
-    report = config.output.state_dir / "healthchecks" / f"{now_iso().replace(':', '')}.yaml"
-    write_report(report, results)
-    append_jsonl(
-        config.output.state_dir / "healthchecks.jsonl",
-        {
-            "timestamp": now_iso(),
-            "report": str(report),
-            "checked": len(results),
-            "success": sum(1 for result in results if result.ok),
-        },
-    )
-    return {"report": str(report), "checked": len(results)}
 
 
 def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
@@ -1911,45 +1810,6 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         curl_parallelism=_payload_int(payload, "curl_parallelism", 4),
         stop_event=stop_event,
     )
-
-
-def _job_zapret_custom_verification(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
-    candidate_id = str(payload.get("candidate_id") or "").strip()
-    if not candidate_id:
-        raise ValueError("candidate_id is required")
-    candidate = find_candidate(config.output.state_dir, candidate_id)
-    domains = _payload_domains(payload)
-    return run_custom_verification(
-        candidate,
-        domains,
-        config.output.state_dir,
-        timeout_seconds=int(payload.get("timeout_seconds") or 3600),
-        include_quic=bool(payload.get("include_quic", True)),
-        stop_event=stop_event,
-    )
-
-
-def _job_zapret_strategy_check(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
-    domain = str(payload.get("domain") or "").strip()
-    strategy_path = str(payload.get("strategy_path") or "").strip()
-    if not domain:
-        raise ValueError("domain is required")
-    if not strategy_path:
-        raise ValueError("strategy_path is required")
-    result = run_check(domain, Path(strategy_path), timeout_seconds=int(payload.get("timeout_seconds") or 60))
-    out_dir = config.output.state_dir / "zapret-checks"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = now_iso().replace(":", "")
-    (out_dir / f"{stamp}.stdout.log").write_text(result.stdout, encoding="utf-8")
-    (out_dir / f"{stamp}.stderr.log").write_text(result.stderr, encoding="utf-8")
-    return {
-        "domain": domain,
-        "strategy_path": strategy_path,
-        "returncode": result.returncode,
-        "stdout_log": str(out_dir / f"{stamp}.stdout.log"),
-        "stderr_log": str(out_dir / f"{stamp}.stderr.log"),
-    }
-
 
 def _payload_domains(payload: dict[str, Any]) -> list[str]:
     raw = payload.get("domains") or []
