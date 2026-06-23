@@ -35,6 +35,21 @@ http://<ip-raspberry-pi>:8080/
 GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -c 'sudo apt-get update && sudo apt-get install -y git && tmp="$(mktemp -d)" && git clone "$GP_REPO_URL" "$tmp" && bash "$tmp/scripts/install-raspberry-pi.sh"'
 ```
 
+## Установка zapret2 отдельно
+
+Полный установщик выше уже ставит `zapret2` автоматически. Если нужно установить только `zapret2` без установки веб-интерфейса, выполните:
+
+```bash
+bash -lc 'sudo apt-get update && sudo apt-get install -y git bsdextrautils && if [ -d /opt/zapret2/.git ]; then sudo git -C /opt/zapret2 pull --ff-only; else sudo git clone https://github.com/bol-van/zapret2.git /opt/zapret2; fi && sudo /opt/zapret2/install_bin.sh'
+```
+
+После этого должны появиться файлы:
+
+```text
+/opt/zapret2/blockcheck2.sh
+/opt/zapret2/nfq2/nfqws2
+```
+
 ## Проверка zapret2
 
 Установщик сам скачивает `zapret2` из `https://github.com/bol-van/zapret2.git` и кладет его в:
