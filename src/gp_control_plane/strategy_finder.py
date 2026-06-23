@@ -100,7 +100,7 @@ def run_multi_domain_discovery(
     timeout_seconds: int,
     include_quic: bool = True,
     scan_level: str = "standard",
-    curl_parallelism: int = 4,
+    curl_parallelism: int = 10,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     return _run_multidomain_blockcheck_live(
@@ -371,7 +371,7 @@ def _run_blockcheck_live(
             env=full_env,
             start_new_session=hasattr(os, "setsid"),
         )
-        deadline = time.monotonic() + timeout_seconds
+        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
         while True:
             if stop_event is not None and stop_event.is_set():
                 stopped = True
@@ -381,17 +381,20 @@ def _run_blockcheck_live(
                 _cleanup_nft_blockcheck_tables()
                 returncode = process.returncode
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                status = "timeout"
-                _stop_process_group(process)
-                _cleanup_blockcheck_processes()
-                _cleanup_nft_blockcheck_tables()
-                returncode = process.returncode
-                break
+            wait_timeout = 1.0
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    status = "timeout"
+                    _stop_process_group(process)
+                    _cleanup_blockcheck_processes()
+                    _cleanup_nft_blockcheck_tables()
+                    returncode = process.returncode
+                    break
+                wait_timeout = min(1.0, remaining)
             try:
-                returncode = process.wait(timeout=min(1.0, remaining))
+                returncode = process.wait(timeout=wait_timeout)
                 if returncode != 0:
                     status = "failed"
                 break
@@ -446,7 +449,7 @@ def _run_multidomain_blockcheck_live(
     normalized_scan_level = scan_level if scan_level in {"quick", "standard", "force"} else "standard"
     blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     zapret_base = blockcheck_path.parent
-    normalized_parallelism = _bounded_int(curl_parallelism, default=4, minimum=1, maximum=16)
+    normalized_parallelism = _bounded_int(curl_parallelism, default=10, minimum=1, maximum=16)
 
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -548,7 +551,7 @@ def _run_blockcheck_command_live(
             env=env,
             start_new_session=hasattr(os, "setsid"),
         )
-        deadline = time.monotonic() + timeout_seconds
+        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
         while True:
             if stop_event is not None and stop_event.is_set():
                 stopped = True
@@ -558,17 +561,20 @@ def _run_blockcheck_command_live(
                 _cleanup_nft_blockcheck_tables()
                 returncode = process.returncode
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                status = "timeout"
-                _stop_process_group(process)
-                _cleanup_blockcheck_processes()
-                _cleanup_nft_blockcheck_tables()
-                returncode = process.returncode
-                break
+            wait_timeout = 1.0
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    status = "timeout"
+                    _stop_process_group(process)
+                    _cleanup_blockcheck_processes()
+                    _cleanup_nft_blockcheck_tables()
+                    returncode = process.returncode
+                    break
+                wait_timeout = min(1.0, remaining)
             try:
-                returncode = process.wait(timeout=min(1.0, remaining))
+                returncode = process.wait(timeout=wait_timeout)
                 if returncode != 0:
                     status = "failed"
                 break
@@ -903,7 +909,7 @@ def _shell_word_count(value: str) -> int:
 def _eta_parallelism_for_run(run: dict[str, Any]) -> int:
     if str(run.get("kind") or "") != "multi-domain-discovery":
         return 1
-    return _bounded_int(run.get("curl_parallelism"), default=4, minimum=1, maximum=16)
+    return _bounded_int(run.get("curl_parallelism"), default=10, minimum=1, maximum=16)
 
 
 def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: bool, parallelism: int = 1) -> int | None:

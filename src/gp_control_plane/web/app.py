@@ -323,8 +323,14 @@ button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
 button.secondary.danger { background: #ffffff; color: var(--red); }
 button.secondary.danger:hover { background: var(--red-soft); }
 button:disabled { opacity: .55; cursor: default; }
-.button-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.button-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.button-row button {
+  min-height: 44px;
+  white-space: normal;
+  text-overflow: clip;
+}
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.time-limit-field[hidden] { display: none; }
 .candidate-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -624,7 +630,7 @@ pre {
         <h1>Подбор стратегий zapret2</h1>
         <div class="subtitle">Raspberry Pi · blockcheck2 · live-лог</div>
       </div>
-      <button class="secondary" data-action="refresh">Обновить</button>
+      <button class="secondary" data-action="refresh" title="Обновляет статус, историю, лог и список найденных кандидатов.">Обновить</button>
     </div>
   </header>
   <main class="main">
@@ -675,23 +681,27 @@ pre {
               <button class="secondary" data-fill="coverage">Покрытие</button>
               <button class="secondary" data-fill="all">Все</button>
             </div>
-            <div class="field">
+            <label class="checkbox-row">
+              <input id="limit-time-enabled" type="checkbox">
+              <span>Ограничить время поиска</span>
+            </label>
+            <div class="field time-limit-field" id="time-limit-field" hidden>
               <label for="finder-timeout-hours">Лимит поиска, часов</label>
               <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
             </div>
             <div class="field">
               <label for="curl-parallelism">Параллельных curl в режиме стратегия -> домены</label>
-              <input id="curl-parallelism" type="number" min="1" max="16" step="1" value="4">
+              <input id="curl-parallelism" type="number" min="1" max="16" step="1" value="10">
             </div>
             <label class="checkbox-row">
               <input id="include-quic" type="checkbox" checked>
               <span>Проверять QUIC/HTTP3</span>
             </label>
             <div class="button-row">
-              <button data-action="standard-discovery">Запустить поиск</button>
-              <button class="secondary" data-action="multi-domain-discovery">Стратегия -> домены</button>
-              <button class="secondary" data-action="refresh">Обновить</button>
-              <button class="secondary danger" data-action="stop-current" disabled>Остановить</button>
+              <button data-action="standard-discovery" title="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта.">Обычный поиск: домены по очереди</button>
+              <button class="secondary" data-action="multi-domain-discovery" title="Экспериментальный режим: одна стратегия запускается один раз, затем параллельно проверяется на выбранных доменах.">Эксперимент: стратегия сразу по доменам</button>
+              <button class="secondary" data-action="refresh" title="Обновляет статус, историю, лог и список найденных кандидатов.">Обновить данные</button>
+              <button class="secondary danger" data-action="stop-current" title="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." disabled>Остановить текущий запуск</button>
             </div>
             <div class="message" id="message">Готово</div>
           </div>
@@ -742,7 +752,7 @@ pre {
           <h2>Терминал</h2>
           <div class="terminal-actions">
             <span class="badge" id="finder-log-status">-</span>
-            <button class="secondary danger" data-action="stop-current" disabled>Остановить</button>
+            <button class="secondary danger" data-action="stop-current" title="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." disabled>Остановить</button>
           </div>
         </div>
         <div class="progress-panel">
@@ -776,7 +786,7 @@ pre {
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
 <script>
-const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', candidateCopyGroups: {}, openCandidateDomains: {} };
+const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', openCandidateDomains: {}, openCommonProtocols: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -890,19 +900,26 @@ function defaultDomains(kind){
 function fillDomains(kind){
   const domains = [...new Set(defaultDomains(kind))];
   el('finder-domains').value = domains.join('\\n');
+  state.domainsTouched = true;
 }
 function finderDomains(){
   const raw = el('finder-domains').value.trim();
   if (!raw) return defaultDomains('critical');
   return raw.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean);
 }
-function timeoutSeconds(){
+function selectedFinderDomains(){
+  const raw = el('finder-domains').value.trim();
+  if (!raw) return [];
+  return [...new Set(raw.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean))];
+}
+function timeoutSecondsOrNull(){
+  if (!el('limit-time-enabled').checked) return null;
   const hours = Number(el('finder-timeout-hours').value || 6);
   return Math.max(60, Math.round(hours * 3600));
 }
 function curlParallelism(){
-  const value = Number(el('curl-parallelism').value || 4);
-  if (!Number.isFinite(value)) return 4;
+  const value = Number(el('curl-parallelism').value || 10);
+  if (!Number.isFinite(value)) return 10;
   return Math.max(1, Math.min(16, Math.round(value)));
 }
 function renderMetrics(){
@@ -933,14 +950,15 @@ function renderMetrics(){
 function renderCandidates(){
   const rows = filteredCandidates();
   const domainRows = rows.filter((row) => candidateDomains(row).length);
-  const commonRows = rows.filter((row) => commonSeen(row).length);
+  const commonRows = dynamicCommonRows(rows);
   const activeRows = state.candidateView === 'common' ? commonRows : domainRows;
   setText('candidates-count', String(state.candidates.length));
-  setText('candidate-summary', `Показано ${activeRows.length} из ${state.candidates.length}`);
+  const selectedDomains = selectedCommonDomains();
+  const commonNote = state.candidateView === 'common' && selectedDomains.length >= 2 ? ` · общие для ${selectedDomains.length} доменов` : '';
+  setText('candidate-summary', `Показано ${activeRows.length} из ${state.candidates.length}${commonNote}`);
   document.querySelectorAll('[data-candidate-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.candidateView === state.candidateView);
   });
-  state.candidateCopyGroups = {};
   if (state.candidateView === 'common') {
     renderCommonCandidates(commonRows);
   } else {
@@ -955,49 +973,60 @@ function renderDomainCandidates(rows){
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
     const total = domainGroup.protocols.reduce((sum, item) => sum + item.rows.length, 0);
-    const open = state.candidateFilter || state.openCandidateDomains[domainGroup.domain] ? ' open' : '';
+    const expanded = Boolean(state.candidateFilter || state.openCandidateDomains[domainGroup.domain]);
+    const open = expanded ? ' open' : '';
+    const protocolBadges = domainGroup.protocols.map((item) => badge(`${item.protocol}: ${item.rows.length}`, item.protocol === 'quic' ? 'warn' : 'good')).join('');
     return `<details class="domain-group" data-domain="${esc(domainGroup.domain)}"${open}>
       <summary class="domain-header">
         <div class="domain-title">${esc(domainGroup.domain)}</div>
-        <div class="domain-meta">${badge(`${total} стратегий`, '')}</div>
+        <div class="domain-meta">
+          ${badge(`${total} стратегий`, '')}${protocolBadges}
+          <button class="secondary" data-copy-scope="domain" data-copy-domain="${esc(domainGroup.domain)}" title="Копирует все стратегии, найденные для этого домена." type="button">Копировать домен</button>
+        </div>
       </summary>
-      ${domainGroup.protocols.map((protocolGroup) => {
-        const copyKey = registerCopyText(protocolGroup.rows.map((row) => row.args || '').filter(Boolean).join('\\n'));
+      ${expanded ? domainGroup.protocols.map((protocolGroup) => {
         return `<div class="protocol-group">
           <div class="protocol-header">
             <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')} ${badge(`${protocolGroup.rows.length} стратегий`, '')}</div>
-            <button class="secondary" data-copy-candidate-group="${copyKey}" type="button">Копировать группу</button>
+            <button class="secondary" data-copy-scope="domain" data-copy-domain="${esc(domainGroup.domain)}" data-copy-protocol="${esc(protocolGroup.protocol)}" title="Копирует стратегии этого протокола для выбранного домена." type="button">Копировать группу</button>
           </div>
           <div class="strategy-list">
             ${protocolGroup.rows.map((row, index) => strategyItem(row, index)).join('')}
           </div>
         </div>`;
-      }).join('')}
+      }).join('') : ''}
     </details>`;
   }).join('')}</div>`;
 }
 function renderCommonCandidates(rows){
+  const selectedDomains = selectedCommonDomains();
+  if (selectedDomains.length < 2) {
+    el('candidates-table').innerHTML = `<div class="empty">Выберите минимум два домена во вкладке Подбор, чтобы увидеть стратегии, найденные сразу для всех выбранных доменов.</div>`;
+    return;
+  }
   const groups = protocolGroups(rows);
   if (!groups.length) {
-    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'Общих стратегий пока нет. Они появятся, если blockcheck2 напечатает блок COMMON.' : 'Кандидатов пока нет'}</div>`;
+    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'Общих стратегий для выбранных доменов пока нет. Если подбор остановлен, сюда попадут уже сохраненные стратегии, которые встречаются у каждого выбранного домена.' : 'Кандидатов пока нет'}</div>`;
     return;
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
-    const copyKey = registerCopyText(protocolGroup.rows.map((row) => row.args || '').filter(Boolean).join('\\n'));
-    const domains = [...new Set(protocolGroup.rows.flatMap((row) => commonDomains(row)))];
-    return `<details class="domain-group" open>
+    const domains = selectedDomains;
+    const expanded = Boolean(state.candidateFilter || state.openCommonProtocols[protocolGroup.protocol]);
+    return `<details class="domain-group" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
       <summary class="domain-header">
         <div class="domain-title">${esc(protocolGroup.protocol)}</div>
-        <div class="domain-meta">${badge(`${protocolGroup.rows.length} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}</div>
+        <div class="domain-meta">
+          ${badge(`${protocolGroup.rows.length} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}
+          <button class="secondary" data-copy-scope="common" data-copy-protocol="${esc(protocolGroup.protocol)}" title="Копирует стратегии этого протокола, которые есть у всех выбранных доменов." type="button">Копировать группу</button>
+        </div>
       </summary>
       <div class="protocol-group">
         <div class="protocol-header">
           <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из запуска blockcheck2'}</div>
-          <button class="secondary" data-copy-candidate-group="${copyKey}" type="button">Копировать группу</button>
         </div>
-        <div class="strategy-list">
+        ${expanded ? `<div class="strategy-list">
           ${protocolGroup.rows.map((row, index) => strategyItem(row, index)).join('')}
-        </div>
+        </div>` : ''}
       </div>
     </details>`;
   }).join('')}</div>`;
@@ -1010,8 +1039,7 @@ function filteredCandidates(){
       row.id,
       row.protocol,
       row.args,
-      ...candidateDomains(row),
-      ...commonDomains(row)
+      ...candidateAllDomains(row)
     ].join(' ').toLowerCase();
     return haystack.includes(query);
   });
@@ -1025,6 +1053,20 @@ function commonSeen(row){
 }
 function commonDomains(row){
   return [...new Set(commonSeen(row).flatMap((item) => Array.isArray(item.domains) ? item.domains : []).map((item) => String(item || '').trim()).filter(Boolean))];
+}
+function candidateAllDomains(row){
+  return [...new Set([...candidateDomains(row), ...commonDomains(row)])];
+}
+function selectedCommonDomains(){
+  return selectedFinderDomains();
+}
+function dynamicCommonRows(rows){
+  const selectedDomains = selectedCommonDomains();
+  if (selectedDomains.length < 2) return [];
+  return rows.filter((row) => {
+    const domains = new Set(candidateAllDomains(row));
+    return selectedDomains.every((domain) => domains.has(domain));
+  });
 }
 function candidateGroups(rows){
   const domainMap = new Map();
@@ -1058,20 +1100,35 @@ function protocolGroups(rows){
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([protocol, protocolRows]) => ({ protocol, rows: protocolRows }));
 }
-function registerCopyText(text){
-  const key = `copy-${Object.keys(state.candidateCopyGroups).length}`;
-  state.candidateCopyGroups[key] = text;
-  return key;
-}
 function strategyItem(row, index){
-  const copyKey = registerCopyText(row.args || '');
+  const candidateId = esc(row.id || '');
   return `<div class="strategy-item">
     <div class="strategy-header">
       <div class="strategy-index">Стратегия ${index + 1}</div>
-      <button class="secondary" data-copy-candidate-strategy="${copyKey}" type="button">Копировать</button>
+      <button class="secondary" data-copy-candidate-id="${candidateId}" title="Копирует только эту стратегию." type="button">Копировать стратегию</button>
     </div>
     <code>${esc(row.args || '')}</code>
   </div>`;
+}
+function uniqueStrategyArgs(rows){
+  return [...new Set(rows.map((row) => String(row.args || '').trim()).filter(Boolean))];
+}
+function copyTextForButton(button){
+  if (button.dataset.copyCandidateId) {
+    const row = state.candidates.find((item) => String(item.id || '') === button.dataset.copyCandidateId);
+    return row ? String(row.args || '') : '';
+  }
+  if (!button.dataset.copyScope) return '';
+  let rows = filteredCandidates();
+  const protocol = button.dataset.copyProtocol || '';
+  if (button.dataset.copyScope === 'domain') {
+    const domain = button.dataset.copyDomain || '';
+    rows = rows.filter((row) => candidateDomains(row).includes(domain));
+  } else if (button.dataset.copyScope === 'common') {
+    rows = dynamicCommonRows(rows);
+  }
+  if (protocol) rows = rows.filter((row) => String(row.protocol || 'unknown') === protocol);
+  return uniqueStrategyArgs(rows).join('\\n');
 }
 async function copyText(text){
   if (!text) return false;
@@ -1203,7 +1260,11 @@ function scrollLogToBottom(){
   });
 }
 function renderAll(){
-  if (!el('finder-domains').value && state.domainSets) fillDomains('critical');
+  if (!state.domainsInitialized && !state.domainsTouched && !el('finder-domains').value.trim() && state.domainSets) {
+    const domains = [...new Set(defaultDomains('critical'))];
+    el('finder-domains').value = domains.join('\\n');
+    state.domainsInitialized = true;
+  }
   renderMetrics();
   renderCandidates();
   renderRuns();
@@ -1261,10 +1322,11 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.fill) fillDomains(button.dataset.fill);
-  if (button.dataset.copyCandidateGroup || button.dataset.copyCandidateStrategy) {
-    const copyKey = button.dataset.copyCandidateGroup || button.dataset.copyCandidateStrategy;
-    const groupText = state.candidateCopyGroups[copyKey] || '';
-    const single = Boolean(button.dataset.copyCandidateStrategy);
+  if (button.dataset.copyScope || button.dataset.copyCandidateId) {
+    event.preventDefault();
+    event.stopPropagation();
+    const groupText = copyTextForButton(button);
+    const single = Boolean(button.dataset.copyCandidateId);
     copyText(groupText).then((ok) => {
       if (ok) {
         hideCopyFallback();
@@ -1277,20 +1339,24 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (button.dataset.action === 'standard-discovery') {
-    startJob('/api/jobs/zapret-standard-discovery', {
+    const payload = {
       domains: finderDomains(),
-      include_quic: el('include-quic').checked,
-      timeout_seconds: timeoutSeconds()
-    }, 'Поиск стратегий');
+      include_quic: el('include-quic').checked
+    };
+    const timeout = timeoutSecondsOrNull();
+    if (timeout !== null) payload.timeout_seconds = timeout;
+    startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
   }
   if (button.dataset.action === 'multi-domain-discovery') {
-    startJob('/api/jobs/zapret-multi-domain-discovery', {
+    const payload = {
       domains: finderDomains(),
       include_quic: el('include-quic').checked,
-      timeout_seconds: timeoutSeconds(),
       scan_level: 'standard',
       curl_parallelism: curlParallelism()
-    }, 'Стратегия -> домены');
+    };
+    const timeout = timeoutSecondsOrNull();
+    if (timeout !== null) payload.timeout_seconds = timeout;
+    startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Стратегия -> домены');
   }
   if (button.dataset.action === 'stop-current') stopCurrentJob();
 });
@@ -1299,11 +1365,25 @@ document.addEventListener('input', (event) => {
     state.candidateFilter = event.target.value;
     renderCandidates();
   }
+  if (event.target && event.target.id === 'finder-domains') {
+    state.domainsTouched = true;
+    renderCandidates();
+  }
+});
+document.addEventListener('change', (event) => {
+  if (event.target && event.target.id === 'limit-time-enabled') {
+    el('time-limit-field').hidden = !event.target.checked;
+  }
 });
 document.addEventListener('toggle', (event) => {
   const details = event.target;
-  if (!details || !details.matches || !details.matches('details.domain-group[data-domain]')) return;
-  state.openCandidateDomains[details.dataset.domain] = details.open;
+  if (!details || !details.matches) return;
+  if (details.matches('details.domain-group[data-domain]')) {
+    state.openCandidateDomains[details.dataset.domain] = details.open;
+  }
+  if (details.matches('details.domain-group[data-common-protocol]')) {
+    state.openCommonProtocols[details.dataset.commonProtocol] = details.open;
+  }
 }, true);
 refresh();
 setInterval(refresh, 5000);
@@ -1399,7 +1479,7 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
     return run_standard_discovery(
         domains,
         config.output.state_dir,
-        timeout_seconds=int(payload.get("timeout_seconds") or 21600),
+        timeout_seconds=_payload_timeout_seconds(payload, default=0),
         include_quic=bool(payload.get("include_quic", True)),
         stop_event=stop_event,
     )
@@ -1410,10 +1490,10 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
     return run_multi_domain_discovery(
         domains,
         config.output.state_dir,
-        timeout_seconds=int(payload.get("timeout_seconds") or 21600),
+        timeout_seconds=_payload_timeout_seconds(payload, default=0),
         include_quic=bool(payload.get("include_quic", True)),
         scan_level=str(payload.get("scan_level") or "standard"),
-        curl_parallelism=int(payload.get("curl_parallelism") or 4),
+        curl_parallelism=int(payload.get("curl_parallelism") or 10),
         stop_event=stop_event,
     )
 
@@ -1463,3 +1543,13 @@ def _payload_domains(payload: dict[str, Any]) -> list[str]:
     if not isinstance(raw, list):
         raw = []
     return [str(domain).strip() for domain in raw if str(domain).strip()]
+
+
+def _payload_timeout_seconds(payload: dict[str, Any], default: int) -> int:
+    if "timeout_seconds" not in payload or payload.get("timeout_seconds") is None:
+        return default
+    try:
+        seconds = int(payload.get("timeout_seconds"))
+    except (TypeError, ValueError):
+        return default
+    return max(0, seconds)
