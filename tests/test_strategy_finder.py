@@ -257,7 +257,10 @@ pktws_check_http3()
             runner = _write_multidomain_runner(tmp, blockcheck)
             text = runner.read_text(encoding="utf-8")
 
+            self.assertIn("gp_md_run_protocol pktws_check_http curl_test_http", text)
             self.assertIn("gp_md_run_protocol pktws_check_https_tls12", text)
+            self.assertIn("gp_md_run_protocol pktws_check_https_tls13", text)
+            self.assertIn("gp_md_run_protocol pktws_check_http3", text)
             self.assertIn("for gp_domain in $DOMAINS", text)
             self.assertIn('pktws_start "$@"', text)
             self.assertIn("GP_MD_CURL_PARALLELISM", text)
@@ -299,6 +302,30 @@ pktws_check_http3()
         self.assertEqual(progress["remaining_attempts"], 20)
         self.assertEqual(progress["eta_parallelism"], 4)
         self.assertEqual(progress["eta_seconds"], 10)
+
+    def test_progress_eta_accounts_for_sequential_repeats(self) -> None:
+        plan = {
+            "total": 10,
+            "scripts": {"standard/10-test.sh": 10},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 5)
+
+        progress = progress_from_stdout(
+            stdout,
+            {
+                "id": "run-repeats",
+                "kind": "standard-discovery",
+                "status": "running",
+                "attempt_plan": plan,
+                "repeats": 3,
+                "repeat_parallel": False,
+            },
+        )
+
+        self.assertEqual(progress["eta_estimate_ms_per_attempt"], 6300)
+        self.assertEqual(progress["eta_seconds"], 31)
 
 
 if __name__ == "__main__":

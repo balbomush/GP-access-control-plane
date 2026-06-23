@@ -37,6 +37,32 @@ class CliSafetyTests(unittest.TestCase):
             parser.parse_args(["strategy-finder", "multi-domain-discovery", "--domain", "youtube.com"]).curl_parallelism,
             4,
         )
+        standard_args = parser.parse_args(
+            [
+                "strategy-finder",
+                "standard-discovery",
+                "--domain",
+                "youtube.com",
+                "--enable-http",
+                "--no-tls12",
+                "--enable-tls13",
+                "--scan-level",
+                "force",
+                "--repeats",
+                "3",
+                "--repeat-parallel",
+                "--no-skip-dnscheck",
+                "--no-skip-ipblock",
+            ]
+        )
+        self.assertTrue(standard_args.enable_http)
+        self.assertTrue(standard_args.no_tls12)
+        self.assertTrue(standard_args.enable_tls13)
+        self.assertEqual(standard_args.scan_level, "force")
+        self.assertEqual(standard_args.repeats, 3)
+        self.assertTrue(standard_args.repeat_parallel)
+        self.assertTrue(standard_args.no_skip_dnscheck)
+        self.assertTrue(standard_args.no_skip_ipblock)
         self.assertEqual(
             parser.parse_args(["strategy-finder", "custom-verification", "--candidate-id", "tls-test"]).finder_command,
             "custom-verification",

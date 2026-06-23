@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,49 @@ _ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
 _SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
 
 
+@dataclass(frozen=True)
+class DiscoveryOptions:
+    enable_http: bool = False
+    enable_tls12: bool = True
+    enable_tls13: bool = False
+    enable_quic: bool = True
+    scan_level: str = "standard"
+    repeats: int = 1
+    repeat_parallel: bool = False
+    skip_dnscheck: bool = True
+    skip_ipblock: bool = True
+
+    def normalized(self) -> "DiscoveryOptions":
+        scan_level = self.scan_level if self.scan_level in {"quick", "standard", "force"} else "standard"
+        repeats = _bounded_int(self.repeats, default=1, minimum=1, maximum=10)
+        if not any([self.enable_http, self.enable_tls12, self.enable_tls13, self.enable_quic]):
+            raise ValueError("at least one protocol check must be enabled")
+        return DiscoveryOptions(
+            enable_http=bool(self.enable_http),
+            enable_tls12=bool(self.enable_tls12),
+            enable_tls13=bool(self.enable_tls13),
+            enable_quic=bool(self.enable_quic),
+            scan_level=scan_level,
+            repeats=repeats,
+            repeat_parallel=bool(self.repeat_parallel),
+            skip_dnscheck=bool(self.skip_dnscheck),
+            skip_ipblock=bool(self.skip_ipblock),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enable_http": self.enable_http,
+            "enable_tls12": self.enable_tls12,
+            "enable_tls13": self.enable_tls13,
+            "enable_quic": self.enable_quic,
+            "scan_level": self.scan_level,
+            "repeats": self.repeats,
+            "repeat_parallel": self.repeat_parallel,
+            "skip_dnscheck": self.skip_dnscheck,
+            "skip_ipblock": self.skip_ipblock,
+        }
+
+
 def domain_sets() -> dict[str, list[str]]:
     return {
         "critical": list(CRITICAL_DOMAINS),
@@ -80,16 +124,34 @@ def run_standard_discovery(
     state_dir: Path,
     timeout_seconds: int,
     include_quic: bool = True,
+    enable_http: bool = False,
+    enable_tls12: bool = True,
+    enable_tls13: bool = False,
+    scan_level: str = "standard",
+    repeats: int = 1,
+    repeat_parallel: bool = False,
+    skip_dnscheck: bool = True,
+    skip_ipblock: bool = True,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    options = DiscoveryOptions(
+        enable_http=enable_http,
+        enable_tls12=enable_tls12,
+        enable_tls13=enable_tls13,
+        enable_quic=include_quic,
+        scan_level=scan_level,
+        repeats=repeats,
+        repeat_parallel=repeat_parallel,
+        skip_dnscheck=skip_dnscheck,
+        skip_ipblock=skip_ipblock,
+    ).normalized()
     return _run_blockcheck_live(
         state_dir=state_dir,
         kind="standard-discovery",
         domains=domains,
         timeout_seconds=timeout_seconds,
         test="standard",
-        enable_tls=True,
-        enable_quic=include_quic,
+        options=options,
         stop_event=stop_event,
     )
 
@@ -99,16 +161,33 @@ def run_multi_domain_discovery(
     state_dir: Path,
     timeout_seconds: int,
     include_quic: bool = True,
+    enable_http: bool = False,
+    enable_tls12: bool = True,
+    enable_tls13: bool = False,
     scan_level: str = "standard",
+    repeats: int = 1,
+    repeat_parallel: bool = False,
+    skip_dnscheck: bool = True,
+    skip_ipblock: bool = True,
     curl_parallelism: int = 4,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    options = DiscoveryOptions(
+        enable_http=enable_http,
+        enable_tls12=enable_tls12,
+        enable_tls13=enable_tls13,
+        enable_quic=include_quic,
+        scan_level=scan_level,
+        repeats=repeats,
+        repeat_parallel=repeat_parallel,
+        skip_dnscheck=skip_dnscheck,
+        skip_ipblock=skip_ipblock,
+    ).normalized()
     return _run_multidomain_blockcheck_live(
         state_dir=state_dir,
         domains=domains,
         timeout_seconds=timeout_seconds,
-        include_quic=include_quic,
-        scan_level=scan_level,
+        options=options,
         curl_parallelism=curl_parallelism,
         stop_event=stop_event,
     )
@@ -136,8 +215,12 @@ def run_custom_verification(
             domains=domains,
             timeout_seconds=timeout_seconds,
             test="custom",
-            enable_tls=protocol in {"tls", "http"},
-            enable_quic=include_quic and protocol == "quic",
+            options=DiscoveryOptions(
+                enable_http=protocol == "http",
+                enable_tls12=protocol == "tls",
+                enable_tls13=False,
+                enable_quic=include_quic and protocol == "quic",
+            ),
             list_paths=lists,
             candidate_id=str(candidate.get("id") or ""),
             stop_event=stop_event,
@@ -299,8 +382,7 @@ def _run_blockcheck_live(
     domains: list[str],
     timeout_seconds: int,
     test: str,
-    enable_tls: bool,
-    enable_quic: bool,
+    options: DiscoveryOptions,
     list_paths: dict[str, Path] | None = None,
     candidate_id: str = "",
     stop_event: threading.Event | None = None,
@@ -308,6 +390,7 @@ def _run_blockcheck_live(
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
+    options = options.normalized()
     clean_domains = _clean_domains(domains)
     full_env = os.environ.copy()
     full_env.update(
@@ -316,11 +399,15 @@ def _run_blockcheck_live(
             "DOMAINS": " ".join(clean_domains),
             "IPVS": "4",
             "TEST": test,
-            "SKIP_DNSCHECK": "1",
-            "ENABLE_HTTP": "0",
-            "ENABLE_HTTPS_TLS12": "1" if enable_tls else "0",
-            "ENABLE_HTTPS_TLS13": "0",
-            "ENABLE_HTTP3": "1" if enable_quic else "0",
+            "SKIP_DNSCHECK": "1" if options.skip_dnscheck else "0",
+            "SKIP_IPBLOCK": "1" if options.skip_ipblock else "0",
+            "ENABLE_HTTP": "1" if options.enable_http else "0",
+            "ENABLE_HTTPS_TLS12": "1" if options.enable_tls12 else "0",
+            "ENABLE_HTTPS_TLS13": "1" if options.enable_tls13 else "0",
+            "ENABLE_HTTP3": "1" if options.enable_quic else "0",
+            "SCANLEVEL": options.scan_level,
+            "REPEATS": str(options.repeats),
+            "PARALLEL": "1" if options.repeat_parallel else "0",
         }
     )
     for key, value in (list_paths or {}).items():
@@ -335,11 +422,12 @@ def _run_blockcheck_live(
     attempt_plan = _standard_attempt_plan(
         domains=clean_domains,
         test=test,
-        enable_http=False,
-        enable_tls=enable_tls,
-        enable_tls13=False,
-        enable_quic=enable_quic,
+        enable_http=options.enable_http,
+        enable_tls=options.enable_tls12,
+        enable_tls13=options.enable_tls13,
+        enable_quic=options.enable_quic,
     )
+    options_mapping = options.to_mapping()
     started = {
         "id": run_id,
         "kind": kind,
@@ -352,8 +440,16 @@ def _run_blockcheck_live(
         "stderr_log": str(stderr_log),
         "candidate_count": 0,
         "test": test,
-        "enable_tls": enable_tls,
-        "enable_quic": enable_quic,
+        "enable_http": options.enable_http,
+        "enable_tls": options.enable_tls12,
+        "enable_tls13": options.enable_tls13,
+        "enable_quic": options.enable_quic,
+        "scan_level": options.scan_level,
+        "repeats": options.repeats,
+        "repeat_parallel": options.repeat_parallel,
+        "skip_dnscheck": options.skip_dnscheck,
+        "skip_ipblock": options.skip_ipblock,
+        "discovery_options": options_mapping,
         "attempt_plan": attempt_plan,
     }
     append_jsonl(root / "runs.jsonl", started)
@@ -421,8 +517,16 @@ def _run_blockcheck_live(
         "stopped": stopped,
         "timeout_seconds": timeout_seconds,
         "test": test,
-        "enable_tls": enable_tls,
-        "enable_quic": enable_quic,
+        "enable_http": options.enable_http,
+        "enable_tls": options.enable_tls12,
+        "enable_tls13": options.enable_tls13,
+        "enable_quic": options.enable_quic,
+        "scan_level": options.scan_level,
+        "repeats": options.repeats,
+        "repeat_parallel": options.repeat_parallel,
+        "skip_dnscheck": options.skip_dnscheck,
+        "skip_ipblock": options.skip_ipblock,
+        "discovery_options": options_mapping,
         "attempt_plan": attempt_plan,
     }
     run["progress"] = progress_from_stdout(stdout, run)
@@ -437,16 +541,15 @@ def _run_multidomain_blockcheck_live(
     state_dir: Path,
     domains: list[str],
     timeout_seconds: int,
-    include_quic: bool,
-    scan_level: str,
+    options: DiscoveryOptions,
     curl_parallelism: int,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
+    options = options.normalized()
     clean_domains = _clean_domains(domains)
-    normalized_scan_level = scan_level if scan_level in {"quick", "standard", "force"} else "standard"
     blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     zapret_base = blockcheck_path.parent
     normalized_parallelism = _bounded_int(curl_parallelism, default=4, minimum=1, maximum=10)
@@ -461,13 +564,15 @@ def _run_multidomain_blockcheck_live(
                 "DOMAINS": " ".join(clean_domains),
                 "IPVS": "4",
                 "TEST": "standard",
-                "SKIP_DNSCHECK": "1",
-                "SKIP_IPBLOCK": "1",
-                "ENABLE_HTTP": "0",
-                "ENABLE_HTTPS_TLS12": "1",
-                "ENABLE_HTTPS_TLS13": "0",
-                "ENABLE_HTTP3": "1" if include_quic else "0",
-                "SCANLEVEL": normalized_scan_level,
+                "SKIP_DNSCHECK": "1" if options.skip_dnscheck else "0",
+                "SKIP_IPBLOCK": "1" if options.skip_ipblock else "0",
+                "ENABLE_HTTP": "1" if options.enable_http else "0",
+                "ENABLE_HTTPS_TLS12": "1" if options.enable_tls12 else "0",
+                "ENABLE_HTTPS_TLS13": "1" if options.enable_tls13 else "0",
+                "ENABLE_HTTP3": "1" if options.enable_quic else "0",
+                "SCANLEVEL": options.scan_level,
+                "REPEATS": str(options.repeats),
+                "PARALLEL": "1" if options.repeat_parallel else "0",
                 "GP_MD_CURL_PARALLELISM": str(normalized_parallelism),
                 "ZAPRET_BASE": str(zapret_base),
                 "ZAPRET_RW": str(zapret_base),
@@ -481,9 +586,7 @@ def _run_multidomain_blockcheck_live(
             domains=clean_domains,
             timeout_seconds=timeout_seconds,
             test="standard",
-            enable_tls=True,
-            enable_quic=include_quic,
-            scan_level=normalized_scan_level,
+            options=options,
             curl_parallelism=normalized_parallelism,
             stop_event=stop_event,
         )
@@ -497,13 +600,12 @@ def _run_blockcheck_command_live(
     domains: list[str],
     timeout_seconds: int,
     test: str,
-    enable_tls: bool,
-    enable_quic: bool,
-    scan_level: str = "",
+    options: DiscoveryOptions,
     curl_parallelism: int | None = None,
     candidate_id: str = "",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    options = options.normalized()
     root = _finder_dir(state_dir)
     logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -513,11 +615,12 @@ def _run_blockcheck_command_live(
     attempt_plan = _standard_attempt_plan(
         domains=domains,
         test=test,
-        enable_http=False,
-        enable_tls=enable_tls,
-        enable_tls13=False,
-        enable_quic=enable_quic,
+        enable_http=options.enable_http,
+        enable_tls=options.enable_tls12,
+        enable_tls13=options.enable_tls13,
+        enable_quic=options.enable_quic,
     )
+    options_mapping = options.to_mapping()
     started = {
         "id": run_id,
         "kind": kind,
@@ -530,9 +633,16 @@ def _run_blockcheck_command_live(
         "stderr_log": str(stderr_log),
         "candidate_count": 0,
         "test": test,
-        "enable_tls": enable_tls,
-        "enable_quic": enable_quic,
-        "scan_level": scan_level,
+        "enable_http": options.enable_http,
+        "enable_tls": options.enable_tls12,
+        "enable_tls13": options.enable_tls13,
+        "enable_quic": options.enable_quic,
+        "scan_level": options.scan_level,
+        "repeats": options.repeats,
+        "repeat_parallel": options.repeat_parallel,
+        "skip_dnscheck": options.skip_dnscheck,
+        "skip_ipblock": options.skip_ipblock,
+        "discovery_options": options_mapping,
         "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
@@ -601,9 +711,16 @@ def _run_blockcheck_command_live(
         "stopped": stopped,
         "timeout_seconds": timeout_seconds,
         "test": test,
-        "enable_tls": enable_tls,
-        "enable_quic": enable_quic,
-        "scan_level": scan_level,
+        "enable_http": options.enable_http,
+        "enable_tls": options.enable_tls12,
+        "enable_tls13": options.enable_tls13,
+        "enable_quic": options.enable_quic,
+        "scan_level": options.scan_level,
+        "repeats": options.repeats,
+        "repeat_parallel": options.repeat_parallel,
+        "skip_dnscheck": options.skip_dnscheck,
+        "skip_ipblock": options.skip_ipblock,
+        "discovery_options": options_mapping,
         "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
@@ -675,7 +792,8 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
         percent = (script_index / script_total * 100.0) if script_total else None
     elapsed = _elapsed_seconds(run.get("timestamp"))
     eta_parallelism = _eta_parallelism_for_run(run)
-    eta = _eta_from_remaining_attempts(attempted, attempt_total, completed, eta_parallelism)
+    eta_ms_per_attempt = _eta_ms_per_attempt_for_run(run)
+    eta = _eta_from_remaining_attempts(attempted, attempt_total, completed, eta_parallelism, eta_ms_per_attempt)
     return {
         "attempted": attempted,
         "attempt_total": attempt_total,
@@ -689,8 +807,10 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
         "percent": percent,
         "elapsed_seconds": elapsed,
         "eta_seconds": eta,
-        "eta_estimate_ms_per_attempt": ATTEMPT_TIMEOUT_ESTIMATE_MS,
+        "eta_estimate_ms_per_attempt": eta_ms_per_attempt,
         "eta_parallelism": eta_parallelism,
+        "repeats": _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10),
+        "repeat_parallel": _truthy(run.get("repeat_parallel"), default=False),
         "attempt_plan_source": attempt_plan.get("source") or "",
     }
 
@@ -912,7 +1032,20 @@ def _eta_parallelism_for_run(run: dict[str, Any]) -> int:
     return _bounded_int(run.get("curl_parallelism"), default=4, minimum=1, maximum=10)
 
 
-def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: bool, parallelism: int = 1) -> int | None:
+def _eta_ms_per_attempt_for_run(run: dict[str, Any]) -> int:
+    repeats = _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10)
+    if _truthy(run.get("repeat_parallel"), default=False):
+        repeats = 1
+    return ATTEMPT_TIMEOUT_ESTIMATE_MS * repeats
+
+
+def _eta_from_remaining_attempts(
+    attempted: int,
+    attempt_total: int,
+    completed: bool,
+    parallelism: int = 1,
+    ms_per_attempt: int = ATTEMPT_TIMEOUT_ESTIMATE_MS,
+) -> int | None:
     if completed:
         return 0
     if not attempt_total:
@@ -921,7 +1054,7 @@ def _eta_from_remaining_attempts(attempted: int, attempt_total: int, completed: 
     if remaining <= 0:
         return 0
     effective_remaining = (remaining + max(1, parallelism) - 1) // max(1, parallelism)
-    return max(0, int((effective_remaining * ATTEMPT_TIMEOUT_ESTIMATE_MS) / 1000))
+    return max(0, int((effective_remaining * max(1, ms_per_attempt)) / 1000))
 
 
 def _truthy(value: Any, default: bool) -> bool:
@@ -1367,7 +1500,9 @@ trap sigsilent PIPE
 trap sigsilent HUP
 for IPV in $IPVS; do
 	configure_ip_version
+	[ "$ENABLE_HTTP" = 1 ] && gp_md_run_protocol pktws_check_http curl_test_http tcp "$HTTP_PORT"
 	[ "$ENABLE_HTTPS_TLS12" = 1 ] && gp_md_run_protocol pktws_check_https_tls12 curl_test_https_tls12 tcp "$HTTPS_PORT"
+	[ "$ENABLE_HTTPS_TLS13" = 1 ] && gp_md_run_protocol pktws_check_https_tls13 curl_test_https_tls13 tcp "$HTTPS_PORT"
 	[ "$ENABLE_HTTP3" = 1 ] && gp_md_run_protocol pktws_check_http3 curl_test_http3 udp "$QUIC_PORT"
 done
 trap - HUP

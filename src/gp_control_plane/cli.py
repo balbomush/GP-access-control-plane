@@ -73,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     finder_standard.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
     finder_standard.add_argument("--timeout-seconds", type=int, default=21600)
     finder_standard.add_argument("--no-quic", action="store_true")
+    finder_standard.add_argument("--enable-http", action="store_true")
+    finder_standard.add_argument("--no-tls12", action="store_true")
+    finder_standard.add_argument("--enable-tls13", action="store_true")
+    finder_standard.add_argument("--scan-level", choices=["quick", "standard", "force"], default="standard")
+    finder_standard.add_argument("--repeats", type=int, default=1)
+    finder_standard.add_argument("--repeat-parallel", action="store_true")
+    finder_standard.add_argument("--no-skip-dnscheck", action="store_true")
+    finder_standard.add_argument("--no-skip-ipblock", action="store_true")
     finder_multi = finder_subparsers.add_parser(
         "multi-domain-discovery",
         help="Run experimental strategy-first discovery across multiple domains",
@@ -80,7 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     finder_multi.add_argument("--domain", action="append", default=[], help="Domain to test; can be repeated")
     finder_multi.add_argument("--timeout-seconds", type=int, default=21600)
     finder_multi.add_argument("--no-quic", action="store_true")
+    finder_multi.add_argument("--enable-http", action="store_true")
+    finder_multi.add_argument("--no-tls12", action="store_true")
+    finder_multi.add_argument("--enable-tls13", action="store_true")
     finder_multi.add_argument("--scan-level", choices=["quick", "standard", "force"], default="standard")
+    finder_multi.add_argument("--repeats", type=int, default=1)
+    finder_multi.add_argument("--repeat-parallel", action="store_true")
+    finder_multi.add_argument("--no-skip-dnscheck", action="store_true")
+    finder_multi.add_argument("--no-skip-ipblock", action="store_true")
     finder_multi.add_argument("--curl-parallelism", type=int, default=4)
     finder_custom = finder_subparsers.add_parser("custom-verification", help="Verify a saved candidate with custom list")
     finder_custom.add_argument("--candidate-id", required=True)
@@ -187,6 +202,14 @@ def _main(args: argparse.Namespace) -> int:
                 config.output.state_dir,
                 timeout_seconds=args.timeout_seconds,
                 include_quic=not args.no_quic,
+                enable_http=args.enable_http,
+                enable_tls12=not args.no_tls12,
+                enable_tls13=args.enable_tls13,
+                scan_level=args.scan_level,
+                repeats=args.repeats,
+                repeat_parallel=args.repeat_parallel,
+                skip_dnscheck=not args.no_skip_dnscheck,
+                skip_ipblock=not args.no_skip_ipblock,
             )
             _print_json(run)
             return 0
@@ -196,7 +219,14 @@ def _main(args: argparse.Namespace) -> int:
                 config.output.state_dir,
                 timeout_seconds=args.timeout_seconds,
                 include_quic=not args.no_quic,
+                enable_http=args.enable_http,
+                enable_tls12=not args.no_tls12,
+                enable_tls13=args.enable_tls13,
                 scan_level=args.scan_level,
+                repeats=args.repeats,
+                repeat_parallel=args.repeat_parallel,
+                skip_dnscheck=not args.no_skip_dnscheck,
+                skip_ipblock=not args.no_skip_ipblock,
                 curl_parallelism=args.curl_parallelism,
             )
             _print_json(run)

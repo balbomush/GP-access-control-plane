@@ -351,6 +351,11 @@ button:disabled { opacity: .55; cursor: default; }
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 8px;
 }
+.protocol-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+}
 .preset-actions,
 .domain-picker-row {
   display: grid;
@@ -696,6 +701,7 @@ pre {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
   .status-grid, .button-row, .fill-row, .candidate-toolbar, .preset-grid, .preset-actions, .domain-picker-row { grid-template-columns: 1fr; }
+  .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
   .candidate-summary { white-space: normal; }
@@ -791,11 +797,55 @@ pre {
             <div class="field">
               <label for="curl-parallelism">Параллельных curl в режиме стратегия -> домены</label>
               <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
+              <div class="helper-text">Для экспериментального режима: одна стратегия запускается один раз, затем выбранные домены проверяются параллельными curl. Остальные настройки blockcheck2 ниже также применяются. Если включить параллельные повторы, реальное число curl может быть: этот лимит × повторы.</div>
             </div>
-            <label class="checkbox-row">
-              <input id="include-quic" type="checkbox" checked>
-              <span>Проверять QUIC/HTTP3</span>
-            </label>
+            <div class="preset-panel finder-options-panel">
+              <div class="helper-text">Настройки blockcheck2, которые реально влияют на подбор стратегий.</div>
+              <div class="protocol-grid">
+                <label class="checkbox-row">
+                  <input id="enable-http" type="checkbox">
+                  <span>HTTP</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="enable-tls12" type="checkbox" checked>
+                  <span>TLS 1.2</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="enable-tls13" type="checkbox">
+                  <span>TLS 1.3</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="include-quic" type="checkbox" checked>
+                  <span>HTTP3 / QUIC</span>
+                </label>
+              </div>
+              <div class="preset-grid">
+                <div class="field">
+                  <label for="scan-level">Уровень поиска</label>
+                  <select id="scan-level">
+                    <option value="quick">quick</option>
+                    <option value="standard" selected>standard</option>
+                    <option value="force">force</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="repeats">Повторы проверки стратегии</label>
+                  <input id="repeats" type="number" min="1" max="10" step="1" value="1">
+                </div>
+              </div>
+              <label class="checkbox-row">
+                <input id="repeat-parallel" type="checkbox">
+                <span>Запускать повторы параллельно</span>
+              </label>
+              <label class="checkbox-row">
+                <input id="skip-dnscheck" type="checkbox" checked>
+                <span>Пропустить DNS-проверку перед подбором</span>
+              </label>
+              <label class="checkbox-row">
+                <input id="skip-ipblock" type="checkbox" checked>
+                <span>Пропустить проверку IP/port-блокировки</span>
+              </label>
+            </div>
             <div class="button-row">
               <button data-action="standard-discovery" title="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта.">Обычный поиск: домены по очереди</button>
               <button class="secondary" data-action="multi-domain-discovery" title="Экспериментальный режим: одна стратегия запускается один раз, затем параллельно проверяется на выбранных доменах.">Эксперимент: стратегия сразу по доменам</button>
@@ -1050,6 +1100,27 @@ function curlParallelism(){
   const value = Number(el('curl-parallelism').value || 4);
   if (!Number.isFinite(value)) return 4;
   return Math.max(1, Math.min(10, Math.round(value)));
+}
+function repeatsValue(){
+  const value = Number(el('repeats').value || 1);
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(10, Math.round(value)));
+}
+function discoveryOptions(){
+  return {
+    enable_http: el('enable-http').checked,
+    enable_tls12: el('enable-tls12').checked,
+    enable_tls13: el('enable-tls13').checked,
+    include_quic: el('include-quic').checked,
+    scan_level: el('scan-level').value || 'standard',
+    repeats: repeatsValue(),
+    repeat_parallel: el('repeat-parallel').checked,
+    skip_dnscheck: el('skip-dnscheck').checked,
+    skip_ipblock: el('skip-ipblock').checked
+  };
+}
+function hasEnabledProtocol(options){
+  return Boolean(options.enable_http || options.enable_tls12 || options.enable_tls13 || options.include_quic);
 }
 function parseDomains(raw){
   return [...new Set(String(raw || '').split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean))];
@@ -1627,19 +1698,28 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (button.dataset.action === 'standard-discovery') {
+    const options = discoveryOptions();
+    if (!hasEnabledProtocol(options)) {
+      setMessage('Выберите хотя бы один протокол для проверки', 'bad');
+      return;
+    }
     const payload = {
       domains: finderDomains(),
-      include_quic: el('include-quic').checked
+      ...options
     };
     const timeout = timeoutSecondsOrNull();
     if (timeout !== null) payload.timeout_seconds = timeout;
     startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
   }
   if (button.dataset.action === 'multi-domain-discovery') {
+    const options = discoveryOptions();
+    if (!hasEnabledProtocol(options)) {
+      setMessage('Выберите хотя бы один протокол для проверки', 'bad');
+      return;
+    }
     const payload = {
       domains: finderDomains(),
-      include_quic: el('include-quic').checked,
-      scan_level: 'standard',
+      ...options,
       curl_parallelism: curlParallelism()
     };
     const timeout = timeoutSecondsOrNull();
@@ -1800,7 +1880,15 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         domains,
         config.output.state_dir,
         timeout_seconds=_payload_timeout_seconds(payload, default=0),
-        include_quic=bool(payload.get("include_quic", True)),
+        include_quic=_payload_bool(payload, "include_quic", True),
+        enable_http=_payload_bool(payload, "enable_http", False),
+        enable_tls12=_payload_bool(payload, "enable_tls12", True),
+        enable_tls13=_payload_bool(payload, "enable_tls13", False),
+        scan_level=str(payload.get("scan_level") or "standard"),
+        repeats=_payload_int(payload, "repeats", 1),
+        repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
+        skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
+        skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
         stop_event=stop_event,
     )
 
@@ -1811,9 +1899,16 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         domains,
         config.output.state_dir,
         timeout_seconds=_payload_timeout_seconds(payload, default=0),
-        include_quic=bool(payload.get("include_quic", True)),
+        include_quic=_payload_bool(payload, "include_quic", True),
+        enable_http=_payload_bool(payload, "enable_http", False),
+        enable_tls12=_payload_bool(payload, "enable_tls12", True),
+        enable_tls13=_payload_bool(payload, "enable_tls13", False),
         scan_level=str(payload.get("scan_level") or "standard"),
-        curl_parallelism=int(payload.get("curl_parallelism") or 4),
+        repeats=_payload_int(payload, "repeats", 1),
+        repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
+        skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
+        skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
+        curl_parallelism=_payload_int(payload, "curl_parallelism", 4),
         stop_event=stop_event,
     )
 
@@ -1873,3 +1968,23 @@ def _payload_timeout_seconds(payload: dict[str, Any], default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, seconds)
+
+
+def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(payload.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _payload_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
