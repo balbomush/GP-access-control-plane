@@ -445,6 +445,21 @@ button:disabled { opacity: .55; cursor: default; }
   display: grid;
   gap: 8px;
 }
+.domain-strategy-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #ffffff;
+}
+.strategy-textarea {
+  min-height: 150px;
+  max-height: 360px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+}
 .strategy-item {
   display: grid;
   gap: 4px;
@@ -1142,25 +1157,27 @@ function renderDomainCandidates(rows){
     const expanded = Boolean(state.candidateFilter || state.openCandidateDomains[domainGroup.domain]);
     const open = expanded ? ' open' : '';
     const protocolBadges = domainGroup.protocols.map((item) => badge(`${item.protocol}: ${item.rows.length}`, item.protocol === 'quic' ? 'warn' : 'good')).join('');
+    const domainRows = domainGroup.protocols.flatMap((protocolGroup) => protocolGroup.rows);
     return `<details class="domain-group" data-domain="${esc(domainGroup.domain)}"${open}>
       <summary class="domain-header">
         <div class="domain-title">${esc(domainGroup.domain)}</div>
         <div class="domain-meta">
           ${badge(`${total} стратегий`, '')}${protocolBadges}
-          <button class="secondary" data-copy-scope="domain" data-copy-domain="${esc(domainGroup.domain)}" title="Копирует все стратегии, найденные для этого домена." type="button">Копировать домен</button>
         </div>
       </summary>
-      ${expanded ? domainGroup.protocols.map((protocolGroup) => {
+      ${expanded ? `<div class="domain-strategy-box">
+        <label for="domain-strategies-${esc(domainGroup.domain)}">Стратегии домена, по одной на строку</label>
+        <textarea id="domain-strategies-${esc(domainGroup.domain)}" class="strategy-textarea" readonly spellcheck="false">${esc(strategyText(domainRows))}</textarea>
+      </div>
+      ${domainGroup.protocols.map((protocolGroup) => {
         return `<div class="protocol-group">
           <div class="protocol-header">
             <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')} ${badge(`${protocolGroup.rows.length} стратегий`, '')}</div>
             <button class="secondary" data-copy-scope="domain" data-copy-domain="${esc(domainGroup.domain)}" data-copy-protocol="${esc(protocolGroup.protocol)}" title="Копирует стратегии этого протокола для выбранного домена." type="button">Копировать группу</button>
           </div>
-          <div class="strategy-list">
-            ${protocolGroup.rows.map((row, index) => strategyItem(row, index)).join('')}
-          </div>
+          <textarea class="strategy-textarea" readonly spellcheck="false">${esc(strategyText(protocolGroup.rows))}</textarea>
         </div>`;
-      }).join('') : ''}
+      }).join('')}` : ''}
     </details>`;
   }).join('')}</div>`;
 }
@@ -1320,6 +1337,9 @@ function strategyItem(row, index){
 }
 function uniqueStrategyArgs(rows){
   return [...new Set(rows.map((row) => String(row.args || '').trim()).filter(Boolean))];
+}
+function strategyText(rows){
+  return uniqueStrategyArgs(rows).join('\\n');
 }
 function copyTextForButton(button){
   if (button.dataset.copyCandidateId) {
@@ -1618,10 +1638,16 @@ document.addEventListener('toggle', (event) => {
   const details = event.target;
   if (!details || !details.matches) return;
   if (details.matches('details.domain-group[data-domain]')) {
-    state.openCandidateDomains[details.dataset.domain] = details.open;
+    if (state.openCandidateDomains[details.dataset.domain] !== details.open) {
+      state.openCandidateDomains[details.dataset.domain] = details.open;
+      renderCandidates();
+    }
   }
   if (details.matches('details.domain-group[data-common-protocol]')) {
-    state.openCommonProtocols[details.dataset.commonProtocol] = details.open;
+    if (state.openCommonProtocols[details.dataset.commonProtocol] !== details.open) {
+      state.openCommonProtocols[details.dataset.commonProtocol] = details.open;
+      renderCandidates();
+    }
   }
 }, true);
 refresh();
