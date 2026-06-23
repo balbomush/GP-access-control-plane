@@ -633,6 +633,68 @@ table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13p
 th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 th { color: var(--text-soft); font-size: 12px; font-weight: 700; background: var(--surface-soft); }
 tr:last-child td { border-bottom: 0; }
+.run-history {
+  display: grid;
+  gap: 10px;
+}
+.run-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.run-card-main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+}
+.run-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.run-field-label {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.run-field-value {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.run-status {
+  justify-self: start;
+  white-space: nowrap;
+}
+.run-domains {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+.run-domain-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.run-domain-chip {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--surface);
+  color: #e6edf3;
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
 code {
   display: block;
   max-width: 100%;
@@ -1490,15 +1552,59 @@ function strategyEditor(key, rows, title){
 function renderRuns(){
   const rows = state.finderRuns.filter((row) => isDiscoveryRun(row));
   setText('finder-runs-count', String(rows.length));
-  table('finder-runs-table', [
-    {label: 'Время', render: (row) => esc(friendlyDate(row.timestamp))},
-    {label: 'Режим', render: (row) => esc(runMode(row))},
-    {label: 'Статус', render: (row) => badge(row.status || '-', statusTone[row.status] || '')},
-    {label: 'Домены', render: (row) => esc((row.domains || []).join(', '))},
-    {label: 'Стратегии', render: (row) => badge(String(runCandidateCount(row)), runCandidateCount(row) > 0 ? 'good' : '')},
-    {label: 'Попытки', render: (row) => esc(runProgressText(row))},
-    {label: 'Итог', render: (row) => esc(runSummary(row))}
-  ], rows.slice().reverse().slice(0, 12), 'Запусков поиска пока не было');
+  const visible = rows.slice().reverse().slice(0, 12);
+  if (!visible.length) {
+    el('finder-runs-table').innerHTML = '<div class="empty">Запусков поиска пока не было</div>';
+    return;
+  }
+  el('finder-runs-table').innerHTML = `<div class="run-history">${visible.map(renderRunCard).join('')}</div>`;
+}
+function renderRunCard(row){
+  const count = runCandidateCount(row);
+  const status = row.status || '-';
+  return `<article class="run-card">
+    <div class="run-card-main">
+      ${runField('Время', friendlyDate(row.timestamp))}
+      ${runField('Режим', runMode(row))}
+      <div class="run-field">
+        <div class="run-field-label">Статус</div>
+        <div class="run-field-value run-status">${badge(runStatusLabel(status), statusTone[status] || '')}</div>
+      </div>
+      <div class="run-field">
+        <div class="run-field-label">Стратегии</div>
+        <div class="run-field-value">${badge(String(count), count > 0 ? 'good' : '')}</div>
+      </div>
+      ${runField('Попытки', runProgressText(row))}
+      ${runField('Итог', runSummary(row))}
+    </div>
+    <div class="run-domains">
+      <div class="run-field-label">Домены</div>
+      <div class="run-domain-list">${runDomainChips(row)}</div>
+    </div>
+  </article>`;
+}
+function runField(label, value){
+  return `<div class="run-field">
+    <div class="run-field-label">${esc(label)}</div>
+    <div class="run-field-value">${esc(value || '-')}</div>
+  </div>`;
+}
+function runStatusLabel(status){
+  const labels = {
+    success: 'готово',
+    failed: 'ошибка',
+    running: 'идет',
+    queued: 'очередь',
+    stopping: 'стоп',
+    stopped: 'стоп',
+    timeout: 'таймаут'
+  };
+  return labels[status] || status || '-';
+}
+function runDomainChips(row){
+  const domains = Array.isArray(row.domains) ? row.domains.map((domain) => String(domain || '').trim()).filter(Boolean) : [];
+  if (!domains.length) return '<span class="run-domain-chip">-</span>';
+  return domains.map((domain) => `<span class="run-domain-chip">${esc(domain)}</span>`).join('');
 }
 function isDiscoveryRun(row){
   return row.kind === 'standard-discovery' || row.kind === 'multi-domain-discovery';
