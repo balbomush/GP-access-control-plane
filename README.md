@@ -27,12 +27,26 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 http://<ip-raspberry-pi>:8080/
 ```
 
-Скрипт нужно запускать обычным пользователем, не через `sudo`. Пароль `sudo` может понадобиться внутри установки.
+Скрипт можно запускать из-под любого пользователя с правом `sudo`. По умолчанию проект ставится в домашний каталог пользователя, от имени которого запущена установка.
+
+Если запустить через `sudo`, установщик возьмет исходного пользователя из `SUDO_USER` и поставит проект ему, а не в `/root`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/main/scripts/install-raspberry-pi.sh | sudo bash
+```
+
+Если нужно явно выбрать пользователя:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/main/scripts/install-raspberry-pi.sh | sudo env GP_INSTALL_USER=pi bash
+```
+
+Путь установки можно поменять через `GP_INSTALL_DIR`, но выбранный пользователь должен иметь право записи в этот каталог. Для обычной установки лучше оставить путь по умолчанию: `~/gp/GP-access-control-plane`.
 
 Если репозиторий приватный, сначала настройте SSH-доступ к GitHub. Затем запустите установку через `git clone`:
 
 ```bash
-GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -c 'sudo apt-get update && sudo apt-get install -y git && tmp="$(mktemp -d)" && git clone "$GP_REPO_URL" "$tmp" && bash "$tmp/scripts/install-raspberry-pi.sh"'
+GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -lc 'SUDO=sudo; [ "$(id -u)" -eq 0 ] && SUDO=; $SUDO apt-get update && $SUDO apt-get install -y git && tmp="$(mktemp -d)" && git clone "$GP_REPO_URL" "$tmp" && bash "$tmp/scripts/install-raspberry-pi.sh"'
 ```
 
 ## Установка zapret2 отдельно
@@ -40,7 +54,7 @@ GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -c 'sudo a
 Полный установщик выше уже ставит `zapret2` автоматически. Если нужно установить только `zapret2` без установки веб-интерфейса, выполните:
 
 ```bash
-bash -lc 'sudo apt-get update && sudo apt-get install -y git bsdextrautils && if [ -d /opt/zapret2/.git ]; then sudo git -C /opt/zapret2 pull --ff-only; else sudo git clone https://github.com/bol-van/zapret2.git /opt/zapret2; fi && sudo /opt/zapret2/install_bin.sh'
+bash -lc 'SUDO=sudo; [ "$(id -u)" -eq 0 ] && SUDO=; $SUDO apt-get update && $SUDO apt-get install -y git bsdextrautils && if [ -d /opt/zapret2/.git ]; then $SUDO git -C /opt/zapret2 pull --ff-only; else $SUDO git clone https://github.com/bol-van/zapret2.git /opt/zapret2; fi && $SUDO /opt/zapret2/install_bin.sh'
 ```
 
 После этого должны появиться файлы:
