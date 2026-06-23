@@ -331,6 +331,33 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .time-limit-field[hidden] { display: none; }
+.preset-panel,
+.common-filter-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-soft);
+}
+.common-filter-panel[hidden] { display: none; }
+.preset-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.preset-actions,
+.domain-picker-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.domain-picker-row { grid-template-columns: minmax(0, 1fr) auto; }
+.helper-text {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .candidate-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -611,7 +638,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .candidate-toolbar { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .candidate-toolbar, .preset-grid, .preset-actions, .domain-picker-row { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
   .candidate-summary { white-space: normal; }
@@ -676,10 +703,22 @@ pre {
               <label for="finder-domains">Домены</label>
               <textarea id="finder-domains" autocomplete="off" spellcheck="false"></textarea>
             </div>
-            <div class="fill-row">
-              <button class="secondary" data-fill="critical">Критичные</button>
-              <button class="secondary" data-fill="coverage">Покрытие</button>
-              <button class="secondary" data-fill="all">Все</button>
+            <div class="preset-panel">
+              <div class="preset-grid">
+                <div class="field">
+                  <label for="finder-preset-select">Пресет доменов</label>
+                  <select id="finder-preset-select"></select>
+                </div>
+                <div class="field">
+                  <label for="finder-preset-name">Название для сохранения</label>
+                  <input id="finder-preset-name" autocomplete="off" placeholder="мой список">
+                </div>
+              </div>
+              <div class="preset-actions">
+                <button class="secondary" data-preset-use="finder" title="Подставляет выбранный пресет в список доменов подбора." type="button">Применить пресет</button>
+                <button class="secondary" data-preset-save="finder" title="Сохраняет текущий список доменов как пользовательский пресет или перезаписывает выбранный пользовательский пресет." type="button">Сохранить пресет</button>
+                <button class="secondary danger" data-preset-delete="finder" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
+              </div>
             </div>
             <label class="checkbox-row">
               <input id="limit-time-enabled" type="checkbox">
@@ -691,7 +730,7 @@ pre {
             </div>
             <div class="field">
               <label for="curl-parallelism">Параллельных curl в режиме стратегия -> домены</label>
-              <input id="curl-parallelism" type="number" min="1" max="16" step="1" value="10">
+              <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
             </div>
             <label class="checkbox-row">
               <input id="include-quic" type="checkbox" checked>
@@ -737,6 +776,33 @@ pre {
         <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
           <button class="subtab-button active" data-candidate-view="domain" type="button">По доменам</button>
           <button class="subtab-button" data-candidate-view="common" type="button">Общие стратегии</button>
+        </div>
+        <div class="common-filter-panel" id="common-controls" hidden>
+          <div class="preset-grid">
+            <div class="field">
+              <label for="common-preset-select">Пресет доменов для пересечения</label>
+              <select id="common-preset-select"></select>
+            </div>
+            <div class="field">
+              <label for="common-preset-name">Название для сохранения</label>
+              <input id="common-preset-name" autocomplete="off" placeholder="мой список">
+            </div>
+          </div>
+          <div class="preset-actions">
+            <button class="secondary" data-preset-use="common" title="Подставляет выбранный пресет в фильтр общих стратегий. Непротестированные домены будут пропущены." type="button">Применить пресет</button>
+            <button class="secondary" data-preset-save="common" title="Сохраняет текущий фильтр как пользовательский пресет или перезаписывает выбранный пользовательский пресет." type="button">Сохранить пресет</button>
+            <button class="secondary danger" data-preset-delete="common" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
+          </div>
+          <div class="field">
+            <label for="common-domains">Домены для поиска общих стратегий</label>
+            <textarea id="common-domains" autocomplete="off" spellcheck="false" placeholder="discord.com&#10;discordcdn.com"></textarea>
+          </div>
+          <div class="domain-picker-row">
+            <input id="common-domain-add" list="tested-domain-options" autocomplete="off" placeholder="Начните вводить протестированный домен">
+            <button class="secondary" data-action="add-common-domain" title="Добавляет домен в фильтр общих стратегий, если по нему уже есть кандидаты." type="button">Добавить домен</button>
+          </div>
+          <datalist id="tested-domain-options"></datalist>
+          <div class="helper-text" id="common-domain-note">Выберите минимум два протестированных домена.</div>
         </div>
         <div class="copy-fallback" id="copy-fallback" hidden>
           <label for="copy-fallback-text">Группа для ручного копирования</label>
@@ -786,7 +852,8 @@ pre {
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
 <script>
-const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', openCandidateDomains: {}, openCommonProtocols: {}, domainsInitialized: false, domainsTouched: false };
+const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
+const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -895,6 +962,7 @@ function defaultDomains(kind){
   if (kind === 'all') {
     return [...(sets.critical || []), ...(sets.coverage || []), ...(sets.diagnostic || [])];
   }
+  if (kind === 'tested') return testedDomains();
   return sets[kind] || [];
 }
 function fillDomains(kind){
@@ -905,12 +973,12 @@ function fillDomains(kind){
 function finderDomains(){
   const raw = el('finder-domains').value.trim();
   if (!raw) return defaultDomains('critical');
-  return raw.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean);
+  return parseDomains(raw);
 }
 function selectedFinderDomains(){
   const raw = el('finder-domains').value.trim();
   if (!raw) return [];
-  return [...new Set(raw.split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean))];
+  return parseDomains(raw);
 }
 function timeoutSecondsOrNull(){
   if (!el('limit-time-enabled').checked) return null;
@@ -918,9 +986,106 @@ function timeoutSecondsOrNull(){
   return Math.max(60, Math.round(hours * 3600));
 }
 function curlParallelism(){
-  const value = Number(el('curl-parallelism').value || 10);
-  if (!Number.isFinite(value)) return 10;
-  return Math.max(1, Math.min(16, Math.round(value)));
+  const value = Number(el('curl-parallelism').value || 4);
+  if (!Number.isFinite(value)) return 4;
+  return Math.max(1, Math.min(10, Math.round(value)));
+}
+function parseDomains(raw){
+  return [...new Set(String(raw || '').split(/[,\\s]+/).map((item) => item.trim()).filter(Boolean))];
+}
+function loadCustomPresets(){
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_PRESETS_KEY) || '{}');
+    return {
+      finder: parsed && typeof parsed.finder === 'object' && parsed.finder ? parsed.finder : {},
+      common: parsed && typeof parsed.common === 'object' && parsed.common ? parsed.common : {}
+    };
+  } catch (_error) {
+    return { finder: {}, common: {} };
+  }
+}
+function persistCustomPresets(){
+  localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+}
+function builtInPresets(target){
+  const presets = [
+    { key: 'critical', label: 'Критичные', domains: defaultDomains('critical') },
+    { key: 'coverage', label: 'Покрытие', domains: defaultDomains('coverage') },
+    { key: 'diagnostic', label: 'Диагностика', domains: defaultDomains('diagnostic') },
+    { key: 'all', label: 'Все встроенные', domains: defaultDomains('all') }
+  ];
+  if (target === 'common') {
+    presets.unshift({ key: 'tested', label: 'Все протестированные', domains: testedDomains() });
+  }
+  return presets;
+}
+function presetDomains(target, value){
+  const [scope, key] = String(value || '').split(':');
+  if (scope === 'builtin') {
+    const preset = builtInPresets(target).find((item) => item.key === key);
+    return preset ? preset.domains : [];
+  }
+  if (scope === 'custom') return state.customPresets[target]?.[key] || [];
+  return [];
+}
+function renderPresetSelect(target){
+  const select = el(`${target}-preset-select`);
+  if (!select) return;
+  const previous = select.value;
+  const builtins = builtInPresets(target);
+  const customEntries = Object.entries(state.customPresets[target] || {}).sort(([a], [b]) => a.localeCompare(b));
+  const builtInOptions = builtins.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${preset.domains.length})</option>`).join('');
+  const customOptions = customEntries.map(([name, domains]) => `<option value="custom:${esc(name)}">${esc(name)} (${Array.isArray(domains) ? domains.length : 0})</option>`).join('');
+  select.innerHTML = `<optgroup label="Встроенные">${builtInOptions}</optgroup>${customOptions ? `<optgroup label="Мои">${customOptions}</optgroup>` : ''}`;
+  if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+}
+function renderPresetSelects(){
+  renderPresetSelect('finder');
+  renderPresetSelect('common');
+}
+function usePreset(target){
+  const domains = presetDomains(target, el(`${target}-preset-select`).value);
+  const finalDomains = target === 'common' ? filterTestedDomains(domains) : domains;
+  el(`${target}-domains`).value = [...new Set(finalDomains)].join('\\n');
+  if (target === 'finder') state.domainsTouched = true;
+  renderCandidates();
+}
+function presetNameForSave(target){
+  const explicit = el(`${target}-preset-name`).value.trim();
+  if (explicit) return explicit;
+  const selected = el(`${target}-preset-select`).value || '';
+  if (selected.startsWith('custom:')) return selected.slice('custom:'.length);
+  return '';
+}
+function savePreset(target){
+  const name = presetNameForSave(target);
+  if (!name) {
+    showToast('Укажите название пользовательского пресета', 'warn');
+    return;
+  }
+  const domains = parseDomains(el(`${target}-domains`).value);
+  if (!domains.length) {
+    showToast('В пресете должен быть хотя бы один домен', 'warn');
+    return;
+  }
+  state.customPresets[target][name] = domains;
+  persistCustomPresets();
+  renderPresetSelect(target);
+  el(`${target}-preset-select`).value = `custom:${name}`;
+  showToast('Пресет сохранен', 'good');
+  renderCandidates();
+}
+function deletePreset(target){
+  const selected = el(`${target}-preset-select`).value || '';
+  if (!selected.startsWith('custom:')) {
+    showToast('Встроенные пресеты нельзя удалить', 'warn');
+    return;
+  }
+  const name = selected.slice('custom:'.length);
+  delete state.customPresets[target][name];
+  persistCustomPresets();
+  renderPresetSelect(target);
+  showToast('Пресет удален', 'good');
 }
 function renderMetrics(){
   const status = state.status || {};
@@ -959,6 +1124,7 @@ function renderCandidates(){
   document.querySelectorAll('[data-candidate-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.candidateView === state.candidateView);
   });
+  renderCommonControls();
   if (state.candidateView === 'common') {
     renderCommonCandidates(commonRows);
   } else {
@@ -1057,8 +1223,17 @@ function commonDomains(row){
 function candidateAllDomains(row){
   return [...new Set([...candidateDomains(row), ...commonDomains(row)])];
 }
+function testedDomains(){
+  return [...new Set(state.candidates.flatMap((row) => candidateAllDomains(row)))].sort((a, b) => a.localeCompare(b));
+}
+function filterTestedDomains(domains){
+  const tested = new Set(testedDomains());
+  return [...new Set(domains)].filter((domain) => tested.has(domain));
+}
 function selectedCommonDomains(){
-  return selectedFinderDomains();
+  const node = el('common-domains');
+  if (!node) return [];
+  return filterTestedDomains(parseDomains(node.value));
 }
 function dynamicCommonRows(rows){
   const selectedDomains = selectedCommonDomains();
@@ -1067,6 +1242,39 @@ function dynamicCommonRows(rows){
     const domains = new Set(candidateAllDomains(row));
     return selectedDomains.every((domain) => domains.has(domain));
   });
+}
+function renderCommonControls(){
+  const controls = el('common-controls');
+  if (!controls) return;
+  controls.hidden = state.candidateView !== 'common';
+  const domains = testedDomains();
+  const datalist = el('tested-domain-options');
+  if (datalist) {
+    datalist.innerHTML = domains.map((domain) => `<option value="${esc(domain)}"></option>`).join('');
+  }
+  const raw = parseDomains(el('common-domains').value);
+  const tested = new Set(domains);
+  const selected = raw.filter((domain) => tested.has(domain));
+  const skipped = raw.filter((domain) => !tested.has(domain));
+  const parts = [`Протестировано доменов: ${domains.length}. Выбрано для пересечения: ${selected.length}.`];
+  if (skipped.length) parts.push(`Будут пропущены без кандидатов: ${skipped.join(', ')}.`);
+  if (selected.length < 2) parts.push('Нужно минимум два протестированных домена.');
+  setText('common-domain-note', parts.join(' '));
+}
+function addCommonDomain(){
+  const input = el('common-domain-add');
+  const domain = String(input.value || '').trim();
+  if (!domain) return;
+  const tested = new Set(testedDomains());
+  if (!tested.has(domain)) {
+    showToast('По этому домену еще нет найденных стратегий', 'warn');
+    return;
+  }
+  const current = parseDomains(el('common-domains').value);
+  if (!current.includes(domain)) current.push(domain);
+  el('common-domains').value = current.join('\\n');
+  input.value = '';
+  renderCandidates();
 }
 function candidateGroups(rows){
   const domainMap = new Map();
@@ -1265,6 +1473,7 @@ function renderAll(){
     el('finder-domains').value = domains.join('\\n');
     state.domainsInitialized = true;
   }
+  renderPresetSelects();
   renderMetrics();
   renderCandidates();
   renderRuns();
@@ -1322,6 +1531,22 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'refresh') refresh();
   if (button.dataset.fill) fillDomains(button.dataset.fill);
+  if (button.dataset.presetUse) {
+    usePreset(button.dataset.presetUse);
+    return;
+  }
+  if (button.dataset.presetSave) {
+    savePreset(button.dataset.presetSave);
+    return;
+  }
+  if (button.dataset.presetDelete) {
+    deletePreset(button.dataset.presetDelete);
+    return;
+  }
+  if (button.dataset.action === 'add-common-domain') {
+    addCommonDomain();
+    return;
+  }
   if (button.dataset.copyScope || button.dataset.copyCandidateId) {
     event.preventDefault();
     event.stopPropagation();
@@ -1369,10 +1594,24 @@ document.addEventListener('input', (event) => {
     state.domainsTouched = true;
     renderCandidates();
   }
+  if (event.target && event.target.id === 'common-domains') {
+    renderCandidates();
+  }
 });
 document.addEventListener('change', (event) => {
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
+  }
+  if (event.target && (event.target.id === 'finder-preset-select' || event.target.id === 'common-preset-select')) {
+    const target = event.target.id.startsWith('finder') ? 'finder' : 'common';
+    const value = event.target.value || '';
+    el(`${target}-preset-name`).value = value.startsWith('custom:') ? value.slice('custom:'.length) : '';
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.target && event.target.id === 'common-domain-add' && event.key === 'Enter') {
+    event.preventDefault();
+    addCommonDomain();
   }
 });
 document.addEventListener('toggle', (event) => {
@@ -1493,7 +1732,7 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         timeout_seconds=_payload_timeout_seconds(payload, default=0),
         include_quic=bool(payload.get("include_quic", True)),
         scan_level=str(payload.get("scan_level") or "standard"),
-        curl_parallelism=int(payload.get("curl_parallelism") or 10),
+        curl_parallelism=int(payload.get("curl_parallelism") or 4),
         stop_event=stop_event,
     )
 

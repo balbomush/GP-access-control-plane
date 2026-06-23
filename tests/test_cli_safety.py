@@ -35,7 +35,7 @@ class CliSafetyTests(unittest.TestCase):
         )
         self.assertEqual(
             parser.parse_args(["strategy-finder", "multi-domain-discovery", "--domain", "youtube.com"]).curl_parallelism,
-            10,
+            4,
         )
         self.assertEqual(
             parser.parse_args(["strategy-finder", "custom-verification", "--candidate-id", "tls-test"]).finder_command,
