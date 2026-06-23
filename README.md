@@ -1,200 +1,163 @@
 # GP Access Control Plane
 
-Текущий этап проекта: Raspberry Pi web UI для подбора рабочих стратегий `zapret2` через штатный `blockcheck2.sh`.
+Веб-интерфейс для Raspberry Pi, который помогает подбирать рабочие стратегии `zapret2` через `blockcheck2.sh`.
 
-Что реализовано сейчас:
+## Установка
 
-- запуск веб-интерфейса на Raspberry Pi;
-- запуск обычного `blockcheck2` подбора по доменам;
-- экспериментальный режим `стратегия -> домены`, где одна стратегия проверяется параллельными `curl` по нескольким доменам;
-- настройка реально влияющих параметров `blockcheck2`;
-- остановка долгого подбора с сохранением уже найденных стратегий;
-- просмотр кандидатов, общих стратегий, истории запусков и live-лога;
-- хранение локального состояния в `build/state`.
-
-Что не реализуется в этой ветке:
-
-- установка или изменение настроек роутера;
-- автоматическая публикация результатов;
-- синхронизация правил маршрутизации;
-- генерация конфигов для других компонентов.
-
-Критерий приемки текущего этапа: открыть web UI, запустить подбор, найти стратегию, вручную скопировать ее в целевую систему и вручную проверить, что она работает.
-
-## Подготовка Raspberry Pi
-
-Предполагается чистая Raspberry Pi OS.
-
-1. Обновить систему:
+Самый простой вариант для Raspberry Pi OS:
 
 ```bash
-sudo apt update
-sudo apt upgrade -y
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/main/scripts/install-raspberry-pi.sh | bash
 ```
 
-2. Поставить базовые пакеты:
+Что сделает скрипт:
 
-```bash
-sudo apt install -y git python3 python3-venv python3-pip curl nftables iproute2 dnsutils
-```
+- обновит систему через `apt`;
+- установит нужные пакеты: `git`, `python3`, `venv`, `curl`, `nftables`, `dnsutils` и другие;
+- установит `zapret2` в `/opt/zapret2`;
+- скачает этот проект в `~/gp/GP-access-control-plane`;
+- создаст Python-окружение;
+- установит команду `gp-control-plane`;
+- создаст и включит systemd-сервис;
+- запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi.
 
-3. Установить и проверить `zapret2`.
-
-В текущей реализации ожидается, что в `PATH` доступны:
-
-```bash
-nfqws2
-blockcheck2.sh
-```
-
-Проверка:
-
-```bash
-command -v nfqws2
-command -v blockcheck2.sh
-```
-
-Если `zapret2` установлен в `/opt/zapret2`, но команды не находятся, добавьте wrappers в `~/.local/bin`:
-
-```bash
-mkdir -p ~/.local/bin
-
-cat > ~/.local/bin/blockcheck2.sh <<'EOF'
-#!/bin/sh
-exec /opt/zapret2/blockcheck2.sh "$@"
-EOF
-
-cat > ~/.local/bin/nfqws2 <<'EOF'
-#!/bin/sh
-exec /opt/zapret2/nfq2/nfqws2 "$@"
-EOF
-
-chmod +x ~/.local/bin/blockcheck2.sh ~/.local/bin/nfqws2
-```
-
-Добавьте `~/.local/bin` в `PATH`, если его там нет:
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
-. ~/.profile
-```
-
-## Установка проекта
-
-```bash
-mkdir -p ~/gp
-cd ~/gp
-git clone git@github.com:balbomush/GP-access-control-plane.git
-cd GP-access-control-plane
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
-```
-
-Проверка команд:
-
-```bash
-gp-control-plane zapret2 check-install --config configs/orchestrator.example.yaml
-gp-control-plane strategy-finder domains --config configs/orchestrator.example.yaml
-```
-
-## Запуск web UI
-
-Ручной запуск:
-
-```bash
-cd ~/gp/GP-access-control-plane
-. .venv/bin/activate
-gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-```
-
-Открыть с компьютера:
+После установки откройте в браузере:
 
 ```text
 http://<ip-raspberry-pi>:8080/
 ```
 
-Проверка с самой Raspberry Pi:
+Скрипт нужно запускать обычным пользователем, не через `sudo`. Пароль `sudo` может понадобиться внутри установки.
+
+Если репозиторий приватный, сначала настройте SSH-доступ к GitHub. Затем запустите установку через `git clone`:
 
 ```bash
-curl -I http://127.0.0.1:8080/
+GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -c 'sudo apt-get update && sudo apt-get install -y git && tmp="$(mktemp -d)" && git clone "$GP_REPO_URL" "$tmp" && bash "$tmp/scripts/install-raspberry-pi.sh"'
 ```
 
-## Автозапуск через systemd
+## Проверка zapret2
 
-Создать service:
-
-```bash
-sudo tee /etc/systemd/system/gp-control-plane-web.service >/dev/null <<'EOF'
-[Unit]
-Description=GP Strategy Finder Web UI
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=%i
-WorkingDirectory=/home/%i/gp/GP-access-control-plane
-Environment=PATH=/home/%i/gp/GP-access-control-plane/.venv/bin:/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/%i/gp/GP-access-control-plane/.venv/bin/gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-Включить сервис для текущего пользователя:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now gp-control-plane-web@$USER.service
-sudo systemctl status gp-control-plane-web@$USER.service
-```
-
-Логи:
-
-```bash
-journalctl -u gp-control-plane-web@$USER.service -f
-```
-
-## Подбор стратегий
-
-В web UI доступны два режима:
-
-- обычный поиск: штатный порядок `blockcheck2`, домены проверяются по очереди;
-- эксперимент: одна стратегия запускается один раз, затем выбранные домены проверяются параллельными `curl`.
-
-Настройки:
-
-- HTTP, TLS 1.2, TLS 1.3, HTTP3/QUIC;
-- уровень поиска `quick`, `standard`, `force`;
-- повторы проверки стратегии;
-- параллельные повторы;
-- пропуск DNS-проверки;
-- пропуск проверки IP/port-блокировки;
-- лимит параллельных `curl` для экспериментального режима.
-
-По умолчанию лимит времени выключен. Подбор может длиться несколько часов. Кнопка остановки завершает текущий запуск и сохраняет уже найденные успешные стратегии.
-
-## Локальные данные
-
-Основные файлы создаются в:
+Установщик сам скачивает `zapret2` из `https://github.com/bol-van/zapret2.git` и кладет его в:
 
 ```text
-build/state/
-  state.json
-  jobs.jsonl
-  strategy-finder/
-    candidates.json
-    runs.jsonl
-    logs/
+/opt/zapret2
 ```
 
-Эти данные локальные и не требуют публикации.
+Также он создает wrappers в `~/.local/bin`, чтобы системе были доступны команды:
 
-## Тесты
+```bash
+blockcheck2.sh
+nfqws2
+```
+
+Проверка после установки:
+
+```bash
+gp-control-plane zapret2 check-install --config ~/gp/GP-access-control-plane/configs/orchestrator.example.yaml
+```
+
+## Что умеет текущая версия
+
+- запускать веб-интерфейс на Raspberry Pi;
+- запускать обычный подбор стратегий через штатный `blockcheck2.sh`;
+- запускать экспериментальный режим, где одна стратегия проверяется сразу на нескольких доменах;
+- ограничивать количество параллельных `curl`;
+- включать и выключать проверки HTTP, TLS 1.2, TLS 1.3, HTTP3/QUIC;
+- показывать прогресс, live-лог и историю запусков;
+- сохранять найденные стратегии;
+- показывать стратегии по доменам и общие стратегии для выбранных доменов;
+- останавливать долгий подбор без потери уже найденных успешных стратегий.
+
+Проект не меняет настройки роутера и не применяет стратегии автоматически.
+
+## Как пользоваться
+
+1. Откройте веб-интерфейс: `http://<ip-raspberry-pi>:8080/`.
+2. Во вкладке `Подбор` выберите домены.
+3. Нажмите обычный поиск или экспериментальный поиск.
+4. Во вкладке `Терминал` смотрите ход работы.
+5. Во вкладке `Кандидаты` смотрите найденные стратегии.
+6. Скопируйте подходящую стратегию вручную и проверьте ее там, где планируете использовать.
+
+Подбор может длиться несколько часов. Кнопка остановки сохраняет найденные к этому моменту стратегии.
+
+## Управление сервисом
+
+Проверить состояние:
+
+```bash
+sudo systemctl status gp-control-plane-web.service
+```
+
+Перезапустить:
+
+```bash
+sudo systemctl restart gp-control-plane-web.service
+```
+
+Остановить:
+
+```bash
+sudo systemctl stop gp-control-plane-web.service
+```
+
+Посмотреть логи сервиса:
+
+```bash
+journalctl -u gp-control-plane-web.service -f
+```
+
+## Обновление
+
+Повторно запустите установщик:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/main/scripts/install-raspberry-pi.sh | bash
+```
+
+Он подтянет свежий `main`, обновит Python-окружение и перезапустит сервис.
+
+## Где лежат данные
+
+Проект хранит локальные данные здесь:
+
+```text
+~/gp/GP-access-control-plane/build/state/
+```
+
+Основные файлы:
+
+- `strategy-finder/candidates.json` - найденные стратегии;
+- `strategy-finder/runs.jsonl` - история запусков;
+- `strategy-finder/logs/` - stdout/stderr логов `blockcheck2`.
+
+Эти данные остаются на Raspberry Pi и никуда не публикуются.
+
+## Ручная установка
+
+Если не хотите запускать установщик одной командой:
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y git python3 python3-venv python3-pip curl nftables iproute2 iptables ipset dnsutils ca-certificates
+
+mkdir -p ~/gp
+cd ~/gp
+git clone https://github.com/balbomush/GP-access-control-plane.git
+cd GP-access-control-plane
+
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e .
+
+gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
+```
+
+Ручная установка выше не показывает все шаги установки `zapret2` и автозапуска. Для обычного использования проще и надежнее запускать `scripts/install-raspberry-pi.sh`.
+
+## Тесты для разработчика
 
 ```bash
 cd ~/gp/GP-access-control-plane
