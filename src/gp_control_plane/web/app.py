@@ -1053,7 +1053,7 @@ pre {
 <script>
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
-const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1617,6 +1617,7 @@ function renderRuns(){
 function renderRunCard(row){
   const count = runCandidateCount(row);
   const status = row.status || '-';
+  const domainKey = runDomainKey(row);
   return `<article class="run-card ${esc(runCardClass(row))}">
     <div class="run-card-main">
       ${runField('Время', friendlyDate(row.timestamp))}
@@ -1632,8 +1633,11 @@ function renderRunCard(row){
       ${runField('Попытки', runProgressText(row))}
       ${runField('Итог', runSummary(row))}
     </div>
-    ${runDomains(row)}
+    ${runDomains(row, domainKey)}
   </article>`;
+}
+function runDomainKey(row){
+  return String(row.id || `${row.timestamp || ''}:${(row.domains || []).join('|')}`);
 }
 function runCardClass(row){
   const status = String(row.status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'unknown';
@@ -1658,12 +1662,13 @@ function runStatusLabel(status){
   };
   return labels[status] || status || '-';
 }
-function runDomains(row){
+function runDomains(row, domainKey){
   const domains = Array.isArray(row.domains) ? row.domains.map((domain) => String(domain || '').trim()).filter(Boolean) : [];
   const preview = domains.length ? domains.join(', ') : '-';
   const count = domains.length ? `${domains.length} доменов` : 'нет доменов';
   const expandable = domains.length > 1;
-  return `<details class="run-domains ${expandable ? 'run-domains-expandable' : ''}">
+  const open = expandable && Boolean(state.openRunDomains[domainKey]);
+  return `<details class="run-domains ${expandable ? 'run-domains-expandable' : ''}" data-run-domains="${esc(domainKey)}"${open ? ' open' : ''}>
     <summary>
       <span class="run-field-label">Домены</span>
       <span class="run-domains-preview" title="${esc(preview)}">${esc(preview)}</span>
@@ -1931,6 +1936,9 @@ document.addEventListener('toggle', (event) => {
       state.openCommonProtocols[details.dataset.commonProtocol] = details.open;
       renderCandidates();
     }
+  }
+  if (details.matches('details.run-domains[data-run-domains]')) {
+    state.openRunDomains[details.dataset.runDomains] = details.open;
   }
 }, true);
 refresh();
