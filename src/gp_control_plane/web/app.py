@@ -639,9 +639,22 @@ tr:last-child td { border-bottom: 0; }
 }
 .run-card {
   border: 1px solid var(--line);
+  border-left: 4px solid var(--line-strong);
   border-radius: 8px;
   overflow: hidden;
   background: var(--surface);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .03);
+}
+.run-card:nth-child(even) { background: #1d2738; }
+.run-card-status-success { border-left-color: var(--green); }
+.run-card-status-running,
+.run-card-status-queued { border-left-color: var(--blue); }
+.run-card-status-stopping,
+.run-card-status-stopped,
+.run-card-status-timeout { border-left-color: var(--amber); }
+.run-card-status-failed { border-left-color: var(--red); }
+.run-card-kind-multi .run-card-main {
+  background: linear-gradient(90deg, rgba(0, 151, 220, .07), transparent 42%);
 }
 .run-card-main {
   display: grid;
@@ -672,17 +685,59 @@ tr:last-child td { border-bottom: 0; }
   white-space: nowrap;
 }
 .run-domains {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px 12px;
   border-top: 1px solid var(--line);
   background: var(--surface-soft);
 }
-.run-domain-list {
-  display: flex;
+.run-domains summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.run-domains summary::-webkit-details-marker { display: none; }
+.run-domains-preview {
+  min-width: 0;
+  color: #e6edf3;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-domains-count {
+  color: var(--text-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.run-domains-arrow {
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 6px solid var(--blue-strong);
+  transition: transform .16s ease;
+}
+.run-domains:not(.run-domains-expandable) .run-domains-arrow {
+  visibility: hidden;
+}
+.run-domains[open] .run-domains-arrow {
+  transform: rotate(90deg);
+}
+.run-domains .run-domain-list {
+  display: none;
   flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
+  padding: 0 12px 12px;
+}
+.run-domains[open] .run-domain-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .run-domain-chip {
   max-width: 100%;
@@ -1562,7 +1617,7 @@ function renderRuns(){
 function renderRunCard(row){
   const count = runCandidateCount(row);
   const status = row.status || '-';
-  return `<article class="run-card">
+  return `<article class="run-card ${esc(runCardClass(row))}">
     <div class="run-card-main">
       ${runField('Время', friendlyDate(row.timestamp))}
       ${runField('Режим', runMode(row))}
@@ -1577,11 +1632,13 @@ function renderRunCard(row){
       ${runField('Попытки', runProgressText(row))}
       ${runField('Итог', runSummary(row))}
     </div>
-    <div class="run-domains">
-      <div class="run-field-label">Домены</div>
-      <div class="run-domain-list">${runDomainChips(row)}</div>
-    </div>
+    ${runDomains(row)}
   </article>`;
+}
+function runCardClass(row){
+  const status = String(row.status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'unknown';
+  const kind = row.kind === 'multi-domain-discovery' ? 'multi' : 'standard';
+  return `run-card-status-${status} run-card-kind-${kind}`;
 }
 function runField(label, value){
   return `<div class="run-field">
@@ -1601,8 +1658,22 @@ function runStatusLabel(status){
   };
   return labels[status] || status || '-';
 }
-function runDomainChips(row){
+function runDomains(row){
   const domains = Array.isArray(row.domains) ? row.domains.map((domain) => String(domain || '').trim()).filter(Boolean) : [];
+  const preview = domains.length ? domains.join(', ') : '-';
+  const count = domains.length ? `${domains.length} доменов` : 'нет доменов';
+  const expandable = domains.length > 1;
+  return `<details class="run-domains ${expandable ? 'run-domains-expandable' : ''}">
+    <summary>
+      <span class="run-field-label">Домены</span>
+      <span class="run-domains-preview" title="${esc(preview)}">${esc(preview)}</span>
+      <span class="run-domains-count">${esc(count)}</span>
+      <span class="run-domains-arrow" aria-hidden="true"></span>
+    </summary>
+    <div class="run-domain-list">${runDomainChips(domains)}</div>
+  </details>`;
+}
+function runDomainChips(domains){
   if (!domains.length) return '<span class="run-domain-chip">-</span>';
   return domains.map((domain) => `<span class="run-domain-chip">${esc(domain)}</span>`).join('');
 }
