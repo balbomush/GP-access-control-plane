@@ -202,6 +202,32 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_preset_domains_domain ON preset_domains(domain_id);
+
+        CREATE VIEW IF NOT EXISTS domain_stats AS
+        SELECT d.id AS domain_id,
+               d.name AS domain,
+               COUNT(DISTINCT r.strategy_id) AS strategy_count,
+               COUNT(DISTINCT CASE WHEN r.protocol = 'tls' THEN r.strategy_id END) AS tls_strategy_count,
+               COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count,
+               COALESCE(SUM(r.success_count), 0) AS success_count,
+               COALESCE(SUM(r.fail_count), 0) AS fail_count,
+               MAX(r.last_seen_at) AS last_success_at
+        FROM domains d
+        LEFT JOIN strategy_domain_results r ON r.domain_id = d.id
+        GROUP BY d.id, d.name;
+
+        CREATE VIEW IF NOT EXISTS strategy_stats AS
+        SELECT s.id AS strategy_id,
+               s.protocol,
+               COUNT(DISTINCT r.domain_id) AS domain_count,
+               COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS single_domain_count,
+               COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count,
+               COALESCE(SUM(r.success_count), 0) AS success_count,
+               COALESCE(SUM(r.fail_count), 0) AS fail_count,
+               MAX(r.last_seen_at) AS last_success_at
+        FROM strategies s
+        LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
+        GROUP BY s.id, s.protocol;
         """
     )
     _migrate_legacy_model(conn)

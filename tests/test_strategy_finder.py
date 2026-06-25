@@ -190,6 +190,17 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
                     conn.execute("SELECT COUNT(*) AS count FROM strategy_attempts").fetchone()["count"],
                     3,
                 )
+                self.assertEqual(
+                    conn.execute("SELECT strategy_count FROM domain_stats WHERE domain = 'youtube.com'").fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT domain_count FROM strategy_stats WHERE strategy_id = ?",
+                        (candidate_id_for("tls", "--payload tls_client_hello --lua-desync=common"),),
+                    ).fetchone()[0],
+                    2,
+                )
             common = read_candidate_page(state_dir, view="common", domains=["youtube.com", "discord.com"])
             self.assertEqual(common["total"], 1)
             self.assertEqual(common["candidates"][0]["args"], "--payload tls_client_hello --lua-desync=common")
