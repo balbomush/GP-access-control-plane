@@ -437,6 +437,12 @@ button:disabled { opacity: .55; cursor: default; }
   display: grid;
   gap: 12px;
 }
+.backup-restore-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
 .backup-card {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -885,7 +891,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-restore-panel { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -1143,6 +1149,13 @@ pre {
           <button data-action="create-backup" type="button">Создать бекап сейчас</button>
         </div>
         <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
+        <div class="backup-restore-panel">
+          <div class="field">
+            <label for="backup-restore-select">Бекап для восстановления</label>
+            <select id="backup-restore-select"></select>
+          </div>
+          <button class="secondary danger" data-action="restore-selected-backup" type="button">Восстановить выбранный бекап</button>
+        </div>
         <div id="backups-table" class="backup-list"></div>
       </section>
     </section>
@@ -1992,6 +2005,7 @@ function renderBackups(){
   const rows = state.backups || [];
   const countNode = el('backups-count');
   if (countNode) countNode.textContent = String(rows.length);
+  renderBackupRestorePanel(rows);
   const target = el('backups-table');
   if (!target) return;
   if (!rows.length) {
@@ -1999,6 +2013,21 @@ function renderBackups(){
     return;
   }
   target.innerHTML = rows.map((item) => backupCard(item)).join('');
+}
+function renderBackupRestorePanel(rows){
+  const select = el('backup-restore-select');
+  const button = document.querySelector('[data-action="restore-selected-backup"]');
+  if (!select || !button) return;
+  const previous = select.value;
+  select.innerHTML = rows.length
+    ? rows.map((item) => {
+      const id = String(item.id || '');
+      const label = `${id} · ${item.created_at || '-'}`;
+      return `<option value="${esc(id)}">${esc(label)}</option>`;
+    }).join('')
+    : '<option value="">Бекапов нет</option>';
+  if (rows.some((item) => String(item.id || '') === previous)) select.value = previous;
+  button.disabled = !rows.length;
 }
 function backupCard(item){
   const id = String(item.id || '');
@@ -2019,7 +2048,6 @@ function backupCard(item){
     </div>
     <div class="backup-files">
       <a href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
-      <button class="secondary danger" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
       ${visibleFiles.map((file) => `<a href="${backupDownloadUrl(id, file.path)}">${esc(file.path)}</a>`).join('')}
     </div>
   </article>`;
@@ -2370,8 +2398,8 @@ document.addEventListener('click', (event) => {
     createBackup();
     return;
   }
-  if (button.dataset.backupRestore) {
-    restoreBackup(button.dataset.backupRestore);
+  if (button.dataset.action === 'restore-selected-backup') {
+    restoreBackup(el('backup-restore-select')?.value || '');
     return;
   }
   if (button.dataset.action === 'load-more-candidates') {
