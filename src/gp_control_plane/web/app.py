@@ -1156,7 +1156,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1244,15 +1244,18 @@ function latestById(rows){
   });
   return Array.from(byId.values()).sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
 }
-function setActiveTab(tabName){
-  state.activeTab = tabName;
+function syncActiveTabUi(){
   document.querySelectorAll('.tab-button[data-tab]').forEach((button) => {
-    const active = button.dataset.tab === tabName;
+    const active = button.dataset.tab === state.activeTab;
     button.classList.toggle('active', active);
   });
   document.querySelectorAll('[data-tab-page]').forEach((page) => {
-    page.classList.toggle('active', page.dataset.tabPage === tabName);
+    page.classList.toggle('active', page.dataset.tabPage === state.activeTab);
   });
+}
+function setActiveTab(tabName){
+  state.activeTab = tabName;
+  syncActiveTabUi();
   if (tabName === 'terminal') scrollLogToBottom();
   if (tabName === 'candidates') ensureCandidateViewLoaded();
   if (tabName === 'backups' && !state.backupsLoaded) refreshBackups();
@@ -1441,7 +1444,11 @@ function usePreset(target){
   el(`${target}-domains`).value = [...new Set(finalDomains)].join('\\n');
   updateEditorLineNumbers(`${target}-domains`);
   if (target === 'finder') state.domainsTouched = true;
-  if (target === 'common') refreshCandidates(true);
+  if (target === 'common') {
+    prepareCommonCandidateState();
+    renderCandidatesOnly();
+    if (selectedCommonDomains().length >= 2) refreshCandidates(true);
+  }
   else renderCandidates();
 }
 function presetNameForSave(target){
@@ -1647,6 +1654,51 @@ function selectedCommonDomains(){
   if (!node) return [];
   return filterTestedDomains(parseDomains(node.value));
 }
+function commonCandidateKey(){
+  return selectedCommonDomains().join('|');
+}
+function currentCandidateQueryKey(options){
+  const opts = options || {};
+  if (opts.view === 'domain') return `domain:${opts.domain || ''}`;
+  if ((opts.view || state.candidateView) === 'common') return `common:${commonCandidateKey()}`;
+  return String(opts.view || state.candidateView || 'domain');
+}
+function loadCommonCandidateCache(key){
+  const cached = state.commonCandidateCache[key];
+  if (!cached) return false;
+  state.candidates = cached.candidates.slice();
+  state.candidateTotal = cached.total;
+  state.candidateOffset = cached.offset;
+  state.candidateHasMore = cached.hasMore;
+  state.candidateVersion = cached.version;
+  state.testedDomains = cached.testedDomains.slice();
+  state.candidatesLoaded = true;
+  state.candidateQueryKey = key;
+  return true;
+}
+function storeCommonCandidateCache(key){
+  if (!key) return;
+  state.commonCandidateCache[key] = {
+    candidates: state.candidates.slice(),
+    total: state.candidateTotal,
+    offset: state.candidateOffset,
+    hasMore: state.candidateHasMore,
+    version: state.candidateVersion,
+    testedDomains: Array.isArray(state.testedDomains) ? state.testedDomains.slice() : []
+  };
+}
+function prepareCommonCandidateState(){
+  const key = `common:${commonCandidateKey()}`;
+  if (state.candidateQueryKey === key) return state.candidatesLoaded;
+  if (loadCommonCandidateCache(key)) return true;
+  state.candidates = [];
+  state.candidateTotal = 0;
+  state.candidateOffset = 0;
+  state.candidateHasMore = false;
+  state.candidatesLoaded = false;
+  state.candidateQueryKey = key;
+  return false;
+}
 function dynamicCommonRows(rows){
   const selectedDomains = selectedCommonDomains();
   if (selectedDomains.length < 2) return [];
@@ -1684,7 +1736,9 @@ function addCommonDomain(){
   el('common-domains').value = current.join('\\n');
   input.value = '';
   updateEditorLineNumbers('common-domains');
-  refreshCandidates(true);
+  prepareCommonCandidateState();
+  renderCandidatesOnly();
+  if (selectedCommonDomains().length >= 2) refreshCandidates(true);
 }
 function candidateGroups(rows){
   const domainMap = new Map();
@@ -1758,10 +1812,11 @@ function strategyEditorScrollKey(field){
   return field?.dataset?.strategyCodeKey || field?.closest?.('[data-strategy-list]')?.dataset?.strategyList || '';
 }
 function rememberStrategyEditorScrolls(){
-  document.querySelectorAll('.strategy-code').forEach((field) => {
-    const key = strategyEditorScrollKey(field);
-    if (key) state.strategyEditorScrolls[key] = field.scrollTop;
-  });
+  const field = document.activeElement && document.activeElement.matches && document.activeElement.matches('.strategy-code')
+    ? document.activeElement
+    : null;
+  const key = strategyEditorScrollKey(field);
+  if (key) state.strategyEditorScrolls[key] = field.scrollTop;
 }
 function restoreStrategyEditorScrolls(){
   requestAnimationFrame(() => {
@@ -2022,7 +2077,8 @@ function scrollLogToBottom(){
     logNode.scrollTop = logNode.scrollHeight;
   });
 }
-function renderAll(){
+function renderAll(options){
+  const opts = options || {};
   if (!state.domainsInitialized && !state.domainsTouched && !el('finder-domains').value.trim() && state.domainSets) {
     const domains = [...new Set(defaultDomains('critical'))];
     el('finder-domains').value = domains.join('\\n');
@@ -2030,19 +2086,33 @@ function renderAll(){
   }
   renderPresetSelects();
   renderMetrics();
-  renderCandidates();
+  if (!opts.skipCandidates) renderCandidates();
   renderRuns();
   renderLog();
   renderBackups();
   updateAllEditorLineNumbers();
-  setActiveTab(state.activeTab);
+  syncActiveTabUi();
+}
+function renderCandidatesOnly(){
+  renderMetrics();
+  renderCandidates();
+  updateEditorLineNumbers('common-domains');
 }
 function ensureCandidateViewLoaded(){
   if (state.candidateView === 'domain') {
     if (!state.candidateDomainsLoaded) refreshDomainIndex();
     return;
   }
-  if (!state.candidatesLoaded) refreshCandidates(true);
+  const selectedDomains = selectedCommonDomains();
+  const loaded = prepareCommonCandidateState();
+  if (selectedDomains.length < 2) return;
+  if (!loaded) refreshCandidates(true);
+}
+function setCandidateView(view){
+  state.candidateView = view;
+  if (view === 'common') prepareCommonCandidateState();
+  renderCandidatesOnly();
+  ensureCandidateViewLoaded();
 }
 function candidateParams(offset, options){
   const params = new URLSearchParams();
@@ -2069,7 +2139,7 @@ async function refreshDomainIndex(){
     state.candidateVersion = data.version || null;
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidateDomainsLoaded = true;
-    renderAll();
+    renderCandidatesOnly();
   } catch (error) {
     setMessage(`Ошибка загрузки доменов: ${error.message}`, 'bad');
   }
@@ -2090,7 +2160,7 @@ async function refreshDomainStrategies(domain, reset){
       loadingAll: false
     };
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
-    renderAll();
+    renderCandidatesOnly();
   } catch (error) {
     setMessage(`Ошибка загрузки стратегий домена: ${error.message}`, 'bad');
   }
@@ -2121,16 +2191,17 @@ async function loadAllDomainStrategies(domain){
       guard += 1;
     }
     state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false };
-    renderAll();
+    renderCandidatesOnly();
   } catch (error) {
     state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false };
     setMessage(`Ошибка загрузки всех стратегий домена: ${error.message}`, 'bad');
-    renderAll();
+    renderCandidatesOnly();
   }
 }
 async function refreshCandidates(reset){
   const requestId = ++candidateRequestSeq;
   const offset = reset ? 0 : state.candidates.length;
+  const queryKey = currentCandidateQueryKey();
   try {
     const data = await getJson(`/api/strategy-finder/candidates?${candidateParams(offset).toString()}`);
     if (requestId !== candidateRequestSeq) return;
@@ -2142,7 +2213,9 @@ async function refreshCandidates(reset){
     state.candidateVersion = data.version || null;
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidatesLoaded = true;
-    renderAll();
+    state.candidateQueryKey = queryKey;
+    if (queryKey.startsWith('common:')) storeCommonCandidateCache(queryKey);
+    renderCandidatesOnly();
   } catch (error) {
     setMessage(`Ошибка загрузки кандидатов: ${error.message}`, 'bad');
   }
@@ -2156,7 +2229,9 @@ function scheduleCandidateRefresh(){
       state.openCandidateDomains = {};
       refreshDomainIndex();
     } else {
-      refreshCandidates(true);
+      prepareCommonCandidateState();
+      renderCandidatesOnly();
+      if (selectedCommonDomains().length >= 2) refreshCandidates(true);
     }
   }, 350);
 }
@@ -2176,7 +2251,7 @@ async function refresh(){
     state.finderLog = finderLog;
     state.domainSets = domainSets;
     mergeCustomPresets((presets || {}).custom || {});
-    renderAll();
+    renderAll({ skipCandidates: true });
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   } finally {
@@ -2274,8 +2349,7 @@ document.addEventListener('click', (event) => {
   if (!button) return;
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
   if (button.dataset.candidateView) {
-    state.candidateView = button.dataset.candidateView;
-    ensureCandidateViewLoaded();
+    setCandidateView(button.dataset.candidateView);
     return;
   }
   if (button.dataset.action === 'refresh') {
