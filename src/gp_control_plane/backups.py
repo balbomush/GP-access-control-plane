@@ -10,8 +10,8 @@ from typing import Any
 
 from . import __version__
 from .state import now_iso, read_state
-from .storage import connect, db_path, read_custom_presets
-from .strategy_finder import domain_sets
+from .storage import connect, db_path, import_candidates_json_if_needed, read_custom_presets
+from .strategy_finder import candidate_id_for, domain_sets
 
 
 SNAPSHOT_KEEP = 5
@@ -156,6 +156,7 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
 
 
 def _export_strategies(state_dir: Path, root: Path) -> int:
+    import_candidates_json_if_needed(state_dir, candidate_id_for)
     strategy_count = 0
     with connect(state_dir) as conn:
         with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
