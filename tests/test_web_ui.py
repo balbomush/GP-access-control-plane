@@ -81,6 +81,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("selectedFinderDomains", html)
         self.assertIn("selectedCommonDomains", html)
         self.assertIn("common-controls", html)
+        self.assertIn(".common-filter-panel .preset-grid", html)
         self.assertIn("common-domains", html)
         self.assertIn("tested-domain-options", html)
         self.assertIn("common-domain-add", html)

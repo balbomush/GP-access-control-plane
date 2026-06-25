@@ -388,6 +388,9 @@ button:disabled { opacity: .55; cursor: default; }
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 8px;
 }
+.common-filter-panel .preset-grid {
+  grid-template-columns: 1fr;
+}
 .protocol-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
