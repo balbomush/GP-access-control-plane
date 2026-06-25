@@ -87,7 +87,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("label: 'Диагностика'", html)
         self.assertIn("label: 'Протестированные'", html)
         self.assertIn("data-preset-use=\"finder\"", html)
-        self.assertIn("data-preset-save=\"common\"", html)
+        self.assertNotIn("data-preset-save=\"common\"", html)
         self.assertIn("CUSTOM_PRESETS_KEY", html)
         self.assertIn("localStorage", html)
         self.assertIn("testedDomains()", html)

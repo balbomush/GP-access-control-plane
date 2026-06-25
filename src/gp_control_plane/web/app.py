@@ -1070,14 +1070,9 @@ pre {
               <label for="common-preset-select">Пресет доменов для пересечения</label>
               <select id="common-preset-select"></select>
             </div>
-            <div class="field">
-              <label for="common-preset-name">Название для сохранения</label>
-              <input id="common-preset-name" autocomplete="off" placeholder="мой список">
-            </div>
           </div>
           <div class="preset-actions">
             <button class="secondary" data-preset-use="common" title="Подставляет выбранный пресет в фильтр общих стратегий. Непротестированные домены будут пропущены." type="button">Применить пресет</button>
-            <button class="secondary" data-preset-save="common" title="Сохраняет текущий фильтр как пользовательский пресет или перезаписывает выбранный пользовательский пресет." type="button">Сохранить пресет</button>
             <button class="secondary danger" data-preset-delete="common" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
           </div>
           <div class="field">
@@ -1452,7 +1447,8 @@ function usePreset(target){
   else renderCandidates();
 }
 function presetNameForSave(target){
-  const explicit = el(`${target}-preset-name`).value.trim();
+  const nameInput = el(`${target}-preset-name`);
+  const explicit = nameInput ? nameInput.value.trim() : '';
   if (explicit) return explicit;
   const selected = el(`${target}-preset-select`).value || '';
   if (selected.startsWith('custom:')) return selected.slice('custom:'.length);
@@ -2467,7 +2463,8 @@ document.addEventListener('change', (event) => {
   if (event.target && (event.target.id === 'finder-preset-select' || event.target.id === 'common-preset-select')) {
     const target = event.target.id.startsWith('finder') ? 'finder' : 'common';
     const value = event.target.value || '';
-    el(`${target}-preset-name`).value = value.startsWith('custom:') ? value.slice('custom:'.length) : '';
+    const nameInput = el(`${target}-preset-name`);
+    if (nameInput) nameInput.value = value.startsWith('custom:') ? value.slice('custom:'.length) : '';
   }
 });
 document.addEventListener('keydown', (event) => {
