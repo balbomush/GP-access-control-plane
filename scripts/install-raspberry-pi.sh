@@ -51,6 +51,14 @@ as_root() {
   fi
 }
 
+run_zapret_install_bin() {
+  if [ "$CURRENT_UID" -eq 0 ]; then
+    (cd "$ZAPRET_DIR" && ./install_bin.sh)
+  else
+    sudo sh -c 'cd "$1" && ./install_bin.sh' sh "$ZAPRET_DIR"
+  fi
+}
+
 run_as_target() {
   if [ "$CURRENT_USER" = "$TARGET_USER" ]; then
     HOME="$TARGET_HOME" "$@"
@@ -111,7 +119,7 @@ else
 fi
 
 as_root chmod +x "$ZAPRET_DIR/blockcheck2.sh" "$ZAPRET_DIR/install_bin.sh" 2>/dev/null || true
-if ! as_root "$ZAPRET_DIR/install_bin.sh"; then
+if ! run_zapret_install_bin; then
   log "zapret2 ready binaries were not found; installing build dependencies and compiling"
   as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
@@ -126,7 +134,7 @@ if ! as_root "$ZAPRET_DIR/install_bin.sh"; then
     || as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y libluajit-5.1-dev \
     || true
   as_root make -C "$ZAPRET_DIR" systemd || as_root make -C "$ZAPRET_DIR"
-  as_root "$ZAPRET_DIR/install_bin.sh"
+  run_zapret_install_bin
 fi
 
 [ -x "$ZAPRET_DIR/blockcheck2.sh" ] || fail "zapret2 blockcheck2.sh was not installed"

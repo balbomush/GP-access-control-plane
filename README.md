@@ -21,13 +21,15 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 - создаст и включит systemd-сервис;
 - запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi.
 
+Установка рассчитана на Raspberry Pi OS. Скрипт можно запускать из-под любого пользователя с правом `sudo`.
+
 После установки откройте в браузере:
 
 ```text
 http://<ip-raspberry-pi>:8080/
 ```
 
-Скрипт можно запускать из-под любого пользователя с правом `sudo`. По умолчанию проект ставится в домашний каталог пользователя, от имени которого запущена установка.
+По умолчанию проект ставится в домашний каталог пользователя, от имени которого запущена установка.
 
 Если запустить через `sudo`, установщик возьмет исходного пользователя из `SUDO_USER` и поставит проект ему, а не в `/root`:
 
@@ -54,7 +56,7 @@ GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -lc 'SUDO=
 Полный установщик выше уже ставит `zapret2` автоматически. Если нужно установить только `zapret2` без установки веб-интерфейса, выполните:
 
 ```bash
-bash -lc 'SUDO=sudo; [ "$(id -u)" -eq 0 ] && SUDO=; $SUDO apt-get update && $SUDO apt-get install -y git bsdextrautils && if [ -d /opt/zapret2/.git ]; then $SUDO git -C /opt/zapret2 pull --ff-only; else $SUDO git clone https://github.com/bol-van/zapret2.git /opt/zapret2; fi && $SUDO /opt/zapret2/install_bin.sh'
+bash -lc 'SUDO=sudo; [ "$(id -u)" -eq 0 ] && SUDO=; $SUDO apt-get update && $SUDO apt-get install -y git bsdextrautils && if [ -d /opt/zapret2/.git ]; then $SUDO git -C /opt/zapret2 pull --ff-only; else $SUDO git clone https://github.com/bol-van/zapret2.git /opt/zapret2; fi && cd /opt/zapret2 && $SUDO ./install_bin.sh'
 ```
 
 После этого должны появиться файлы:
@@ -96,10 +98,11 @@ gp-control-plane zapret2 check-install --config ~/gp/GP-access-control-plane/con
 - показывать прогресс, live-лог и историю запусков;
 - сохранять найденные стратегии в локальную SQLite-БД;
 - показывать стратегии по доменам и общие стратегии для выбранных доменов;
+- быстро подгружать большие списки кандидатов частями, без полной загрузки всего списка в браузер;
 - останавливать долгий подбор без потери уже найденных успешных стратегий;
 - хранить пользовательские пресеты доменов на backend, а не только в браузере;
-- создавать файловые сохранения стратегий и пресетов;
-- скачивать бекапы через отдельную вкладку `Бекапы`.
+- создавать файловые бекапы стратегий и пресетов;
+- скачивать бекапы через отдельную вкладку `Бекапы`;
 - восстанавливать стратегии и пользовательские пресеты из бекапа, когда подбор не запущен.
 
 Проект не меняет настройки роутера и не применяет стратегии автоматически.
