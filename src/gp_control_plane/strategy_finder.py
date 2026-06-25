@@ -333,6 +333,63 @@ def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
     return result
 
 
+def close_stale_running_runs(state_dir: Path) -> int:
+    root = _finder_dir(state_dir)
+    runs = read_runs(state_dir, limit=200)
+    latest_by_id: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        run_id = str(run.get("id") or "")
+        if run_id:
+            latest_by_id[run_id] = run
+    closed = 0
+    for run in latest_by_id.values():
+        if str(run.get("status") or "") not in {"queued", "running", "stopping"}:
+            continue
+        progress = run.get("progress")
+        if not isinstance(progress, dict):
+            progress = _read_progress_log(run)
+        update = {
+            "id": run.get("id"),
+            "kind": run.get("kind"),
+            "candidate_id": run.get("candidate_id", ""),
+            "status": "stopped",
+            "timestamp": run.get("timestamp") or now_iso(),
+            "domains": run.get("domains") or [],
+            "returncode": run.get("returncode"),
+            "stdout_log": run.get("stdout_log", ""),
+            "stderr_log": run.get("stderr_log", ""),
+            "progress_log": run.get("progress_log", ""),
+            "candidate_count": int(run.get("candidate_count") or 0),
+            "common_candidate_count": int(run.get("common_candidate_count") or 0),
+            "total_candidates": int(run.get("total_candidates") or 0),
+            "stopped": True,
+            "interrupted": True,
+            "interrupted_reason": "web service stopped while run was marked active",
+            "test": run.get("test", "standard"),
+            "attempt_plan": run.get("attempt_plan") or {},
+        }
+        if isinstance(progress, dict):
+            update["progress"] = progress
+        for key in (
+            "enable_http",
+            "enable_tls",
+            "enable_tls13",
+            "enable_quic",
+            "scan_level",
+            "repeats",
+            "repeat_parallel",
+            "skip_dnscheck",
+            "skip_ipblock",
+            "curl_parallelism",
+            "discovery_options",
+        ):
+            if key in run:
+                update[key] = run[key]
+        append_jsonl(root / "runs.jsonl", update)
+        closed += 1
+    return closed
+
+
 def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
     for run in reversed(read_runs(state_dir, limit=200)):
         stdout_log = Path(str(run.get("stdout_log") or ""))

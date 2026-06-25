@@ -10,6 +10,7 @@ from ..config import AppConfig
 from ..jobs import JobRunner
 from ..state import read_state, write_state
 from ..strategy_finder import (
+    close_stale_running_runs,
     domain_sets,
     latest_log_tail,
     read_candidate_domain_index,
@@ -23,6 +24,7 @@ from ..zapret2 import check_install
 
 def serve(config: AppConfig, host: str, port: int) -> None:
     _clear_stale_current_job(config)
+    close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir)
 
     class Handler(BaseHTTPRequestHandler):

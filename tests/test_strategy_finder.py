@@ -16,12 +16,14 @@ from gp_control_plane.strategy_finder import (
     _standard_attempt_plan,
     _write_multidomain_runner,
     candidate_id_for,
+    close_stale_running_runs,
     latest_log_tail,
     parse_blockcheck_stdout,
     progress_from_stdout,
     read_candidate_domain_index,
     read_candidate_page,
     read_candidates,
+    read_runs,
     upsert_candidates,
 )
 
@@ -453,6 +455,31 @@ pktws_check_http3()
             self.assertEqual(tail["progress"]["attempted"], 42)
             self.assertEqual(tail["progress"]["successful"], 7)
             self.assertNotIn("partial", tail["progress"])
+
+    def test_close_stale_running_runs_appends_stopped_update(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            root.mkdir(parents=True)
+            append_jsonl(
+                root / "runs.jsonl",
+                {
+                    "id": "run-active",
+                    "kind": "multi-domain-discovery",
+                    "status": "running",
+                    "timestamp": "2026-06-25T17:18:40Z",
+                    "domains": ["youtube.com"],
+                    "candidate_count": 0,
+                },
+            )
+
+            closed = close_stale_running_runs(state_dir)
+            runs = read_runs(state_dir, limit=10)
+
+            self.assertEqual(closed, 1)
+            self.assertEqual(runs[-1]["id"], "run-active")
+            self.assertEqual(runs[-1]["status"], "stopped")
+            self.assertTrue(runs[-1]["interrupted"])
 
     def test_live_stdout_recorder_persists_success_without_full_stdout_parse(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
