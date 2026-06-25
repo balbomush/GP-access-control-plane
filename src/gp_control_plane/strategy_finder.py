@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .state import append_jsonl, now_iso
+from .storage import (
+    append_run,
+    connect,
+    import_candidates_json_if_needed,
+    read_run_payloads,
+    upsert_candidate_event,
+)
 from .zapret2 import _cleanup_blockcheck_processes, _cleanup_nft_blockcheck_tables, _stop_process_group
 
 
@@ -60,6 +67,79 @@ COVERAGE_DOMAINS = [
     "discordstatus.com",
     "speedtest.net",
     "cloudflare-ech.com",
+]
+GOOGLE_YOUTUBE_DOMAINS = [
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "youtubei.googleapis.com",
+    "youtube.googleapis.com",
+    "googlevideo.com",
+    "video.google.com",
+    "i.ytimg.com",
+    "i9.ytimg.com",
+    "ytimg.com",
+    "yt3.ggpht.com",
+    "yt3.googleusercontent.com",
+    "yt4.ggpht.com",
+    "yt4.googleusercontent.com",
+    "ggpht.com",
+    "gstatic.com",
+    "gvt1.com",
+    "googleapis.com",
+    "googleusercontent.com",
+    "play.google.com",
+]
+DISCORD_DOMAINS = [
+    "discord.com",
+    "discord.gg",
+    "discordapp.com",
+    "discordapp.net",
+    "discordcdn.com",
+    "discord.media",
+    "discord.co",
+    "discord.design",
+    "discord.dev",
+    "discord.gift",
+    "discord.gifts",
+    "discord.new",
+    "discord.store",
+    "discord.tools",
+    "discordmerch.com",
+    "discordpartygames.com",
+    "discord-activities.com",
+    "discordactivities.com",
+    "discordsays.com",
+    "discordstatus.com",
+    "dis.gd",
+    "discord-attachments-uploads-prd.storage.googleapis.com",
+]
+CLOUDFLARE_DOMAINS = [
+    "cloudflare.com",
+    "www.cloudflare.com",
+    "cloudflare-dns.com",
+    "cloudflare-ech.com",
+    "cloudflareclient.com",
+    "cloudflareinsights.com",
+    "cdnjs.cloudflare.com",
+    "workers.dev",
+    "pages.dev",
+]
+AMAZON_AWS_DOMAINS = [
+    "amazon.com",
+    "www.amazon.com",
+    "amazonaws.com",
+    "aws.amazon.com",
+    "cloudfront.net",
+    "s3.amazonaws.com",
+    "ec2.amazonaws.com",
+    "globalaccelerator.amazonaws.com",
+    "media-amazon.com",
+    "ssl-images-amazon.com",
+    "images-na.ssl-images-amazon.com",
 ]
 
 ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
@@ -141,6 +221,10 @@ def domain_sets() -> dict[str, list[str]]:
         "critical": list(CRITICAL_DOMAINS),
         "diagnostic": list(DIAGNOSTIC_DOMAINS),
         "coverage": list(COVERAGE_DOMAINS),
+        "google-youtube": list(GOOGLE_YOUTUBE_DOMAINS),
+        "discord": list(DISCORD_DOMAINS),
+        "cloudflare": list(CLOUDFLARE_DOMAINS),
+        "amazon-aws": list(AMAZON_AWS_DOMAINS),
     }
 
 
@@ -219,10 +303,16 @@ def run_multi_domain_discovery(
 
 
 def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
-    path = _finder_dir(state_dir) / "candidates.json"
-    if not path.exists():
-        return []
-    return list(_iter_candidate_file(path))
+    _ensure_candidate_import(state_dir)
+    with connect(state_dir) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, protocol, args, status, first_seen_at, last_seen_at
+            FROM candidates
+            ORDER BY last_seen_at DESC, id ASC
+            """
+        ).fetchall()
+        return [_candidate_from_db(conn, row, include_events=True) for row in rows]
 
 
 def read_candidate_page(
@@ -235,39 +325,39 @@ def read_candidate_page(
     domains: list[str] | None = None,
     domain: str = "",
 ) -> dict[str, Any]:
-    path = _finder_dir(state_dir) / "candidates.json"
+    _ensure_candidate_import(state_dir)
     limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
     offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
     query = query.strip().lower()
     view = view if view in {"domain", "common"} else "domain"
     selected_domains = _clean_domain_list(domains or [])
     selected_domain = domain.strip()
-    tested_domains: set[str] = set()
     total = 0
     rows: list[dict[str, Any]] = []
-    for candidate in _iter_candidate_file(path):
-        candidate_domains = _candidate_domains(candidate)
-        all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
-        tested_domains.update(all_domains)
-        if view == "domain":
-            if not candidate_domains:
+    with connect(state_dir) as conn:
+        tested_domains = _tested_domains_from_db(conn)
+        for candidate in _iter_db_candidates(conn):
+            candidate_domains = _candidate_domains(candidate)
+            all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
+            if view == "domain":
+                if not candidate_domains:
+                    continue
+                if selected_domain and selected_domain not in candidate_domains:
+                    continue
+            if view == "common":
+                if len(selected_domains) < 2:
+                    continue
+                domain_set = set(all_domains)
+                if not all(item in domain_set for item in selected_domains):
+                    continue
+            if query and not _candidate_matches_query(candidate, query, all_domains):
                 continue
-            if selected_domain and selected_domain not in candidate_domains:
+            total += 1
+            if total <= offset:
                 continue
-        if view == "common":
-            if len(selected_domains) < 2:
-                continue
-            domain_set = set(all_domains)
-            if not all(domain in domain_set for domain in selected_domains):
-                continue
-        if query and not _candidate_matches_query(candidate, query, all_domains):
-            continue
-        total += 1
-        if total <= offset:
-            continue
-        if len(rows) < limit:
-            rows.append(_compact_candidate(candidate))
-    version = _file_version(path)
+            if len(rows) < limit:
+                rows.append(_compact_candidate(candidate))
+    version = _storage_version(state_dir)
     return {
         "candidates": rows,
         "total": total,
@@ -280,23 +370,23 @@ def read_candidate_page(
 
 
 def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str, Any]:
-    path = _finder_dir(state_dir) / "candidates.json"
+    _ensure_candidate_import(state_dir)
     query = query.strip().lower()
     domains: dict[str, dict[str, Any]] = {}
-    tested_domains: set[str] = set()
-    for candidate in _iter_candidate_file(path):
-        candidate_domains = _candidate_domains(candidate)
-        all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
-        tested_domains.update(all_domains)
-        if query and not _candidate_matches_query(candidate, query, all_domains):
-            continue
-        candidate_id = str(candidate.get("id") or candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or "")))
-        protocol = str(candidate.get("protocol") or "unknown")
-        for domain in candidate_domains:
-            item = domains.setdefault(domain, {"domain": domain, "strategy_ids": set(), "protocols": {}})
-            item["strategy_ids"].add(candidate_id)
-            protocol_ids = item["protocols"].setdefault(protocol, set())
-            protocol_ids.add(candidate_id)
+    with connect(state_dir) as conn:
+        tested_domains = _tested_domains_from_db(conn)
+        for candidate in _iter_db_candidates(conn):
+            candidate_domains = _candidate_domains(candidate)
+            all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
+            if query and not _candidate_matches_query(candidate, query, all_domains):
+                continue
+            candidate_id = str(candidate.get("id") or candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or "")))
+            protocol = str(candidate.get("protocol") or "unknown")
+            for item_domain in candidate_domains:
+                item = domains.setdefault(item_domain, {"domain": item_domain, "strategy_ids": set(), "protocols": {}})
+                item["strategy_ids"].add(candidate_id)
+                protocol_ids = item["protocols"].setdefault(protocol, set())
+                protocol_ids.add(candidate_id)
     rows = []
     for item in domains.values():
         rows.append(
@@ -315,22 +405,12 @@ def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str
         "total": len(rows),
         "strategy_total": sum(int(item["strategy_count"]) for item in rows),
         "tested_domains": sorted(tested_domains),
-        "version": _file_version(path),
+        "version": _storage_version(state_dir),
     }
 
 
 def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
-    path = _finder_dir(state_dir) / "runs.jsonl"
-    if not path.exists():
-        return []
-    lines = _tail_lines(path, limit)
-    result: list[dict[str, Any]] = []
-    for line in lines:
-        if line.strip():
-            parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                result.append(_compact_run(parsed))
-    return result
+    return [_compact_run(run) for run in read_run_payloads(state_dir, limit=limit)]
 
 
 def _compact_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -402,7 +482,7 @@ def close_stale_running_runs(state_dir: Path) -> int:
         ):
             if key in run:
                 update[key] = run[key]
-        append_jsonl(root / "runs.jsonl", update)
+        append_run(state_dir, update)
         closed += 1
     return closed
 
@@ -479,62 +559,51 @@ def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
     }
 
 
-def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
-    existing = {str(item.get("id")): item for item in read_candidates(state_dir)}
+def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, Any]) -> int:
     now = now_iso()
     for raw in parsed.get("candidates") or []:
         if not isinstance(raw, dict):
             continue
         candidate_id = candidate_id_for(str(raw.get("protocol")), str(raw.get("args")))
-        item = existing.get(candidate_id) or {
-            "id": candidate_id,
-            "protocol": raw.get("protocol"),
-            "args": raw.get("args"),
-            "status": "candidate",
-            "first_seen_at": now,
-            "seen": [],
-        }
-        item["last_seen_at"] = now
-        seen = item.setdefault("seen", [])
-        if isinstance(seen, list):
-            seen.append(
-                {
-                    "run_id": run["id"],
-                    "domain": raw.get("domain"),
-                    "test": raw.get("test"),
-                    "ip_version": raw.get("ip_version"),
-                    "seen_at": now,
-                }
-            )
-        existing[candidate_id] = item
+        upsert_candidate_event(
+            state_dir,
+            candidate_id=candidate_id,
+            protocol=str(raw.get("protocol") or ""),
+            args=str(raw.get("args") or ""),
+            status="candidate",
+            run_id=str(run.get("id") or ""),
+            domain=str(raw.get("domain") or ""),
+            domains=[],
+            test=str(raw.get("test") or ""),
+            ip_version=str(raw.get("ip_version") or ""),
+            seen_at=now,
+            common=False,
+        )
     for raw in parsed.get("common_candidates") or []:
         if not isinstance(raw, dict):
             continue
         candidate_id = candidate_id_for(str(raw.get("protocol")), str(raw.get("args")))
-        item = existing.get(candidate_id) or {
-            "id": candidate_id,
-            "protocol": raw.get("protocol"),
-            "args": raw.get("args"),
-            "status": "candidate",
-            "first_seen_at": now,
-            "seen": [],
-        }
-        item["last_seen_at"] = now
-        common_seen = item.setdefault("common_seen", [])
-        if isinstance(common_seen, list):
-            common_seen.append(
-                {
-                    "run_id": run["id"],
-                    "domains": run.get("domains") or [],
-                    "test": raw.get("test"),
-                    "ip_version": raw.get("ip_version"),
-                    "seen_at": now,
-                }
-            )
-        existing[candidate_id] = item
-    candidates = sorted(existing.values(), key=lambda item: str(item.get("last_seen_at") or ""), reverse=True)
-    _write_candidates(state_dir, candidates)
-    return candidates
+        upsert_candidate_event(
+            state_dir,
+            candidate_id=candidate_id,
+            protocol=str(raw.get("protocol") or ""),
+            args=str(raw.get("args") or ""),
+            status="candidate",
+            run_id=str(run.get("id") or ""),
+            domain="",
+            domains=[str(item or "") for item in run.get("domains", [])] if isinstance(run.get("domains"), list) else [],
+            test=str(raw.get("test") or ""),
+            ip_version=str(raw.get("ip_version") or ""),
+            seen_at=now,
+            common=True,
+        )
+    return candidate_total(state_dir)
+
+
+def candidate_total(state_dir: Path) -> int:
+    _ensure_candidate_import(state_dir)
+    with connect(state_dir) as conn:
+        return int(conn.execute("SELECT COUNT(*) AS count FROM candidates").fetchone()["count"])
 
 
 def candidate_id_for(protocol: str, args: str) -> str:
@@ -545,6 +614,7 @@ def candidate_id_for(protocol: str, args: str) -> str:
 class _LiveStdoutRecorder:
     def __init__(self, state_dir: Path, run: dict[str, Any]):
         self._lock = threading.Lock()
+        self._state_dir = state_dir
         self._run = run
         self._available_path = _finder_dir(state_dir) / "available.ndjson"
         progress_log = str(run.get("progress_log") or "")
@@ -587,6 +657,7 @@ class _LiveStdoutRecorder:
                 "common_results": common_results,
                 "direct_available": [item for item in results if item.get("result") == "working without bypass"],
                 "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
+                "live_recorded": True,
             }
 
     def progress(self, run: dict[str, Any]) -> dict[str, Any]:
@@ -657,6 +728,21 @@ class _LiveStdoutRecorder:
                 "run_id": self._run["id"],
                 "seen_at": now_iso(),
             },
+        )
+        candidate_id = candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or ""))
+        upsert_candidate_event(
+            self._state_dir,
+            candidate_id=candidate_id,
+            protocol=str(candidate.get("protocol") or ""),
+            args=str(candidate.get("args") or ""),
+            status="candidate",
+            run_id=str(self._run.get("id") or ""),
+            domain=str(candidate.get("domain") or ""),
+            domains=[str(item or "") for item in self._run.get("domains", [])] if common and isinstance(self._run.get("domains"), list) else [],
+            test=str(candidate.get("test") or ""),
+            ip_version=str(candidate.get("ip_version") or ""),
+            seen_at=now_iso(),
+            common=common,
         )
 
     def _progress_locked(self, run: dict[str, Any]) -> dict[str, Any]:
@@ -832,7 +918,7 @@ def _run_blockcheck_live(
         **option_fields,
         "attempt_plan": attempt_plan,
     }
-    append_jsonl(root / "runs.jsonl", started)
+    append_run(state_dir, started)
 
     recorder = _LiveStdoutRecorder(state_dir, started)
     process_result = _run_process_with_live_stdout(
@@ -869,9 +955,8 @@ def _run_blockcheck_live(
     }
     run["progress"] = recorder.progress(run)
     if kind in {"standard-discovery", "multi-domain-discovery"}:
-        candidates = upsert_candidates(state_dir, parsed, run)
-        run["total_candidates"] = len(candidates)
-    append_jsonl(root / "runs.jsonl", run)
+        run["total_candidates"] = candidate_total(state_dir) if parsed.get("live_recorded") else upsert_candidates(state_dir, parsed, run)
+    append_run(state_dir, run)
     return run
 
 
@@ -969,7 +1054,7 @@ def _run_blockcheck_command_live(
         "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
-    append_jsonl(root / "runs.jsonl", started)
+    append_run(state_dir, started)
 
     recorder = _LiveStdoutRecorder(state_dir, started)
     process_result = _run_process_with_live_stdout(
@@ -1007,9 +1092,8 @@ def _run_blockcheck_command_live(
     }
     run["progress"] = recorder.progress(run)
     if kind in {"standard-discovery", "multi-domain-discovery"}:
-        candidates = upsert_candidates(state_dir, parsed, run)
-        run["total_candidates"] = len(candidates)
-    append_jsonl(root / "runs.jsonl", run)
+        run["total_candidates"] = candidate_total(state_dir) if parsed.get("live_recorded") else upsert_candidates(state_dir, parsed, run)
+    append_run(state_dir, run)
     return run
 
 
@@ -1819,6 +1903,109 @@ def _write_candidates(state_dir: Path, candidates: list[dict[str, Any]]) -> None
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(candidates, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _ensure_candidate_import(state_dir: Path) -> None:
+    import_candidates_json_if_needed(state_dir, candidate_id_for)
+
+
+def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, protocol, args, status, first_seen_at, last_seen_at
+        FROM candidates
+        ORDER BY last_seen_at DESC, id ASC
+        """
+    ).fetchall()
+    for row in rows:
+        yield _candidate_from_db(conn, row, include_events=False)
+
+
+def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str, Any]:
+    candidate = {
+        "id": row["id"],
+        "protocol": row["protocol"],
+        "args": row["args"],
+        "status": row["status"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+    }
+    if include_events:
+        seen_rows = conn.execute(
+            """
+            SELECT run_id, domain, test, ip_version, seen_at
+            FROM candidate_seen_events
+            WHERE candidate_id = ? AND is_common = 0
+            ORDER BY seq ASC
+            """,
+            (row["id"],),
+        ).fetchall()
+        common_rows = conn.execute(
+            """
+            SELECT run_id, domains_json, test, ip_version, seen_at
+            FROM candidate_seen_events
+            WHERE candidate_id = ? AND is_common = 1
+            ORDER BY seq ASC
+            """,
+            (row["id"],),
+        ).fetchall()
+        candidate["seen"] = [
+            {
+                "run_id": item["run_id"],
+                "domain": item["domain"],
+                "test": item["test"],
+                "ip_version": item["ip_version"],
+                "seen_at": item["seen_at"],
+            }
+            for item in seen_rows
+        ]
+        common_seen = []
+        for item in common_rows:
+            try:
+                domains = json.loads(str(item["domains_json"] or "[]"))
+            except json.JSONDecodeError:
+                domains = []
+            common_seen.append(
+                {
+                    "run_id": item["run_id"],
+                    "domains": [str(domain or "") for domain in domains] if isinstance(domains, list) else [],
+                    "test": item["test"],
+                    "ip_version": item["ip_version"],
+                    "seen_at": item["seen_at"],
+                }
+            )
+        if common_seen:
+            candidate["common_seen"] = common_seen
+        return candidate
+
+    domain_rows = conn.execute(
+        "SELECT domain FROM candidate_domains WHERE candidate_id = ? ORDER BY domain ASC",
+        (row["id"],),
+    ).fetchall()
+    common_domain_rows = conn.execute(
+        "SELECT domain FROM candidate_common_domains WHERE candidate_id = ? ORDER BY domain ASC",
+        (row["id"],),
+    ).fetchall()
+    candidate["seen"] = [{"domain": item["domain"]} for item in domain_rows]
+    common_domains = [str(item["domain"]) for item in common_domain_rows]
+    if common_domains:
+        candidate["common_seen"] = [{"domains": common_domains}]
+    return candidate
+
+
+def _tested_domains_from_db(conn: Any) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT domain FROM candidate_domains
+        UNION
+        SELECT domain FROM candidate_common_domains
+        """
+    ).fetchall()
+    return {str(row["domain"]).strip() for row in rows if str(row["domain"]).strip()}
+
+
+def _storage_version(state_dir: Path) -> dict[str, int]:
+    return _file_version(state_dir / "strategy-finder" / "state.sqlite3")
 
 
 def _iter_candidate_file(path: Path) -> Iterator[dict[str, Any]]:

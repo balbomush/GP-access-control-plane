@@ -19,8 +19,9 @@ class Job:
 
 
 class JobRunner:
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, on_idle: Callable[[], Any] | None = None):
         self.state_dir = state_dir
+        self._on_idle = on_idle
         self._lock = threading.Lock()
         self._active: str | None = None
         self._active_name: str | None = None
@@ -75,6 +76,11 @@ class JobRunner:
                     self._active = None
                     self._active_name = None
                     self._active_cancel = None
+            if self._on_idle:
+                try:
+                    self._on_idle()
+                except Exception:
+                    return
 
     def _record(self, job_id: str, name: str, status: str, timestamp: str, **extra: Any) -> None:
         payload = {

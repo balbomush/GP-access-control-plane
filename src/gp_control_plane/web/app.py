@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from ..backups import create_snapshot_if_idle, list_snapshots, snapshot_file_path
 from ..config import AppConfig
 from ..jobs import JobRunner
-from ..state import read_state, write_state
+from ..state import now_iso, read_state, write_state
+from ..storage import read_custom_presets, save_custom_presets
 from ..strategy_finder import (
     close_stale_running_runs,
     domain_sets,
@@ -25,7 +29,7 @@ from ..zapret2 import check_install
 def serve(config: AppConfig, host: str, port: int) -> None:
     _clear_stale_current_job(config)
     close_stale_running_runs(config.output.state_dir)
-    runner = JobRunner(config.output.state_dir)
+    runner = JobRunner(config.output.state_dir, on_idle=lambda: create_snapshot_if_idle(config.output.state_dir))
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -46,6 +50,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json({"runs": read_runs(config.output.state_dir)})
             elif path == "/api/strategy-finder/latest-log":
                 self._json(latest_log_tail(config.output.state_dir))
+            elif path == "/api/backups":
+                self._json(list_snapshots(config.output.state_dir))
+            elif path == "/api/presets":
+                self._json({"custom": read_custom_presets(config.output.state_dir)})
+            elif path == "/api/backups/download":
+                self._download_backup(config, query)
             else:
                 self._not_found()
 
@@ -61,6 +71,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/strategy-finder/candidates",
                 "/api/strategy-finder/runs",
                 "/api/strategy-finder/latest-log",
+                "/api/backups",
+                "/api/presets",
             }:
                 self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
             else:
@@ -80,6 +92,16 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                     self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                     return
                 self._json({"job": job}, status=HTTPStatus.ACCEPTED)
+                return
+            if path == "/api/backups/create":
+                try:
+                    self._json(create_snapshot_if_idle(config.output.state_dir), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/presets":
+                saved = save_custom_presets(config.output.state_dir, payload.get("custom") or payload, now_iso())
+                self._json({"custom": saved})
                 return
             jobs: dict[str, Any] = {
                 "/api/jobs/zapret-standard-discovery": (
@@ -120,6 +142,27 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _download_backup(self, config: AppConfig, query: dict[str, list[str]]) -> None:
+            snapshot_id = _query_one(query, "snapshot")
+            file_name = _query_one(query, "file") or "archive"
+            try:
+                path = snapshot_file_path(config.output.state_dir, snapshot_id, file_name)
+            except Exception:
+                self._not_found()
+                return
+            self._file(path, download_name=path.name)
+
+        def _file(self, path: Path, download_name: str) -> None:
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+            self.end_headers()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    self.wfile.write(chunk)
 
         def _head(self, status: HTTPStatus, content_type: str, content_length: int) -> None:
             self.send_response(status)
@@ -382,6 +425,42 @@ button:disabled { opacity: .55; cursor: default; }
 .candidate-groups {
   display: grid;
   gap: 14px;
+}
+.backup-list {
+  display: grid;
+  gap: 12px;
+}
+.backup-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+.backup-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+.backup-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.backup-files a {
+  color: var(--blue-strong);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-decoration: none;
+  background: var(--surface-code);
+  font-size: 13px;
+}
+.backup-files a:hover {
+  border-color: var(--blue);
 }
 .domain-group {
   border: 1px solid var(--line);
@@ -850,6 +929,7 @@ pre {
       <button class="tab-button active" data-tab="finder" type="button">Подбор</button>
       <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
+      <button class="tab-button" data-tab="backups" type="button">Сохранения</button>
     </nav>
 
     <section class="tab-page active" data-tab-page="finder">
@@ -1056,6 +1136,21 @@ pre {
         <pre id="finder-log">Лога пока нет</pre>
       </section>
     </section>
+
+    <section class="tab-page backups-page" data-tab-page="backups">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Сохранения</h2>
+          <span class="badge" id="backups-count">0</span>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
+          <button data-action="create-backup" type="button">Создать сохранение сейчас</button>
+        </div>
+        <div class="helper-text">Сохранение создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
+        <div id="backups-table" class="backup-list"></div>
+      </section>
+    </section>
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
@@ -1063,7 +1158,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1162,6 +1257,7 @@ function setActiveTab(tabName){
   });
   if (tabName === 'terminal') scrollLogToBottom();
   if (tabName === 'candidates') ensureCandidateViewLoaded();
+  if (tabName === 'backups' && !state.backupsLoaded) refreshBackups();
 }
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
@@ -1173,7 +1269,7 @@ function isBusy(){
 function defaultDomains(kind){
   const sets = state.domainSets || {};
   if (kind === 'all') {
-    return [...(sets.critical || []), ...(sets.coverage || []), ...(sets.diagnostic || [])];
+    return Object.values(sets).flat();
   }
   if (kind === 'tested') return testedDomains();
   return sets[kind] || [];
@@ -1241,12 +1337,35 @@ function loadCustomPresets(){
 }
 function persistCustomPresets(){
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+  fetch('/api/presets', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({custom: state.customPresets})
+  }).catch(() => {});
+}
+function mergeCustomPresets(remote){
+  const result = { finder: {}, common: {} };
+  for (const scope of ['finder', 'common']) {
+    result[scope] = {
+      ...((remote && typeof remote[scope] === 'object') ? remote[scope] : {}),
+      ...((state.customPresets && typeof state.customPresets[scope] === 'object') ? state.customPresets[scope] : {})
+    };
+  }
+  state.customPresets = result;
+  localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
 }
 function builtInPresets(target){
+  const labels = {
+    critical: 'Критичные',
+    coverage: 'Покрытие',
+    diagnostic: 'Диагностика',
+    'google-youtube': 'Google / YouTube',
+    discord: 'Discord',
+    cloudflare: 'Cloudflare',
+    'amazon-aws': 'Amazon / AWS'
+  };
   const presets = [
-    { key: 'critical', label: 'Критичные', domains: defaultDomains('critical') },
-    { key: 'coverage', label: 'Покрытие', domains: defaultDomains('coverage') },
-    { key: 'diagnostic', label: 'Диагностика', domains: defaultDomains('diagnostic') },
+    ...Object.keys(state.domainSets || {}).sort().map((key) => ({ key, label: labels[key] || key, domains: defaultDomains(key) })),
     { key: 'all', label: 'Все встроенные', domains: defaultDomains('all') }
   ];
   if (target === 'common') {
@@ -1745,6 +1864,51 @@ function renderLog(){
   renderProgress(log.progress || {});
   if (state.activeTab === 'terminal') scrollLogToBottom();
 }
+function renderBackups(){
+  const rows = state.backups || [];
+  const countNode = el('backups-count');
+  if (countNode) countNode.textContent = String(rows.length);
+  const target = el('backups-table');
+  if (!target) return;
+  if (!rows.length) {
+    target.innerHTML = `<div class="empty">${state.backupsLoaded ? 'Сохранений пока нет' : 'Откройте вкладку, чтобы загрузить сохранения'}</div>`;
+    return;
+  }
+  target.innerHTML = rows.map((item) => backupCard(item)).join('');
+}
+function backupCard(item){
+  const id = String(item.id || '');
+  const files = Array.isArray(item.files) ? item.files : [];
+  const visibleFiles = files.filter((file) => !String(file.path || '').endsWith('checksums.sha256') && String(file.path || '') !== 'manifest.yaml');
+  return `<article class="backup-card">
+    <div class="domain-header">
+      <div>
+        <h3>${esc(id)}</h3>
+        <div class="helper-text">${esc(item.created_at || '-')}</div>
+      </div>
+      ${badge(item.checksum_ok ? 'checksum ok' : 'checksum fail', item.checksum_ok ? 'good' : 'bad')}
+    </div>
+    <div class="backup-meta">
+      <div>Размер: ${esc(formatBytes(item.size_bytes || 0))}</div>
+      <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
+      <div>Пресетов: ${esc(item.preset_count || 0)}</div>
+    </div>
+    <div class="backup-files">
+      <a href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
+      ${visibleFiles.map((file) => `<a href="${backupDownloadUrl(id, file.path)}">${esc(file.path)}</a>`).join('')}
+    </div>
+  </article>`;
+}
+function backupDownloadUrl(snapshot, file){
+  return `/api/backups/download?snapshot=${encodeURIComponent(snapshot)}&file=${encodeURIComponent(file)}`;
+}
+function formatBytes(value){
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 Б';
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+}
 function renderProgress(progress){
   const percent = Number(progress.percent || 0);
   const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
@@ -1797,6 +1961,7 @@ function renderAll(){
   renderCandidates();
   renderRuns();
   renderLog();
+  renderBackups();
   updateAllEditorLineNumbers();
   setActiveTab(state.activeTab);
 }
@@ -1897,21 +2062,46 @@ async function refresh(){
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const [status, finderRuns, finderLog, domainSets] = await Promise.all([
+    const [status, finderRuns, finderLog, domainSets, presets] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
-      getJson('/api/strategy-finder/domains')
+      getJson('/api/strategy-finder/domains'),
+      getJson('/api/presets')
     ]);
     state.status = status;
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
+    mergeCustomPresets((presets || {}).custom || {});
     renderAll();
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   } finally {
     refreshInFlight = false;
+  }
+}
+async function refreshBackups(){
+  try {
+    const data = await getJson('/api/backups');
+    state.backups = data.snapshots || [];
+    state.backupsLoaded = true;
+    renderBackups();
+  } catch (error) {
+    setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
+  }
+}
+async function createBackup(){
+  try {
+    const data = await postJson('/api/backups/create', {});
+    if (data.queued) {
+      setMessage('Подбор идет. Сохранение будет возможно после остановки или завершения', 'warn');
+    } else if (data.created) {
+      setMessage('Сохранение создано', 'good');
+    }
+    await refreshBackups();
+  } catch (error) {
+    setMessage(`Ошибка создания сохранения: ${error.message}`, 'bad');
   }
 }
 async function startJob(url, payload, text){
@@ -1971,6 +2161,14 @@ document.addEventListener('click', (event) => {
         refreshCandidates(true);
       }
     }
+  }
+  if (button.dataset.action === 'refresh-backups') {
+    refreshBackups();
+    return;
+  }
+  if (button.dataset.action === 'create-backup') {
+    createBackup();
+    return;
   }
   if (button.dataset.action === 'load-more-candidates') {
     refreshCandidates(false);
@@ -2151,6 +2349,11 @@ def _query_domains(query: dict[str, list[str]], key: str) -> list[str]:
     for value in values:
         domains.extend(item.strip() for item in value.split(",") if item.strip())
     return domains
+
+
+def _query_one(query: dict[str, list[str]], key: str) -> str:
+    values = query.get(key) or []
+    return str(values[0]).strip() if values else ""
 
 
 def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
