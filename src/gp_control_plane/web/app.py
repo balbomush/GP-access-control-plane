@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import AppConfig
 from ..jobs import JobRunner
-from ..state import read_state
+from ..state import read_state, write_state
 from ..strategy_finder import (
     domain_sets,
     latest_log_tail,
@@ -22,6 +22,7 @@ from ..zapret2 import check_install
 
 
 def serve(config: AppConfig, host: str, port: int) -> None:
+    _clear_stale_current_job(config)
     runner = JobRunner(config.output.state_dir)
 
     class Handler(BaseHTTPRequestHandler):
@@ -2094,6 +2095,14 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         },
         "zapret2": check_install(),
     }
+
+
+def _clear_stale_current_job(config: AppConfig) -> None:
+    state = read_state(config.output.state_dir)
+    if not state.get("current_job"):
+        return
+    state["current_job"] = None
+    write_state(config.output.state_dir, state)
 
 
 def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:

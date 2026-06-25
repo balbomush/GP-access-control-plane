@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
+from gp_control_plane.state import read_state, write_state
 from gp_control_plane.web.app import index_html, serve
 
 
@@ -212,6 +213,22 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
+
+    def test_serve_clears_stale_current_job_on_start(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            write_state(config.output.state_dir, {"current_job": "stale-job", "last_error": None})
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            self.assertIsNone(read_state(config.output.state_dir)["current_job"])
 
 
 def _free_port() -> int:
