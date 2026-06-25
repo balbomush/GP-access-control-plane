@@ -4,7 +4,7 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..config import AppConfig
 from ..jobs import JobRunner
@@ -12,7 +12,7 @@ from ..state import read_state
 from ..strategy_finder import (
     domain_sets,
     latest_log_tail,
-    read_candidates,
+    read_candidate_page,
     read_runs,
     run_multi_domain_discovery,
     run_standard_discovery,
@@ -25,7 +25,9 @@ def serve(config: AppConfig, host: str, port: int) -> None:
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            path = urlparse(self.path).path
+            parsed_url = urlparse(self.path)
+            path = parsed_url.path
+            query = parse_qs(parsed_url.query)
             if path == "/":
                 self._html()
             elif path == "/api/status":
@@ -33,7 +35,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path == "/api/strategy-finder/domains":
                 self._json(domain_sets())
             elif path == "/api/strategy-finder/candidates":
-                self._json({"candidates": read_candidates(config.output.state_dir)})
+                self._json(_candidate_page_payload(config, query))
             elif path == "/api/strategy-finder/runs":
                 self._json({"runs": read_runs(config.output.state_dir)})
             elif path == "/api/strategy-finder/latest-log":
@@ -105,7 +107,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             self.wfile.write(data)
 
         def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-            data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -1053,7 +1055,8 @@ pre {
 <script>
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
-const state = { status: null, candidates: [], finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const CANDIDATE_PAGE_LIMIT = 200;
+const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, testedDomains: [], candidatesLoaded: false, finderRuns: [], finderLog: null, domainSets: null, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1062,6 +1065,9 @@ const jobNames = {
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 let toastTimer = null;
+let refreshInFlight = false;
+let candidateRefreshTimer = null;
+let candidateRequestSeq = 0;
 
 function el(id){ return document.getElementById(id); }
 function esc(value){
@@ -1147,6 +1153,7 @@ function setActiveTab(tabName){
     page.classList.toggle('active', page.dataset.tabPage === tabName);
   });
   if (tabName === 'terminal') scrollLogToBottom();
+  if (tabName === 'candidates' && !state.candidatesLoaded) refreshCandidates(true);
 }
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
@@ -1269,7 +1276,8 @@ function usePreset(target){
   el(`${target}-domains`).value = [...new Set(finalDomains)].join('\\n');
   updateEditorLineNumbers(`${target}-domains`);
   if (target === 'finder') state.domainsTouched = true;
-  renderCandidates();
+  if (target === 'common') refreshCandidates(true);
+  else renderCandidates();
 }
 function presetNameForSave(target){
   const explicit = el(`${target}-preset-name`).value.trim();
@@ -1294,7 +1302,8 @@ function savePreset(target){
   renderPresetSelect(target);
   el(`${target}-preset-select`).value = `custom:${name}`;
   showToast('Пресет сохранен', 'good');
-  renderCandidates();
+  if (target === 'common') refreshCandidates(true);
+  else renderCandidates();
 }
 function deletePreset(target){
   const selected = el(`${target}-preset-select`).value || '';
@@ -1307,6 +1316,7 @@ function deletePreset(target){
   persistCustomPresets();
   renderPresetSelect(target);
   showToast('Пресет удален', 'good');
+  if (target === 'common') refreshCandidates(true);
 }
 function renderMetrics(){
   const status = state.status || {};
@@ -1319,8 +1329,8 @@ function renderMetrics(){
   setText('metric-zapret-note', `nfqws2: ${zapret.nfqws2_found ? 'да' : 'нет'}, blockcheck: ${zapret.blockcheck_found ? 'да' : 'нет'}`);
   setText('metric-job', busy ? 'В работе' : 'Свободна');
   setText('metric-job-note', busy ? `ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
-  setText('metric-candidates', String(state.candidates.length));
-  setText('metric-candidates-note', 'перейти к списку');
+  setText('metric-candidates', String(state.candidateTotal || state.candidates.length));
+  setText('metric-candidates-note', state.candidatesLoaded ? `загружено ${state.candidates.length}` : 'открыть список');
   setText('metric-last-run', run ? (run.status || '-') : '-');
   setText('metric-last-run-note', run ? friendlyDate(run.timestamp) : 'запусков еще не было');
   const jobBadge = el('job-badge');
@@ -1339,10 +1349,12 @@ function renderCandidates(){
   const domainRows = rows.filter((row) => candidateDomains(row).length);
   const commonRows = dynamicCommonRows(rows);
   const activeRows = state.candidateView === 'common' ? commonRows : domainRows;
-  setText('candidates-count', String(state.candidates.length));
+  const total = state.candidateTotal || state.candidates.length;
+  setText('candidates-count', String(total));
   const selectedDomains = selectedCommonDomains();
   const commonNote = state.candidateView === 'common' && selectedDomains.length >= 2 ? ` · общие для ${selectedDomains.length} доменов` : '';
-  setText('candidate-summary', `Показано ${activeRows.length} из ${state.candidates.length}${commonNote}`);
+  const loadedNote = state.candidatesLoaded ? `Показано ${activeRows.length} из ${total}` : 'Список загружается по запросу';
+  setText('candidate-summary', `${loadedNote}${commonNote}`);
   document.querySelectorAll('[data-candidate-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.candidateView === state.candidateView);
   });
@@ -1357,7 +1369,7 @@ function renderCandidates(){
 function renderDomainCandidates(rows){
   const groups = candidateGroups(rows);
   if (!groups.length) {
-    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'По фильтру ничего не найдено' : 'Кандидатов по доменам пока нет'}</div>`;
+    el('candidates-table').innerHTML = `<div class="empty">${state.candidatesLoaded ? 'По фильтру ничего не найдено' : 'Откройте вкладку или обновите список, чтобы загрузить кандидатов'}</div>`;
     return;
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
@@ -1380,7 +1392,7 @@ function renderDomainCandidates(rows){
         ${strategyEditor(`domain:${domainGroup.domain}`, domainRows, 'Стратегии домена')}
       </div>` : ''}
     </details>`;
-  }).join('')}</div>`;
+  }).join('')}</div>${candidatePager()}`;
 }
 function renderCommonCandidates(rows){
   const selectedDomains = selectedCommonDomains();
@@ -1390,7 +1402,7 @@ function renderCommonCandidates(rows){
   }
   const groups = protocolGroups(rows);
   if (!groups.length) {
-    el('candidates-table').innerHTML = `<div class="empty">${state.candidates.length ? 'Общих стратегий для выбранных доменов пока нет. Если подбор остановлен, сюда попадут уже сохраненные стратегии, которые встречаются у каждого выбранного домена.' : 'Кандидатов пока нет'}</div>`;
+    el('candidates-table').innerHTML = `<div class="empty">${state.candidatesLoaded ? 'Общих стратегий для выбранных доменов пока нет. Если подбор остановлен, сюда попадут уже сохраненные стратегии, которые встречаются у каждого выбранного домена.' : 'Кандидатов пока нет'}</div>`;
     return;
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
@@ -1411,20 +1423,14 @@ function renderCommonCandidates(rows){
         ${expanded ? strategyEditor(`common:${protocolGroup.protocol}:${domains.join('|')}`, protocolGroup.rows, 'Общие стратегии') : ''}
       </div>
     </details>`;
-  }).join('')}</div>`;
+  }).join('')}</div>${candidatePager()}`;
+}
+function candidatePager(){
+  if (!state.candidateHasMore) return '';
+  return `<div class="button-row"><button class="secondary" data-action="load-more-candidates" type="button">Показать еще ${CANDIDATE_PAGE_LIMIT}</button></div>`;
 }
 function filteredCandidates(){
-  const query = state.candidateFilter.trim().toLowerCase();
-  if (!query) return state.candidates;
-  return state.candidates.filter((row) => {
-    const haystack = [
-      row.id,
-      row.protocol,
-      row.args,
-      ...candidateAllDomains(row)
-    ].join(' ').toLowerCase();
-    return haystack.includes(query);
-  });
+  return state.candidates;
 }
 function candidateDomains(row){
   const seen = Array.isArray(row.seen) ? row.seen : [];
@@ -1440,6 +1446,7 @@ function candidateAllDomains(row){
   return [...new Set([...candidateDomains(row), ...commonDomains(row)])];
 }
 function testedDomains(){
+  if (Array.isArray(state.testedDomains) && state.testedDomains.length) return state.testedDomains;
   return [...new Set(state.candidates.flatMap((row) => candidateAllDomains(row)))].sort((a, b) => a.localeCompare(b));
 }
 function filterTestedDomains(domains){
@@ -1454,10 +1461,7 @@ function selectedCommonDomains(){
 function dynamicCommonRows(rows){
   const selectedDomains = selectedCommonDomains();
   if (selectedDomains.length < 2) return [];
-  return rows.filter((row) => {
-    const domains = new Set(candidateAllDomains(row));
-    return selectedDomains.every((domain) => domains.has(domain));
-  });
+  return rows;
 }
 function renderCommonControls(){
   const controls = el('common-controls');
@@ -1490,7 +1494,8 @@ function addCommonDomain(){
   if (!current.includes(domain)) current.push(domain);
   el('common-domains').value = current.join('\\n');
   input.value = '';
-  renderCandidates();
+  updateEditorLineNumbers('common-domains');
+  refreshCandidates(true);
 }
 function candidateGroups(rows){
   const domainMap = new Map();
@@ -1777,23 +1782,64 @@ function renderAll(){
   updateAllEditorLineNumbers();
   setActiveTab(state.activeTab);
 }
-async function refresh(){
+function candidateParams(offset){
+  const params = new URLSearchParams();
+  params.set('limit', String(CANDIDATE_PAGE_LIMIT));
+  params.set('offset', String(Math.max(0, offset || 0)));
+  params.set('view', state.candidateView);
+  const query = state.candidateFilter.trim();
+  if (query) params.set('query', query);
+  if (state.candidateView === 'common') {
+    const domains = selectedCommonDomains();
+    if (domains.length) params.set('domains', domains.join(','));
+  }
+  return params;
+}
+async function refreshCandidates(reset){
+  const requestId = ++candidateRequestSeq;
+  const offset = reset ? 0 : state.candidates.length;
   try {
-    const [status, candidates, finderRuns, finderLog, domainSets] = await Promise.all([
+    const data = await getJson(`/api/strategy-finder/candidates?${candidateParams(offset).toString()}`);
+    if (requestId !== candidateRequestSeq) return;
+    const rows = data.candidates || [];
+    state.candidates = reset ? rows : [...state.candidates, ...rows];
+    state.candidateTotal = Number(data.total || 0);
+    state.candidateOffset = Number(data.offset || 0);
+    state.candidateHasMore = Boolean(data.has_more);
+    state.candidateVersion = data.version || null;
+    state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+    state.candidatesLoaded = true;
+    renderAll();
+  } catch (error) {
+    setMessage(`Ошибка загрузки кандидатов: ${error.message}`, 'bad');
+  }
+}
+function scheduleCandidateRefresh(){
+  if (candidateRefreshTimer) clearTimeout(candidateRefreshTimer);
+  candidateRefreshTimer = setTimeout(() => {
+    candidateRefreshTimer = null;
+    refreshCandidates(true);
+  }, 350);
+}
+async function refresh(){
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    const [status, finderRuns, finderLog, domainSets] = await Promise.all([
       getJson('/api/status'),
-      getJson('/api/strategy-finder/candidates'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains')
     ]);
     state.status = status;
-    state.candidates = candidates.candidates || [];
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
     renderAll();
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
+  } finally {
+    refreshInFlight = false;
   }
 }
 async function startJob(url, payload, text){
@@ -1809,8 +1855,8 @@ async function startJob(url, payload, text){
 }
 async function stopCurrentJob(){
   try {
-    setMessage('Остановка подбора запрошена', 'warn');
     await postJson('/api/jobs/stop-current', {});
+    setMessage('Остановка подбора запрошена', 'warn');
     await refresh();
   } catch (error) {
     setMessage(error.message, 'bad');
@@ -1823,10 +1869,17 @@ document.addEventListener('click', (event) => {
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
   if (button.dataset.candidateView) {
     state.candidateView = button.dataset.candidateView;
-    renderCandidates();
+    refreshCandidates(true);
     return;
   }
-  if (button.dataset.action === 'refresh') refresh();
+  if (button.dataset.action === 'refresh') {
+    refresh();
+    if (state.activeTab === 'candidates') refreshCandidates(true);
+  }
+  if (button.dataset.action === 'load-more-candidates') {
+    refreshCandidates(false);
+    return;
+  }
   if (button.dataset.fill) fillDomains(button.dataset.fill);
   if (button.dataset.presetUse) {
     usePreset(button.dataset.presetUse);
@@ -1884,16 +1937,16 @@ document.addEventListener('click', (event) => {
 document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'candidate-filter') {
     state.candidateFilter = event.target.value;
-    renderCandidates();
+    scheduleCandidateRefresh();
   }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
-    renderCandidates();
+    if (state.candidateView === 'common') scheduleCandidateRefresh();
   }
   if (event.target && event.target.id === 'common-domains') {
     updateEditorLineNumbers('common-domains');
-    renderCandidates();
+    scheduleCandidateRefresh();
   }
 });
 document.addEventListener('scroll', (event) => {
@@ -1956,6 +2009,38 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         },
         "zapret2": check_install(),
     }
+
+
+def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return read_candidate_page(
+        config.output.state_dir,
+        limit=_query_int(query, "limit", 200),
+        offset=_query_int(query, "offset", 0),
+        query=_query_str(query, "query", ""),
+        view=_query_str(query, "view", "domain"),
+        domains=_query_domains(query, "domains"),
+    )
+
+
+def _query_str(query: dict[str, list[str]], key: str, default: str) -> str:
+    values = query.get(key) or []
+    return values[0] if values else default
+
+
+def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
+    raw = _query_str(query, key, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _query_domains(query: dict[str, list[str]], key: str) -> list[str]:
+    values = query.get(key) or []
+    domains: list[str] = []
+    for value in values:
+        domains.extend(item.strip() for item in value.split(",") if item.strip())
+    return domains
 
 
 def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:

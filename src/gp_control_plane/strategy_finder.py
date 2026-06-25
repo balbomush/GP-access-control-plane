@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .state import append_jsonl, now_iso
 from .zapret2 import _cleanup_blockcheck_processes, _cleanup_nft_blockcheck_tables, _stop_process_group
@@ -66,6 +66,8 @@ ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
 _ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
 _SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
+DEFAULT_PAGE_LIMIT = 200
+MAX_PAGE_LIMIT = 200
 
 
 @dataclass(frozen=True)
@@ -220,19 +222,64 @@ def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
     path = _finder_dir(state_dir) / "candidates.json"
     if not path.exists():
         return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        return []
-    return [item for item in data if isinstance(item, dict)]
+    return list(_iter_candidate_file(path))
+
+
+def read_candidate_page(
+    state_dir: Path,
+    *,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+    query: str = "",
+    view: str = "domain",
+    domains: list[str] | None = None,
+) -> dict[str, Any]:
+    path = _finder_dir(state_dir) / "candidates.json"
+    limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
+    offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
+    query = query.strip().lower()
+    view = view if view in {"domain", "common"} else "domain"
+    selected_domains = _clean_domains(domains or [])
+    tested_domains: set[str] = set()
+    total = 0
+    rows: list[dict[str, Any]] = []
+    for candidate in _iter_candidate_file(path):
+        all_domains = _candidate_all_domains(candidate)
+        tested_domains.update(all_domains)
+        if view == "domain" and not _candidate_domains(candidate):
+            continue
+        if view == "common":
+            if len(selected_domains) < 2:
+                continue
+            domain_set = set(all_domains)
+            if not all(domain in domain_set for domain in selected_domains):
+                continue
+        if query and not _candidate_matches_query(candidate, query, all_domains):
+            continue
+        total += 1
+        if total <= offset:
+            continue
+        if len(rows) < limit:
+            rows.append(_compact_candidate(candidate))
+    version = _file_version(path)
+    return {
+        "candidates": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(rows) < total,
+        "tested_domains": sorted(tested_domains),
+        "version": version,
+    }
 
 
 def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
     path = _finder_dir(state_dir) / "runs.jsonl"
     if not path.exists():
         return []
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _tail_lines(path, limit)
     result: list[dict[str, Any]] = []
-    for line in lines[-limit:]:
+    for line in lines:
         if line.strip():
             parsed = json.loads(line)
             if isinstance(parsed, dict):
@@ -243,21 +290,28 @@ def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
 def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
     for run in reversed(read_runs(state_dir, limit=200)):
         stdout_log = Path(str(run.get("stdout_log") or ""))
-        if not stdout_log.exists():
+        if not stdout_log.is_file():
             continue
-        lines = stdout_log.read_text(encoding="utf-8", errors="replace").splitlines()
-        stderr_log = Path(str(run.get("stderr_log") or ""))
-        stderr_lines = stderr_log.read_text(encoding="utf-8", errors="replace").splitlines() if stderr_log.exists() else []
-        stdout = "\n".join(lines)
+        lines = _tail_lines(stdout_log, max_lines)
+        stderr_log_raw = str(run.get("stderr_log") or "")
+        stderr_log = Path(stderr_log_raw) if stderr_log_raw else None
+        stderr_lines = _tail_lines(stderr_log, max_lines) if stderr_log and stderr_log.is_file() else []
+        stdout_tail = "\n".join(lines)
+        progress = run.get("progress")
+        if not isinstance(progress, dict):
+            progress = _read_progress_log(run)
+        if not isinstance(progress, dict):
+            progress = progress_from_stdout(stdout_tail, run)
+            progress["partial"] = True
         return {
             "run_id": run.get("id"),
             "kind": run.get("kind"),
             "status": run.get("status"),
-            "stdout_tail": "\n".join(lines[-max_lines:]),
-            "stderr_tail": "\n".join(stderr_lines[-max_lines:]),
+            "stdout_tail": stdout_tail,
+            "stderr_tail": "\n".join(stderr_lines),
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log) if stderr_log else "",
-            "progress": progress_from_stdout(stdout, run),
+            "progress": progress,
         }
     return {
         "run_id": None,
@@ -267,6 +321,20 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
         "stderr_tail": "",
         "progress": progress_from_stdout("", {}),
     }
+
+
+def _read_progress_log(run: dict[str, Any]) -> dict[str, Any] | None:
+    progress_log = str(run.get("progress_log") or "")
+    if not progress_log:
+        return None
+    path = Path(progress_log)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
@@ -354,6 +422,238 @@ def candidate_id_for(protocol: str, args: str) -> str:
     return f"{protocol}-{digest}"
 
 
+class _LiveStdoutRecorder:
+    def __init__(self, state_dir: Path, run: dict[str, Any]):
+        self._lock = threading.Lock()
+        self._run = run
+        self._available_path = _finder_dir(state_dir) / "available.ndjson"
+        progress_log = str(run.get("progress_log") or "")
+        self._progress_log = Path(progress_log) if progress_log else None
+        self._last_progress_attempted = -1
+        self._last_progress_written_at = 0.0
+        self._section = ""
+        self._current_script = ""
+        self._pending_attempt: str | None = None
+        self._attempted = 0
+        self._attempts_by_script: dict[str, int] = {}
+        self._summary: list[str] = []
+        self._common: list[str] = []
+        self._results: list[dict[str, Any]] = []
+        self._common_results: list[dict[str, Any]] = []
+        self._candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self._common_candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+
+    def record_line(self, raw_line: str) -> None:
+        line = raw_line.strip()
+        if not line:
+            return
+        with self._lock:
+            self._record_line_locked(line)
+            self._write_progress_locked()
+
+    def parsed(self) -> dict[str, Any]:
+        with self._lock:
+            candidates = list(self._candidates.values())
+            common_candidates = list(self._common_candidates.values())
+            results = list(self._results)
+            common_results = list(self._common_results)
+            return {
+                "summary": list(self._summary),
+                "common": list(self._common),
+                "live_summary": [str(item.get("raw") or "") for item in candidates if item.get("raw")],
+                "candidates": candidates,
+                "common_candidates": common_candidates,
+                "results": results,
+                "common_results": common_results,
+                "direct_available": [item for item in results if item.get("result") == "working without bypass"],
+                "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
+            }
+
+    def progress(self, run: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            progress = self._progress_locked(run)
+            self._write_progress_locked(force=True, run=run)
+            return progress
+
+    def _record_line_locked(self, line: str) -> None:
+        if line == "* SUMMARY":
+            self._section = "summary"
+            return
+        if line == "* COMMON":
+            self._section = "common"
+            return
+        script = _script_name_from_line(line)
+        if script:
+            self._current_script = script
+            self._attempts_by_script.setdefault(script, 0)
+            return
+        if _ATTEMPT_RE.match(line):
+            self._attempted += 1
+            self._attempts_by_script[self._current_script] = self._attempts_by_script.get(self._current_script, 0) + 1
+        attempt = _live_attempt_line(line)
+        if attempt:
+            self._pending_attempt = attempt
+            return
+        if line == "!!!!! AVAILABLE !!!!!" and self._pending_attempt:
+            candidate = _candidate_from_result_line(self._pending_attempt, scope="domain")
+            if candidate:
+                self._record_candidate_locked(candidate, common=False)
+            self._pending_attempt = None
+            return
+        if line.startswith("UNAVAILABLE") or line.startswith("FAILED"):
+            self._pending_attempt = None
+            return
+        live_success = _candidate_from_live_success_line(line)
+        if live_success:
+            self._record_candidate_locked(live_success, common=False)
+            return
+        if self._section in {"summary", "common"}:
+            target = self._common if self._section == "common" else self._summary
+            target.append(line)
+            parsed = _parse_result_line(line)
+            if parsed:
+                result_target = self._common_results if self._section == "common" else self._results
+                result_target.append(parsed)
+            candidate = _candidate_from_result_line(line, scope=self._section)
+            if candidate:
+                self._record_candidate_locked(candidate, common=self._section == "common")
+
+    def _record_candidate_locked(self, candidate: dict[str, Any], common: bool) -> None:
+        key = (
+            str(candidate.get("scope") or ""),
+            str(candidate.get("test") or ""),
+            str(candidate.get("ip_version") or ""),
+            str(candidate.get("domain") or ""),
+            str(candidate.get("args") or ""),
+        )
+        target = self._common_candidates if common else self._candidates
+        if key in target:
+            return
+        target[key] = candidate
+        append_jsonl(
+            self._available_path,
+            {
+                **candidate,
+                "run_id": self._run["id"],
+                "seen_at": now_iso(),
+            },
+        )
+
+    def _progress_locked(self, run: dict[str, Any]) -> dict[str, Any]:
+        successful = len(
+            {
+                (str(item.get("protocol") or ""), str(item.get("args") or ""))
+                for item in [*self._candidates.values(), *self._common_candidates.values()]
+            }
+        )
+        return _progress_from_counts(
+            run=run,
+            attempted=self._attempted,
+            attempts_by_script=dict(self._attempts_by_script),
+            successful=successful,
+            current_script=self._current_script,
+        )
+
+    def _write_progress_locked(self, force: bool = False, run: dict[str, Any] | None = None) -> None:
+        if not self._progress_log:
+            return
+        now = time.monotonic()
+        attempt_delta = self._attempted - self._last_progress_attempted
+        if not force and attempt_delta < 20 and now - self._last_progress_written_at < 2.0:
+            return
+        progress = self._progress_locked(run or self._run)
+        tmp = self._progress_log.with_suffix(".json.tmp")
+        try:
+            self._progress_log.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(progress, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+            tmp.replace(self._progress_log)
+            self._last_progress_attempted = self._attempted
+            self._last_progress_written_at = now
+        except OSError:
+            return
+
+
+def _run_process_with_live_stdout(
+    command: list[str],
+    env: dict[str, str],
+    stdout_log: Path,
+    stderr_log: Path,
+    timeout_seconds: int,
+    stop_event: threading.Event | None,
+    recorder: _LiveStdoutRecorder,
+) -> dict[str, Any]:
+    status = "success"
+    returncode: int | None = None
+    timed_out = False
+    stopped = False
+    reader_errors: list[BaseException] = []
+
+    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
+        process = subprocess.Popen(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=stderr_handle,
+            env=env,
+            start_new_session=hasattr(os, "setsid"),
+        )
+
+        def read_stdout() -> None:
+            try:
+                if process.stdout is None:
+                    return
+                for line in process.stdout:
+                    stdout_handle.write(line)
+                    stdout_handle.flush()
+                    recorder.record_line(line)
+            except BaseException as exc:  # noqa: BLE001
+                reader_errors.append(exc)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                status = "stopped"
+                _stop_process_group(process)
+                _cleanup_blockcheck_processes()
+                _cleanup_nft_blockcheck_tables()
+                returncode = process.returncode
+                break
+            wait_timeout = 1.0
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    status = "timeout"
+                    _stop_process_group(process)
+                    _cleanup_blockcheck_processes()
+                    _cleanup_nft_blockcheck_tables()
+                    returncode = process.returncode
+                    break
+                wait_timeout = min(1.0, remaining)
+            try:
+                returncode = process.wait(timeout=wait_timeout)
+                if returncode != 0:
+                    status = "failed"
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        reader.join(timeout=5)
+
+    if reader_errors:
+        raise RuntimeError(f"failed to read blockcheck stdout: {reader_errors[0]}")
+    return {
+        "status": status,
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "stopped": stopped,
+    }
+
+
 def _run_blockcheck_live(
     state_dir: Path,
     kind: str,
@@ -386,6 +686,7 @@ def _run_blockcheck_live(
     run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
+    progress_log = logs / f"{run_id}.{kind}.progress.json"
     attempt_plan = _standard_attempt_plan(
         domains=clean_domains,
         test=test,
@@ -405,6 +706,7 @@ def _run_blockcheck_live(
         "returncode": None,
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
+        "progress_log": str(progress_log),
         "candidate_count": 0,
         "test": test,
         **option_fields,
@@ -412,73 +714,40 @@ def _run_blockcheck_live(
     }
     append_jsonl(root / "runs.jsonl", started)
 
-    status = "success"
-    returncode: int | None = None
-    timed_out = False
-    stopped = False
-    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
-        process = subprocess.Popen(
-            [blockcheck],
-            text=True,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            env=full_env,
-            start_new_session=hasattr(os, "setsid"),
-        )
-        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                stopped = True
-                status = "stopped"
-                _stop_process_group(process)
-                _cleanup_blockcheck_processes()
-                _cleanup_nft_blockcheck_tables()
-                returncode = process.returncode
-                break
-            wait_timeout = 1.0
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    status = "timeout"
-                    _stop_process_group(process)
-                    _cleanup_blockcheck_processes()
-                    _cleanup_nft_blockcheck_tables()
-                    returncode = process.returncode
-                    break
-                wait_timeout = min(1.0, remaining)
-            try:
-                returncode = process.wait(timeout=wait_timeout)
-                if returncode != 0:
-                    status = "failed"
-                break
-            except subprocess.TimeoutExpired:
-                continue
-
-    stdout = stdout_log.read_text(encoding="utf-8", errors="replace")
-    parsed = parse_blockcheck_stdout(stdout)
+    recorder = _LiveStdoutRecorder(state_dir, started)
+    process_result = _run_process_with_live_stdout(
+        command=[blockcheck],
+        env=full_env,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        timeout_seconds=timeout_seconds,
+        stop_event=stop_event,
+        recorder=recorder,
+    )
+    parsed = recorder.parsed()
     run = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
-        "status": status,
+        "status": process_result["status"],
         "timestamp": now_iso(),
         "domains": clean_domains,
-        "returncode": returncode,
+        "returncode": process_result["returncode"],
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
+        "progress_log": str(progress_log),
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
         "common_candidate_count": len(parsed["common_candidates"]),
-        "timed_out": timed_out,
-        "stopped": stopped,
+        "timed_out": process_result["timed_out"],
+        "stopped": process_result["stopped"],
         "timeout_seconds": timeout_seconds,
         "test": test,
         **option_fields,
         "attempt_plan": attempt_plan,
     }
-    run["progress"] = progress_from_stdout(stdout, run)
+    run["progress"] = recorder.progress(run)
     if kind in {"standard-discovery", "multi-domain-discovery"}:
         candidates = upsert_candidates(state_dir, parsed, run)
         run["total_candidates"] = len(candidates)
@@ -553,6 +822,7 @@ def _run_blockcheck_command_live(
     run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
+    progress_log = logs / f"{run_id}.{kind}.progress.json"
     attempt_plan = _standard_attempt_plan(
         domains=domains,
         test=test,
@@ -572,6 +842,7 @@ def _run_blockcheck_command_live(
         "returncode": None,
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
+        "progress_log": str(progress_log),
         "candidate_count": 0,
         "test": test,
         **option_fields,
@@ -580,74 +851,41 @@ def _run_blockcheck_command_live(
     }
     append_jsonl(root / "runs.jsonl", started)
 
-    status = "success"
-    returncode: int | None = None
-    timed_out = False
-    stopped = False
-    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
-        process = subprocess.Popen(
-            command,
-            text=True,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            env=env,
-            start_new_session=hasattr(os, "setsid"),
-        )
-        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                stopped = True
-                status = "stopped"
-                _stop_process_group(process)
-                _cleanup_blockcheck_processes()
-                _cleanup_nft_blockcheck_tables()
-                returncode = process.returncode
-                break
-            wait_timeout = 1.0
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    status = "timeout"
-                    _stop_process_group(process)
-                    _cleanup_blockcheck_processes()
-                    _cleanup_nft_blockcheck_tables()
-                    returncode = process.returncode
-                    break
-                wait_timeout = min(1.0, remaining)
-            try:
-                returncode = process.wait(timeout=wait_timeout)
-                if returncode != 0:
-                    status = "failed"
-                break
-            except subprocess.TimeoutExpired:
-                continue
-
-    stdout = stdout_log.read_text(encoding="utf-8", errors="replace")
-    parsed = parse_blockcheck_stdout(stdout)
+    recorder = _LiveStdoutRecorder(state_dir, started)
+    process_result = _run_process_with_live_stdout(
+        command=command,
+        env=env,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        timeout_seconds=timeout_seconds,
+        stop_event=stop_event,
+        recorder=recorder,
+    )
+    parsed = recorder.parsed()
     run = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
-        "status": status,
+        "status": process_result["status"],
         "timestamp": now_iso(),
         "domains": domains,
-        "returncode": returncode,
+        "returncode": process_result["returncode"],
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
+        "progress_log": str(progress_log),
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
         "common_candidate_count": len(parsed["common_candidates"]),
-        "timed_out": timed_out,
-        "stopped": stopped,
+        "timed_out": process_result["timed_out"],
+        "stopped": process_result["stopped"],
         "timeout_seconds": timeout_seconds,
         "test": test,
         **option_fields,
         "curl_parallelism": curl_parallelism,
         "attempt_plan": attempt_plan,
     }
-    run["progress"] = progress_from_stdout(stdout, run)
+    run["progress"] = recorder.progress(run)
     if kind in {"standard-discovery", "multi-domain-discovery"}:
         candidates = upsert_candidates(state_dir, parsed, run)
         run["total_candidates"] = len(candidates)
@@ -668,6 +906,23 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     )
     scripts = [_script_name_from_line(line) for line in lines if _script_name_from_line(line)]
     current_script = scripts[-1] if scripts else ""
+    return _progress_from_counts(
+        run=run,
+        attempted=attempted,
+        attempts_by_script=attempts_by_script,
+        successful=successful,
+        current_script=current_script,
+    )
+
+
+def _progress_from_counts(
+    *,
+    run: dict[str, Any],
+    attempted: int,
+    attempts_by_script: dict[str, int],
+    successful: int,
+    current_script: str,
+) -> dict[str, Any]:
     attempt_plan = _attempt_plan_for_run(run, current_script)
     script_order = [str(item) for item in attempt_plan.get("script_order") or []]
     script_attempt_totals = attempt_plan.get("scripts") if isinstance(attempt_plan.get("scripts"), dict) else {}
@@ -1026,25 +1281,29 @@ def _dedupe_candidate_lines(candidates: list[dict[str, Any]]) -> list[dict[str, 
 def _candidate_lines(summary: list[str], scope: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for line in summary:
-        parsed = _parse_result_line(line)
-        if not parsed:
-            continue
-        raw_result = str(parsed.get("result") or "")
-        if not raw_result.startswith("nfqws2 ") or raw_result == "nfqws2 not working":
-            continue
-        args = raw_result.removeprefix("nfqws2 ").strip()
-        candidates.append(
-            {
-                "domain": parsed["domain"],
-                "test": parsed["test"],
-                "ip_version": parsed["ip_version"],
-                "protocol": _protocol_from_test(str(parsed["test"])),
-                "args": args,
-                "raw": line,
-                "scope": scope,
-            }
-        )
+        parsed = _candidate_from_result_line(line, scope)
+        if parsed:
+            candidates.append(parsed)
     return candidates
+
+
+def _candidate_from_result_line(line: str, scope: str) -> dict[str, Any] | None:
+    parsed = _parse_result_line(line)
+    if not parsed:
+        return None
+    raw_result = str(parsed.get("result") or "")
+    if not raw_result.startswith("nfqws2 ") or raw_result == "nfqws2 not working":
+        return None
+    args = raw_result.removeprefix("nfqws2 ").strip()
+    return {
+        "domain": parsed["domain"],
+        "test": parsed["test"],
+        "ip_version": parsed["ip_version"],
+        "protocol": _protocol_from_test(str(parsed["test"])),
+        "args": args,
+        "raw": line,
+        "scope": scope,
+    }
 
 
 def _parse_result_line(line: str) -> dict[str, Any] | None:
@@ -1068,18 +1327,29 @@ def _parse_result_line(line: str) -> dict[str, Any] | None:
 
 def _live_success_lines(stdout: str) -> list[str]:
     result: list[str] = []
+    for line in stdout.splitlines():
+        candidate = _candidate_from_live_success_line(line.strip())
+        if candidate:
+            result.append(
+                f"{candidate['test']} ipv{candidate['ip_version']} {candidate['domain']} : "
+                f"nfqws2 {candidate['args']}"
+            )
+    return result
+
+
+def _candidate_from_live_success_line(line: str) -> dict[str, Any] | None:
     pattern = re.compile(
         r"^!!!!!\s+(?P<test>\S+): working strategy found for ipv(?P<ip_version>\d+)\s+"
         r"(?P<domain>\S+)\s+:\s+nfqws2\s+(?P<args>.*?)\s+!!!!!$"
     )
-    for line in stdout.splitlines():
-        match = pattern.match(line.strip())
-        if match:
-            result.append(
-                f"{match.group('test')} ipv{match.group('ip_version')} {match.group('domain')} : "
-                f"nfqws2 {match.group('args').strip()}"
-            )
-    return result
+    match = pattern.match(line.strip())
+    if not match:
+        return None
+    result_line = (
+        f"{match.group('test')} ipv{match.group('ip_version')} {match.group('domain')} : "
+        f"nfqws2 {match.group('args').strip()}"
+    )
+    return _candidate_from_result_line(result_line, scope="domain")
 
 
 def _live_available_lines(stdout: str) -> list[str]:
@@ -1425,3 +1695,136 @@ def _write_candidates(state_dir: Path, candidates: list[dict[str, Any]]) -> None
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(candidates, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _iter_candidate_file(path: Path) -> Iterator[dict[str, Any]]:
+    if not path.exists():
+        return
+    decoder = json.JSONDecoder()
+    buffer = ""
+    eof = False
+
+    def fill(handle: Any) -> None:
+        nonlocal buffer, eof
+        chunk = handle.read(65536)
+        if chunk:
+            buffer += chunk
+        else:
+            eof = True
+
+    with path.open("r", encoding="utf-8") as handle:
+        fill(handle)
+        while True:
+            buffer = buffer.lstrip()
+            if buffer:
+                break
+            if eof:
+                return
+            fill(handle)
+        if not buffer.startswith("["):
+            return
+        buffer = buffer[1:]
+        while True:
+            while True:
+                buffer = buffer.lstrip()
+                if buffer:
+                    break
+                if eof:
+                    return
+                fill(handle)
+            if buffer.startswith("]"):
+                return
+            if buffer.startswith(","):
+                buffer = buffer[1:]
+                continue
+            while True:
+                try:
+                    value, end = decoder.raw_decode(buffer)
+                    break
+                except json.JSONDecodeError:
+                    if eof:
+                        return
+                    fill(handle)
+            if isinstance(value, dict):
+                yield value
+            buffer = buffer[end:]
+
+
+def _tail_lines(path: Path, max_lines: int) -> list[str]:
+    max_lines = max(0, max_lines)
+    if max_lines <= 0 or not path.exists():
+        return []
+    block_size = 8192
+    blocks: list[bytes] = []
+    line_count = 0
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        while position > 0 and line_count <= max_lines:
+            read_size = min(block_size, position)
+            position -= read_size
+            handle.seek(position)
+            block = handle.read(read_size)
+            blocks.append(block)
+            line_count += block.count(b"\n")
+    data = b"".join(reversed(blocks))
+    return data.decode("utf-8", errors="replace").splitlines()[-max_lines:]
+
+
+def _file_version(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {"size": 0, "mtime_ns": 0}
+    stat = path.stat()
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def _candidate_domains(candidate: dict[str, Any]) -> list[str]:
+    seen = candidate.get("seen")
+    if not isinstance(seen, list):
+        return []
+    return sorted({str(item.get("domain") or "").strip() for item in seen if isinstance(item, dict) and str(item.get("domain") or "").strip()})
+
+
+def _candidate_common_domains(candidate: dict[str, Any]) -> list[str]:
+    common_seen = candidate.get("common_seen")
+    if not isinstance(common_seen, list):
+        return []
+    domains: set[str] = set()
+    for item in common_seen:
+        if not isinstance(item, dict) or not isinstance(item.get("domains"), list):
+            continue
+        domains.update(str(domain or "").strip() for domain in item["domains"] if str(domain or "").strip())
+    return sorted(domains)
+
+
+def _candidate_all_domains(candidate: dict[str, Any]) -> list[str]:
+    return sorted({*_candidate_domains(candidate), *_candidate_common_domains(candidate)})
+
+
+def _candidate_matches_query(candidate: dict[str, Any], query: str, domains: list[str]) -> bool:
+    haystack = " ".join(
+        [
+            str(candidate.get("id") or ""),
+            str(candidate.get("protocol") or ""),
+            str(candidate.get("args") or ""),
+            *domains,
+        ]
+    ).lower()
+    return query in haystack
+
+
+def _compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    domains = _candidate_domains(candidate)
+    common_domains = _candidate_common_domains(candidate)
+    result = {
+        "id": candidate.get("id"),
+        "protocol": candidate.get("protocol"),
+        "args": candidate.get("args"),
+        "status": candidate.get("status"),
+        "first_seen_at": candidate.get("first_seen_at"),
+        "last_seen_at": candidate.get("last_seen_at"),
+        "seen": [{"domain": domain} for domain in domains],
+    }
+    if common_domains:
+        result["common_seen"] = [{"domains": common_domains}]
+    return result

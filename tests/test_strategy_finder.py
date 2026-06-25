@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.state import append_jsonl
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
+    _LiveStdoutRecorder,
     _resolve_blockcheck_script,
     _standard_attempt_plan,
     _write_multidomain_runner,
@@ -17,6 +19,7 @@ from gp_control_plane.strategy_finder import (
     latest_log_tail,
     parse_blockcheck_stdout,
     progress_from_stdout,
+    read_candidate_page,
     read_candidates,
     upsert_candidates,
 )
@@ -285,6 +288,141 @@ pktws_check_http3()
             self.assertEqual(tail["run_id"], "run")
             self.assertEqual(tail["stdout_tail"], "b\nc")
             self.assertEqual(tail["stderr_tail"], "err")
+
+    def test_latest_log_tail_reads_only_requested_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            logs = root / "logs"
+            logs.mkdir(parents=True)
+            stdout = logs / "run.stdout.log"
+            stdout.write_text("\n".join(f"line-{index}" for index in range(1000)) + "\n", encoding="utf-8")
+            append_jsonl(
+                root / "runs.jsonl",
+                {
+                    "id": "run",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout),
+                },
+            )
+
+            tail = latest_log_tail(state_dir, max_lines=3)
+
+            self.assertEqual(tail["stdout_tail"], "line-997\nline-998\nline-999")
+
+    def test_read_candidate_page_limits_results_and_reports_total(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            root.mkdir(parents=True)
+            candidates = [
+                {
+                    "id": f"tls-{index}",
+                    "protocol": "tls",
+                    "args": f"--strategy {index}",
+                    "status": "candidate",
+                    "seen": [{"domain": f"domain-{index}.test", "run_id": "run"}],
+                }
+                for index in range(3)
+            ]
+            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+            page = read_candidate_page(state_dir, limit=2)
+
+            self.assertEqual(page["total"], 3)
+            self.assertEqual(len(page["candidates"]), 2)
+            self.assertTrue(page["has_more"])
+            self.assertEqual(page["tested_domains"], ["domain-0.test", "domain-1.test", "domain-2.test"])
+
+    def test_read_candidate_page_filters_common_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            root.mkdir(parents=True)
+            candidates = [
+                {
+                    "id": "tls-common",
+                    "protocol": "tls",
+                    "args": "--strategy common",
+                    "status": "candidate",
+                    "seen": [{"domain": "youtube.com"}, {"domain": "discord.com"}],
+                },
+                {
+                    "id": "tls-youtube",
+                    "protocol": "tls",
+                    "args": "--strategy youtube-only",
+                    "status": "candidate",
+                    "seen": [{"domain": "youtube.com"}],
+                },
+            ]
+            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+            page = read_candidate_page(state_dir, view="common", domains=["youtube.com", "discord.com"])
+
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["candidates"][0]["args"], "--strategy common")
+
+    def test_latest_log_tail_prefers_live_progress_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            logs = root / "logs"
+            logs.mkdir(parents=True)
+            stdout = logs / "run.stdout.log"
+            progress = logs / "run.progress.json"
+            stdout.write_text("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one\n", encoding="utf-8")
+            progress.write_text(json.dumps({"attempted": 42, "successful": 7}), encoding="utf-8")
+            append_jsonl(
+                root / "runs.jsonl",
+                {
+                    "id": "run",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout),
+                    "progress_log": str(progress),
+                },
+            )
+
+            tail = latest_log_tail(state_dir, max_lines=1)
+
+            self.assertEqual(tail["progress"]["attempted"], 42)
+            self.assertEqual(tail["progress"]["successful"], 7)
+            self.assertNotIn("partial", tail["progress"])
+
+    def test_live_stdout_recorder_persists_success_without_full_stdout_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            progress_log = state_dir / "strategy-finder" / "logs" / "run.progress.json"
+            run = {
+                "id": "run-live",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(progress_log),
+                "attempt_plan": {
+                    "total": 2,
+                    "scripts": {"standard/10-test.sh": 2},
+                    "script_order": ["standard/10-test.sh"],
+                    "source": "test",
+                },
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            recorder.record_line("* script : standard/10-test.sh")
+            recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello")
+            recorder.record_line("!!!!! AVAILABLE !!!!!")
+
+            parsed = recorder.parsed()
+            progress = recorder.progress(run)
+            live_lines = (state_dir / "strategy-finder" / "available.ndjson").read_text(encoding="utf-8").splitlines()
+
+            self.assertEqual(len(parsed["candidates"]), 1)
+            self.assertEqual(parsed["candidates"][0]["domain"], "youtube.com")
+            self.assertEqual(progress["attempted"], 1)
+            self.assertEqual(progress["successful"], 1)
+            self.assertEqual(len(live_lines), 1)
+            self.assertTrue(progress_log.exists())
 
     def test_multidomain_runner_overrides_strategy_check_order(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
