@@ -1252,7 +1252,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1677,22 +1677,30 @@ function renderCommonCandidates(rows){
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
     const domains = selectedDomains;
     const expanded = state.openCommonProtocols[protocolGroup.protocol] !== false;
-    const total = uniqueStrategyArgs(protocolGroup.rows).length;
+    const loadedTotal = uniqueStrategyArgs(protocolGroup.rows).length;
+    const remoteTotal = groups.length === 1 ? Number(state.candidateTotal || loadedTotal) : loadedTotal;
+    const hasRemoteMore = groups.length === 1 && Boolean(state.candidateHasMore);
     return `<details class="domain-group" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
       <summary class="domain-header">
         <div class="domain-title">${esc(protocolGroup.protocol)}</div>
         <div class="domain-meta">
-          ${badge(`${total} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}
+          ${badge(`${loadedTotal} из ${remoteTotal} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}
         </div>
       </summary>
       <div class="protocol-group">
         <div class="protocol-header">
           <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из запуска blockcheck2'}</div>
         </div>
-        ${expanded ? strategyEditor(`common:${protocolGroup.protocol}:${domains.join('|')}`, protocolGroup.rows, 'Общие стратегии') : ''}
+        ${expanded ? strategyEditor(`common:${protocolGroup.protocol}:${domains.join('|')}`, protocolGroup.rows, 'Общие стратегии', {
+          hasRemoteMore,
+          loading: Boolean(state.commonLoadingAll),
+          loadedTotal,
+          remoteTotal,
+          remoteLabel: 'Показать все общие стратегии'
+        }) : ''}
       </div>
     </details>`;
-  }).join('')}</div>${candidatePager()}`;
+  }).join('')}</div>`;
 }
 function candidatePager(){
   if (!state.candidateHasMore) return '';
@@ -1800,7 +1808,10 @@ function commonCandidateKey(){
 function currentCandidateQueryKey(options){
   const opts = options || {};
   if (opts.view === 'domain') return `domain:${opts.domain || ''}`;
-  if ((opts.view || state.candidateView) === 'common') return `common:${commonCandidateKey()}`;
+  if ((opts.view || state.candidateView) === 'common') {
+    const domains = Array.isArray(opts.domains) ? opts.domains : selectedCommonDomains();
+    return `common:${domains.join('|')}`;
+  }
   return String(opts.view || state.candidateView || 'domain');
 }
 function loadCommonCandidateCache(key){
@@ -2004,7 +2015,7 @@ function strategyToggleLabel(list, options){
   const opts = options || {};
   if (opts.loading) return 'Загружается...';
   if (list.expanded) return `Свернуть до ${STRATEGY_LIST_LIMIT}`;
-  if (opts.hasRemoteMore) return 'Показать все стратегии домена';
+  if (opts.hasRemoteMore) return opts.remoteLabel || 'Показать все стратегии домена';
   return `Показать все ${list.all.length}`;
 }
 function domainFromStrategyListKey(key){
@@ -2013,6 +2024,9 @@ function domainFromStrategyListKey(key){
   const rest = text.slice('domain:'.length);
   const protocolSeparator = rest.lastIndexOf(':');
   return protocolSeparator >= 0 ? rest.slice(0, protocolSeparator) : rest;
+}
+function isCommonStrategyListKey(key){
+  return String(key || '').startsWith('common:');
 }
 function renderRuns(){
   const rows = state.finderRuns.filter((row) => isDiscoveryRun(row));
@@ -2287,7 +2301,7 @@ function candidateParams(offset, options){
   if (options && options.view) params.set('view', options.view);
   if (options && options.domain) params.set('domain', options.domain);
   if ((options && options.view === 'common') || (!options && state.candidateView === 'common')) {
-    const domains = selectedCommonDomains();
+    const domains = Array.isArray(options?.domains) ? options.domains : selectedCommonDomains();
     if (domains.length) params.set('domains', domains.join(','));
   }
   return params;
@@ -2363,10 +2377,58 @@ async function loadAllDomainStrategies(domain){
     renderCandidatesOnly();
   }
 }
+async function loadAllCommonStrategies(){
+  if (state.commonLoadingAll || !state.candidateHasMore) return;
+  const domains = selectedCommonDomains();
+  if (domains.length < 2) return;
+  const queryKey = currentCandidateQueryKey({ view: 'common', domains });
+  let candidates = Array.isArray(state.candidates) ? state.candidates.slice() : [];
+  let total = Number(state.candidateTotal || candidates.length);
+  let hasMore = Boolean(state.candidateHasMore);
+  state.commonLoadingAll = true;
+  renderCandidatesOnly();
+  try {
+    let guard = 0;
+    while (hasMore && guard < 1000) {
+      const data = await getJson(`/api/strategy-finder/candidates?${candidateParams(candidates.length, { view: 'common', domains }).toString()}`);
+      if (state.candidateQueryKey !== queryKey) {
+        state.commonLoadingAll = false;
+        return;
+      }
+      const rows = data.candidates || [];
+      total = Number(data.total || total || candidates.length);
+      hasMore = Boolean(data.has_more);
+      if (!rows.length) {
+        hasMore = false;
+        break;
+      }
+      candidates = [...candidates, ...rows];
+      state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+      guard += 1;
+    }
+    if (state.candidateQueryKey !== queryKey) {
+      state.commonLoadingAll = false;
+      return;
+    }
+    state.candidates = candidates;
+    state.candidateTotal = total;
+    state.candidateOffset = Math.max(0, candidates.length - CANDIDATE_PAGE_LIMIT);
+    state.candidateHasMore = hasMore;
+    state.candidatesLoaded = true;
+    state.commonLoadingAll = false;
+    storeCommonCandidateCache(queryKey);
+    renderCandidatesOnly();
+  } catch (error) {
+    setMessage(`Ошибка загрузки всех общих стратегий: ${error.message}`, 'bad');
+    state.commonLoadingAll = false;
+    renderCandidatesOnly();
+  }
+}
 async function refreshCandidates(reset){
   const requestId = ++candidateRequestSeq;
   const offset = reset ? 0 : state.candidates.length;
   const queryKey = currentCandidateQueryKey();
+  state.commonLoadingAll = false;
   try {
     const data = await getJson(`/api/strategy-finder/candidates?${candidateParams(offset).toString()}`);
     if (requestId !== candidateRequestSeq) return;
@@ -2569,9 +2631,14 @@ document.addEventListener('click', (event) => {
   if (button.dataset.strategyListToggle) {
     const key = button.dataset.strategyListToggle;
     const domain = domainFromStrategyListKey(key);
+    const common = isCommonStrategyListKey(key);
     const currentlyExpanded = Boolean(state.expandedStrategyLists[key]);
     state.expandedStrategyLists[key] = !currentlyExpanded;
     renderCandidates();
+    if (!currentlyExpanded && common && state.candidateHasMore) {
+      loadAllCommonStrategies();
+      return;
+    }
     if (!currentlyExpanded && domain && (state.domainStrategies[domain] || {}).hasMore) {
       loadAllDomainStrategies(domain);
     }
