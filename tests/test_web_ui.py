@@ -28,6 +28,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("data-tab=\"terminal\"", html)
         self.assertIn("data-tab=\"backups\"", html)
         self.assertIn("data-tab-page=\"backups\"", html)
+        self.assertIn("Бекапы", html)
+        self.assertIn("Создать бекап сейчас", html)
         self.assertIn("backups-table", html)
         self.assertIn("refreshBackups", html)
         self.assertIn("/api/backups", html)

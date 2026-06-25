@@ -929,7 +929,7 @@ pre {
       <button class="tab-button active" data-tab="finder" type="button">Подбор</button>
       <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
-      <button class="tab-button" data-tab="backups" type="button">Сохранения</button>
+      <button class="tab-button" data-tab="backups" type="button">Бекапы</button>
     </nav>
 
     <section class="tab-page active" data-tab-page="finder">
@@ -1140,14 +1140,14 @@ pre {
     <section class="tab-page backups-page" data-tab-page="backups">
       <section class="panel">
         <div class="panel-header">
-          <h2>Сохранения</h2>
+          <h2>Бекапы</h2>
           <span class="badge" id="backups-count">0</span>
         </div>
         <div class="button-row">
           <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
-          <button data-action="create-backup" type="button">Создать сохранение сейчас</button>
+          <button data-action="create-backup" type="button">Создать бекап сейчас</button>
         </div>
-        <div class="helper-text">Сохранение создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
+        <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
         <div id="backups-table" class="backup-list"></div>
       </section>
     </section>
@@ -1944,7 +1944,7 @@ function renderBackups(){
   const target = el('backups-table');
   if (!target) return;
   if (!rows.length) {
-    target.innerHTML = `<div class="empty">${state.backupsLoaded ? 'Сохранений пока нет' : 'Откройте вкладку, чтобы загрузить сохранения'}</div>`;
+    target.innerHTML = `<div class="empty">${state.backupsLoaded ? 'Бекапов пока нет' : 'Откройте вкладку, чтобы загрузить бекапы'}</div>`;
     return;
   }
   target.innerHTML = rows.map((item) => backupCard(item)).join('');
@@ -2202,13 +2202,13 @@ async function createBackup(){
   try {
     const data = await postJson('/api/backups/create', {});
     if (data.queued) {
-      setMessage('Подбор идет. Сохранение будет возможно после остановки или завершения', 'warn');
+      setMessage('Подбор идет. Бекап можно создать после остановки или завершения', 'warn');
     } else if (data.created) {
-      setMessage('Сохранение создано', 'good');
+      setMessage('Бекап создан', 'good');
     }
     await refreshBackups();
   } catch (error) {
-    setMessage(`Ошибка создания сохранения: ${error.message}`, 'bad');
+    setMessage(`Ошибка создания бекапа: ${error.message}`, 'bad');
   }
 }
 async function startJob(url, payload, text){
