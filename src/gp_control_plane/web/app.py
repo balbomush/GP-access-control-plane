@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from ..backups import create_snapshot_if_idle, list_snapshots, snapshot_file_path
+from ..backups import create_snapshot_if_idle, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
 from ..config import AppConfig
 from ..jobs import JobRunner
 from ..state import now_iso, read_state, write_state
@@ -96,6 +96,15 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             if path == "/api/backups/create":
                 try:
                     self._json(create_snapshot_if_idle(config.output.state_dir), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/backups/restore":
+                try:
+                    snapshot_id = str(payload.get("snapshot") or "").strip()
+                    if not snapshot_id:
+                        raise ValueError("snapshot is required")
+                    self._json(restore_snapshot_if_idle(config.output.state_dir, snapshot_id), status=HTTPStatus.ACCEPTED)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                 return
@@ -1968,6 +1977,7 @@ function backupCard(item){
     </div>
     <div class="backup-files">
       <a href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
+      <button class="secondary danger" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
       ${visibleFiles.map((file) => `<a href="${backupDownloadUrl(id, file.path)}">${esc(file.path)}</a>`).join('')}
     </div>
   </article>`;
@@ -2211,6 +2221,32 @@ async function createBackup(){
     setMessage(`Ошибка создания бекапа: ${error.message}`, 'bad');
   }
 }
+async function restoreBackup(snapshotId){
+  const id = String(snapshotId || '').trim();
+  if (!id) return;
+  const ok = window.confirm(`Восстановить данные из бекапа ${id}? Текущие найденные стратегии и пользовательские пресеты будут заменены.`);
+  if (!ok) return;
+  try {
+    const data = await postJson('/api/backups/restore', { snapshot: id });
+    if (data.queued) {
+      setMessage('Подбор идет. Восстановление можно выполнить после остановки или завершения', 'warn');
+      return;
+    }
+    if (data.restored) {
+      setMessage('Бекап восстановлен', 'good');
+      state.candidates = [];
+      state.candidateDomains = [];
+      state.domainStrategies = {};
+      state.candidatesLoaded = false;
+      state.candidateDomainsLoaded = false;
+      state.testedDomains = [];
+      await refresh();
+      if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
+    }
+  } catch (error) {
+    setMessage(`Ошибка восстановления бекапа: ${error.message}`, 'bad');
+  }
+}
 async function startJob(url, payload, text){
   try {
     setMessage(`${text} запущено`, 'warn');
@@ -2275,6 +2311,10 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'create-backup') {
     createBackup();
+    return;
+  }
+  if (button.dataset.backupRestore) {
+    restoreBackup(button.dataset.backupRestore);
     return;
   }
   if (button.dataset.action === 'load-more-candidates') {

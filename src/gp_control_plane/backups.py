@@ -59,6 +59,108 @@ def create_snapshot(state_dir: Path) -> dict[str, Any]:
     return {"created": True, "snapshot": snapshot_info(state_dir, snapshot_id)}
 
 
+def restore_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
+    state = read_state(state_dir)
+    if state.get("current_job"):
+        return {"restored": False, "queued": True, "reason": "job is running"}
+    return restore_snapshot(state_dir, snapshot_id)
+
+
+def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
+    path = _snapshot_path(state_dir, snapshot_id)
+    if not path.is_dir():
+        raise FileNotFoundError(snapshot_id)
+    if not verify_snapshot(state_dir, snapshot_id):
+        raise ValueError("backup checksum verification failed")
+    strategies = _read_ndjson(path / "strategies" / "strategies.ndjson")
+    links = _read_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
+    presets = _read_user_presets(path / "presets" / "user-presets.yaml")
+    restored_at = now_iso()
+    with connect(state_dir) as conn:
+        conn.execute("DELETE FROM candidate_seen_events")
+        conn.execute("DELETE FROM candidate_common_domains")
+        conn.execute("DELETE FROM candidate_domains")
+        conn.execute("DELETE FROM candidates")
+        for item in strategies:
+            candidate_id = str(item.get("id") or "").strip()
+            if not candidate_id:
+                continue
+            conn.execute(
+                """
+                INSERT INTO candidates(id, protocol, args, status, first_seen_at, last_seen_at, seen_count, common_seen_count)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    str(item.get("protocol") or ""),
+                    str(item.get("args") or ""),
+                    str(item.get("status") or "candidate"),
+                    str(item.get("first_seen_at") or ""),
+                    str(item.get("last_seen_at") or ""),
+                    _int_value(item.get("seen_count")),
+                    _int_value(item.get("common_seen_count")),
+                ),
+            )
+        known_ids = {
+            str(row["id"])
+            for row in conn.execute("SELECT id FROM candidates").fetchall()
+        }
+        for item in links:
+            candidate_id = str(item.get("candidate_id") or "").strip()
+            domain = str(item.get("domain") or "").strip()
+            if not candidate_id or not domain or candidate_id not in known_ids:
+                continue
+            table = "candidate_common_domains" if str(item.get("scope") or "") == "common" else "candidate_domains"
+            conn.execute(
+                f"""
+                INSERT OR REPLACE INTO {table}(candidate_id, domain, protocol, first_seen_at, last_seen_at, seen_count)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    domain,
+                    str(item.get("protocol") or ""),
+                    str(item.get("first_seen_at") or ""),
+                    str(item.get("last_seen_at") or ""),
+                    _int_value(item.get("seen_count")),
+                ),
+            )
+        conn.execute("DELETE FROM presets WHERE builtin = 0")
+        for scope, scoped in presets.items():
+            for name, domains in scoped.items():
+                conn.execute(
+                    """
+                    INSERT INTO presets(scope, name, label, domains_json, source_json, updated_at, builtin)
+                    VALUES(?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        scope,
+                        name,
+                        name,
+                        json.dumps(domains, ensure_ascii=False, separators=(",", ":")),
+                        "{}",
+                        restored_at,
+                    ),
+                )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            ("restored_snapshot", snapshot_id),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            ("restored_at", restored_at),
+        )
+        _mark_legacy_candidates_imported(conn, state_dir)
+    info = snapshot_info(state_dir, snapshot_id)
+    return {
+        "restored": True,
+        "snapshot": info,
+        "strategy_count": len(strategies),
+        "preset_count": sum(len(items) for items in presets.values()),
+        "restored_at": restored_at,
+    }
+
+
 def list_snapshots(state_dir: Path) -> dict[str, Any]:
     items = [snapshot_info(state_dir, path.name) for path in _snapshot_paths(state_dir)]
     items = [item for item in items if item]
@@ -221,6 +323,75 @@ def _write_checksums(root: Path) -> None:
             continue
         rows.append(f"{_sha256_file(item)}  {item.relative_to(root).as_posix()}")
     _write_text(root / "checksums.sha256", "\n".join(rows) + "\n")
+
+
+def _read_ndjson(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    result: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid ndjson in {path.name}") from exc
+            if isinstance(payload, dict):
+                result.append(payload)
+    return result
+
+
+def _read_user_presets(path: Path) -> dict[str, dict[str, list[str]]]:
+    result: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
+    if not path.is_file():
+        return result
+    current_scope = ""
+    current_name = ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        if indent == 2 and line.endswith(":"):
+            scope = line[:-1].strip()
+            current_scope = scope if scope in result else ""
+            current_name = ""
+            continue
+        if indent == 4 and line.endswith(":") and current_scope:
+            current_name = line[:-1].strip()
+            if current_name:
+                result[current_scope][current_name] = []
+            continue
+        if indent >= 6 and line.startswith("- ") and current_scope and current_name:
+            raw_value = line[2:].strip()
+            try:
+                value = json.loads(raw_value)
+            except json.JSONDecodeError:
+                value = raw_value.strip('"')
+            domain = str(value or "").strip()
+            if domain and domain not in result[current_scope][current_name]:
+                result[current_scope][current_name].append(domain)
+    return result
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mark_legacy_candidates_imported(conn: Any, state_dir: Path) -> None:
+    path = state_dir / "strategy-finder" / "candidates.json"
+    if not path.exists():
+        return
+    stat = path.stat()
+    marker = f"{stat.st_size}:{stat.st_mtime_ns}"
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+        ("imported_candidates_json", marker),
+    )
 
 
 def _prune_snapshots(state_dir: Path) -> None:
