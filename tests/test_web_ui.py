@@ -240,6 +240,7 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
+            self.assertEqual(response.getheader("Cache-Control"), "no-store")
 
     def test_serve_clears_stale_current_job_on_start(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -140,6 +140,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             data = index_html().encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -176,6 +177,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         def _head(self, status: HTTPStatus, content_type: str, content_length: int) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
+            if content_type.startswith("text/html"):
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(content_length))
             self.end_headers()
 
