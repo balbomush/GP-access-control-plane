@@ -481,6 +481,31 @@ pktws_check_http3()
             self.assertEqual(runs[-1]["status"], "stopped")
             self.assertTrue(runs[-1]["interrupted"])
 
+    def test_read_runs_omits_heavy_summary_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            root.mkdir(parents=True)
+            append_jsonl(
+                root / "runs.jsonl",
+                {
+                    "id": "run-heavy",
+                    "kind": "multi-domain-discovery",
+                    "status": "stopped",
+                    "timestamp": "2026-06-25T17:18:40Z",
+                    "domains": ["youtube.com"],
+                    "candidate_count": 1,
+                    "summary": ["large"] * 1000,
+                    "results": [{"raw": "large"}] * 1000,
+                },
+            )
+
+            runs = read_runs(state_dir, limit=10)
+
+            self.assertEqual(runs[0]["id"], "run-heavy")
+            self.assertNotIn("summary", runs[0])
+            self.assertNotIn("results", runs[0])
+
     def test_live_stdout_recorder_persists_success_without_full_stdout_parse(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

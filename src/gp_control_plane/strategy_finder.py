@@ -329,8 +329,25 @@ def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
         if line.strip():
             parsed = json.loads(line)
             if isinstance(parsed, dict):
-                result.append(parsed)
+                result.append(_compact_run(parsed))
     return result
+
+
+def _compact_run(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in run.items()
+        if key
+        not in {
+            "summary",
+            "common",
+            "live_summary",
+            "results",
+            "common_results",
+            "direct_available",
+            "not_working",
+        }
+    }
 
 
 def close_stale_running_runs(state_dir: Path) -> int:
