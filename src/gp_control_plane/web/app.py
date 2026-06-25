@@ -1601,10 +1601,22 @@ function domainStrategyContent(domain){
   if (!data.loaded) return '<div class="empty">Стратегии домена загружаются</div>';
   const rows = data.candidates || [];
   if (!rows.length) return '<div class="empty">Для домена нет загруженных стратегий</div>';
+  const groups = protocolGroups(rows);
   const more = data.hasMore
     ? `<div class="button-row"><button class="secondary" data-domain-load-more="${esc(domain)}" type="button">Показать еще стратегии этого домена</button></div>`
     : '';
-  return `${strategyEditor(`domain:${domain}`, rows, 'Стратегии домена')}${more}`;
+  const grouped = groups.map((protocolGroup) => {
+    const key = `domain:${domain}:${protocolGroup.protocol}`;
+    const total = uniqueStrategyArgs(protocolGroup.rows).length;
+    return `<section class="protocol-group">
+      <div class="protocol-header">
+        <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')}</div>
+        <div class="helper-text">${total} стратегий</div>
+      </div>
+      ${strategyEditor(key, protocolGroup.rows, `Стратегии ${protocolGroup.protocol}`)}
+    </section>`;
+  }).join('');
+  return `${grouped}${more}`;
 }
 function filteredCandidates(){
   return state.candidates;

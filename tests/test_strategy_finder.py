@@ -386,13 +386,20 @@ pktws_check_http3()
                     "status": "candidate",
                     "seen": [{"domain": "discord.com"}],
                 },
+                {
+                    "id": "quic-common",
+                    "protocol": "quic",
+                    "args": "--strategy common-quic",
+                    "status": "candidate",
+                    "common_seen": [{"domains": ["youtube.com", "discord.com"]}],
+                },
             ]
             (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
 
             page = read_candidate_page(state_dir, domain="youtube.com")
 
-            self.assertEqual(page["total"], 1)
-            self.assertEqual(page["candidates"][0]["args"], "--strategy youtube")
+            self.assertEqual(page["total"], 2)
+            self.assertEqual({item["args"] for item in page["candidates"]}, {"--strategy youtube", "--strategy common-quic"})
 
     def test_read_candidate_domain_index_counts_by_domain_and_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -414,6 +421,13 @@ pktws_check_http3()
                     "status": "candidate",
                     "seen": [{"domain": "youtube.com"}],
                 },
+                {
+                    "id": "quic-common",
+                    "protocol": "quic",
+                    "args": "--strategy common-quic",
+                    "status": "candidate",
+                    "common_seen": [{"domains": ["youtube.com", "discord.com"]}],
+                },
             ]
             (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
 
@@ -422,11 +436,11 @@ pktws_check_http3()
             discord = next(item for item in index["domains"] if item["domain"] == "discord.com")
 
             self.assertEqual(index["total"], 2)
-            self.assertEqual(youtube["strategy_count"], 2)
-            self.assertEqual(discord["strategy_count"], 1)
+            self.assertEqual(youtube["strategy_count"], 3)
+            self.assertEqual(discord["strategy_count"], 2)
             self.assertEqual(
                 youtube["protocols"],
-                [{"protocol": "quic", "count": 1}, {"protocol": "tls", "count": 1}],
+                [{"protocol": "quic", "count": 2}, {"protocol": "tls", "count": 1}],
             )
 
     def test_latest_log_tail_prefers_live_progress_file(self) -> None:

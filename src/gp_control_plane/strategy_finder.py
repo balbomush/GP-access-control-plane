@@ -340,9 +340,9 @@ def read_candidate_page(
             candidate_domains = _candidate_domains(candidate)
             all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
             if view == "domain":
-                if not candidate_domains:
+                if not all_domains:
                     continue
-                if selected_domain and selected_domain not in candidate_domains:
+                if selected_domain and selected_domain not in all_domains:
                     continue
             if view == "common":
                 if len(selected_domains) < 2:
@@ -382,7 +382,7 @@ def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str
                 continue
             candidate_id = str(candidate.get("id") or candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or "")))
             protocol = str(candidate.get("protocol") or "unknown")
-            for item_domain in candidate_domains:
+            for item_domain in all_domains:
                 item = domains.setdefault(item_domain, {"domain": item_domain, "strategy_ids": set(), "protocols": {}})
                 item["strategy_ids"].add(candidate_id)
                 protocol_ids = item["protocols"].setdefault(protocol, set())
