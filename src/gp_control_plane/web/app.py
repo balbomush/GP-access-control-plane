@@ -1073,7 +1073,6 @@ pre {
           </div>
           <div class="preset-actions">
             <button class="secondary" data-preset-use="common" title="Подставляет выбранный пресет в фильтр общих стратегий. Непротестированные домены будут пропущены." type="button">Применить пресет</button>
-            <button class="secondary danger" data-preset-delete="common" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
           </div>
           <div class="field">
             <label for="common-domains">Домены для поиска общих стратегий</label>
