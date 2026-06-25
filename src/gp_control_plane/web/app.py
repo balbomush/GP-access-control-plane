@@ -458,12 +458,44 @@ button:disabled { opacity: .55; cursor: default; }
   color: var(--text-soft);
   font-size: 13px;
 }
-.backup-files {
+.backup-downloads {
+  display: grid;
+  grid-template-columns: minmax(180px, .35fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.backup-download-block {
+  display: grid;
+  gap: 8px;
+}
+.backup-section-title {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.backup-archive-link {
+  color: #ffffff;
+  border: 1px solid var(--blue);
+  border-radius: 6px;
+  padding: 10px 12px;
+  text-decoration: none;
+  background: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+}
+.backup-archive-link:hover {
+  background: var(--blue-strong);
+  border-color: var(--blue-strong);
+}
+.backup-file-links {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
-.backup-files a {
+.backup-file-links a {
   color: var(--blue-strong);
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -472,7 +504,7 @@ button:disabled { opacity: .55; cursor: default; }
   background: var(--surface-code);
   font-size: 13px;
 }
-.backup-files a:hover {
+.backup-file-links a:hover {
   border-color: var(--blue);
 }
 .domain-group {
@@ -891,7 +923,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-restore-panel { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-restore-panel, .backup-downloads { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -2046,9 +2078,17 @@ function backupCard(item){
       <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
       <div>Пресетов: ${esc(item.preset_count || 0)}</div>
     </div>
-    <div class="backup-files">
-      <a href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
-      ${visibleFiles.map((file) => `<a href="${backupDownloadUrl(id, file.path)}">${esc(file.path)}</a>`).join('')}
+    <div class="backup-downloads">
+      <div class="backup-download-block backup-archive">
+        <div class="backup-section-title">Архив</div>
+        <a class="backup-archive-link" href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
+      </div>
+      <div class="backup-download-block">
+        <div class="backup-section-title">Файлы бекапа</div>
+        <div class="backup-file-links">
+          ${visibleFiles.map((file) => `<a href="${backupDownloadUrl(id, file.path)}">${esc(file.path)}</a>`).join('')}
+        </div>
+      </div>
     </div>
   </article>`;
 }
