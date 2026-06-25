@@ -402,17 +402,12 @@ button:disabled { opacity: .55; cursor: default; }
   font-size: 12px;
   line-height: 1.4;
 }
-.candidate-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-  margin-bottom: 12px;
-}
 .candidate-summary {
   color: var(--text-soft);
   font-size: 13px;
   white-space: nowrap;
+  text-align: right;
+  margin-bottom: 10px;
 }
 .candidate-tabs {
   display: flex;
@@ -887,7 +882,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .candidate-toolbar, .preset-grid, .preset-actions, .domain-picker-row { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -1064,13 +1059,7 @@ pre {
           <h2>Найденные стратегии</h2>
           <span class="badge" id="candidates-count">0</span>
         </div>
-        <div class="candidate-toolbar">
-          <div class="field">
-            <label for="candidate-filter">Фильтр по домену, протоколу или аргументам</label>
-            <input id="candidate-filter" autocomplete="off" placeholder="youtube.com, quic, multisplit">
-          </div>
-          <div class="candidate-summary" id="candidate-summary">-</div>
-        </div>
+        <div class="candidate-summary" id="candidate-summary">-</div>
         <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
           <button class="subtab-button active" data-candidate-view="domain" type="button">По доменам</button>
           <button class="subtab-button" data-candidate-view="common" type="button">Общие стратегии</button>
@@ -1167,7 +1156,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', candidateFilter: '', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1552,7 +1541,7 @@ function renderDomainCandidates(){
     return;
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
-    const expanded = Boolean(state.candidateFilter || state.openCandidateDomains[domainGroup.domain]);
+    const expanded = Boolean(state.openCandidateDomains[domainGroup.domain]);
     const open = expanded ? ' open' : '';
     const protocolBadges = domainGroup.protocols.map((item) => {
       return badge(`${item.protocol}: ${item.count}`, item.protocol === 'quic' ? 'warn' : 'good');
@@ -1583,7 +1572,7 @@ function renderCommonCandidates(rows){
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
     const domains = selectedDomains;
-    const expanded = Boolean(state.candidateFilter || state.openCommonProtocols[protocolGroup.protocol]);
+    const expanded = Boolean(state.openCommonProtocols[protocolGroup.protocol]);
     const total = uniqueStrategyArgs(protocolGroup.rows).length;
     return `<details class="domain-group" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
       <summary class="domain-header">
@@ -2061,8 +2050,6 @@ function candidateParams(offset, options){
   params.set('offset', String(Math.max(0, offset || 0)));
   params.set('view', state.candidateView);
   if (options && options.view) params.set('view', options.view);
-  const query = state.candidateFilter.trim();
-  if (query) params.set('query', query);
   if (options && options.domain) params.set('domain', options.domain);
   if ((options && options.view === 'common') || (!options && state.candidateView === 'common')) {
     const domains = selectedCommonDomains();
@@ -2074,8 +2061,6 @@ async function refreshDomainIndex(){
   const requestId = ++domainIndexRequestSeq;
   try {
     const params = new URLSearchParams();
-    const query = state.candidateFilter.trim();
-    if (query) params.set('query', query);
     const data = await getJson(`/api/strategy-finder/candidate-domains?${params.toString()}`);
     if (requestId !== domainIndexRequestSeq) return;
     state.candidateDomains = data.domains || [];
@@ -2381,10 +2366,6 @@ document.addEventListener('click', (event) => {
   if (button.dataset.action === 'stop-current') stopCurrentJob();
 });
 document.addEventListener('input', (event) => {
-  if (event.target && event.target.id === 'candidate-filter') {
-    state.candidateFilter = event.target.value;
-    scheduleCandidateRefresh();
-  }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
