@@ -1355,23 +1355,59 @@ function mergeCustomPresets(remote){
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
 }
 function builtInPresets(target){
-  const labels = {
-    critical: 'Критичные',
-    coverage: 'Покрытие',
-    diagnostic: 'Диагностика',
-    'google-youtube': 'Google / YouTube',
-    discord: 'Discord',
-    cloudflare: 'Cloudflare',
-    'amazon-aws': 'Amazon / AWS'
-  };
-  const presets = [
-    ...Object.keys(state.domainSets || {}).sort().map((key) => ({ key, label: labels[key] || key, domains: defaultDomains(key) })),
-    { key: 'all', label: 'Все встроенные', domains: defaultDomains('all') }
-  ];
-  if (target === 'common') {
-    presets.unshift({ key: 'tested', label: 'Все протестированные', domains: testedDomains() });
-  }
+  const groups = presetGroups(target);
+  const presets = groups.flatMap((group) => group.presets);
   return presets;
+}
+function presetGroups(target){
+  const sets = state.domainSets || {};
+  const make = (key, label) => ({ key, label, domains: defaultDomains(key) });
+  const groups = [];
+  if (target === 'common') {
+    groups.push({
+      label: 'Протестированные',
+      presets: [{ key: 'tested', label: 'Все протестированные', domains: testedDomains() }]
+    });
+  }
+  groups.push({
+    label: 'Обязательные',
+    presets: [
+      make('critical', 'Критичные')
+    ].filter((preset) => preset.domains.length)
+  });
+  groups.push({
+    label: 'Сервисы',
+    presets: [
+      make('google-youtube', 'Google / YouTube'),
+      make('discord', 'Discord'),
+      make('cloudflare', 'Cloudflare'),
+      make('amazon-aws', 'Amazon / AWS')
+    ].filter((preset) => preset.domains.length)
+  });
+  groups.push({
+    label: 'Готовые наборы',
+    presets: [
+      make('coverage', 'Покрытие'),
+      { key: 'all', label: 'Все встроенные', domains: defaultDomains('all') }
+    ].filter((preset) => preset.domains.length)
+  });
+  groups.push({
+    label: 'Диагностика',
+    presets: [
+      make('diagnostic', 'Диагностика')
+    ].filter((preset) => preset.domains.length)
+  });
+  const known = new Set(groups.flatMap((group) => group.presets.map((preset) => preset.key)));
+  const other = Object.keys(sets)
+    .filter((key) => !known.has(key))
+    .sort()
+    .map((key) => make(key, key))
+    .filter((preset) => preset.domains.length);
+  if (other.length) groups.push({ label: 'Другие', presets: other });
+  if (target === 'common') {
+    return groups.filter((group) => group.presets.length);
+  }
+  return groups.filter((group) => group.presets.length);
 }
 function presetDomains(target, value){
   const [scope, key] = String(value || '').split(':');
@@ -1386,11 +1422,15 @@ function renderPresetSelect(target){
   const select = el(`${target}-preset-select`);
   if (!select) return;
   const previous = select.value;
-  const builtins = builtInPresets(target);
   const customEntries = Object.entries(state.customPresets[target] || {}).sort(([a], [b]) => a.localeCompare(b));
-  const builtInOptions = builtins.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${preset.domains.length})</option>`).join('');
-  const customOptions = customEntries.map(([name, domains]) => `<option value="custom:${esc(name)}">${esc(name)} (${Array.isArray(domains) ? domains.length : 0})</option>`).join('');
-  select.innerHTML = `<optgroup label="Встроенные">${builtInOptions}</optgroup>${customOptions ? `<optgroup label="Мои">${customOptions}</optgroup>` : ''}`;
+  const customGroup = customEntries.length
+    ? `<optgroup label="Персональные">${customEntries.map(([name, domains]) => `<option value="custom:${esc(name)}">${esc(name)} (${Array.isArray(domains) ? domains.length : 0})</option>`).join('')}</optgroup>`
+    : '';
+  const builtInGroups = presetGroups(target).map((group) => {
+    const options = group.presets.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${preset.domains.length})</option>`).join('');
+    return `<optgroup label="${esc(group.label)}">${options}</optgroup>`;
+  }).join('');
+  select.innerHTML = `${customGroup}${builtInGroups}`;
   if ([...select.options].some((option) => option.value === previous)) select.value = previous;
 }
 function renderPresetSelects(){
