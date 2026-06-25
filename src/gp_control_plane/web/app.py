@@ -400,6 +400,54 @@ button:disabled { opacity: .55; cursor: default; }
   gap: 8px;
 }
 .domain-picker-row { grid-template-columns: minmax(0, 1fr) auto; }
+.common-domain-picker {
+  position: relative;
+}
+.common-domain-picker input {
+  width: 100%;
+}
+.common-domain-suggestions {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-code);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, .28);
+  overflow: hidden;
+}
+.common-domain-suggestions[hidden] {
+  display: none;
+}
+.domain-suggestion {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  padding: 9px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: left;
+}
+.domain-suggestion:last-child {
+  border-bottom: 0;
+}
+.domain-suggestion:hover,
+.domain-suggestion:focus {
+  background: rgba(0, 151, 220, .18);
+  color: #ffffff;
+}
+.domain-suggestion-empty {
+  padding: 9px 10px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
 .helper-text {
   color: var(--text-soft);
   font-size: 12px;
@@ -1123,7 +1171,10 @@ pre {
             </div>
           </div>
           <div class="domain-picker-row">
-            <input id="common-domain-add" list="tested-domain-options" autocomplete="off" placeholder="Начните вводить протестированный домен">
+            <div class="common-domain-picker">
+              <input id="common-domain-add" list="tested-domain-options" autocomplete="off" placeholder="Начните вводить протестированный домен">
+              <div id="common-domain-suggestions" class="common-domain-suggestions" role="listbox" hidden></div>
+            </div>
             <button class="secondary" data-action="add-common-domain" title="Добавляет домен в фильтр общих стратегий, если по нему уже есть кандидаты." type="button">Добавить домен</button>
           </div>
           <datalist id="tested-domain-options"></datalist>
@@ -1697,6 +1748,49 @@ function selectedCommonDomains(){
   if (!node) return [];
   return filterTestedDomains(parseDomains(node.value));
 }
+function commonDomainSuggestions(query){
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return [];
+  const selected = new Set(parseDomains(el('common-domains').value));
+  return testedDomains()
+    .filter((domain) => !selected.has(domain))
+    .filter((domain) => domain.toLowerCase().includes(needle))
+    .sort((a, b) => {
+      const aStarts = a.toLowerCase().startsWith(needle);
+      const bStarts = b.toLowerCase().startsWith(needle);
+      if (aStarts !== bStarts) return aStarts ? -1 : 1;
+      return a.localeCompare(b);
+    })
+    .slice(0, 8);
+}
+function renderCommonDomainSuggestions(){
+  const input = el('common-domain-add');
+  const target = el('common-domain-suggestions');
+  if (!input || !target || state.candidateView !== 'common') return;
+  const value = String(input.value || '');
+  const rows = commonDomainSuggestions(value);
+  if (!value.trim()) {
+    target.hidden = true;
+    target.innerHTML = '';
+    return;
+  }
+  target.hidden = false;
+  target.innerHTML = rows.length
+    ? rows.map((domain) => `<button class="domain-suggestion" data-common-domain-suggestion="${esc(domain)}" type="button" role="option">${esc(domain)}</button>`).join('')
+    : '<div class="domain-suggestion-empty">Совпадений среди протестированных доменов нет</div>';
+}
+function hideCommonDomainSuggestions(){
+  const target = el('common-domain-suggestions');
+  if (!target) return;
+  target.hidden = true;
+}
+function chooseCommonDomainSuggestion(domain){
+  const input = el('common-domain-add');
+  if (!input) return;
+  input.value = domain;
+  hideCommonDomainSuggestions();
+  input.focus();
+}
 function commonCandidateKey(){
   return selectedCommonDomains().join('|');
 }
@@ -1764,6 +1858,7 @@ function renderCommonControls(){
   if (skipped.length) parts.push(`Будут пропущены без кандидатов: ${skipped.join(', ')}.`);
   if (selected.length < 2) parts.push('Нужно минимум два протестированных домена.');
   setText('common-domain-note', parts.join(' '));
+  renderCommonDomainSuggestions();
 }
 function addCommonDomain(){
   const input = el('common-domain-add');
@@ -1778,6 +1873,7 @@ function addCommonDomain(){
   if (!current.includes(domain)) current.push(domain);
   el('common-domains').value = current.join('\\n');
   input.value = '';
+  hideCommonDomainSuggestions();
   updateEditorLineNumbers('common-domains');
   prepareCommonCandidateState();
   renderCandidatesOnly();
@@ -2413,6 +2509,10 @@ document.addEventListener('click', (event) => {
   }
   const button = event.target.closest('button');
   if (!button) return;
+  if (button.dataset.commonDomainSuggestion) {
+    chooseCommonDomainSuggestion(button.dataset.commonDomainSuggestion);
+    return;
+  }
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
   if (button.dataset.candidateView) {
     setCandidateView(button.dataset.candidateView);
@@ -2514,6 +2614,10 @@ document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'common-domains') {
     updateEditorLineNumbers('common-domains');
     scheduleCandidateRefresh();
+    renderCommonDomainSuggestions();
+  }
+  if (event.target && event.target.id === 'common-domain-add') {
+    renderCommonDomainSuggestions();
   }
 });
 document.addEventListener('scroll', (event) => {
@@ -2541,6 +2645,19 @@ document.addEventListener('keydown', (event) => {
   if (event.target && event.target.id === 'common-domain-add' && event.key === 'Enter') {
     event.preventDefault();
     addCommonDomain();
+  }
+  if (event.target && event.target.id === 'common-domain-add' && event.key === 'Escape') {
+    hideCommonDomainSuggestions();
+  }
+});
+document.addEventListener('focusin', (event) => {
+  if (event.target && event.target.id === 'common-domain-add') {
+    renderCommonDomainSuggestions();
+  }
+});
+document.addEventListener('focusout', (event) => {
+  if (event.target && event.target.id === 'common-domain-add') {
+    setTimeout(hideCommonDomainSuggestions, 120);
   }
 });
 document.addEventListener('toggle', (event) => {
