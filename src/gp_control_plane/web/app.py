@@ -1602,9 +1602,6 @@ function domainStrategyContent(domain){
   const rows = data.candidates || [];
   if (!rows.length) return '<div class="empty">Для домена нет загруженных стратегий</div>';
   const groups = protocolGroups(rows);
-  const more = data.hasMore
-    ? `<div class="button-row"><button class="secondary" data-domain-load-more="${esc(domain)}" type="button">Показать еще стратегии этого домена</button></div>`
-    : '';
   const grouped = groups.map((protocolGroup) => {
     const key = `domain:${domain}:${protocolGroup.protocol}`;
     const total = uniqueStrategyArgs(protocolGroup.rows).length;
@@ -1613,10 +1610,15 @@ function domainStrategyContent(domain){
         <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')}</div>
         <div class="helper-text">${total} стратегий</div>
       </div>
-      ${strategyEditor(key, protocolGroup.rows, `Стратегии ${protocolGroup.protocol}`)}
+      ${strategyEditor(key, protocolGroup.rows, `Стратегии ${protocolGroup.protocol}`, {
+        hasRemoteMore: Boolean(data.hasMore),
+        loading: Boolean(data.loadingAll),
+        loadedTotal: rows.length,
+        remoteTotal: Number(data.total || rows.length)
+      })}
     </section>`;
   }).join('');
-  return `${grouped}${more}`;
+  return grouped;
 }
 function filteredCandidates(){
   return state.candidates;
@@ -1775,14 +1777,19 @@ function restoreStrategyEditorScrolls(){
     });
   });
 }
-function strategyEditor(key, rows, title){
+function strategyEditor(key, rows, title, options){
+  const opts = options || {};
   const list = strategyListState(key, rows);
   const lines = list.visible;
   const lineCount = Math.max(lines.length, 1);
   const rowsAttr = Math.min(Math.max(lineCount, 6), 18);
-  const meta = `Показано ${lines.length} из ${list.all.length} уникальных стратегий. Дубликаты строк скрыты.${list.hidden ? ` Скрыто до раскрытия: ${list.hidden}.` : ''}`;
-  const toggle = list.all.length > STRATEGY_LIST_LIMIT
-    ? `<button class="secondary" data-strategy-list-toggle="${esc(key)}" type="button">${list.expanded ? `Свернуть до ${STRATEGY_LIST_LIMIT}` : `Показать все ${list.all.length}`}</button>`
+  const remoteMore = Boolean(opts.hasRemoteMore);
+  const loadedTotal = Number(opts.loadedTotal || list.all.length);
+  const remoteTotal = Number(opts.remoteTotal || loadedTotal);
+  const remoteText = remoteMore ? ` Загружено ${loadedTotal}${remoteTotal ? ` из ${remoteTotal}` : ''}; оставшиеся догружаются по кнопке.` : '';
+  const meta = `Показано ${lines.length} из ${list.all.length} уникальных стратегий. Дубликаты строк скрыты.${list.hidden ? ` Скрыто до раскрытия: ${list.hidden}.` : ''}${remoteText}`;
+  const toggle = list.all.length > STRATEGY_LIST_LIMIT || remoteMore
+    ? `<button class="secondary" data-strategy-list-toggle="${esc(key)}" type="button"${opts.loading ? ' disabled' : ''}>${strategyToggleLabel(list, opts)}</button>`
     : '';
   return `<div class="strategy-editor" data-strategy-list="${esc(key)}">
     <div class="strategy-editor-head">
@@ -1797,6 +1804,20 @@ function strategyEditor(key, rows, title){
       <textarea class="strategy-code" data-strategy-code-key="${esc(key)}" readonly spellcheck="false" rows="${rowsAttr}">${esc(lines.join('\\n'))}</textarea>
     </div>
   </div>`;
+}
+function strategyToggleLabel(list, options){
+  const opts = options || {};
+  if (opts.loading) return 'Загружается...';
+  if (list.expanded) return `Свернуть до ${STRATEGY_LIST_LIMIT}`;
+  if (opts.hasRemoteMore) return 'Показать все стратегии домена';
+  return `Показать все ${list.all.length}`;
+}
+function domainFromStrategyListKey(key){
+  const text = String(key || '');
+  if (!text.startsWith('domain:')) return '';
+  const rest = text.slice('domain:'.length);
+  const protocolSeparator = rest.lastIndexOf(':');
+  return protocolSeparator >= 0 ? rest.slice(0, protocolSeparator) : rest;
 }
 function renderRuns(){
   const rows = state.finderRuns.filter((row) => isDiscoveryRun(row));
@@ -2070,12 +2091,46 @@ async function refreshDomainStrategies(domain, reset){
       candidates: reset ? rows : [...current.candidates, ...rows],
       total: Number(data.total || 0),
       hasMore: Boolean(data.has_more),
-      loaded: true
+      loaded: true,
+      loadingAll: false
     };
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     renderAll();
   } catch (error) {
     setMessage(`Ошибка загрузки стратегий домена: ${error.message}`, 'bad');
+  }
+}
+async function loadAllDomainStrategies(domain){
+  const key = String(domain || '').trim();
+  if (!key) return;
+  const current = state.domainStrategies[key] || { candidates: [], total: 0, hasMore: false, loaded: false };
+  if (current.loadingAll) return;
+  let candidates = Array.isArray(current.candidates) ? current.candidates.slice() : [];
+  let total = Number(current.total || candidates.length);
+  let hasMore = Boolean(current.hasMore);
+  state.domainStrategies[key] = { ...current, candidates, total, hasMore, loaded: true, loadingAll: true };
+  renderCandidates();
+  try {
+    let guard = 0;
+    while (hasMore && guard < 1000) {
+      const data = await getJson(`/api/strategy-finder/candidates?${candidateParams(candidates.length, { view: 'domain', domain: key }).toString()}`);
+      const rows = data.candidates || [];
+      total = Number(data.total || total || candidates.length);
+      hasMore = Boolean(data.has_more);
+      if (!rows.length) {
+        hasMore = false;
+        break;
+      }
+      candidates = [...candidates, ...rows];
+      state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+      guard += 1;
+    }
+    state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false };
+    renderAll();
+  } catch (error) {
+    state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false };
+    setMessage(`Ошибка загрузки всех стратегий домена: ${error.message}`, 'bad');
+    renderAll();
   }
 }
 async function refreshCandidates(reset){
@@ -2226,10 +2281,6 @@ document.addEventListener('click', (event) => {
     refreshCandidates(false);
     return;
   }
-  if (button.dataset.domainLoadMore) {
-    refreshDomainStrategies(button.dataset.domainLoadMore, false);
-    return;
-  }
   if (button.dataset.fill) fillDomains(button.dataset.fill);
   if (button.dataset.presetUse) {
     usePreset(button.dataset.presetUse);
@@ -2249,8 +2300,13 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.strategyListToggle) {
     const key = button.dataset.strategyListToggle;
-    state.expandedStrategyLists[key] = !state.expandedStrategyLists[key];
+    const domain = domainFromStrategyListKey(key);
+    const currentlyExpanded = Boolean(state.expandedStrategyLists[key]);
+    state.expandedStrategyLists[key] = !currentlyExpanded;
     renderCandidates();
+    if (!currentlyExpanded && domain && (state.domainStrategies[domain] || {}).hasMore) {
+      loadAllDomainStrategies(domain);
+    }
     return;
   }
   if (button.dataset.action === 'standard-discovery') {
