@@ -19,6 +19,7 @@ from gp_control_plane.strategy_finder import (
     latest_log_tail,
     parse_blockcheck_stdout,
     progress_from_stdout,
+    read_candidate_domain_index,
     read_candidate_page,
     read_candidates,
     upsert_candidates,
@@ -362,6 +363,69 @@ pktws_check_http3()
 
             self.assertEqual(page["total"], 1)
             self.assertEqual(page["candidates"][0]["args"], "--strategy common")
+
+    def test_read_candidate_page_filters_single_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            root.mkdir(parents=True)
+            candidates = [
+                {
+                    "id": "tls-youtube",
+                    "protocol": "tls",
+                    "args": "--strategy youtube",
+                    "status": "candidate",
+                    "seen": [{"domain": "youtube.com"}],
+                },
+                {
+                    "id": "tls-discord",
+                    "protocol": "tls",
+                    "args": "--strategy discord",
+                    "status": "candidate",
+                    "seen": [{"domain": "discord.com"}],
+                },
+            ]
+            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+            page = read_candidate_page(state_dir, domain="youtube.com")
+
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["candidates"][0]["args"], "--strategy youtube")
+
+    def test_read_candidate_domain_index_counts_by_domain_and_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            root.mkdir(parents=True)
+            candidates = [
+                {
+                    "id": "tls-common",
+                    "protocol": "tls",
+                    "args": "--strategy common",
+                    "status": "candidate",
+                    "seen": [{"domain": "youtube.com"}, {"domain": "discord.com"}],
+                },
+                {
+                    "id": "quic-youtube",
+                    "protocol": "quic",
+                    "args": "--strategy quic",
+                    "status": "candidate",
+                    "seen": [{"domain": "youtube.com"}],
+                },
+            ]
+            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+            index = read_candidate_domain_index(state_dir)
+            youtube = next(item for item in index["domains"] if item["domain"] == "youtube.com")
+            discord = next(item for item in index["domains"] if item["domain"] == "discord.com")
+
+            self.assertEqual(index["total"], 2)
+            self.assertEqual(youtube["strategy_count"], 2)
+            self.assertEqual(discord["strategy_count"], 1)
+            self.assertEqual(
+                youtube["protocols"],
+                [{"protocol": "quic", "count": 1}, {"protocol": "tls", "count": 1}],
+            )
 
     def test_latest_log_tail_prefers_live_progress_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

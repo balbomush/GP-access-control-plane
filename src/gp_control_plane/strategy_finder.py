@@ -233,21 +233,27 @@ def read_candidate_page(
     query: str = "",
     view: str = "domain",
     domains: list[str] | None = None,
+    domain: str = "",
 ) -> dict[str, Any]:
     path = _finder_dir(state_dir) / "candidates.json"
     limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
     offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
     query = query.strip().lower()
     view = view if view in {"domain", "common"} else "domain"
-    selected_domains = _clean_domains(domains or [])
+    selected_domains = _clean_domain_list(domains or [])
+    selected_domain = domain.strip()
     tested_domains: set[str] = set()
     total = 0
     rows: list[dict[str, Any]] = []
     for candidate in _iter_candidate_file(path):
-        all_domains = _candidate_all_domains(candidate)
+        candidate_domains = _candidate_domains(candidate)
+        all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
         tested_domains.update(all_domains)
-        if view == "domain" and not _candidate_domains(candidate):
-            continue
+        if view == "domain":
+            if not candidate_domains:
+                continue
+            if selected_domain and selected_domain not in candidate_domains:
+                continue
         if view == "common":
             if len(selected_domains) < 2:
                 continue
@@ -270,6 +276,46 @@ def read_candidate_page(
         "has_more": offset + len(rows) < total,
         "tested_domains": sorted(tested_domains),
         "version": version,
+    }
+
+
+def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str, Any]:
+    path = _finder_dir(state_dir) / "candidates.json"
+    query = query.strip().lower()
+    domains: dict[str, dict[str, Any]] = {}
+    tested_domains: set[str] = set()
+    for candidate in _iter_candidate_file(path):
+        candidate_domains = _candidate_domains(candidate)
+        all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
+        tested_domains.update(all_domains)
+        if query and not _candidate_matches_query(candidate, query, all_domains):
+            continue
+        candidate_id = str(candidate.get("id") or candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or "")))
+        protocol = str(candidate.get("protocol") or "unknown")
+        for domain in candidate_domains:
+            item = domains.setdefault(domain, {"domain": domain, "strategy_ids": set(), "protocols": {}})
+            item["strategy_ids"].add(candidate_id)
+            protocol_ids = item["protocols"].setdefault(protocol, set())
+            protocol_ids.add(candidate_id)
+    rows = []
+    for item in domains.values():
+        rows.append(
+            {
+                "domain": item["domain"],
+                "strategy_count": len(item["strategy_ids"]),
+                "protocols": [
+                    {"protocol": protocol, "count": len(ids)}
+                    for protocol, ids in sorted(item["protocols"].items(), key=lambda pair: pair[0])
+                ],
+            }
+        )
+    rows.sort(key=lambda item: str(item["domain"]))
+    return {
+        "domains": rows,
+        "total": len(rows),
+        "strategy_total": sum(int(item["strategy_count"]) for item in rows),
+        "tested_domains": sorted(tested_domains),
+        "version": _file_version(path),
     }
 
 
@@ -1676,12 +1722,16 @@ report_print
 
 
 def _clean_domains(domains: list[str]) -> list[str]:
+    return _clean_domain_list(domains) or list(CRITICAL_DOMAINS)
+
+
+def _clean_domain_list(domains: list[str]) -> list[str]:
     result: list[str] = []
     for domain in domains:
         value = str(domain).strip()
         if value and value not in result:
             result.append(value)
-    return result or list(CRITICAL_DOMAINS)
+    return result
 
 
 def _finder_dir(state_dir: Path) -> Path:
