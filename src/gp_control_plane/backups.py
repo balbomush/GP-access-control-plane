@@ -77,6 +77,12 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     presets = _read_user_presets(path / "presets" / "user-presets.yaml")
     restored_at = now_iso()
     with connect(state_dir) as conn:
+        conn.execute("DELETE FROM strategy_attempts")
+        conn.execute("DELETE FROM strategy_domain_results")
+        conn.execute("DELETE FROM strategies")
+        conn.execute("DELETE FROM preset_domains")
+        conn.execute("DELETE FROM domain_presets WHERE kind = 'user'")
+        conn.execute("DELETE FROM domains")
         conn.execute("DELETE FROM candidate_seen_events")
         conn.execute("DELETE FROM candidate_common_domains")
         conn.execute("DELETE FROM candidate_domains")
@@ -101,6 +107,21 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     _int_value(item.get("common_seen_count")),
                 ),
             )
+            conn.execute(
+                """
+                INSERT INTO strategies(id, protocol, args, args_hash, status, first_seen_at, last_seen_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    str(item.get("protocol") or ""),
+                    str(item.get("args") or ""),
+                    _sha256_text(str(item.get("args") or "")),
+                    str(item.get("status") or "candidate"),
+                    str(item.get("first_seen_at") or ""),
+                    str(item.get("last_seen_at") or ""),
+                ),
+            )
         known_ids = {
             str(row["id"])
             for row in conn.execute("SELECT id FROM candidates").fetchall()
@@ -111,6 +132,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             if not candidate_id or not domain or candidate_id not in known_ids:
                 continue
             table = "candidate_common_domains" if str(item.get("scope") or "") == "common" else "candidate_domains"
+            domain_id = _restore_domain_id(conn, domain, str(item.get("first_seen_at") or ""), str(item.get("last_seen_at") or ""))
+            source_mode = "multi_domain" if str(item.get("scope") or "") == "common" else "single_domain"
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO {table}(candidate_id, domain, protocol, first_seen_at, last_seen_at, seen_count)
@@ -120,6 +143,24 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     candidate_id,
                     domain,
                     str(item.get("protocol") or ""),
+                    str(item.get("first_seen_at") or ""),
+                    str(item.get("last_seen_at") or ""),
+                    _int_value(item.get("seen_count")),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO strategy_domain_results(
+                    strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at,
+                    success_count, fail_count, last_success_run_id, last_fail_run_id
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, 0, '', '')
+                """,
+                (
+                    candidate_id,
+                    domain_id,
+                    str(item.get("protocol") or ""),
+                    source_mode,
                     str(item.get("first_seen_at") or ""),
                     str(item.get("last_seen_at") or ""),
                     _int_value(item.get("seen_count")),
@@ -142,6 +183,7 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                         restored_at,
                     ),
                 )
+                _restore_domain_preset(conn, scope, name, domains, restored_at)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_snapshot", snapshot_id),
@@ -264,31 +306,42 @@ def _export_strategies(state_dir: Path, root: Path) -> int:
         with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT id, protocol, args, status, first_seen_at, last_seen_at, seen_count, common_seen_count
-                FROM candidates
-                ORDER BY last_seen_at DESC, id ASC
+                SELECT s.id, s.protocol, s.args, s.status, s.first_seen_at, s.last_seen_at,
+                       COALESCE(SUM(CASE WHEN r.source_mode = 'single_domain' THEN r.success_count ELSE 0 END), 0) AS seen_count,
+                       COALESCE(SUM(CASE WHEN r.source_mode = 'multi_domain' THEN r.success_count ELSE 0 END), 0) AS common_seen_count
+                FROM strategies s
+                LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
+                GROUP BY s.id
+                ORDER BY s.last_seen_at DESC, s.id ASC
                 """
             ):
                 strategy_count += 1
                 handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
         with (root / "strategies" / "strategy-domain-links.ndjson").open("w", encoding="utf-8") as handle:
-            for scope, table in (("domain", "candidate_domains"), ("common", "candidate_common_domains")):
-                for row in conn.execute(f"SELECT candidate_id, domain, protocol, first_seen_at, last_seen_at, seen_count FROM {table} ORDER BY domain, candidate_id"):
-                    payload = dict(row)
-                    payload["scope"] = scope
-                    handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+            for row in conn.execute(
+                """
+                SELECT r.strategy_id AS candidate_id, d.name AS domain, r.protocol, r.first_seen_at,
+                       r.last_seen_at, r.success_count AS seen_count, r.source_mode
+                FROM strategy_domain_results r
+                JOIN domains d ON d.id = r.domain_id
+                ORDER BY d.name, r.strategy_id
+                """
+            ):
+                payload = dict(row)
+                payload["scope"] = "common" if payload.pop("source_mode", "") == "multi_domain" else "domain"
+                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
         with (root / "strategies" / "strategy-stats.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT c.id, c.protocol, c.last_seen_at,
-                       COUNT(DISTINCT d.domain) AS domain_count,
-                       COUNT(DISTINCT cd.domain) AS common_domain_count,
-                       c.seen_count, c.common_seen_count
-                FROM candidates c
-                LEFT JOIN candidate_domains d ON d.candidate_id = c.id
-                LEFT JOIN candidate_common_domains cd ON cd.candidate_id = c.id
-                GROUP BY c.id
-                ORDER BY c.last_seen_at DESC, c.id ASC
+                SELECT s.id, s.protocol, s.last_seen_at,
+                       COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS domain_count,
+                       COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS common_domain_count,
+                       COALESCE(SUM(CASE WHEN r.source_mode = 'single_domain' THEN r.success_count ELSE 0 END), 0) AS seen_count,
+                       COALESCE(SUM(CASE WHEN r.source_mode = 'multi_domain' THEN r.success_count ELSE 0 END), 0) AS common_seen_count
+                FROM strategies s
+                LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
+                GROUP BY s.id
+                ORDER BY s.last_seen_at DESC, s.id ASC
                 """
             ):
                 handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
@@ -380,6 +433,57 @@ def _int_value(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _restore_domain_id(conn: Any, domain: str, created_at: str, updated_at: str) -> int:
+    conn.execute(
+        """
+        INSERT INTO domains(name, service_group, created_at, updated_at)
+        VALUES(?, '', ?, ?)
+        ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at
+        """,
+        (domain, created_at, updated_at or created_at),
+    )
+    row = conn.execute("SELECT id FROM domains WHERE name = ?", (domain,)).fetchone()
+    return int(row["id"])
+
+
+def _restore_domain_preset(conn: Any, scope: str, name: str, domains: list[str], updated_at: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO domain_presets(scope, name, kind, label, created_at, updated_at)
+        VALUES(?, ?, 'user', ?, ?, ?)
+        ON CONFLICT(scope, name, kind) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
+        """,
+        (scope, name, name, updated_at, updated_at),
+    )
+    row = conn.execute(
+        "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'user'",
+        (scope, name),
+    ).fetchone()
+    if not row:
+        return
+    preset_id = int(row["id"])
+    conn.execute("DELETE FROM preset_domains WHERE preset_id = ?", (preset_id,))
+    for position, domain in enumerate(_unique_nonempty([str(item or "") for item in domains])):
+        domain_id = _restore_domain_id(conn, domain, updated_at, updated_at)
+        conn.execute(
+            "INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position) VALUES(?, ?, ?)",
+            (preset_id, domain_id, position),
+        )
+
+
+def _unique_nonempty(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        if item and item not in result:
+            result.append(item)
+    return result
 
 
 def _mark_legacy_candidates_imported(conn: Any, state_dir: Path) -> None:

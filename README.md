@@ -165,6 +165,17 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 - `strategy-finder/state.sqlite3` - SQLite-БД со стратегиями, связями стратегия-домен, историей запусков и пользовательскими пресетами;
 - `strategy-finder/logs/` - stdout/stderr/progress логи `blockcheck2`.
 
+Внутри SQLite данные разделены на сущности:
+
+- `domains` - домены;
+- `strategies` - уникальные стратегии;
+- `strategy_domain_results` - результат "стратегия работает на домене";
+- `strategy_attempts` - история успешных проверок;
+- `domain_presets` и `preset_domains` - пользовательские пресеты доменов;
+- `runs` - история запусков.
+
+Списки кандидатов, стратегии домена и общие стратегии считаются SQL-запросами по этим таблицам, без полного обхода всех стратегий в Python.
+
 Старые файлы `strategy-finder/candidates.json`, `strategy-finder/runs.jsonl`, `strategy-finder/available.ndjson` могут остаться после обновления. При первом чтении они импортируются в SQLite для совместимости.
 
 Файловые бекапы лежат отдельно:

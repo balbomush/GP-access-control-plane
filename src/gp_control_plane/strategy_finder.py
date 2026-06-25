@@ -308,7 +308,7 @@ def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT id, protocol, args, status, first_seen_at, last_seen_at
-            FROM candidates
+            FROM strategies
             ORDER BY last_seen_at DESC, id ASC
             """
         ).fetchall()
@@ -332,34 +332,21 @@ def read_candidate_page(
     view = view if view in {"domain", "common"} else "domain"
     selected_domains = _clean_domain_list(domains or [])
     selected_domain = domain.strip()
-    total = 0
-    rows: list[dict[str, Any]] = []
     with connect(state_dir) as conn:
         tested_domains = _tested_domains_from_db(conn)
-        for candidate in _iter_db_candidates(conn):
-            candidate_domains = _candidate_domains(candidate)
-            all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
-            if view == "domain":
-                if not all_domains:
-                    continue
-                if selected_domain and selected_domain not in all_domains:
-                    continue
-            if view == "common":
-                if len(selected_domains) < 2:
-                    continue
-                domain_set = set(all_domains)
-                if not all(item in domain_set for item in selected_domains):
-                    continue
-            if query and not _candidate_matches_query(candidate, query, all_domains):
-                continue
-            total += 1
-            if total <= offset:
-                continue
-            if len(rows) < limit:
-                rows.append(_compact_candidate(candidate))
+        rows, total = _read_candidate_page_sql(
+            conn,
+            limit=limit,
+            offset=offset,
+            query=query,
+            view=view,
+            domains=selected_domains,
+            domain=selected_domain,
+        )
+        candidates = [_compact_candidate(_candidate_from_db(conn, row, include_events=False)) for row in rows]
     version = _storage_version(state_dir)
     return {
-        "candidates": rows,
+        "candidates": candidates,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -372,34 +359,9 @@ def read_candidate_page(
 def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str, Any]:
     _ensure_candidate_import(state_dir)
     query = query.strip().lower()
-    domains: dict[str, dict[str, Any]] = {}
     with connect(state_dir) as conn:
         tested_domains = _tested_domains_from_db(conn)
-        for candidate in _iter_db_candidates(conn):
-            candidate_domains = _candidate_domains(candidate)
-            all_domains = sorted({*candidate_domains, *_candidate_common_domains(candidate)})
-            if query and not _candidate_matches_query(candidate, query, all_domains):
-                continue
-            candidate_id = str(candidate.get("id") or candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or "")))
-            protocol = str(candidate.get("protocol") or "unknown")
-            for item_domain in all_domains:
-                item = domains.setdefault(item_domain, {"domain": item_domain, "strategy_ids": set(), "protocols": {}})
-                item["strategy_ids"].add(candidate_id)
-                protocol_ids = item["protocols"].setdefault(protocol, set())
-                protocol_ids.add(candidate_id)
-    rows = []
-    for item in domains.values():
-        rows.append(
-            {
-                "domain": item["domain"],
-                "strategy_count": len(item["strategy_ids"]),
-                "protocols": [
-                    {"protocol": protocol, "count": len(ids)}
-                    for protocol, ids in sorted(item["protocols"].items(), key=lambda pair: pair[0])
-                ],
-            }
-        )
-    rows.sort(key=lambda item: str(item["domain"]))
+        rows = _read_candidate_domain_index_sql(conn, query=query)
     return {
         "domains": rows,
         "total": len(rows),
@@ -407,6 +369,117 @@ def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str
         "tested_domains": sorted(tested_domains),
         "version": _storage_version(state_dir),
     }
+
+
+def _read_candidate_page_sql(
+    conn: Any,
+    *,
+    limit: int,
+    offset: int,
+    query: str,
+    view: str,
+    domains: list[str],
+    domain: str,
+) -> tuple[list[Any], int]:
+    query_clause, query_params = _strategy_query_clause(query)
+    if view == "common":
+        if len(domains) < 2:
+            return [], 0
+        placeholders = ", ".join("?" for _item in domains)
+        base = f"""
+            FROM strategies s
+            JOIN strategy_domain_results r ON r.strategy_id = s.id
+            JOIN domains d ON d.id = r.domain_id
+            WHERE d.name IN ({placeholders}) {query_clause}
+            GROUP BY s.id
+            HAVING COUNT(DISTINCT d.name) = ?
+        """
+        params: list[Any] = [*domains, *query_params, len(domains)]
+    elif domain:
+        base = f"""
+            FROM strategies s
+            JOIN strategy_domain_results r ON r.strategy_id = s.id
+            JOIN domains d ON d.id = r.domain_id
+            WHERE d.name = ? {query_clause}
+            GROUP BY s.id
+        """
+        params = [domain, *query_params]
+    else:
+        base = f"""
+            FROM strategies s
+            JOIN strategy_domain_results r ON r.strategy_id = s.id
+            JOIN domains d ON d.id = r.domain_id
+            WHERE 1 = 1 {query_clause}
+            GROUP BY s.id
+        """
+        params = [*query_params]
+    total = int(
+        conn.execute(
+            f"SELECT COUNT(*) AS count FROM (SELECT s.id {base}) AS candidate_page",
+            params,
+        ).fetchone()["count"]
+    )
+    rows = conn.execute(
+        f"""
+        SELECT s.id, s.protocol, s.args, s.status, s.first_seen_at, s.last_seen_at
+        {base}
+        ORDER BY s.last_seen_at DESC, s.id ASC
+        LIMIT ? OFFSET ?
+        """,
+        [*params, limit, offset],
+    ).fetchall()
+    return rows, total
+
+
+def _read_candidate_domain_index_sql(conn: Any, *, query: str) -> list[dict[str, Any]]:
+    query_clause, query_params = _strategy_query_clause(query)
+    domain_rows = conn.execute(
+        f"""
+        SELECT d.name AS domain, COUNT(DISTINCT r.strategy_id) AS strategy_count
+        FROM domains d
+        JOIN strategy_domain_results r ON r.domain_id = d.id
+        JOIN strategies s ON s.id = r.strategy_id
+        WHERE 1 = 1 {query_clause}
+        GROUP BY d.id, d.name
+        ORDER BY d.name ASC
+        """,
+        query_params,
+    ).fetchall()
+    protocol_rows = conn.execute(
+        f"""
+        SELECT d.name AS domain, r.protocol AS protocol, COUNT(DISTINCT r.strategy_id) AS count
+        FROM domains d
+        JOIN strategy_domain_results r ON r.domain_id = d.id
+        JOIN strategies s ON s.id = r.strategy_id
+        WHERE 1 = 1 {query_clause}
+        GROUP BY d.id, d.name, r.protocol
+        ORDER BY d.name ASC, r.protocol ASC
+        """,
+        query_params,
+    ).fetchall()
+    protocols: dict[str, list[dict[str, Any]]] = {}
+    for row in protocol_rows:
+        protocols.setdefault(str(row["domain"]), []).append(
+            {"protocol": str(row["protocol"] or "unknown"), "count": int(row["count"] or 0)}
+        )
+    return [
+        {
+            "domain": str(row["domain"]),
+            "strategy_count": int(row["strategy_count"] or 0),
+            "protocols": protocols.get(str(row["domain"]), []),
+        }
+        for row in domain_rows
+    ]
+
+
+def _strategy_query_clause(query: str) -> tuple[str, list[Any]]:
+    if not query:
+        return "", []
+    pattern = f"%{query.lower()}%"
+    return (
+        "AND (LOWER(s.id) LIKE ? OR LOWER(s.protocol) LIKE ? OR LOWER(s.args) LIKE ? OR LOWER(d.name) LIKE ?)",
+        [pattern, pattern, pattern, pattern],
+    )
 
 
 def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
@@ -603,7 +676,7 @@ def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, An
 def candidate_total(state_dir: Path) -> int:
     _ensure_candidate_import(state_dir)
     with connect(state_dir) as conn:
-        return int(conn.execute("SELECT COUNT(*) AS count FROM candidates").fetchone()["count"])
+        return int(conn.execute("SELECT COUNT(*) AS count FROM strategies").fetchone()["count"])
 
 
 def candidate_id_for(protocol: str, args: str) -> str:
@@ -1913,7 +1986,7 @@ def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT id, protocol, args, status, first_seen_at, last_seen_at
-        FROM candidates
+        FROM strategies
         ORDER BY last_seen_at DESC, id ASC
         """
     ).fetchall()
@@ -1933,21 +2006,29 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
     if include_events:
         seen_rows = conn.execute(
             """
-            SELECT run_id, domain, test, ip_version, seen_at
-            FROM candidate_seen_events
-            WHERE candidate_id = ? AND is_common = 0
-            ORDER BY seq ASC
+            SELECT a.run_id, d.name AS domain, a.test_name AS test, a.ip_version, a.checked_at AS seen_at
+            FROM strategy_attempts a
+            JOIN domains d ON d.id = a.domain_id
+            WHERE a.strategy_id = ? AND a.source_mode = 'single_domain' AND a.result = 'success'
+            ORDER BY a.id ASC
             """,
             (row["id"],),
         ).fetchall()
         common_rows = conn.execute(
             """
-            SELECT run_id, domains_json, test, ip_version, seen_at
-            FROM candidate_seen_events
-            WHERE candidate_id = ? AND is_common = 1
-            ORDER BY seq ASC
+            SELECT DISTINCT d.name AS domain
+            FROM strategy_domain_results r
+            JOIN domains d ON d.id = r.domain_id
+            LEFT JOIN (
+                SELECT domain_id, MIN(id) AS first_attempt_id
+                FROM strategy_attempts
+                WHERE strategy_id = ? AND source_mode = 'multi_domain'
+                GROUP BY domain_id
+            ) a ON a.domain_id = d.id
+            WHERE r.strategy_id = ? AND r.source_mode = 'multi_domain'
+            ORDER BY COALESCE(a.first_attempt_id, 2147483647), d.name ASC
             """,
-            (row["id"],),
+            (row["id"], row["id"]),
         ).fetchall()
         candidate["seen"] = [
             {
@@ -1959,31 +2040,29 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
             }
             for item in seen_rows
         ]
-        common_seen = []
-        for item in common_rows:
-            try:
-                domains = json.loads(str(item["domains_json"] or "[]"))
-            except json.JSONDecodeError:
-                domains = []
-            common_seen.append(
-                {
-                    "run_id": item["run_id"],
-                    "domains": [str(domain or "") for domain in domains] if isinstance(domains, list) else [],
-                    "test": item["test"],
-                    "ip_version": item["ip_version"],
-                    "seen_at": item["seen_at"],
-                }
-            )
-        if common_seen:
-            candidate["common_seen"] = common_seen
+        common_domains = [str(item["domain"]) for item in common_rows]
+        if common_domains:
+            candidate["common_seen"] = [{"domains": common_domains}]
         return candidate
 
     domain_rows = conn.execute(
-        "SELECT domain FROM candidate_domains WHERE candidate_id = ? ORDER BY domain ASC",
+        """
+        SELECT DISTINCT d.name AS domain
+        FROM strategy_domain_results r
+        JOIN domains d ON d.id = r.domain_id
+        WHERE r.strategy_id = ? AND r.source_mode = 'single_domain'
+        ORDER BY d.name ASC
+        """,
         (row["id"],),
     ).fetchall()
     common_domain_rows = conn.execute(
-        "SELECT domain FROM candidate_common_domains WHERE candidate_id = ? ORDER BY domain ASC",
+        """
+        SELECT DISTINCT d.name AS domain
+        FROM strategy_domain_results r
+        JOIN domains d ON d.id = r.domain_id
+        WHERE r.strategy_id = ? AND r.source_mode = 'multi_domain'
+        ORDER BY d.name ASC
+        """,
         (row["id"],),
     ).fetchall()
     candidate["seen"] = [{"domain": item["domain"]} for item in domain_rows]
@@ -1996,9 +2075,10 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
 def _tested_domains_from_db(conn: Any) -> set[str]:
     rows = conn.execute(
         """
-        SELECT domain FROM candidate_domains
-        UNION
-        SELECT domain FROM candidate_common_domains
+        SELECT DISTINCT d.name AS domain
+        FROM domains d
+        JOIN strategy_domain_results r ON r.domain_id = d.id
+        ORDER BY d.name ASC
         """
     ).fetchall()
     return {str(row["domain"]).strip() for row in rows if str(row["domain"]).strip()}

@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.state import append_jsonl
+from gp_control_plane.storage import connect
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
     _LiveStdoutRecorder,
@@ -151,6 +152,47 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
 
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["common_seen"][0]["domains"], ["youtube.com", "discord.com"])
+
+    def test_upsert_candidates_writes_normalized_model(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            parsed = {
+                "candidates": [
+                    {
+                        "domain": "youtube.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=fake",
+                    }
+                ],
+                "common_candidates": [
+                    {
+                        "domain": "",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=common",
+                    }
+                ],
+            }
+
+            upsert_candidates(state_dir, parsed, {"id": "run1", "domains": ["youtube.com", "discord.com"]})
+
+            with connect(state_dir) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM strategies").fetchone()["count"], 2)
+                self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM domains").fetchone()["count"], 2)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) AS count FROM strategy_domain_results").fetchone()["count"],
+                    3,
+                )
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) AS count FROM strategy_attempts").fetchone()["count"],
+                    3,
+                )
+            common = read_candidate_page(state_dir, view="common", domains=["youtube.com", "discord.com"])
+            self.assertEqual(common["total"], 1)
+            self.assertEqual(common["candidates"][0]["args"], "--payload tls_client_hello --lua-desync=common")
 
     def test_parse_live_success_without_summary(self) -> None:
         stdout = """
