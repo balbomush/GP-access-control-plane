@@ -1579,7 +1579,7 @@ function renderCommonCandidates(rows){
   }
   el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
     const domains = selectedDomains;
-    const expanded = Boolean(state.openCommonProtocols[protocolGroup.protocol]);
+    const expanded = state.openCommonProtocols[protocolGroup.protocol] !== false;
     const total = uniqueStrategyArgs(protocolGroup.rows).length;
     return `<details class="domain-group" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
       <summary class="domain-header">
