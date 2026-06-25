@@ -1934,6 +1934,22 @@ async function stopCurrentJob(){
   }
 }
 document.addEventListener('click', (event) => {
+  const domainSummary = event.target.closest('details.domain-group[data-domain] > summary');
+  if (domainSummary) {
+    event.preventDefault();
+    const details = domainSummary.parentElement;
+    const domain = details.dataset.domain;
+    const nextOpen = !Boolean(state.openCandidateDomains[domain]);
+    state.openCandidateDomains[domain] = nextOpen;
+    if (nextOpen && !(state.domainStrategies[domain] || {}).loaded) {
+      state.domainStrategies[domain] = { candidates: [], total: 0, hasMore: false, loaded: false, loading: true };
+      renderCandidates();
+      refreshDomainStrategies(domain, true);
+    } else {
+      renderCandidates();
+    }
+    return;
+  }
   const button = event.target.closest('button');
   if (!button) return;
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
@@ -2060,16 +2076,6 @@ document.addEventListener('keydown', (event) => {
 document.addEventListener('toggle', (event) => {
   const details = event.target;
   if (!details || !details.matches) return;
-  if (details.matches('details.domain-group[data-domain]')) {
-    if (state.openCandidateDomains[details.dataset.domain] !== details.open) {
-      state.openCandidateDomains[details.dataset.domain] = details.open;
-      if (details.open && !(state.domainStrategies[details.dataset.domain] || {}).loaded) {
-        refreshDomainStrategies(details.dataset.domain, true);
-      } else {
-        renderCandidates();
-      }
-    }
-  }
   if (details.matches('details.domain-group[data-common-protocol]')) {
     if (state.openCommonProtocols[details.dataset.commonProtocol] !== details.open) {
       state.openCommonProtocols[details.dataset.commonProtocol] = details.open;
