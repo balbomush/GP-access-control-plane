@@ -24,7 +24,13 @@ from .storage import (
     read_run_payloads,
     upsert_candidate_event,
 )
-from .zapret2 import _cleanup_blockcheck_processes, _cleanup_nft_blockcheck_tables, _stop_process_group
+from .zapret2 import (
+    BLOCKCHECK_ENV_KEYS,
+    _cleanup_blockcheck_processes,
+    _cleanup_nft_blockcheck_tables,
+    _stop_process_group,
+    root_command,
+)
 
 
 CRITICAL_DOMAINS = ["youtube.com", "googlevideo.com", "discord.com", "discordcdn.com"]
@@ -948,6 +954,7 @@ def _run_blockcheck_live(
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
     options = options.normalized()
     clean_domains = _clean_domains(domains)
+    blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     full_env = os.environ.copy()
     full_env.update(
         {
@@ -958,6 +965,7 @@ def _run_blockcheck_live(
             **options.to_blockcheck_env(),
         }
     )
+    command = root_command([str(blockcheck_path)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS)
 
     root = _finder_dir(state_dir)
     logs = root / "logs"
@@ -995,7 +1003,7 @@ def _run_blockcheck_live(
 
     recorder = _LiveStdoutRecorder(state_dir, started)
     process_result = _run_process_with_live_stdout(
-        command=[blockcheck],
+        command=command,
         env=full_env,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
@@ -1067,7 +1075,7 @@ def _run_multidomain_blockcheck_live(
             }
         )
         return _run_blockcheck_command_live(
-            command=[str(runner)],
+            command=root_command([str(runner)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS),
             env=full_env,
             state_dir=state_dir,
             kind="multi-domain-discovery",

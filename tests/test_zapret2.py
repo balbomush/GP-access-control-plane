@@ -9,7 +9,15 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.zapret2 import _blockcheck_nft_tables, _cleanup_blockcheck_processes, _stop_process_group, check_install
+from gp_control_plane.zapret2 import (
+    BLOCKCHECK_ENV_KEYS,
+    _blockcheck_nft_tables,
+    _cleanup_blockcheck_processes,
+    _stop_process_group,
+    check_install,
+    root_command,
+    root_helper_status,
+)
 
 
 class Zapret2Tests(unittest.TestCase):
@@ -24,6 +32,53 @@ class Zapret2Tests(unittest.TestCase):
         self.assertEqual(result["nfqws2_path"], "/usr/bin/nfqws2")
         self.assertTrue(result["blockcheck_found"])
         self.assertEqual(result["blockcheck_path"], "/usr/bin/blockcheck2.sh")
+        self.assertFalse(result["root_helper_ready"])
+
+    def test_root_helper_status_uses_sudo_non_interactively(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+            mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=True),
+            mock.patch("gp_control_plane.zapret2.os.access", return_value=True),
+            mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/bin/sudo"),
+            mock.patch("gp_control_plane.zapret2.subprocess.run", side_effect=fake_run),
+        ):
+            status = root_helper_status()
+
+        self.assertTrue(status["ready"])
+        self.assertEqual(calls[0], ["/usr/bin/sudo", "-n", "/helper/gp-root-helper", "check"])
+
+    def test_root_command_wraps_blockcheck_with_helper_and_env(self) -> None:
+        env = {"BATCH": "1", "DOMAINS": "youtube.com", "ENABLE_HTTP3": "1", "IGNORED": "x"}
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2.require_root_helper_ready"),
+            mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+            mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/bin/sudo"),
+        ):
+            command = root_command(["/opt/zapret2/blockcheck2.sh"], env=env, pass_env_keys=BLOCKCHECK_ENV_KEYS)
+
+        self.assertEqual(
+            command,
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/helper/gp-root-helper",
+                "run-env",
+                "BATCH=1",
+                "DOMAINS=youtube.com",
+                "ENABLE_HTTP3=1",
+                "--",
+                "/opt/zapret2/blockcheck2.sh",
+            ],
+        )
 
     def test_stop_process_group_terminates_process(self) -> None:
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=hasattr(os, "setsid"))
@@ -63,15 +118,17 @@ table inet blockcheck42
 
         with (
             mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=lambda name: name if name in {"pgrep", "sudo"} else None),
+            mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=True),
+            mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
             mock.patch("gp_control_plane.zapret2.subprocess.run", side_effect=fake_run),
             mock.patch("gp_control_plane.zapret2.time.sleep"),
         ):
             _cleanup_blockcheck_processes()
 
         self.assertIn(["kill", "-TERM", "101", "102"], calls)
-        self.assertIn(["sudo", "-n", "kill", "-TERM", "101", "102"], calls)
+        self.assertIn(["sudo", "-n", "/helper/gp-root-helper", "kill", "TERM", "101", "102"], calls)
         self.assertIn(["kill", "-KILL", "102"], calls)
-        self.assertIn(["sudo", "-n", "kill", "-KILL", "102"], calls)
+        self.assertIn(["sudo", "-n", "/helper/gp-root-helper", "kill", "KILL", "102"], calls)
 
 
 if __name__ == "__main__":

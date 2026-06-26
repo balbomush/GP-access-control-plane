@@ -18,6 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 - скачает этот проект в `~/gp/GP-access-control-plane`;
 - создаст Python-окружение;
 - установит команду `gp-control-plane`;
+- установит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
 - создаст и включит systemd-сервис;
 - запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi.
 
@@ -86,6 +87,22 @@ nfqws2
 ```bash
 gp-control-plane zapret2 check-install --config ~/gp/GP-access-control-plane/configs/orchestrator.example.yaml
 ```
+
+В выводе должны быть `root_helper_found: true` и `root_helper_ready: true`. Это важно: подбор запускается из web-сервиса без терминала, поэтому он не может вводить sudo-пароль. Установщик решает это через отдельный root-helper:
+
+```text
+/usr/local/libexec/gp-control-plane/gp-root-helper
+/etc/sudoers.d/gp-control-plane-root-helper
+```
+
+Проверка сценария после истечения sudo-сессии:
+
+```bash
+sudo -k
+curl -I http://127.0.0.1:8080/
+```
+
+После этого запуск подбора из web UI должен стартовать без ошибки `sudo: a terminal is required`.
 
 ## Что умеет текущая версия
 

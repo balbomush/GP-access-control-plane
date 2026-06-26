@@ -1592,10 +1592,11 @@ function renderMetrics(){
   const board = status.state || {};
   const zapret = status.zapret2 || {};
   const ready = Boolean(zapret.nfqws2_found && zapret.blockcheck_found);
+  const rootReady = Boolean(zapret.root_helper_ready);
   const busy = isBusy();
   const run = latestRun();
   setText('metric-zapret', ready ? 'Готов' : 'Не готов');
-  setText('metric-zapret-note', `nfqws2: ${zapret.nfqws2_found ? 'да' : 'нет'}, blockcheck: ${zapret.blockcheck_found ? 'да' : 'нет'}`);
+  setText('metric-zapret-note', `nfqws2: ${zapret.nfqws2_found ? 'да' : 'нет'}, blockcheck: ${zapret.blockcheck_found ? 'да' : 'нет'}, root-helper: ${rootReady ? 'да' : 'нет'}`);
   setText('metric-job', busy ? 'В работе' : 'Свободна');
   setText('metric-job-note', busy ? `ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
   const candidateMetric = state.candidateView === 'domain' ? state.candidateDomainStrategyTotal : (state.candidateTotal || state.candidates.length);

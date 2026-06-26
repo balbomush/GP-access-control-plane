@@ -170,6 +170,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("renderRunCard(row)", html)
         self.assertIn("runCardClass(row)", html)
         self.assertIn("runDomainKey(row)", html)
+        self.assertIn("root-helper", html)
         self.assertIn("runStatusLabel(status)", html)
         self.assertIn("runDomains(row, domainKey)", html)
         self.assertIn("runDomainChips(domains)", html)

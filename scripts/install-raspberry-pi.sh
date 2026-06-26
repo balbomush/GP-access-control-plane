@@ -9,6 +9,9 @@ WEB_PORT="${GP_WEB_PORT:-8080}"
 ZAPRET_REPO_URL="${ZAPRET_REPO_URL:-https://github.com/bol-van/zapret2.git}"
 ZAPRET_BRANCH="${ZAPRET_BRANCH:-master}"
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
+ROOT_HELPER_PATH="${GP_ROOT_HELPER_PATH:-/usr/local/libexec/gp-control-plane/gp-root-helper}"
+ROOT_HELPER_CONFIG="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
+SUDOERS_PATH="${GP_SUDOERS_PATH:-/etc/sudoers.d/gp-control-plane-root-helper}"
 
 log() {
   printf '\n==> %s\n' "$1"
@@ -179,6 +182,22 @@ run_as_target python3 -m venv "$INSTALL_DIR/.venv"
 run_as_target "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 run_as_target "$INSTALL_DIR/.venv/bin/python" -m pip install -e "$INSTALL_DIR"
 
+log "Installing GP root helper"
+as_root install -d -m 0755 "$(dirname "$ROOT_HELPER_PATH")"
+as_root install -m 0755 -o root -g root "$INSTALL_DIR/scripts/gp-root-helper.sh" "$ROOT_HELPER_PATH"
+
+TMP_ROOT_HELPER_CONFIG="$(mktemp)"
+ZAPRET_DIR_ESCAPED="$(printf '%s' "$ZAPRET_DIR" | sed "s/'/'\\\\''/g")"
+printf "ZAPRET_DIR='%s'\n" "$ZAPRET_DIR_ESCAPED" > "$TMP_ROOT_HELPER_CONFIG"
+as_root install -m 0644 -o root -g root "$TMP_ROOT_HELPER_CONFIG" "$ROOT_HELPER_CONFIG"
+rm -f "$TMP_ROOT_HELPER_CONFIG"
+
+TMP_SUDOERS="$(mktemp)"
+printf '# Managed by GP Access Control Plane installer\n%s ALL=(root) NOPASSWD: %s *\n' "$TARGET_USER" "$ROOT_HELPER_PATH" > "$TMP_SUDOERS"
+as_root visudo -cf "$TMP_SUDOERS"
+as_root install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_PATH"
+rm -f "$TMP_SUDOERS"
+
 log "Creating systemd service"
 as_root tee "/etc/systemd/system/$SERVICE_NAME" >/dev/null <<SERVICE
 [Unit]
@@ -192,6 +211,8 @@ User=$TARGET_USER
 WorkingDirectory=$INSTALL_DIR
 Environment=HOME=$TARGET_HOME
 Environment=PATH=$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
+Environment=GP_ZAPRET_DIR=$ZAPRET_DIR
 ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --config $INSTALL_DIR/configs/orchestrator.example.yaml --host $WEB_HOST --port $WEB_PORT
 Restart=always
 RestartSec=5
