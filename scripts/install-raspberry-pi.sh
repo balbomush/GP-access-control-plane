@@ -45,6 +45,7 @@ TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || true)"
 [ -n "$TARGET_GROUP" ] || fail "Cannot find primary group for user: $TARGET_USER"
 INSTALL_DIR="${GP_INSTALL_DIR:-$TARGET_HOME/gp/GP-access-control-plane}"
 TARGET_BIN_DIR="$TARGET_HOME/.local/bin"
+SERVICE_PATH="$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 as_root() {
   if [ "$CURRENT_UID" -eq 0 ]; then
@@ -64,9 +65,9 @@ run_zapret_install_bin() {
 
 run_as_target() {
   if [ "$CURRENT_USER" = "$TARGET_USER" ]; then
-    HOME="$TARGET_HOME" "$@"
+    HOME="$TARGET_HOME" PATH="$SERVICE_PATH" "$@"
   else
-    sudo -H -u "$TARGET_USER" env HOME="$TARGET_HOME" "$@"
+    sudo -H -u "$TARGET_USER" env HOME="$TARGET_HOME" PATH="$SERVICE_PATH" "$@"
   fi
 }
 
@@ -210,7 +211,7 @@ Type=simple
 User=$TARGET_USER
 WorkingDirectory=$INSTALL_DIR
 Environment=HOME=$TARGET_HOME
-Environment=PATH=$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=$SERVICE_PATH
 Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
 Environment=GP_ZAPRET_DIR=$ZAPRET_DIR
 ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --config $INSTALL_DIR/configs/orchestrator.example.yaml --host $WEB_HOST --port $WEB_PORT
