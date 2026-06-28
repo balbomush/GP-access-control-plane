@@ -183,6 +183,7 @@ class DiscoveryOptions:
     enable_tls12: bool = True
     enable_tls13: bool = False
     enable_quic: bool = True
+    enable_ipv6: bool = False
     scan_level: str = "standard"
     repeats: int = 1
     repeat_parallel: bool = False
@@ -199,6 +200,7 @@ class DiscoveryOptions:
             enable_tls12=bool(self.enable_tls12),
             enable_tls13=bool(self.enable_tls13),
             enable_quic=bool(self.enable_quic),
+            enable_ipv6=bool(self.enable_ipv6),
             scan_level=scan_level,
             repeats=repeats,
             repeat_parallel=bool(self.repeat_parallel),
@@ -212,6 +214,7 @@ class DiscoveryOptions:
             "enable_tls12": self.enable_tls12,
             "enable_tls13": self.enable_tls13,
             "enable_quic": self.enable_quic,
+            "enable_ipv6": self.enable_ipv6,
             "scan_level": self.scan_level,
             "repeats": self.repeats,
             "repeat_parallel": self.repeat_parallel,
@@ -255,6 +258,10 @@ def domain_sets() -> dict[str, list[str]]:
     }
 
 
+def _ipvs_value(options: DiscoveryOptions) -> str:
+    return "4 6" if options.enable_ipv6 else "4"
+
+
 def run_standard_discovery(
     domains: list[str],
     state_dir: Path,
@@ -263,6 +270,7 @@ def run_standard_discovery(
     enable_http: bool = False,
     enable_tls12: bool = True,
     enable_tls13: bool = False,
+    enable_ipv6: bool = False,
     scan_level: str = "standard",
     repeats: int = 1,
     repeat_parallel: bool = False,
@@ -275,6 +283,7 @@ def run_standard_discovery(
         enable_tls12=enable_tls12,
         enable_tls13=enable_tls13,
         enable_quic=include_quic,
+        enable_ipv6=enable_ipv6,
         scan_level=scan_level,
         repeats=repeats,
         repeat_parallel=repeat_parallel,
@@ -300,6 +309,7 @@ def run_multi_domain_discovery(
     enable_http: bool = False,
     enable_tls12: bool = True,
     enable_tls13: bool = False,
+    enable_ipv6: bool = False,
     scan_level: str = "standard",
     repeats: int = 1,
     repeat_parallel: bool = False,
@@ -313,6 +323,7 @@ def run_multi_domain_discovery(
         enable_tls12=enable_tls12,
         enable_tls13=enable_tls13,
         enable_quic=include_quic,
+        enable_ipv6=enable_ipv6,
         scan_level=scan_level,
         repeats=repeats,
         repeat_parallel=repeat_parallel,
@@ -1332,7 +1343,7 @@ def _run_blockcheck_live(
         {
             "BATCH": "1",
             "DOMAINS": " ".join(clean_domains),
-            "IPVS": "4",
+            "IPVS": _ipvs_value(options),
             "TEST": test,
             **options.to_blockcheck_env(),
         }
@@ -1356,6 +1367,7 @@ def _run_blockcheck_live(
         enable_tls=options.enable_tls12,
         enable_tls13=options.enable_tls13,
         enable_quic=options.enable_quic,
+        enable_ipv6=options.enable_ipv6,
     )
     option_fields = options.to_run_fields()
     started = {
@@ -1454,10 +1466,10 @@ def _run_multidomain_blockcheck_live(
         full_env = os.environ.copy()
         full_env.update(
             {
-                "BATCH": "1",
-                "DOMAINS": " ".join(clean_domains),
-                "IPVS": "4",
-                "TEST": "standard",
+            "BATCH": "1",
+            "DOMAINS": " ".join(clean_domains),
+            "IPVS": _ipvs_value(options),
+            "TEST": "standard",
                 **options.to_blockcheck_env(),
                 "GP_MD_CURL_PARALLELISM": str(normalized_parallelism),
                 "ZAPRET_BASE": str(zapret_base),
@@ -1509,6 +1521,7 @@ def _run_blockcheck_command_live(
         enable_tls=options.enable_tls12,
         enable_tls13=options.enable_tls13,
         enable_quic=options.enable_quic,
+        enable_ipv6=options.enable_ipv6,
     )
     option_fields = options.to_run_fields()
     started = {
@@ -1781,6 +1794,7 @@ def _attempt_plan_for_run(run: dict[str, Any], current_script: str) -> dict[str,
         enable_tls=_truthy(run.get("enable_tls"), default=True),
         enable_tls13=_truthy(run.get("enable_tls13"), default=False),
         enable_quic=_truthy(run.get("enable_quic"), default=True),
+        enable_ipv6=_truthy(run.get("enable_ipv6"), default=False),
     )
 
 
@@ -1791,6 +1805,7 @@ def _standard_attempt_plan(
     enable_tls: bool = True,
     enable_tls13: bool = False,
     enable_quic: bool = True,
+    enable_ipv6: bool = False,
     root: Path | None = None,
 ) -> dict[str, Any]:
     if test != "standard":
@@ -1800,6 +1815,7 @@ def _standard_attempt_plan(
         return _empty_attempt_plan(test)
     scripts = _standard_scripts(root)
     domain_count = len(_clean_domains(domains))
+    ip_version_count = 2 if enable_ipv6 else 1
     fingerprint = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in scripts)
     key = (
         str(root),
@@ -1809,6 +1825,7 @@ def _standard_attempt_plan(
         bool(enable_tls),
         bool(enable_tls13),
         bool(enable_quic),
+        bool(enable_ipv6),
     )
     cached = _ATTEMPT_PLAN_CACHE.get(key)
     if cached:
@@ -1838,7 +1855,7 @@ def _standard_attempt_plan(
                 per_domain = _count_script_attempts_static(script)
                 break
             per_domain += counted
-        script_totals[name] = per_domain * domain_count
+        script_totals[name] = per_domain * domain_count * ip_version_count
 
     total = sum(script_totals.values())
     plan = {
@@ -1847,6 +1864,7 @@ def _standard_attempt_plan(
         "scripts": script_totals,
         "script_order": script_order,
         "domain_count": domain_count,
+        "ip_version_count": ip_version_count,
         "source": source if total else "",
     }
     _ATTEMPT_PLAN_CACHE[key] = plan

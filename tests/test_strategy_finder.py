@@ -289,6 +289,30 @@ pktws_check_http3()
             self.assertEqual(plan["scripts"]["standard/10-test.sh"], 8)
             self.assertEqual(plan["total"], 8)
 
+    def test_standard_attempt_plan_accounts_for_ipv6(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "10-test.sh").write_text(
+                """
+pktws_check_https_tls12()
+{
+    pktws_curl_test_update "$1" "$2" --payload=tls
+}
+""",
+                encoding="utf-8",
+            )
+
+            plan = _standard_attempt_plan(
+                domains=["youtube.com", "discord.com"],
+                enable_tls=True,
+                enable_quic=False,
+                enable_ipv6=True,
+                root=root,
+            )
+
+            self.assertEqual(plan["ip_version_count"], 2)
+            self.assertEqual(plan["total"], 4)
+
     def test_progress_uses_attempt_total_and_timeout_eta(self) -> None:
         plan = {
             "total": 40,

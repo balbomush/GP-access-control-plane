@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .. import __version__
 from ..backups import create_snapshot_if_idle, import_snapshot_archive, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
@@ -41,6 +42,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._html()
             elif path == "/api/status":
                 self._json(status_payload(config))
+            elif path == "/api/settings":
+                self._json({"settings": read_settings(config)})
             elif path == "/api/diagnostics":
                 self._json(diagnostics_payload(config.output.state_dir))
             elif path == "/api/strategy-finder/domains":
@@ -69,6 +72,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
             elif path in {
                 "/api/status",
+                "/api/settings",
                 "/api/diagnostics",
                 "/api/strategy-finder/domains",
                 "/api/strategy-finder/candidate-domains",
@@ -121,6 +125,9 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             if path == "/api/presets":
                 saved = save_custom_presets(config.output.state_dir, payload.get("custom") or payload, now_iso())
                 self._json({"custom": saved})
+                return
+            if path == "/api/settings":
+                self._json({"settings": save_settings(config, payload.get("settings") or payload)})
                 return
             jobs: dict[str, Any] = {
                 "/api/jobs/zapret-standard-discovery": (
@@ -378,6 +385,26 @@ button {
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
 button.secondary { background: var(--surface-soft); color: var(--blue-strong); }
 button.secondary:hover { background: #243149; }
+a.button-link {
+  min-height: 44px;
+  border: 1px solid var(--blue);
+  background: var(--blue);
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  text-decoration: none;
+}
+a.button-link.secondary { background: var(--surface-soft); color: var(--blue-strong); }
+a.button-link:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
+a.button-link.secondary:hover { background: #243149; }
 label.file-button {
   min-height: 44px;
   border: 1px solid var(--blue);
@@ -1067,6 +1094,7 @@ pre {
       <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
       <button class="tab-button" data-tab="backups" type="button">Бекапы</button>
+      <button class="tab-button" data-tab="settings" type="button">Настройки</button>
     </nav>
 
     <section class="tab-page active" data-tab-page="finder">
@@ -1133,6 +1161,10 @@ pre {
                 <label class="checkbox-row">
                   <input id="include-quic" type="checkbox" checked>
                   <span>HTTP3 / QUIC</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="enable-ipv6" type="checkbox">
+                  <span>IPv6</span>
                 </label>
               </div>
               <div class="preset-grid">
@@ -1294,6 +1326,44 @@ pre {
         <div id="backups-table" class="backup-list"></div>
       </section>
     </section>
+
+    <section class="tab-page settings-page" data-tab-page="settings">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Настройки</h2>
+          <span class="badge" id="settings-version">-</span>
+        </div>
+        <div class="preset-panel">
+          <div class="preset-grid">
+            <label class="checkbox-row">
+              <input id="settings-enable-ipv6" type="checkbox">
+              IPv6-проверки
+            </label>
+            <div class="field">
+              <label for="settings-curl-default">Параллельных curl по умолчанию</label>
+              <input id="settings-curl-default" type="number" min="1" max="10" value="4">
+            </div>
+            <div class="field">
+              <label for="settings-curl-max">Максимум параллельных curl</label>
+              <input id="settings-curl-max" type="number" min="1" max="10" value="10">
+            </div>
+            <div class="field">
+              <label for="settings-update-channel">Канал обновлений</label>
+              <select id="settings-update-channel">
+                <option value="stable">Последний стабильный релиз</option>
+                <option value="prerelease">Предрелизы</option>
+              </select>
+            </div>
+          </div>
+          <div class="button-row">
+            <button data-action="save-settings" type="button">Сохранить настройки</button>
+            <a class="button-link secondary" id="settings-stable-link" href="https://github.com/balbomush/GP-access-control-plane/releases/latest" target="_blank" rel="noreferrer">Открыть последний релиз</a>
+            <a class="button-link secondary" id="settings-prerelease-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть предрелизы</a>
+          </div>
+          <div class="helper-text">Обновление из web UI будет выполняться только когда подбор не запущен. До этого шага используются ссылки на релизы.</div>
+        </div>
+      </section>
+    </section>
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
@@ -1301,7 +1371,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, settings: null, settingsTouched: false, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1443,8 +1513,9 @@ function timeoutSecondsOrNull(){
 }
 function curlParallelism(){
   const value = Number(el('curl-parallelism').value || 4);
+  const max = Number((state.settings || {}).curl_parallelism_max || 10);
   if (!Number.isFinite(value)) return 4;
-  return Math.max(1, Math.min(10, Math.round(value)));
+  return Math.max(1, Math.min(max, Math.round(value)));
 }
 function repeatsValue(){
   const value = Number(el('repeats').value || 1);
@@ -1457,6 +1528,7 @@ function discoveryOptions(){
     enable_tls12: el('enable-tls12').checked,
     enable_tls13: el('enable-tls13').checked,
     include_quic: el('include-quic').checked,
+    enable_ipv6: el('enable-ipv6').checked,
     scan_level: el('scan-level').value || 'standard',
     repeats: repeatsValue(),
     repeat_parallel: el('repeat-parallel').checked,
@@ -2337,6 +2409,50 @@ function renderRuntimeMetrics(metrics){
   const walText = files.sqlite_wal ? `SQLite WAL: ${formatBytes(files.sqlite_wal)}` : '';
   target.textContent = [procText, cpuText, ioText, memFree, walText].filter(Boolean).join(' · ');
 }
+function renderSettings(){
+  const settings = state.settings || {};
+  setText('settings-version', `v${(state.status || {}).version || '-'}`);
+  const ipv6 = el('settings-enable-ipv6');
+  const curlDefault = el('settings-curl-default');
+  const curlMax = el('settings-curl-max');
+  const channel = el('settings-update-channel');
+  if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
+  if (curlDefault) curlDefault.value = String(settings.curl_parallelism_default || 4);
+  if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
+  if (channel) channel.value = settings.update_channel || 'stable';
+  const stableLink = el('settings-stable-link');
+  const prereleaseLink = el('settings-prerelease-link');
+  if (stableLink && settings.stable_release_url) stableLink.href = settings.stable_release_url;
+  if (prereleaseLink && settings.prerelease_url) prereleaseLink.href = settings.prerelease_url;
+  if (!state.settingsTouched) {
+    const curlInput = el('curl-parallelism');
+    if (curlInput) {
+      curlInput.max = String(settings.curl_parallelism_max || 10);
+      curlInput.value = String(settings.curl_parallelism_default || 4);
+    }
+    const finderIpv6 = el('enable-ipv6');
+    if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
+  }
+}
+function currentSettingsFromForm(){
+  return {
+    enable_ipv6: Boolean(el('settings-enable-ipv6')?.checked),
+    curl_parallelism_default: Number(el('settings-curl-default')?.value || 4),
+    curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
+    update_channel: el('settings-update-channel')?.value || 'stable'
+  };
+}
+async function saveSettings(){
+  try {
+    const data = await postJson('/api/settings', { settings: currentSettingsFromForm() });
+    state.settings = data.settings || {};
+    state.settingsTouched = false;
+    renderSettings();
+    setMessage('Настройки сохранены', 'good');
+  } catch (error) {
+    setMessage(`Ошибка сохранения настроек: ${error.message}`, 'bad');
+  }
+}
 function formatDuration(seconds){
   if (!Number.isFinite(seconds)) return '-';
   if (seconds <= 0) return '0 мин';
@@ -2366,6 +2482,7 @@ function renderAll(options){
   renderRuns();
   renderLog();
   renderBackups();
+  renderSettings();
   updateAllEditorLineNumbers();
   syncActiveTabUi();
 }
@@ -2563,14 +2680,16 @@ async function refresh(){
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const [status, finderRuns, finderLog, domainSets, presets] = await Promise.all([
+    const [status, finderRuns, finderLog, domainSets, presets, settings] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains'),
-      getJson('/api/presets')
+      getJson('/api/presets'),
+      getJson('/api/settings')
     ]);
     state.status = status;
+    state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
@@ -2722,6 +2841,10 @@ document.addEventListener('click', (event) => {
     createBackup();
     return;
   }
+  if (button.dataset.action === 'save-settings') {
+    saveSettings();
+    return;
+  }
   if (button.dataset.action === 'restore-selected-backup') {
     restoreBackup(el('backup-restore-select')?.value || '');
     return;
@@ -2799,6 +2922,12 @@ document.addEventListener('click', (event) => {
   if (button.dataset.action === 'stop-current') stopCurrentJob();
 });
 document.addEventListener('input', (event) => {
+  if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
+    state.settingsTouched = true;
+  }
+  if (event.target && String(event.target.id || '').startsWith('settings-')) {
+    state.settingsTouched = true;
+  }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
@@ -2824,6 +2953,12 @@ document.addEventListener('scroll', (event) => {
   }
 }, true);
 document.addEventListener('change', (event) => {
+  if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
+    state.settingsTouched = true;
+  }
+  if (event.target && String(event.target.id || '').startsWith('settings-')) {
+    state.settingsTouched = true;
+  }
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
   }
@@ -2875,11 +3010,51 @@ setInterval(refresh, 5000);
 
 def status_payload(config: AppConfig) -> dict[str, Any]:
     return {
+        "version": __version__,
         "state": read_state(config.output.state_dir),
+        "settings": read_settings(config),
         "paths": {
             "state_dir": str(config.output.state_dir),
         },
         "zapret2": check_install(),
+    }
+
+
+DEFAULT_SETTINGS = {
+    "curl_parallelism_default": 4,
+    "curl_parallelism_max": 10,
+    "enable_ipv6": False,
+    "update_channel": "stable",
+}
+
+
+def read_settings(config: AppConfig) -> dict[str, Any]:
+    state = read_state(config.output.state_dir)
+    stored = state.get("settings") if isinstance(state.get("settings"), dict) else {}
+    return _normalize_settings({**DEFAULT_SETTINGS, **stored})
+
+
+def save_settings(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    settings = _normalize_settings({**read_settings(config), **(payload if isinstance(payload, dict) else {})})
+    state = read_state(config.output.state_dir)
+    state["settings"] = settings
+    write_state(config.output.state_dir, state)
+    return settings
+
+
+def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    max_parallelism = _bounded_int(raw.get("curl_parallelism_max"), default=10, minimum=1, maximum=10)
+    default_parallelism = _bounded_int(raw.get("curl_parallelism_default"), default=4, minimum=1, maximum=max_parallelism)
+    channel = str(raw.get("update_channel") or "stable")
+    if channel not in {"stable", "prerelease"}:
+        channel = "stable"
+    return {
+        "curl_parallelism_default": default_parallelism,
+        "curl_parallelism_max": max_parallelism,
+        "enable_ipv6": bool(raw.get("enable_ipv6")),
+        "update_channel": channel,
+        "stable_release_url": "https://github.com/balbomush/GP-access-control-plane/releases/latest",
+        "prerelease_url": "https://github.com/balbomush/GP-access-control-plane/releases",
     }
 
 
@@ -2956,6 +3131,7 @@ def _multipart_file_bytes(body: bytes, boundary: str) -> bytes:
 
 def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
     domains = _payload_domains(payload)
+    settings = read_settings(config)
     return run_standard_discovery(
         domains,
         config.output.state_dir,
@@ -2964,6 +3140,7 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         enable_http=_payload_bool(payload, "enable_http", False),
         enable_tls12=_payload_bool(payload, "enable_tls12", True),
         enable_tls13=_payload_bool(payload, "enable_tls13", False),
+        enable_ipv6=_payload_bool(payload, "enable_ipv6", bool(settings.get("enable_ipv6"))),
         scan_level=str(payload.get("scan_level") or "standard"),
         repeats=_payload_int(payload, "repeats", 1),
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
@@ -2975,6 +3152,8 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
 
 def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
     domains = _payload_domains(payload)
+    settings = read_settings(config)
+    max_parallelism = _bounded_int(settings.get("curl_parallelism_max"), default=10, minimum=1, maximum=10)
     return run_multi_domain_discovery(
         domains,
         config.output.state_dir,
@@ -2983,12 +3162,13 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         enable_http=_payload_bool(payload, "enable_http", False),
         enable_tls12=_payload_bool(payload, "enable_tls12", True),
         enable_tls13=_payload_bool(payload, "enable_tls13", False),
+        enable_ipv6=_payload_bool(payload, "enable_ipv6", bool(settings.get("enable_ipv6"))),
         scan_level=str(payload.get("scan_level") or "standard"),
         repeats=_payload_int(payload, "repeats", 1),
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
-        curl_parallelism=_payload_int(payload, "curl_parallelism", 4),
+        curl_parallelism=_bounded_int(payload.get("curl_parallelism"), default=int(settings.get("curl_parallelism_default") or 4), minimum=1, maximum=max_parallelism),
         stop_event=stop_event,
     )
 
@@ -3016,6 +3196,14 @@ def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
         return int(payload.get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
 
 
 def _payload_bool(payload: dict[str, Any], key: str, default: bool) -> bool:

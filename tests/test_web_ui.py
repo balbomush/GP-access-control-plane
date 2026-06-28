@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import socket
 import sys
 import tempfile
@@ -28,6 +29,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("data-tab=\"terminal\"", html)
         self.assertIn("data-tab=\"backups\"", html)
         self.assertIn("data-tab-page=\"backups\"", html)
+        self.assertIn("data-tab=\"settings\"", html)
+        self.assertIn("data-tab-page=\"settings\"", html)
         self.assertIn("Бекапы", html)
         self.assertIn("Создать бекап сейчас", html)
         self.assertIn("backups-table", html)
@@ -42,6 +45,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("backup-file-links", html)
         self.assertIn("backup-upload-file", html)
         self.assertIn("/api/backups/upload", html)
+        self.assertIn("settings-version", html)
+        self.assertIn("settings-enable-ipv6", html)
+        self.assertIn("/api/settings", html)
         self.assertIn("Файлы бекапа", html)
         self.assertIn("Восстановить выбранный бекап", html)
         self.assertIn("data-action=\"restore-selected-backup\"", html)
@@ -301,6 +307,30 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('"process"', body)
             self.assertIn('"files"', body)
+
+    def test_settings_endpoint_saves_runtime_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps({"settings": {"enable_ipv6": True, "curl_parallelism_default": 6, "curl_parallelism_max": 8}})
+            connection.request("POST", "/api/settings", body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            saved = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"enable_ipv6":true', saved)
+            self.assertIn('"curl_parallelism_default":6', saved)
 
 
 def _free_port() -> int:
