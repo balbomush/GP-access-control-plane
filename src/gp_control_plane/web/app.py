@@ -2461,8 +2461,8 @@ function runStatusLabel(status){
     failed: 'ошибка',
     running: 'идет',
     queued: 'очередь',
-    stopping: 'стоп',
-    stopped: 'стоп',
+    stopping: 'останавливается',
+    stopped: 'остановлено',
     timeout: 'таймаут'
   };
   return labels[status] || status || '-';
@@ -2511,6 +2511,10 @@ function runMode(row){
 }
 function runSummary(row){
   const count = runCandidateCount(row);
+  const phase = row.phase || (row.progress || {}).phase || '';
+  if (row.status === 'stopping') return 'останавливается';
+  if (phase === 'saving_results' && row.status === 'failed') return `ошибка сохранения, код: ${row.returncode ?? '-'}`;
+  if (phase === 'saving_results') return 'сохраняются результаты';
   if (row.status === 'running') return 'идет поиск';
   if (row.status === 'timeout') return `остановлено по лимиту, найдено: ${count}`;
   if (row.status === 'stopped') return count > 0 ? `остановлено, сохранено: ${count}` : 'остановлено, кандидатов нет';
