@@ -12,6 +12,7 @@ from .. import __version__
 from ..backups import create_snapshot_if_idle, import_snapshot_archive, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
+from ..domain_sources import builtin_preset_sources, import_v2fly_preset, preview_v2fly_preset
 from ..jobs import JobRunner
 from ..state import now_iso, read_state, write_state
 from ..storage import read_custom_presets, save_custom_presets
@@ -60,6 +61,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json(list_snapshots(config.output.state_dir))
             elif path == "/api/presets":
                 self._json({"custom": read_custom_presets(config.output.state_dir)})
+            elif path == "/api/domain-sources":
+                self._json({"builtin": builtin_preset_sources()})
             elif path == "/api/backups/download":
                 self._download_backup(config, query)
             else:
@@ -81,6 +84,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/strategy-finder/latest-log",
                 "/api/backups",
                 "/api/presets",
+                "/api/domain-sources",
             }:
                 self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
             else:
@@ -128,6 +132,18 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 return
             if path == "/api/settings":
                 self._json({"settings": save_settings(config, payload.get("settings") or payload)})
+                return
+            if path == "/api/domain-sources/v2fly/preview":
+                try:
+                    self._json(_v2fly_preview_payload(config, payload))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/domain-sources/v2fly/import":
+                try:
+                    self._json(_v2fly_import_payload(config, payload), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             jobs: dict[str, Any] = {
                 "/api/jobs/zapret-standard-discovery": (
@@ -519,6 +535,17 @@ button:disabled { opacity: .55; cursor: default; }
   color: var(--text-soft);
   font-size: 13px;
 }
+.source-preview {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-code);
+  color: var(--text-soft);
+  font-size: 13px;
+}
+.source-preview strong { color: #e6edf3; }
 .helper-text {
   color: var(--text-soft);
   font-size: 12px;
@@ -1362,6 +1389,35 @@ pre {
           </div>
           <div class="helper-text">Обновление из web UI будет выполняться только когда подбор не запущен. До этого шага используются ссылки на релизы.</div>
         </div>
+        <div class="preset-panel">
+          <div class="panel-header">
+            <h2>Источники доменов</h2>
+            <span class="badge">v2fly</span>
+          </div>
+          <div class="preset-grid">
+            <div class="field">
+              <label for="v2fly-preset-name">Название пресета</label>
+              <input id="v2fly-preset-name" autocomplete="off" placeholder="v2fly-youtube">
+            </div>
+            <div class="field">
+              <label for="v2fly-scope">Где использовать</label>
+              <select id="v2fly-scope">
+                <option value="finder">Подбор</option>
+                <option value="common">Общие стратегии</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="v2fly-categories">Категории v2fly/domain-list-community</label>
+            <textarea id="v2fly-categories" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube&#10;google&#10;discord"></textarea>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="v2fly-preview" type="button">Проверить список</button>
+            <button data-action="v2fly-import" type="button">Сохранить в пресет</button>
+          </div>
+          <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
+          <div class="helper-text">Берутся только доменные правила v2fly: domain/full и явные доменные строки. keyword/regexp/include не превращаются в домены автоматически.</div>
+        </div>
       </section>
     </section>
   </main>
@@ -1371,7 +1427,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, settings: null, settingsTouched: false, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, settings: null, settingsTouched: false, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1490,8 +1546,14 @@ function defaultDomains(kind){
   if (kind === 'tested') return testedDomains();
   return sets[kind] || [];
 }
+function uniqueDomains(domains){
+  return [...new Set((Array.isArray(domains) ? domains : []).map((domain) => String(domain || '').trim()).filter(Boolean))];
+}
+function uniqueDomainCount(domains){
+  return uniqueDomains(domains).length;
+}
 function fillDomains(kind){
-  const domains = [...new Set(defaultDomains(kind))];
+  const domains = uniqueDomains(defaultDomains(kind));
   el('finder-domains').value = domains.join('\\n');
   updateEditorLineNumbers('finder-domains');
   state.domainsTouched = true;
@@ -1642,10 +1704,10 @@ function renderPresetSelect(target){
   const previous = select.value;
   const customEntries = Object.entries(state.customPresets[target] || {}).sort(([a], [b]) => a.localeCompare(b));
   const customGroup = customEntries.length
-    ? `<optgroup label="Персональные">${customEntries.map(([name, domains]) => `<option value="custom:${esc(name)}">${esc(name)} (${Array.isArray(domains) ? domains.length : 0})</option>`).join('')}</optgroup>`
+    ? `<optgroup label="Персональные">${customEntries.map(([name, domains]) => `<option value="custom:${esc(name)}">${esc(name)} (${uniqueDomainCount(domains)})</option>`).join('')}</optgroup>`
     : '';
   const builtInGroups = presetGroups(target).map((group) => {
-    const options = group.presets.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${preset.domains.length})</option>`).join('');
+    const options = group.presets.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${uniqueDomainCount(preset.domains)})</option>`).join('');
     return `<optgroup label="${esc(group.label)}">${options}</optgroup>`;
   }).join('');
   select.innerHTML = `${customGroup}${builtInGroups}`;
@@ -1658,7 +1720,7 @@ function renderPresetSelects(){
 function usePreset(target){
   const domains = presetDomains(target, el(`${target}-preset-select`).value);
   const finalDomains = target === 'common' ? filterTestedDomains(domains) : domains;
-  el(`${target}-domains`).value = [...new Set(finalDomains)].join('\\n');
+  el(`${target}-domains`).value = uniqueDomains(finalDomains).join('\\n');
   updateEditorLineNumbers(`${target}-domains`);
   if (target === 'finder') state.domainsTouched = true;
   if (target === 'common') {
@@ -1682,7 +1744,7 @@ function savePreset(target){
     showToast('Укажите название пользовательского пресета', 'warn');
     return;
   }
-  const domains = parseDomains(el(`${target}-domains`).value);
+  const domains = uniqueDomains(parseDomains(el(`${target}-domains`).value));
   if (!domains.length) {
     showToast('В пресете должен быть хотя бы один домен', 'warn');
     return;
@@ -2433,6 +2495,7 @@ function renderSettings(){
     const finderIpv6 = el('enable-ipv6');
     if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
   }
+  renderV2flyPreview();
 }
 function currentSettingsFromForm(){
   return {
@@ -2451,6 +2514,65 @@ async function saveSettings(){
     setMessage('Настройки сохранены', 'good');
   } catch (error) {
     setMessage(`Ошибка сохранения настроек: ${error.message}`, 'bad');
+  }
+}
+function v2flyCategories(){
+  return parseDomains(el('v2fly-categories')?.value || '');
+}
+function v2flyPayload(){
+  return {
+    scope: el('v2fly-scope')?.value || 'finder',
+    name: String(el('v2fly-preset-name')?.value || '').trim(),
+    categories: v2flyCategories()
+  };
+}
+function renderV2flyPreview(){
+  const target = el('v2fly-preview-result');
+  if (!target) return;
+  const preview = state.v2flyPreview;
+  if (!preview) {
+    target.textContent = 'Список не проверялся.';
+    return;
+  }
+  const added = Array.isArray(preview.added) ? preview.added.length : 0;
+  const removed = Array.isArray(preview.removed) ? preview.removed.length : 0;
+  const sources = Array.isArray(preview.sources) ? preview.sources.map((source) => `${source.category}: ${source.domains}`).join(', ') : '-';
+  target.innerHTML = [
+    `<div><strong>${esc(preview.preset || '-')}</strong>: ${esc(preview.count || 0)} доменов</div>`,
+    `<div>Добавится: ${esc(added)}, уйдет: ${esc(removed)}, без изменений: ${esc(preview.unchanged_count || 0)}</div>`,
+    `<div>Категории: ${esc(sources)}</div>`
+  ].join('');
+}
+async function previewV2flyPreset(){
+  const payload = v2flyPayload();
+  if (!payload.name || !payload.categories.length) {
+    setMessage('Укажите название пресета и хотя бы одну категорию v2fly', 'warn');
+    return;
+  }
+  try {
+    const data = await postJson('/api/domain-sources/v2fly/preview', payload);
+    state.v2flyPreview = data;
+    renderV2flyPreview();
+    setMessage('Список v2fly проверен', 'good');
+  } catch (error) {
+    setMessage(`Ошибка проверки v2fly: ${error.message}`, 'bad');
+  }
+}
+async function importV2flyPreset(){
+  const payload = v2flyPayload();
+  if (!payload.name || !payload.categories.length) {
+    setMessage('Укажите название пресета и хотя бы одну категорию v2fly', 'warn');
+    return;
+  }
+  try {
+    const data = await postJson('/api/domain-sources/v2fly/import', payload);
+    state.v2flyPreview = data;
+    mergeCustomPresets((data || {}).custom || {});
+    renderPresetSelects();
+    renderV2flyPreview();
+    setMessage(`Пресет сохранен: ${data.count || 0} доменов`, 'good');
+  } catch (error) {
+    setMessage(`Ошибка сохранения v2fly: ${error.message}`, 'bad');
   }
 }
 function formatDuration(seconds){
@@ -2680,19 +2802,21 @@ async function refresh(){
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const [status, finderRuns, finderLog, domainSets, presets, settings] = await Promise.all([
+    const [status, finderRuns, finderLog, domainSets, presets, settings, domainSources] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains'),
       getJson('/api/presets'),
-      getJson('/api/settings')
+      getJson('/api/settings'),
+      getJson('/api/domain-sources')
     ]);
     state.status = status;
     state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
+    state.domainSources = domainSources;
     mergeCustomPresets((presets || {}).custom || {});
     renderAll({ skipCandidates: true });
   } catch (error) {
@@ -2845,6 +2969,14 @@ document.addEventListener('click', (event) => {
     saveSettings();
     return;
   }
+  if (button.dataset.action === 'v2fly-preview') {
+    previewV2flyPreset();
+    return;
+  }
+  if (button.dataset.action === 'v2fly-import') {
+    importV2flyPreset();
+    return;
+  }
   if (button.dataset.action === 'restore-selected-backup') {
     restoreBackup(el('backup-restore-select')?.value || '');
     return;
@@ -2928,6 +3060,10 @@ document.addEventListener('input', (event) => {
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
   }
+  if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
+    state.v2flyPreview = null;
+    renderV2flyPreview();
+  }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
@@ -2958,6 +3094,10 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
+  }
+  if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
+    state.v2flyPreview = null;
+    renderV2flyPreview();
   }
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
@@ -3087,6 +3227,24 @@ def _candidate_domain_index_payload(config: AppConfig, query: dict[str, list[str
     )
 
 
+def _v2fly_preview_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    return preview_v2fly_preset(
+        config.output.state_dir,
+        scope=str(payload.get("scope") or "finder"),
+        name=str(payload.get("name") or ""),
+        categories=_payload_string_list(payload, "categories"),
+    )
+
+
+def _v2fly_import_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    return import_v2fly_preset(
+        config.output.state_dir,
+        scope=str(payload.get("scope") or "finder"),
+        name=str(payload.get("name") or ""),
+        categories=_payload_string_list(payload, "categories"),
+    )
+
+
 def _query_str(query: dict[str, list[str]], key: str, default: str) -> str:
     values = query.get(key) or []
     return values[0] if values else default
@@ -3111,6 +3269,15 @@ def _query_domains(query: dict[str, list[str]], key: str) -> list[str]:
 def _query_one(query: dict[str, list[str]], key: str) -> str:
     values = query.get(key) or []
     return str(values[0]).strip() if values else ""
+
+
+def _payload_string_list(payload: dict[str, Any], key: str) -> list[str]:
+    raw = payload.get(key) or []
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
 def _multipart_file_bytes(body: bytes, boundary: str) -> bytes:

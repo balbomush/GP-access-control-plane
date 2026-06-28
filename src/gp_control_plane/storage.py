@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -187,6 +187,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL DEFAULT '',
             kind TEXT NOT NULL DEFAULT 'user',
             label TEXT NOT NULL DEFAULT '',
+            source_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT '',
             UNIQUE(scope, name, kind)
@@ -230,6 +231,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         GROUP BY s.id, s.protocol;
         """
     )
+    _ensure_column(conn, "domain_presets", "source_json", "TEXT NOT NULL DEFAULT '{}'")
     _migrate_legacy_model(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
@@ -245,6 +247,12 @@ def get_meta(conn: sqlite3.Connection, key: str) -> str:
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value))
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _migrate_legacy_model(conn: sqlite3.Connection) -> None:
@@ -405,6 +413,7 @@ def _save_domain_preset_conn(
     kind: str,
     domains: list[str],
     updated_at: str,
+    source_json: str = "{}",
 ) -> None:
     clean_name = str(name or "").strip()
     clean_scope = str(scope or "").strip()
@@ -413,13 +422,14 @@ def _save_domain_preset_conn(
         return
     conn.execute(
         """
-        INSERT INTO domain_presets(scope, name, kind, label, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?)
+        INSERT INTO domain_presets(scope, name, kind, label, source_json, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope, name, kind) DO UPDATE SET
             label = excluded.label,
+            source_json = excluded.source_json,
             updated_at = excluded.updated_at
         """,
-        (clean_scope, clean_name, clean_kind, clean_name, updated_at, updated_at),
+        (clean_scope, clean_name, clean_kind, clean_name, source_json or "{}", updated_at, updated_at),
     )
     preset = conn.execute(
         "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = ?",
@@ -649,6 +659,58 @@ def save_custom_presets(state_dir: Path, presets: dict[str, Any], updated_at: st
                     updated_at=updated_at,
                 )
     return clean
+
+
+def save_custom_preset(
+    state_dir: Path,
+    *,
+    scope: str,
+    name: str,
+    domains: list[str],
+    updated_at: str,
+    source: dict[str, Any] | None = None,
+) -> dict[str, dict[str, list[str]]]:
+    clean_scope = str(scope or "").strip()
+    clean_name = str(name or "").strip()
+    if clean_scope not in {"finder", "common"}:
+        raise ValueError("scope must be finder or common")
+    if not clean_name:
+        raise ValueError("preset name is required")
+    clean_domains = _unique_nonempty([str(item or "") for item in domains])
+    if not clean_domains:
+        raise ValueError("preset must contain at least one domain")
+    source_json = json.dumps(source or {}, ensure_ascii=False, separators=(",", ":"))
+    with connect(state_dir) as conn:
+        conn.execute(
+            """
+            INSERT INTO presets(scope, name, label, domains_json, source_json, updated_at, builtin)
+            VALUES(?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(scope, name) DO UPDATE SET
+                label = excluded.label,
+                domains_json = excluded.domains_json,
+                source_json = excluded.source_json,
+                updated_at = excluded.updated_at,
+                builtin = 0
+            """,
+            (
+                clean_scope,
+                clean_name,
+                clean_name,
+                json.dumps(clean_domains, ensure_ascii=False, separators=(",", ":")),
+                source_json,
+                updated_at,
+            ),
+        )
+        _save_domain_preset_conn(
+            conn,
+            scope=clean_scope,
+            name=clean_name,
+            kind="user",
+            domains=clean_domains,
+            updated_at=updated_at,
+            source_json=source_json,
+        )
+    return read_custom_presets(state_dir)
 
 
 def _upsert_candidate_event_conn(
