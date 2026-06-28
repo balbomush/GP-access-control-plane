@@ -13,6 +13,7 @@ from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
     _CompactStdoutWriter,
     _LiveStdoutRecorder,
+    _RotatingTextWriter,
     _resolve_blockcheck_script,
     _standard_attempt_plan,
     _write_multidomain_runner,
@@ -668,6 +669,20 @@ pktws_check_https_tls12()
             self.assertNotIn("--failed", text)
             self.assertIn("--success", text)
             self.assertIn("!!!!! AVAILABLE !!!!!", text)
+
+    def test_rotating_text_writer_limits_active_log_size(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "runtime.log"
+            with _RotatingTextWriter(path, max_bytes=128) as writer:
+                for index in range(60):
+                    writer.write(f"line-{index}-{'x' * 40}\n")
+
+            rotated = path.with_suffix(path.suffix + ".1")
+            active = path.read_text(encoding="utf-8")
+
+            self.assertTrue(rotated.is_file())
+            self.assertLessEqual(path.stat().st_size, 1024)
+            self.assertIn("log rotated", active)
 
     def test_multidomain_runner_overrides_strategy_check_order(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

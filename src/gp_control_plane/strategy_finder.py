@@ -153,6 +153,8 @@ ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
 ETA_SAMPLE_MIN_ATTEMPTS = 3
 METRICS_INTERVAL_SECONDS = 10.0
 METRICS_MAX_BYTES = 1_000_000
+STDOUT_LOG_MAX_BYTES = 2_000_000
+DEBUG_STDOUT_LOG_MAX_BYTES = 10_000_000
 PHASE_CHECK_VPN = "checking_vpn"
 PHASE_CHECK_ZAPRET = "checking_zapret"
 PHASE_CHECK_DOMAIN = "checking_domain"
@@ -1080,6 +1082,55 @@ def _file_size(path: Path) -> int:
         return 0
 
 
+class _RotatingTextWriter:
+    def __init__(self, path: Path, max_bytes: int):
+        self._path = path
+        self._max_bytes = max(1024, int(max_bytes))
+        self._handle: Any | None = None
+
+    def __enter__(self) -> "_RotatingTextWriter":
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self._path.open("w", encoding="utf-8")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    def write(self, text: str) -> None:
+        if self._handle is None:
+            raise ValueError("writer is closed")
+        self._handle.write(text)
+        self._handle.flush()
+        self._rotate_if_needed()
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    def _rotate_if_needed(self) -> None:
+        try:
+            if not self._path.is_file() or self._path.stat().st_size <= self._max_bytes:
+                return
+        except OSError:
+            return
+        self.close()
+        rotated = self._path.with_suffix(self._path.suffix + ".1")
+        try:
+            if rotated.exists():
+                rotated.unlink()
+            self._path.replace(rotated)
+            self._handle = self._path.open("w", encoding="utf-8")
+            self._handle.write(f"# log rotated, previous chunk: {rotated.name}\n")
+            self._handle.flush()
+        except OSError:
+            self._handle = self._path.open("a", encoding="utf-8")
+
+
 def _loadavg() -> list[float]:
     try:
         return [round(float(item), 2) for item in os.getloadavg()]
@@ -1230,72 +1281,75 @@ def _run_process_with_live_stdout(
     reader_errors: list[BaseException] = []
 
     stdout_mode = _stdout_log_mode(env)
-    debug_handle = debug_stdout_log.open("w", encoding="utf-8") if debug_stdout_log and stdout_mode == "debug" else None
-    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
-        compact_writer = _CompactStdoutWriter(stdout_handle)
-        process = subprocess.Popen(
-            command,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=stderr_handle,
-            env=env,
-            start_new_session=hasattr(os, "setsid"),
-        )
+    debug_writer = _RotatingTextWriter(debug_stdout_log, DEBUG_STDOUT_LOG_MAX_BYTES) if debug_stdout_log and stdout_mode == "debug" else None
+    debug_handle = debug_writer.__enter__() if debug_writer else None
+    try:
+        with _RotatingTextWriter(stdout_log, STDOUT_LOG_MAX_BYTES) as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
+            compact_writer = _CompactStdoutWriter(stdout_handle)
+            process = subprocess.Popen(
+                command,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=stderr_handle,
+                env=env,
+                start_new_session=hasattr(os, "setsid"),
+            )
 
-        def read_stdout() -> None:
-            try:
-                if process.stdout is None:
-                    return
-                for line in process.stdout:
-                    compact_writer.write(line)
+            def read_stdout() -> None:
+                try:
+                    if process.stdout is None:
+                        return
+                    for line in process.stdout:
+                        compact_writer.write(line)
+                        if debug_handle:
+                            debug_handle.write(line)
+                        recorder.record_line(line)
+                except BaseException as exc:  # noqa: BLE001
+                    reader_errors.append(exc)
+                finally:
+                    compact_writer.close()
                     if debug_handle:
-                        debug_handle.write(line)
-                    recorder.record_line(line)
-            except BaseException as exc:  # noqa: BLE001
-                reader_errors.append(exc)
-            finally:
-                compact_writer.close()
-                if debug_handle:
-                    debug_handle.flush()
+                        debug_handle.flush()
 
-        reader = threading.Thread(target=read_stdout, daemon=True)
-        reader.start()
-        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                stopped = True
-                status = "stopped"
-                _stop_process_group(process)
-                _cleanup_blockcheck_processes()
-                _cleanup_nft_blockcheck_tables()
-                recorder.mark_phase(PHASE_SAVING)
-                returncode = process.returncode
-                break
-            wait_timeout = 1.0
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    status = "timeout"
+            reader = threading.Thread(target=read_stdout, daemon=True)
+            reader.start()
+            deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    stopped = True
+                    status = "stopped"
                     _stop_process_group(process)
                     _cleanup_blockcheck_processes()
                     _cleanup_nft_blockcheck_tables()
                     recorder.mark_phase(PHASE_SAVING)
                     returncode = process.returncode
                     break
-                wait_timeout = min(1.0, remaining)
-            try:
-                returncode = process.wait(timeout=wait_timeout)
-                if returncode != 0:
-                    status = "failed"
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        reader.join(timeout=5)
-    if debug_handle:
-        debug_handle.close()
+                wait_timeout = 1.0
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        status = "timeout"
+                        _stop_process_group(process)
+                        _cleanup_blockcheck_processes()
+                        _cleanup_nft_blockcheck_tables()
+                        recorder.mark_phase(PHASE_SAVING)
+                        returncode = process.returncode
+                        break
+                    wait_timeout = min(1.0, remaining)
+                try:
+                    returncode = process.wait(timeout=wait_timeout)
+                    if returncode != 0:
+                        status = "failed"
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            reader.join(timeout=5)
+    finally:
+        if debug_writer:
+            debug_writer.__exit__(None, None, None)
 
     if reader_errors:
         raise RuntimeError(f"failed to read blockcheck stdout: {reader_errors[0]}")
