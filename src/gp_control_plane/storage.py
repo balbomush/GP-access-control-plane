@@ -34,12 +34,12 @@ def db_path(state_dir: Path) -> Path:
 
 def connect(state_dir: Path) -> sqlite3.Connection:
     path = db_path(state_dir)
-    conn = sqlite3.connect(path, factory=ClosingConnection)
+    conn = sqlite3.connect(path, timeout=30, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
     with _MIGRATION_LOCK:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         _migrate_schema(conn)
     return conn
 
