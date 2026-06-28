@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Any
 
 
+REMOVED_STATE_KEYS = {
+    "last_sync_at",
+    "last_validate_at",
+    "last_render_at",
+    "selected_strategy",
+}
+
+
 def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -21,7 +29,10 @@ def read_state(state_dir: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         return defaults
-    return {key: raw.get(key, value) for key, value in defaults.items()}
+    state = {**defaults, **raw}
+    for key in REMOVED_STATE_KEYS:
+        state.pop(key, None)
+    return state
 
 
 def write_state(state_dir: Path, state: dict[str, Any]) -> None:

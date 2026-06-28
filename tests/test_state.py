@@ -31,6 +31,26 @@ class StateTests(unittest.TestCase):
 
             self.assertEqual(read_state(state_dir), {"current_job": "job", "last_error": "error"})
 
+    def test_read_state_preserves_current_runtime_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            (state_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "current_job": None,
+                        "last_error": None,
+                        "settings": {"enable_ipv6": True},
+                        "discovery_profiles": {"night-test": {"title": "Night test"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state = read_state(state_dir)
+
+            self.assertEqual(state["settings"], {"enable_ipv6": True})
+            self.assertEqual(state["discovery_profiles"], {"night-test": {"title": "Night test"}})
+
 
 if __name__ == "__main__":
     unittest.main()

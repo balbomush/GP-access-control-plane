@@ -48,6 +48,12 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("settings-version", html)
         self.assertIn("settings-enable-ipv6", html)
         self.assertIn("/api/settings", html)
+        self.assertIn("/api/discovery-profiles", html)
+        self.assertIn("discovery-profile-select", html)
+        self.assertIn("discovery-profile-name", html)
+        self.assertIn("useDiscoveryProfile", html)
+        self.assertIn("saveDiscoveryProfile", html)
+        self.assertIn("deleteDiscoveryProfile", html)
         self.assertIn("/api/domain-sources", html)
         self.assertIn("/api/domain-sources/v2fly/preview", html)
         self.assertIn("/api/domain-sources/v2fly/import", html)
@@ -340,6 +346,54 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('"enable_ipv6":true', saved)
             self.assertIn('"curl_parallelism_default":6', saved)
+
+    def test_discovery_profiles_endpoint_saves_user_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps(
+                {
+                    "profiles": {
+                        "night-test": {
+                            "title": "Night test",
+                            "enable_http": True,
+                            "enable_tls12": True,
+                            "enable_tls13": True,
+                            "include_quic": True,
+                            "scan_level": "force",
+                            "repeats": 99,
+                            "curl_parallelism": 99,
+                            "limit_time_enabled": True,
+                            "timeout_hours": 99,
+                        },
+                        "balanced": {
+                            "title": "Changed built-in",
+                            "enable_tls12": False,
+                        },
+                    }
+                }
+            )
+            connection.request("POST", "/api/discovery-profiles", body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            saved = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"night-test"', saved)
+            self.assertIn('"curl_parallelism":10', saved)
+            self.assertIn('"repeats":10', saved)
+            self.assertIn('"timeout_hours":24', saved)
+            self.assertNotIn("Changed built-in", saved)
 
 
 def _free_port() -> int:

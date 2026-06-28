@@ -45,6 +45,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json(status_payload(config))
             elif path == "/api/settings":
                 self._json({"settings": read_settings(config)})
+            elif path == "/api/discovery-profiles":
+                self._json({"profiles": read_discovery_profiles(config)})
             elif path == "/api/diagnostics":
                 self._json(diagnostics_payload(config.output.state_dir))
             elif path == "/api/strategy-finder/domains":
@@ -76,6 +78,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path in {
                 "/api/status",
                 "/api/settings",
+                "/api/discovery-profiles",
                 "/api/diagnostics",
                 "/api/strategy-finder/domains",
                 "/api/strategy-finder/candidate-domains",
@@ -132,6 +135,9 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 return
             if path == "/api/settings":
                 self._json({"settings": save_settings(config, payload.get("settings") or payload)})
+                return
+            if path == "/api/discovery-profiles":
+                self._json({"profiles": save_discovery_profiles(config, payload.get("profiles") or payload)})
                 return
             if path == "/api/domain-sources/v2fly/preview":
                 try:
@@ -1157,6 +1163,23 @@ pre {
                 <button class="secondary danger" data-preset-delete="finder" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
               </div>
             </div>
+            <div class="preset-panel">
+              <div class="preset-grid">
+                <div class="field">
+                  <label for="discovery-profile-select">Профиль подбора</label>
+                  <select id="discovery-profile-select"></select>
+                </div>
+                <div class="field">
+                  <label for="discovery-profile-name">Название для сохранения</label>
+                  <input id="discovery-profile-name" autocomplete="off" placeholder="мой-профиль">
+                </div>
+              </div>
+              <div class="preset-actions">
+                <button class="secondary" data-action="use-discovery-profile" title="Применяет сохраненные настройки blockcheck2, curl и лимита времени к форме подбора." type="button">Применить профиль</button>
+                <button class="secondary" data-action="save-discovery-profile" title="Сохраняет текущие настройки подбора как пользовательский профиль." type="button">Сохранить профиль</button>
+                <button class="secondary danger" data-action="delete-discovery-profile" title="Удаляет выбранный пользовательский профиль. Встроенные профили не удаляются." type="button">Удалить профиль</button>
+              </div>
+            </div>
             <label class="checkbox-row">
               <input id="limit-time-enabled" type="checkbox">
               <span>Ограничить время поиска</span>
@@ -1427,7 +1450,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, settings: null, settingsTouched: false, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, settings: null, settingsTouched: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1597,6 +1620,97 @@ function discoveryOptions(){
     skip_dnscheck: el('skip-dnscheck').checked,
     skip_ipblock: el('skip-ipblock').checked
   };
+}
+function currentDiscoveryProfileFromForm(){
+  const timeoutHours = Number(el('finder-timeout-hours').value || 6);
+  return {
+    ...discoveryOptions(),
+    curl_parallelism: curlParallelism(),
+    limit_time_enabled: el('limit-time-enabled').checked,
+    timeout_hours: Number.isFinite(timeoutHours) ? Math.max(1, Math.min(24, Math.round(timeoutHours))) : 6
+  };
+}
+function useDiscoveryProfile(profile){
+  if (!profile) return;
+  el('enable-http').checked = Boolean(profile.enable_http);
+  el('enable-tls12').checked = Boolean(profile.enable_tls12);
+  el('enable-tls13').checked = Boolean(profile.enable_tls13);
+  el('include-quic').checked = Boolean(profile.include_quic);
+  el('enable-ipv6').checked = Boolean(profile.enable_ipv6);
+  el('scan-level').value = profile.scan_level || 'standard';
+  el('repeats').value = String(profile.repeats || 1);
+  el('repeat-parallel').checked = Boolean(profile.repeat_parallel);
+  el('skip-dnscheck').checked = Boolean(profile.skip_dnscheck);
+  el('skip-ipblock').checked = Boolean(profile.skip_ipblock);
+  el('curl-parallelism').value = String(profile.curl_parallelism || 4);
+  el('limit-time-enabled').checked = Boolean(profile.limit_time_enabled);
+  el('finder-timeout-hours').value = String(profile.timeout_hours || 6);
+  el('time-limit-field').hidden = !el('limit-time-enabled').checked;
+  state.settingsTouched = true;
+}
+function profileTitle(name, profile){
+  return String((profile && profile.title) || name || '-');
+}
+function renderDiscoveryProfiles(){
+  const select = el('discovery-profile-select');
+  if (!select) return;
+  const current = select.value;
+  const profiles = state.discoveryProfiles || {};
+  const names = Object.keys(profiles).sort((a, b) => profileTitle(a, profiles[a]).localeCompare(profileTitle(b, profiles[b])));
+  select.innerHTML = names.map((name) => `<option value="${esc(name)}">${esc(profileTitle(name, profiles[name]))}</option>`).join('');
+  if (current && profiles[current]) select.value = current;
+  const nameInput = el('discovery-profile-name');
+  if (nameInput && select.value && !nameInput.value) {
+    nameInput.value = select.value;
+  }
+}
+async function persistDiscoveryProfiles(profiles){
+  const data = await postJson('/api/discovery-profiles', { profiles });
+  state.discoveryProfiles = data.profiles || {};
+  renderDiscoveryProfiles();
+}
+async function saveDiscoveryProfile(){
+  const name = String(el('discovery-profile-name')?.value || '').trim();
+  if (!name) {
+    setMessage('Укажите название профиля подбора', 'warn');
+    return;
+  }
+  const profiles = { ...(state.discoveryProfiles || {}) };
+  profiles[name] = { ...currentDiscoveryProfileFromForm(), title: name };
+  try {
+    await persistDiscoveryProfiles(profiles);
+    const savedName = Object.keys(state.discoveryProfiles || {}).find((key) => profileTitle(key, state.discoveryProfiles[key]) === name) || name;
+    el('discovery-profile-select').value = savedName;
+    setMessage('Профиль подбора сохранен', 'good');
+  } catch (error) {
+    setMessage(`Ошибка сохранения профиля: ${error.message}`, 'bad');
+  }
+}
+async function deleteDiscoveryProfile(){
+  const select = el('discovery-profile-select');
+  const name = select ? select.value : '';
+  if (!name || ['balanced', 'deep'].includes(name)) {
+    setMessage('Встроенный профиль удалить нельзя', 'warn');
+    return;
+  }
+  const profiles = { ...(state.discoveryProfiles || {}) };
+  delete profiles[name];
+  try {
+    await persistDiscoveryProfiles(profiles);
+    setMessage('Профиль подбора удален', 'good');
+  } catch (error) {
+    setMessage(`Ошибка удаления профиля: ${error.message}`, 'bad');
+  }
+}
+function useSelectedDiscoveryProfile(){
+  const select = el('discovery-profile-select');
+  const profile = select ? (state.discoveryProfiles || {})[select.value] : null;
+  if (!profile) {
+    setMessage('Профиль подбора не выбран', 'warn');
+    return;
+  }
+  useDiscoveryProfile(profile);
+  setMessage('Профиль подбора применен', 'good');
 }
 function hasEnabledProtocol(options){
   return Boolean(options.enable_http || options.enable_tls12 || options.enable_tls13 || options.include_quic);
@@ -2495,6 +2609,7 @@ function renderSettings(){
     const finderIpv6 = el('enable-ipv6');
     if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
   }
+  renderDiscoveryProfiles();
   renderV2flyPreview();
 }
 function currentSettingsFromForm(){
@@ -2802,13 +2917,14 @@ async function refresh(){
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const [status, finderRuns, finderLog, domainSets, presets, settings, domainSources] = await Promise.all([
+    const [status, finderRuns, finderLog, domainSets, presets, settings, discoveryProfiles, domainSources] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains'),
       getJson('/api/presets'),
       getJson('/api/settings'),
+      getJson('/api/discovery-profiles'),
       getJson('/api/domain-sources')
     ]);
     state.status = status;
@@ -2816,6 +2932,7 @@ async function refresh(){
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
+    state.discoveryProfiles = (discoveryProfiles || {}).profiles || {};
     state.domainSources = domainSources;
     mergeCustomPresets((presets || {}).custom || {});
     renderAll({ skipCandidates: true });
@@ -2969,6 +3086,18 @@ document.addEventListener('click', (event) => {
     saveSettings();
     return;
   }
+  if (button.dataset.action === 'use-discovery-profile') {
+    useSelectedDiscoveryProfile();
+    return;
+  }
+  if (button.dataset.action === 'save-discovery-profile') {
+    saveDiscoveryProfile();
+    return;
+  }
+  if (button.dataset.action === 'delete-discovery-profile') {
+    deleteDiscoveryProfile();
+    return;
+  }
   if (button.dataset.action === 'v2fly-preview') {
     previewV2flyPreset();
     return;
@@ -3108,6 +3237,11 @@ document.addEventListener('change', (event) => {
     const nameInput = el(`${target}-preset-name`);
     if (nameInput) nameInput.value = value.startsWith('custom:') ? value.slice('custom:'.length) : '';
   }
+  if (event.target && event.target.id === 'discovery-profile-select') {
+    const profile = (state.discoveryProfiles || {})[event.target.value];
+    const nameInput = el('discovery-profile-name');
+    if (nameInput) nameInput.value = profileTitle(event.target.value, profile);
+  }
 });
 document.addEventListener('keydown', (event) => {
   if (event.target && event.target.id === 'common-domain-add' && event.key === 'Enter') {
@@ -3168,6 +3302,44 @@ DEFAULT_SETTINGS = {
 }
 
 
+DEFAULT_DISCOVERY_PROFILES = {
+    "balanced": {
+        "name": "balanced",
+        "title": "Balanced",
+        "enable_http": False,
+        "enable_tls12": True,
+        "enable_tls13": False,
+        "include_quic": True,
+        "enable_ipv6": False,
+        "scan_level": "standard",
+        "repeats": 1,
+        "repeat_parallel": False,
+        "skip_dnscheck": True,
+        "skip_ipblock": True,
+        "curl_parallelism": 4,
+        "limit_time_enabled": False,
+        "timeout_hours": 6,
+    },
+    "deep": {
+        "name": "deep",
+        "title": "Deep",
+        "enable_http": True,
+        "enable_tls12": True,
+        "enable_tls13": True,
+        "include_quic": True,
+        "enable_ipv6": False,
+        "scan_level": "force",
+        "repeats": 1,
+        "repeat_parallel": False,
+        "skip_dnscheck": False,
+        "skip_ipblock": False,
+        "curl_parallelism": 4,
+        "limit_time_enabled": False,
+        "timeout_hours": 6,
+    },
+}
+
+
 def read_settings(config: AppConfig) -> dict[str, Any]:
     state = read_state(config.output.state_dir)
     stored = state.get("settings") if isinstance(state.get("settings"), dict) else {}
@@ -3196,6 +3368,68 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "stable_release_url": "https://github.com/balbomush/GP-access-control-plane/releases/latest",
         "prerelease_url": "https://github.com/balbomush/GP-access-control-plane/releases",
     }
+
+
+def read_discovery_profiles(config: AppConfig) -> dict[str, dict[str, Any]]:
+    state = read_state(config.output.state_dir)
+    stored = state.get("discovery_profiles") if isinstance(state.get("discovery_profiles"), dict) else {}
+    merged: dict[str, dict[str, Any]] = {}
+    for name, profile in DEFAULT_DISCOVERY_PROFILES.items():
+        merged[name] = _normalize_discovery_profile(name, profile)
+    for raw_name, raw_profile in stored.items():
+        name = _profile_name(raw_name)
+        if not name or not isinstance(raw_profile, dict):
+            continue
+        merged[name] = _normalize_discovery_profile(name, raw_profile)
+    return dict(sorted(merged.items()))
+
+
+def save_discovery_profiles(config: AppConfig, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    profiles: dict[str, dict[str, Any]] = {}
+    source = payload if isinstance(payload, dict) else {}
+    for raw_name, raw_profile in source.items():
+        name = _profile_name(raw_name)
+        if not name or not isinstance(raw_profile, dict):
+            continue
+        if name in DEFAULT_DISCOVERY_PROFILES:
+            continue
+        profiles[name] = _normalize_discovery_profile(name, raw_profile)
+    state = read_state(config.output.state_dir)
+    state["discovery_profiles"] = profiles
+    write_state(config.output.state_dir, state)
+    return read_discovery_profiles(config)
+
+
+def _normalize_discovery_profile(name: str, raw: dict[str, Any]) -> dict[str, Any]:
+    scan_level = str(raw.get("scan_level") or "standard")
+    if scan_level not in {"quick", "standard", "force"}:
+        scan_level = "standard"
+    return {
+        "name": name,
+        "title": str(raw.get("title") or name),
+        "enable_http": _payload_bool(raw, "enable_http", False),
+        "enable_tls12": _payload_bool(raw, "enable_tls12", True),
+        "enable_tls13": _payload_bool(raw, "enable_tls13", False),
+        "include_quic": _payload_bool(raw, "include_quic", True),
+        "enable_ipv6": _payload_bool(raw, "enable_ipv6", False),
+        "scan_level": scan_level,
+        "repeats": _bounded_int(raw.get("repeats"), default=1, minimum=1, maximum=10),
+        "repeat_parallel": _payload_bool(raw, "repeat_parallel", False),
+        "skip_dnscheck": _payload_bool(raw, "skip_dnscheck", True),
+        "skip_ipblock": _payload_bool(raw, "skip_ipblock", True),
+        "curl_parallelism": _bounded_int(raw.get("curl_parallelism"), default=4, minimum=1, maximum=10),
+        "limit_time_enabled": _payload_bool(raw, "limit_time_enabled", False),
+        "timeout_hours": _bounded_int(raw.get("timeout_hours"), default=6, minimum=1, maximum=24),
+    }
+
+
+def _profile_name(value: Any) -> str:
+    name = str(value or "").strip().lower()
+    allowed = []
+    for char in name:
+        if char.isalnum() or char in {"-", "_"}:
+            allowed.append(char)
+    return "".join(allowed)[:64]
 
 
 def _clear_stale_current_job(config: AppConfig) -> None:
