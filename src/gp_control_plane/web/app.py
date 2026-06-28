@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .. import __version__
-from ..backups import create_snapshot_if_idle, import_snapshot_archive, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
+from ..backups import create_snapshot_if_idle, import_snapshot_archive, list_snapshots, restore_snapshot_if_idle, restore_snapshot_preview, snapshot_file_path
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
 from ..domain_sources import builtin_preset_sources, import_v2fly_preset, preview_v2fly_preset
@@ -62,6 +62,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json(latest_log_tail(config.output.state_dir))
             elif path == "/api/backups":
                 self._json(list_snapshots(config.output.state_dir))
+            elif path == "/api/backups/restore-preview":
+                snapshot_id = _query_one(query, "snapshot")
+                try:
+                    self._json(restore_snapshot_preview(config.output.state_dir, snapshot_id))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             elif path == "/api/presets":
                 self._json({"custom": read_custom_presets(config.output.state_dir)})
             elif path == "/api/domain-sources":
@@ -87,6 +93,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/strategy-finder/runs",
                 "/api/strategy-finder/latest-log",
                 "/api/backups",
+                "/api/backups/restore-preview",
                 "/api/presets",
                 "/api/domain-sources",
             }:
@@ -595,6 +602,26 @@ button:disabled { opacity: .55; cursor: default; }
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: end;
+}
+.restore-preview {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+}
+.restore-preview-row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+.restore-preview-row strong {
+  color: var(--text);
 }
 .backup-card {
   border: 1px solid var(--line);
@@ -1379,6 +1406,7 @@ pre {
           </div>
           <button class="secondary danger" data-action="restore-selected-backup" type="button">Восстановить выбранный бекап</button>
         </div>
+        <div id="backup-restore-preview" class="restore-preview">Выберите бекап, чтобы увидеть, какие данные будут заменены.</div>
         <div id="backups-table" class="backup-list"></div>
       </section>
     </section>
@@ -1461,7 +1489,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, settings: null, settingsTouched: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, settings: null, settingsTouched: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupRestorePreview: null, backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -2601,6 +2629,35 @@ function renderBackupRestorePanel(rows){
     : '<option value="">Бекапов нет</option>';
   if (rows.some((item) => String(item.id || '') === previous)) select.value = previous;
   button.disabled = !rows.length;
+  if (!rows.length) state.backupRestorePreview = null;
+  renderBackupRestorePreview();
+}
+function renderBackupRestorePreview(){
+  const target = el('backup-restore-preview');
+  if (!target) return;
+  const preview = state.backupRestorePreview;
+  if (!preview) {
+    target.textContent = 'Выберите бекап, чтобы увидеть, какие данные будут заменены.';
+    return;
+  }
+  if (preview.loading) {
+    target.textContent = 'Проверяется содержимое бекапа...';
+    return;
+  }
+  if (preview.error) {
+    target.textContent = `Не удалось проверить бекап: ${preview.error}`;
+    return;
+  }
+  const entities = Array.isArray(preview.entities) ? preview.entities : [];
+  const checksum = preview.checksum_ok ? badge('checksum ok', 'good') : badge('checksum fail', 'bad');
+  const compatible = preview.compatible ? badge('совместим', 'good') : badge('несовместим', 'bad');
+  target.innerHTML = `<div>${checksum} ${compatible}</div>${entities.map((item) => {
+    const action = item.will_replace ? 'будет заменено' : 'останется без изменений';
+    return `<div class="restore-preview-row">
+      <strong>${esc(item.label || item.key)}</strong>
+      <span>${esc(action)} · сейчас: ${esc(item.current_count ?? 0)} · в бекапе: ${esc(item.backup_count ?? 0)}</span>
+    </div>`;
+  }).join('')}`;
 }
 function backupCard(item){
   const id = String(item.id || '');
@@ -3068,9 +3125,27 @@ async function refreshBackups(){
     state.backups = data.snapshots || [];
     state.backupsLoaded = true;
     renderBackups();
+    const selected = el('backup-restore-select')?.value || '';
+    if (selected) refreshBackupRestorePreview(selected);
   } catch (error) {
     setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
   }
+}
+async function refreshBackupRestorePreview(snapshotId){
+  const id = String(snapshotId || '').trim();
+  if (!id) {
+    state.backupRestorePreview = null;
+    renderBackupRestorePreview();
+    return;
+  }
+  state.backupRestorePreview = { loading: true };
+  renderBackupRestorePreview();
+  try {
+    state.backupRestorePreview = await getJson(`/api/backups/restore-preview?snapshot=${encodeURIComponent(id)}`);
+  } catch (error) {
+    state.backupRestorePreview = { error: error.message };
+  }
+  renderBackupRestorePreview();
 }
 async function createBackup(){
   try {
@@ -3360,6 +3435,9 @@ document.addEventListener('change', (event) => {
     const profile = (state.discoveryProfiles || {})[event.target.value];
     const nameInput = el('discovery-profile-name');
     if (nameInput) nameInput.value = profileTitle(event.target.value, profile);
+  }
+  if (event.target && event.target.id === 'backup-restore-select') {
+    refreshBackupRestorePreview(event.target.value || '');
   }
 });
 document.addEventListener('keydown', (event) => {

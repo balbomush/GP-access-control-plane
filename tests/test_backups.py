@@ -15,6 +15,7 @@ from gp_control_plane.backups import (
     list_snapshots,
     restore_snapshot,
     restore_snapshot_if_idle,
+    restore_snapshot_preview,
     snapshot_archive_path,
     _write_checksums,
 )
@@ -123,6 +124,45 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             pre_restore_strategy_file = state_dir.parent / "backups" / "snapshots" / pre_restore / "domains" / "domains.ndjson"
             pre_restore_domains = pre_restore_strategy_file.read_text(encoding="utf-8")
             self.assertIn("discord.com", pre_restore_domains)
+
+    def test_restore_preview_reports_replaced_and_preserved_entities(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            first = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, first, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            second = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua-desync=multisplit
+"""
+            )
+            upsert_candidates(state_dir, second, {"id": "run-2"})
+            save_custom_presets(
+                state_dir,
+                {"finder": {"mine": ["discord.com"]}, "common": {}},
+                "2026-06-25T01:00:00Z",
+            )
+            write_state(state_dir, {"current_job": None, "settings": {"enable_ipv6": True}})
+
+            preview = restore_snapshot_preview(state_dir, snapshot_id)
+            entities = {item["key"]: item for item in preview["entities"]}
+
+            self.assertTrue(preview["checksum_ok"])
+            self.assertTrue(preview["compatible"])
+            self.assertEqual(entities["domains"]["current_count"], 2)
+            self.assertEqual(entities["domains"]["backup_count"], 1)
+            self.assertTrue(entities["domains"]["will_replace"])
+            self.assertEqual(entities["strategies"]["current_count"], 2)
+            self.assertEqual(entities["strategies"]["backup_count"], 1)
+            self.assertTrue(entities["strategy_domain_links"]["will_replace"])
+            self.assertFalse(entities["user_presets"]["will_replace"])
+            self.assertFalse(entities["settings"]["will_replace"])
 
     def test_snapshot_excludes_derived_strategy_stats(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

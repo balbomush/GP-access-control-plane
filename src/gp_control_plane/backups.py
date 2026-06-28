@@ -67,6 +67,70 @@ def restore_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any
     return restore_snapshot(state_dir, snapshot_id)
 
 
+def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
+    path = _snapshot_path(state_dir, snapshot_id)
+    if not path.is_dir():
+        raise FileNotFoundError(snapshot_id)
+    checksum_ok = verify_snapshot(state_dir, snapshot_id)
+    if checksum_ok:
+        _ensure_snapshot_compatible(path)
+    manifest = _read_simple_manifest(path / "manifest.yaml")
+    backup_domain_count = _int_value(manifest.get("domain_count"))
+    backup_strategy_count = _int_value(manifest.get("strategy_count"))
+    backup_link_count = _int_value(manifest.get("link_count"))
+    with connect(state_dir) as conn:
+        current_domain_count = _linked_domain_count(conn)
+        current_strategy_count = _table_count(conn, "strategies")
+        current_link_count = _table_count(conn, "strategy_domain_results")
+        current_preset_count = int(
+            conn.execute("SELECT COUNT(*) AS count FROM domain_presets WHERE kind = 'user'").fetchone()["count"]
+        )
+    settings = read_state(state_dir).get("settings")
+    current_settings_count = 1 if isinstance(settings, dict) and settings else 0
+    return {
+        "snapshot": snapshot_info(state_dir, snapshot_id),
+        "checksum_ok": checksum_ok,
+        "compatible": checksum_ok and _is_supported_snapshot_manifest(manifest),
+        "entities": [
+            {
+                "key": "domains",
+                "label": "Домены со стратегиями",
+                "current_count": current_domain_count,
+                "backup_count": backup_domain_count,
+                "will_replace": True,
+            },
+            {
+                "key": "strategies",
+                "label": "Стратегии",
+                "current_count": current_strategy_count,
+                "backup_count": backup_strategy_count,
+                "will_replace": True,
+            },
+            {
+                "key": "strategy_domain_links",
+                "label": "Связи стратегия-домен",
+                "current_count": current_link_count,
+                "backup_count": backup_link_count,
+                "will_replace": True,
+            },
+            {
+                "key": "user_presets",
+                "label": "Пользовательские списки",
+                "current_count": current_preset_count,
+                "backup_count": 0,
+                "will_replace": False,
+            },
+            {
+                "key": "settings",
+                "label": "Настройки",
+                "current_count": current_settings_count,
+                "backup_count": 0,
+                "will_replace": False,
+            },
+        ],
+    }
+
+
 def import_snapshot_archive(state_dir: Path, archive_bytes: bytes) -> dict[str, Any]:
     root = snapshots_dir(state_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -478,6 +542,21 @@ def _int_value(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _table_count(conn: Any, table: str) -> int:
+    return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
+
+
+def _linked_domain_count(conn: Any) -> int:
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(DISTINCT domain_id) AS count
+            FROM strategy_domain_results
+            """
+        ).fetchone()["count"]
+    )
 
 
 def _sha256_text(value: str) -> str:
