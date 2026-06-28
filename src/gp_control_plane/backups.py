@@ -10,8 +10,8 @@ from typing import Any
 
 from . import __version__
 from .state import now_iso, read_state
-from .storage import connect, db_path, import_candidates_json_if_needed, read_custom_presets
-from .strategy_finder import candidate_id_for, domain_sets
+from .storage import connect, db_path, import_candidates_json_if_needed
+from .strategy_finder import candidate_id_for
 
 
 SNAPSHOT_KEEP = 5
@@ -66,6 +66,47 @@ def restore_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any
     return restore_snapshot(state_dir, snapshot_id)
 
 
+def import_snapshot_archive(state_dir: Path, archive_bytes: bytes) -> dict[str, Any]:
+    root = snapshots_dir(state_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    upload_id = uuid.uuid4().hex[:8]
+    tmp_dir = root / f".upload-{upload_id}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+    try:
+        archive_path = tmp_dir / "upload.zip"
+        archive_path.write_bytes(archive_bytes)
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            members = [item for item in zf.infolist() if not item.is_dir()]
+            top_dirs = {_safe_zip_top(item.filename) for item in members}
+            top_dirs.discard("")
+            if len(top_dirs) != 1:
+                raise ValueError("backup archive must contain exactly one snapshot directory")
+            snapshot_id = top_dirs.pop()
+            if snapshot_id.startswith("."):
+                raise ValueError("invalid snapshot directory")
+            for member in members:
+                target = _safe_extract_target(tmp_dir, member.filename)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member, "r") as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        extracted = tmp_dir / snapshot_id
+        if not (extracted / "manifest.yaml").is_file():
+            raise ValueError("backup manifest.yaml not found")
+        if not _verify_snapshot_path(extracted):
+            raise ValueError("backup checksum verification failed")
+        final = root / snapshot_id
+        if final.exists():
+            shutil.rmtree(final)
+        extracted.replace(final)
+        _write_latest_marker(state_dir, snapshot_id)
+        _prune_snapshots(state_dir)
+        return {"imported": True, "snapshot": snapshot_info(state_dir, snapshot_id)}
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     path = _snapshot_path(state_dir, snapshot_id)
     if not path.is_dir():
@@ -74,19 +115,25 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         raise ValueError("backup checksum verification failed")
     strategies = _read_ndjson(path / "strategies" / "strategies.ndjson")
     links = _read_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
-    presets = _read_user_presets(path / "presets" / "user-presets.yaml")
     restored_at = now_iso()
     with connect(state_dir) as conn:
         conn.execute("DELETE FROM strategy_attempts")
         conn.execute("DELETE FROM strategy_domain_results")
         conn.execute("DELETE FROM strategies")
-        conn.execute("DELETE FROM preset_domains")
-        conn.execute("DELETE FROM domain_presets WHERE kind = 'user'")
-        conn.execute("DELETE FROM domains")
         conn.execute("DELETE FROM candidate_seen_events")
         conn.execute("DELETE FROM candidate_common_domains")
         conn.execute("DELETE FROM candidate_domains")
         conn.execute("DELETE FROM candidates")
+        for item in _read_ndjson(path / "domains" / "domains.ndjson"):
+            domain = str(item.get("domain") or item.get("name") or "").strip()
+            if not domain:
+                continue
+            _restore_domain_id(
+                conn,
+                domain,
+                str(item.get("created_at") or restored_at),
+                str(item.get("updated_at") or restored_at),
+            )
         for item in strategies:
             candidate_id = str(item.get("id") or "").strip()
             if not candidate_id:
@@ -103,8 +150,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     str(item.get("status") or "candidate"),
                     str(item.get("first_seen_at") or ""),
                     str(item.get("last_seen_at") or ""),
-                    _int_value(item.get("seen_count")),
-                    _int_value(item.get("common_seen_count")),
+                    0,
+                    0,
                 ),
             )
             conn.execute(
@@ -127,7 +174,7 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             for row in conn.execute("SELECT id FROM candidates").fetchall()
         }
         for item in links:
-            candidate_id = str(item.get("candidate_id") or "").strip()
+            candidate_id = str(item.get("strategy_id") or item.get("candidate_id") or "").strip()
             domain = str(item.get("domain") or "").strip()
             if not candidate_id or not domain or candidate_id not in known_ids:
                 continue
@@ -145,7 +192,7 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     str(item.get("protocol") or ""),
                     str(item.get("first_seen_at") or ""),
                     str(item.get("last_seen_at") or ""),
-                    _int_value(item.get("seen_count")),
+                    1,
                 ),
             )
             conn.execute(
@@ -163,27 +210,9 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     source_mode,
                     str(item.get("first_seen_at") or ""),
                     str(item.get("last_seen_at") or ""),
-                    _int_value(item.get("seen_count")),
+                    1,
                 ),
             )
-        conn.execute("DELETE FROM presets WHERE builtin = 0")
-        for scope, scoped in presets.items():
-            for name, domains in scoped.items():
-                conn.execute(
-                    """
-                    INSERT INTO presets(scope, name, label, domains_json, source_json, updated_at, builtin)
-                    VALUES(?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        scope,
-                        name,
-                        name,
-                        json.dumps(domains, ensure_ascii=False, separators=(",", ":")),
-                        "{}",
-                        restored_at,
-                    ),
-                )
-                _restore_domain_preset(conn, scope, name, domains, restored_at)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_snapshot", snapshot_id),
@@ -198,7 +227,6 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         "restored": True,
         "snapshot": info,
         "strategy_count": len(strategies),
-        "preset_count": sum(len(items) for items in presets.values()),
         "restored_at": restored_at,
     }
 
@@ -232,6 +260,10 @@ def snapshot_info(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
 
 def verify_snapshot(state_dir: Path, snapshot_id: str) -> bool:
     path = _snapshot_path(state_dir, snapshot_id)
+    return _verify_snapshot_path(path)
+
+
+def _verify_snapshot_path(path: Path) -> bool:
     checksums = path / "checksums.sha256"
     if not checksums.is_file():
         return False
@@ -243,6 +275,23 @@ def verify_snapshot(state_dir: Path, snapshot_id: str) -> bool:
         if not target.is_file() or _sha256_file(target) != expected:
             return False
     return True
+
+
+def _safe_zip_top(name: str) -> str:
+    normalized = name.replace("\\", "/").lstrip("/")
+    parts = [part for part in normalized.split("/") if part and part not in {".", ".."}]
+    return parts[0] if parts else ""
+
+
+def _safe_extract_target(root: Path, name: str) -> Path:
+    normalized = name.replace("\\", "/").lstrip("/")
+    parts = [part for part in normalized.split("/") if part and part not in {".", ".."}]
+    if not parts:
+        raise ValueError("invalid empty zip member")
+    target = (root / Path(*parts)).resolve()
+    if not str(target).startswith(str(root.resolve())):
+        raise ValueError("invalid zip path")
+    return target
 
 
 def snapshot_file_path(state_dir: Path, snapshot_id: str, file_name: str) -> Path:
@@ -278,40 +327,57 @@ def snapshot_archive_path(state_dir: Path, snapshot_id: str) -> Path:
 
 
 def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None:
+    (root / "domains").mkdir()
     (root / "strategies").mkdir()
-    (root / "presets").mkdir()
-    (root / "settings").mkdir()
-    strategy_count = _export_strategies(state_dir, root)
-    preset_count = _export_presets(root, state_dir)
-    _write_text(root / "settings" / "discovery-profiles.yaml", "profiles: []\n")
+    domain_count = _export_domains(state_dir, root)
+    strategy_count, link_count = _export_strategies(state_dir, root)
     manifest = {
-        "schema_version": "1",
+        "schema_version": "2",
         "created_at": now_iso(),
         "snapshot_id": snapshot_id,
         "app_version": __version__,
         "storage": "sqlite",
         "db_path": str(db_path(state_dir)),
+        "domain_count": str(domain_count),
         "strategy_count": str(strategy_count),
-        "preset_count": str(preset_count),
+        "link_count": str(link_count),
+        "preset_count": "0",
         "completed": "true",
     }
     _write_text(root / "manifest.yaml", _yaml_mapping(manifest))
     _write_checksums(root)
 
 
-def _export_strategies(state_dir: Path, root: Path) -> int:
+def _export_domains(state_dir: Path, root: Path) -> int:
+    import_candidates_json_if_needed(state_dir, candidate_id_for)
+    count = 0
+    with connect(state_dir) as conn:
+        with (root / "domains" / "domains.ndjson").open("w", encoding="utf-8") as handle:
+            for row in conn.execute(
+                """
+                SELECT d.name AS domain, d.service_group, d.created_at, d.updated_at
+                FROM domains d
+                WHERE EXISTS (
+                    SELECT 1 FROM strategy_domain_results r WHERE r.domain_id = d.id
+                )
+                ORDER BY d.name ASC
+                """
+            ):
+                count += 1
+                handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    return count
+
+
+def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
     import_candidates_json_if_needed(state_dir, candidate_id_for)
     strategy_count = 0
+    link_count = 0
     with connect(state_dir) as conn:
         with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT s.id, s.protocol, s.args, s.status, s.first_seen_at, s.last_seen_at,
-                       COALESCE(SUM(CASE WHEN r.source_mode = 'single_domain' THEN r.success_count ELSE 0 END), 0) AS seen_count,
-                       COALESCE(SUM(CASE WHEN r.source_mode = 'multi_domain' THEN r.success_count ELSE 0 END), 0) AS common_seen_count
+                SELECT s.id, s.protocol, s.args, s.status, s.first_seen_at, s.last_seen_at
                 FROM strategies s
-                LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
-                GROUP BY s.id
                 ORDER BY s.last_seen_at DESC, s.id ASC
                 """
             ):
@@ -320,53 +386,19 @@ def _export_strategies(state_dir: Path, root: Path) -> int:
         with (root / "strategies" / "strategy-domain-links.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT r.strategy_id AS candidate_id, d.name AS domain, r.protocol, r.first_seen_at,
-                       r.last_seen_at, r.success_count AS seen_count, r.source_mode
+                SELECT r.strategy_id AS strategy_id, d.name AS domain, r.protocol, r.first_seen_at,
+                       r.last_seen_at, r.source_mode
                 FROM strategy_domain_results r
                 JOIN domains d ON d.id = r.domain_id
                 ORDER BY d.name, r.strategy_id
                 """
             ):
+                link_count += 1
                 payload = dict(row)
+                payload["candidate_id"] = payload["strategy_id"]
                 payload["scope"] = "common" if payload.pop("source_mode", "") == "multi_domain" else "domain"
                 handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
-        with (root / "strategies" / "strategy-stats.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute(
-                """
-                SELECT s.id, s.protocol, s.last_seen_at,
-                       COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS domain_count,
-                       COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS common_domain_count,
-                       COALESCE(SUM(CASE WHEN r.source_mode = 'single_domain' THEN r.success_count ELSE 0 END), 0) AS seen_count,
-                       COALESCE(SUM(CASE WHEN r.source_mode = 'multi_domain' THEN r.success_count ELSE 0 END), 0) AS common_seen_count
-                FROM strategies s
-                LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
-                GROUP BY s.id
-                ORDER BY s.last_seen_at DESC, s.id ASC
-                """
-            ):
-                handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
-    return strategy_count
-
-
-def _export_presets(root: Path, state_dir: Path | None = None) -> int:
-    sets = domain_sets()
-    custom = read_custom_presets(state_dir) if state_dir else {"finder": {}, "common": {}}
-    builtin = {
-        "presets": [
-            {"name": name, "domains": domains}
-            for name, domains in sorted(sets.items(), key=lambda item: item[0])
-        ]
-    }
-    sources = {
-        "sources": [
-            {"name": name, "source": "builtin", "updated_at": now_iso()}
-            for name in sorted(sets)
-        ]
-    }
-    _write_text(root / "presets" / "builtin-presets.yaml", _yaml_value(builtin))
-    _write_text(root / "presets" / "user-presets.yaml", _yaml_value({"presets": custom}))
-    _write_text(root / "presets" / "preset-sources.yaml", _yaml_value(sources))
-    return len(sets) + sum(len(items) for items in custom.values())
+    return strategy_count, link_count
 
 
 def _write_checksums(root: Path) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from ..backups import create_snapshot_if_idle, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
+from ..backups import create_snapshot_if_idle, import_snapshot_archive, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
 from ..jobs import JobRunner
@@ -84,6 +84,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
+            if path == "/api/backups/upload":
+                try:
+                    self._json(import_snapshot_archive(config.output.state_dir, self._request_upload_bytes()), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
             try:
                 payload = self._request_json()
             except Exception as exc:  # noqa: BLE001
@@ -156,6 +162,20 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _request_upload_bytes(self) -> bytes:
+            length = int(self.headers.get("Content-Length") or "0")
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(length)
+            if content_type.startswith("application/zip") or content_type.startswith("application/octet-stream"):
+                return body
+            if content_type.startswith("multipart/form-data"):
+                marker = "boundary="
+                if marker not in content_type:
+                    raise ValueError("multipart boundary is missing")
+                boundary = content_type.split(marker, 1)[1].strip().strip('"')
+                return _multipart_file_bytes(body, boundary)
+            raise ValueError("expected zip upload")
 
         def _download_backup(self, config: AppConfig, query: dict[str, list[str]]) -> None:
             snapshot_id = _query_one(query, "snapshot")
@@ -358,6 +378,23 @@ button {
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
 button.secondary { background: var(--surface-soft); color: var(--blue-strong); }
 button.secondary:hover { background: #243149; }
+label.file-button {
+  min-height: 44px;
+  border: 1px solid var(--blue);
+  background: var(--surface-soft);
+  color: var(--blue-strong);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+label.file-button:hover { background: #243149; }
 button.danger { border-color: var(--red); background: var(--red); color: #ffffff; }
 button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
 button.secondary.danger { background: var(--surface-soft); color: var(--red); }
@@ -1242,6 +1279,9 @@ pre {
         <div class="button-row">
           <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
           <button data-action="create-backup" type="button">Создать бекап сейчас</button>
+          <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
+          <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
+          <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
         </div>
         <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
         <div class="backup-restore-panel">
@@ -2218,7 +2258,6 @@ function backupCard(item){
     <div class="backup-meta">
       <div>Размер: ${esc(formatBytes(item.size_bytes || 0))}</div>
       <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
-      <div>Пресетов: ${esc(item.preset_count || 0)}</div>
     </div>
     <div class="backup-downloads">
       <div class="backup-download-block backup-archive">
@@ -2569,7 +2608,7 @@ async function createBackup(){
 async function restoreBackup(snapshotId){
   const id = String(snapshotId || '').trim();
   if (!id) return;
-  const ok = window.confirm(`Восстановить данные из бекапа ${id}? Текущие найденные стратегии и пользовательские пресеты будут заменены.`);
+  const ok = window.confirm(`Восстановить данные из бекапа ${id}? Будут заменены найденные стратегии и связи стратегия-домен. Пользовательские пресеты не меняются.`);
   if (!ok) return;
   try {
     const data = await postJson('/api/backups/restore', { snapshot: id });
@@ -2590,6 +2629,28 @@ async function restoreBackup(snapshotId){
     }
   } catch (error) {
     setMessage(`Ошибка восстановления бекапа: ${error.message}`, 'bad');
+  }
+}
+async function uploadBackup(){
+  const input = el('backup-upload-file');
+  const file = input && input.files ? input.files[0] : null;
+  if (!file) {
+    setMessage('Выберите ZIP-архив бекапа', 'warn');
+    return;
+  }
+  try {
+    const response = await fetch('/api/backups/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/zip' },
+      body: file
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    setMessage('Бекап загружен и проверен', 'good');
+    input.value = '';
+    await refreshBackups();
+  } catch (error) {
+    setMessage(`Ошибка загрузки бекапа: ${error.message}`, 'bad');
   }
 }
 async function startJob(url, payload, text){
@@ -2663,6 +2724,10 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'restore-selected-backup') {
     restoreBackup(el('backup-restore-select')?.value || '');
+    return;
+  }
+  if (button.dataset.action === 'upload-backup') {
+    uploadBackup();
     return;
   }
   if (button.dataset.action === 'load-more-candidates') {
@@ -2871,6 +2936,22 @@ def _query_domains(query: dict[str, list[str]], key: str) -> list[str]:
 def _query_one(query: dict[str, list[str]], key: str) -> str:
     values = query.get(key) or []
     return str(values[0]).strip() if values else ""
+
+
+def _multipart_file_bytes(body: bytes, boundary: str) -> bytes:
+    delimiter = ("--" + boundary).encode("utf-8")
+    for part in body.split(delimiter):
+        if b"Content-Disposition:" not in part or b"filename=" not in part:
+            continue
+        header, sep, payload = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        payload = payload.rstrip(b"\r\n")
+        if payload.endswith(b"--"):
+            payload = payload[:-2].rstrip(b"\r\n")
+        if payload:
+            return payload
+    raise ValueError("backup file is missing")
 
 
 def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:

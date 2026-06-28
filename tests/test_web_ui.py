@@ -40,6 +40,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("backup-downloads", html)
         self.assertIn("backup-archive-link", html)
         self.assertIn("backup-file-links", html)
+        self.assertIn("backup-upload-file", html)
+        self.assertIn("/api/backups/upload", html)
         self.assertIn("Файлы бекапа", html)
         self.assertIn("Восстановить выбранный бекап", html)
         self.assertIn("data-action=\"restore-selected-backup\"", html)
