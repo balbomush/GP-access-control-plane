@@ -205,6 +205,32 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             self.assertEqual(common["total"], 1)
             self.assertEqual(common["candidates"][0]["args"], "--payload tls_client_hello --lua-desync=common")
 
+    def test_strategy_domain_results_has_no_persistent_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            parsed = {
+                "candidates": [
+                    {
+                        "domain": "youtube.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=fake",
+                    }
+                ]
+            }
+
+            upsert_candidates(state_dir, parsed, {"id": "run1"})
+
+            with connect(state_dir) as conn:
+                columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(strategy_domain_results)").fetchall()}
+                self.assertNotIn("success_count", columns)
+                self.assertNotIn("fail_count", columns)
+                self.assertEqual(
+                    conn.execute("SELECT success_count FROM domain_stats WHERE domain = 'youtube.com'").fetchone()[0],
+                    1,
+                )
+
     def test_parse_live_success_without_summary(self) -> None:
         stdout = """
 !!!!! curl_test_https_tls12: working strategy found for ipv4 youtube.com : nfqws2 --payload tls_client_hello --lua-desync=fake !!!!!

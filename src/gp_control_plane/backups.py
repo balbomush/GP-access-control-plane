@@ -197,10 +197,9 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strategy_domain_results(
-                    strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at,
-                    success_count, fail_count, last_success_run_id, last_fail_run_id
+                    strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, 0, '', '')
+                VALUES(?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
@@ -209,7 +208,6 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     source_mode,
                     str(item.get("first_seen_at") or ""),
                     str(item.get("last_seen_at") or ""),
-                    1,
                 ),
             )
         conn.execute(
