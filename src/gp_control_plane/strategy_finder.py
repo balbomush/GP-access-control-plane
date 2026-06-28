@@ -159,6 +159,7 @@ PHASE_CHECK_ZAPRET = "checking_zapret"
 PHASE_CHECK_DOMAIN = "checking_domain"
 PHASE_DISCOVERY = "strategy_discovery"
 PHASE_SUMMARY = "strategy_summary"
+PHASE_SAVING = "saving_results"
 PHASE_COMPLETE = "complete"
 PHASE_LABELS = {
     PHASE_CHECK_VPN: "проверка VPN",
@@ -166,6 +167,7 @@ PHASE_LABELS = {
     PHASE_CHECK_DOMAIN: "проверка доступности домена",
     PHASE_DISCOVERY: "подбор стратегий",
     PHASE_SUMMARY: "суммаризация стратегий",
+    PHASE_SAVING: "сохранение результатов",
     PHASE_COMPLETE: "завершено",
 }
 _ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -801,6 +803,11 @@ class _LiveStdoutRecorder:
             self._write_progress_locked(force=True, run=run)
             return progress
 
+    def mark_phase(self, phase: str, run: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            self._phase = phase
+            self._write_progress_locked(force=True, run=run or self._run)
+
     def close(self) -> None:
         with self._lock:
             self._close_conn_locked()
@@ -1142,11 +1149,80 @@ def _process_counts() -> dict[str, int]:
     return counts
 
 
+class _CompactStdoutWriter:
+    def __init__(self, handle: Any):
+        self._handle = handle
+        self._pending_attempt = ""
+        self._attempt_lines = 0
+        self._summary_lines = 0
+        self._section = ""
+
+    def write(self, line: str) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+        if stripped in {"* SUMMARY", "* COMMON"}:
+            self._flush_attempt_counter()
+            self._section = stripped.removeprefix("* ").lower()
+            self._write(line)
+            return
+        script = _script_name_from_line(stripped)
+        if script:
+            self._flush_attempt_counter()
+            self._section = ""
+            self._write(line)
+            return
+        attempt = _live_attempt_line(stripped)
+        if attempt:
+            self._pending_attempt = attempt
+            self._attempt_lines += 1
+            if self._attempt_lines % 1000 == 0:
+                self._write(f"# compact-log: skipped {self._attempt_lines} attempt lines\n")
+            return
+        if stripped == "!!!!! AVAILABLE !!!!!":
+            if self._pending_attempt:
+                self._write(self._pending_attempt + "\n")
+            self._write(line)
+            self._pending_attempt = ""
+            return
+        if _candidate_from_live_success_line(stripped):
+            self._write(line)
+            return
+        if stripped.startswith("UNAVAILABLE") or stripped.startswith("FAILED"):
+            self._pending_attempt = ""
+            return
+        if self._section in {"summary", "common"}:
+            self._summary_lines += 1
+            if self._summary_lines % 1000 == 0:
+                self._write(f"# compact-log: skipped {self._summary_lines} summary/common lines\n")
+            return
+        if stripped.startswith("* "):
+            self._write(line)
+
+    def close(self) -> None:
+        self._flush_attempt_counter()
+
+    def _flush_attempt_counter(self) -> None:
+        if self._attempt_lines:
+            self._write(f"# compact-log: total attempt lines skipped {self._attempt_lines}\n")
+            self._attempt_lines = 0
+        self._pending_attempt = ""
+
+    def _write(self, line: str) -> None:
+        self._handle.write(line)
+        self._handle.flush()
+
+
+def _stdout_log_mode(env: dict[str, str]) -> str:
+    return "debug" if _truthy(env.get("GP_DEBUG_STDOUT"), default=False) else "compact"
+
+
 def _run_process_with_live_stdout(
     command: list[str],
     env: dict[str, str],
     stdout_log: Path,
     stderr_log: Path,
+    debug_stdout_log: Path | None,
     timeout_seconds: int,
     stop_event: threading.Event | None,
     recorder: _LiveStdoutRecorder,
@@ -1157,7 +1233,10 @@ def _run_process_with_live_stdout(
     stopped = False
     reader_errors: list[BaseException] = []
 
+    stdout_mode = _stdout_log_mode(env)
+    debug_handle = debug_stdout_log.open("w", encoding="utf-8") if debug_stdout_log and stdout_mode == "debug" else None
     with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
+        compact_writer = _CompactStdoutWriter(stdout_handle)
         process = subprocess.Popen(
             command,
             text=True,
@@ -1174,11 +1253,16 @@ def _run_process_with_live_stdout(
                 if process.stdout is None:
                     return
                 for line in process.stdout:
-                    stdout_handle.write(line)
-                    stdout_handle.flush()
+                    compact_writer.write(line)
+                    if debug_handle:
+                        debug_handle.write(line)
                     recorder.record_line(line)
             except BaseException as exc:  # noqa: BLE001
                 reader_errors.append(exc)
+            finally:
+                compact_writer.close()
+                if debug_handle:
+                    debug_handle.flush()
 
         reader = threading.Thread(target=read_stdout, daemon=True)
         reader.start()
@@ -1190,6 +1274,7 @@ def _run_process_with_live_stdout(
                 _stop_process_group(process)
                 _cleanup_blockcheck_processes()
                 _cleanup_nft_blockcheck_tables()
+                recorder.mark_phase(PHASE_SAVING)
                 returncode = process.returncode
                 break
             wait_timeout = 1.0
@@ -1201,6 +1286,7 @@ def _run_process_with_live_stdout(
                     _stop_process_group(process)
                     _cleanup_blockcheck_processes()
                     _cleanup_nft_blockcheck_tables()
+                    recorder.mark_phase(PHASE_SAVING)
                     returncode = process.returncode
                     break
                 wait_timeout = min(1.0, remaining)
@@ -1212,6 +1298,8 @@ def _run_process_with_live_stdout(
             except subprocess.TimeoutExpired:
                 continue
         reader.join(timeout=5)
+    if debug_handle:
+        debug_handle.close()
 
     if reader_errors:
         raise RuntimeError(f"failed to read blockcheck stdout: {reader_errors[0]}")
@@ -1260,6 +1348,7 @@ def _run_blockcheck_live(
     progress_log = logs / f"{run_id}.{kind}.progress.json"
     metrics_log = logs / f"{run_id}.{kind}.metrics.ndjson"
     summary_fallback_log = logs / f"{run_id}.{kind}.summary-fallback.ndjson"
+    debug_stdout_log = logs / f"{run_id}.{kind}.debug.stdout.log"
     attempt_plan = _standard_attempt_plan(
         domains=clean_domains,
         test=test,
@@ -1282,6 +1371,8 @@ def _run_blockcheck_live(
         "progress_log": str(progress_log),
         "metrics_log": str(metrics_log),
         "summary_fallback_log": str(summary_fallback_log),
+        "debug_stdout_log": str(debug_stdout_log),
+        "stdout_log_mode": _stdout_log_mode(full_env),
         "candidate_count": 0,
         "phase": PHASE_CHECK_VPN,
         "test": test,
@@ -1296,6 +1387,7 @@ def _run_blockcheck_live(
         env=full_env,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
+        debug_stdout_log=debug_stdout_log,
         timeout_seconds=timeout_seconds,
         stop_event=stop_event,
         recorder=recorder,
@@ -1314,6 +1406,8 @@ def _run_blockcheck_live(
         "progress_log": str(progress_log),
         "metrics_log": str(metrics_log),
         "summary_fallback_log": str(summary_fallback_log),
+        "debug_stdout_log": str(debug_stdout_log),
+        "stdout_log_mode": _stdout_log_mode(full_env),
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
@@ -1405,6 +1499,9 @@ def _run_blockcheck_command_live(
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
     progress_log = logs / f"{run_id}.{kind}.progress.json"
+    metrics_log = logs / f"{run_id}.{kind}.metrics.ndjson"
+    summary_fallback_log = logs / f"{run_id}.{kind}.summary-fallback.ndjson"
+    debug_stdout_log = logs / f"{run_id}.{kind}.debug.stdout.log"
     attempt_plan = _standard_attempt_plan(
         domains=domains,
         test=test,
@@ -1425,7 +1522,12 @@ def _run_blockcheck_command_live(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "progress_log": str(progress_log),
+        "metrics_log": str(metrics_log),
+        "summary_fallback_log": str(summary_fallback_log),
+        "debug_stdout_log": str(debug_stdout_log),
+        "stdout_log_mode": _stdout_log_mode(env),
         "candidate_count": 0,
+        "phase": PHASE_CHECK_VPN,
         "test": test,
         **option_fields,
         "curl_parallelism": curl_parallelism,
@@ -1439,6 +1541,7 @@ def _run_blockcheck_command_live(
         env=env,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
+        debug_stdout_log=debug_stdout_log,
         timeout_seconds=timeout_seconds,
         stop_event=stop_event,
         recorder=recorder,
@@ -1455,10 +1558,18 @@ def _run_blockcheck_command_live(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "progress_log": str(progress_log),
+        "metrics_log": str(metrics_log),
+        "summary_fallback_log": str(summary_fallback_log),
+        "debug_stdout_log": str(debug_stdout_log),
+        "stdout_log_mode": _stdout_log_mode(env),
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
         "common_candidate_count": len(parsed["common_candidates"]),
+        "phase": parsed.get("phase") or PHASE_COMPLETE,
+        "summary_verified": parsed.get("summary_verified", 0),
+        "summary_fallbacks": parsed.get("summary_fallbacks", 0),
+        "summary_common_seen": parsed.get("summary_common_seen", 0),
         "timed_out": process_result["timed_out"],
         "stopped": process_result["stopped"],
         "timeout_seconds": timeout_seconds,
@@ -1470,6 +1581,7 @@ def _run_blockcheck_command_live(
     run["progress"] = recorder.progress(run)
     if kind in {"standard-discovery", "multi-domain-discovery"}:
         run["total_candidates"] = candidate_total(state_dir) if parsed.get("live_recorded") else upsert_candidates(state_dir, parsed, run)
+    recorder.close()
     append_run(state_dir, run)
     return run
 

@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..backups import create_snapshot_if_idle, list_snapshots, restore_snapshot_if_idle, snapshot_file_path
 from ..config import AppConfig
+from ..diagnostics import diagnostics_payload
 from ..jobs import JobRunner
 from ..state import now_iso, read_state, write_state
 from ..storage import read_custom_presets, save_custom_presets
@@ -40,6 +41,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._html()
             elif path == "/api/status":
                 self._json(status_payload(config))
+            elif path == "/api/diagnostics":
+                self._json(diagnostics_payload(config.output.state_dir))
             elif path == "/api/strategy-finder/domains":
                 self._json(domain_sets())
             elif path == "/api/strategy-finder/candidate-domains":
@@ -66,6 +69,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
             elif path in {
                 "/api/status",
+                "/api/diagnostics",
                 "/api/strategy-finder/domains",
                 "/api/strategy-finder/candidate-domains",
                 "/api/strategy-finder/candidates",
@@ -1599,11 +1603,12 @@ function renderMetrics(){
   const ready = Boolean(zapret.nfqws2_found && zapret.blockcheck_found);
   const rootReady = Boolean(zapret.root_helper_ready);
   const busy = isBusy();
+  const jobStatus = board.current_job_status || (busy ? 'running' : '');
   const run = latestRun();
   setText('metric-zapret', ready ? 'Готов' : 'Не готов');
   setText('metric-zapret-note', `nfqws2: ${zapret.nfqws2_found ? 'да' : 'нет'}, blockcheck: ${zapret.blockcheck_found ? 'да' : 'нет'}, root-helper: ${rootReady ? 'да' : 'нет'}`);
-  setText('metric-job', busy ? 'В работе' : 'Свободна');
-  setText('metric-job-note', busy ? `ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
+  setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободна');
+  setText('metric-job-note', busy ? `${board.current_job_name || 'job'} · ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
   const candidateMetric = state.candidateView === 'domain' ? state.candidateDomainStrategyTotal : (state.candidateTotal || state.candidates.length);
   const loadedMetric = state.candidateView === 'domain' ? `${state.candidateDomains.length} доменов` : `${state.candidates.length} стратегий`;
   setText('metric-candidates', String(candidateMetric));
@@ -2104,6 +2109,7 @@ function phaseLabel(phase){
     checking_domain: 'проверка доступности домена',
     strategy_discovery: 'подбор стратегий',
     strategy_summary: 'суммаризация стратегий',
+    saving_results: 'сохранение результатов',
     complete: 'завершено'
   };
   return labels[phase] || phase || '-';
@@ -2817,6 +2823,8 @@ def _clear_stale_current_job(config: AppConfig) -> None:
     if not state.get("current_job"):
         return
     state["current_job"] = None
+    state["current_job_name"] = None
+    state["current_job_status"] = None
     write_state(config.output.state_dir, state)
 
 

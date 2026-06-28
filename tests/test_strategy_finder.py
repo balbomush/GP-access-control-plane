@@ -12,6 +12,7 @@ from gp_control_plane.state import append_jsonl
 from gp_control_plane.storage import connect
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
+    _CompactStdoutWriter,
     _LiveStdoutRecorder,
     _resolve_blockcheck_script,
     _standard_attempt_plan,
@@ -609,6 +610,25 @@ pktws_check_http3()
             self.assertEqual(len(live_lines), 1)
             self.assertTrue(progress_log.exists())
             self.assertTrue(metrics_log.exists())
+
+    def test_compact_stdout_writer_keeps_success_and_skips_failed_attempt_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "compact.log"
+            with path.open("w", encoding="utf-8") as handle:
+                writer = _CompactStdoutWriter(handle)
+                writer.write("* script : standard/10-test.sh\n")
+                writer.write("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --failed\n")
+                writer.write("UNAVAILABLE code=28\n")
+                writer.write("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --success\n")
+                writer.write("!!!!! AVAILABLE !!!!!\n")
+                writer.close()
+
+            text = path.read_text(encoding="utf-8")
+
+            self.assertIn("* script : standard/10-test.sh", text)
+            self.assertNotIn("--failed", text)
+            self.assertIn("--success", text)
+            self.assertIn("!!!!! AVAILABLE !!!!!", text)
 
     def test_multidomain_runner_overrides_strategy_check_order(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

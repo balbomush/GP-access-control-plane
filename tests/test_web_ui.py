@@ -277,6 +277,29 @@ class WebUiTests(unittest.TestCase):
 
             self.assertIsNone(read_state(config.output.state_dir)["current_job"])
 
+    def test_diagnostics_endpoint_returns_runtime_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/diagnostics")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"process"', body)
+            self.assertIn('"files"', body)
+
 
 def _free_port() -> int:
     with socket.socket() as sock:
