@@ -35,6 +35,60 @@ def connect(state_dir: Path) -> sqlite3.Connection:
     return conn
 
 
+def storage_status(state_dir: Path) -> dict[str, Any]:
+    path = db_path(state_dir)
+    with connect(state_dir) as conn:
+        meta = {
+            str(row["key"] or ""): str(row["value"] or "")
+            for row in conn.execute("SELECT key, value FROM meta ORDER BY key").fetchall()
+        }
+        counts = {table: _table_count(conn, table) for table in _STORAGE_STATUS_TABLES}
+        view_counts = {view: _table_count(conn, view) for view in _STORAGE_STATUS_VIEWS}
+        integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+    return {
+        "db_path": str(path),
+        "schema_version": meta.get("schema_version", ""),
+        "expected_schema_version": str(SCHEMA_VERSION),
+        "integrity_check": integrity,
+        "db_size_bytes": _file_size(path),
+        "wal_size_bytes": _file_size(path.with_name(f"{path.name}-wal")),
+        "shm_size_bytes": _file_size(path.with_name(f"{path.name}-shm")),
+        "tables": counts,
+        "views": view_counts,
+        "meta": meta,
+    }
+
+
+_STORAGE_STATUS_TABLES = (
+    "runs",
+    "domains",
+    "strategies",
+    "strategy_domain_results",
+    "strategy_attempts",
+    "domain_presets",
+    "preset_domains",
+    "candidates",
+    "candidate_domains",
+    "candidate_common_domains",
+    "candidate_seen_events",
+    "presets",
+)
+
+_STORAGE_STATUS_VIEWS = ("domain_stats", "strategy_stats")
+
+
+def _table_count(conn: sqlite3.Connection, name: str) -> int:
+    row = conn.execute(f"SELECT COUNT(*) AS count FROM {name}").fetchone()
+    return int(row["count"]) if row else 0
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """

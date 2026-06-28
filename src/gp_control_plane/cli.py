@@ -14,6 +14,7 @@ from .strategy_finder import (
     run_multi_domain_discovery,
     run_standard_discovery,
 )
+from .storage import storage_status
 from .web.app import serve
 from .zapret2 import check_install
 
@@ -61,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     finder_multi.add_argument("--no-skip-dnscheck", action="store_true")
     finder_multi.add_argument("--no-skip-ipblock", action="store_true")
     finder_multi.add_argument("--curl-parallelism", type=int, default=4)
+    storage_parser = subparsers.add_parser("storage", help="Inspect local SQLite data")
+    storage_subparsers = storage_parser.add_subparsers(dest="storage_command", required=True)
+    storage_subparsers.add_parser("status", help="Print local SQLite status")
     web_parser = subparsers.add_parser("web", help="Run local Raspberry Pi web UI")
     web_parser.add_argument("--host", default="0.0.0.0")
     web_parser.add_argument("--port", type=int, default=8080)
@@ -130,6 +134,12 @@ def _main(args: argparse.Namespace) -> int:
             _print_json(run)
             return 0
         raise ValueError("unsupported strategy-finder command")
+
+    if args.command == "storage":
+        if args.storage_command == "status":
+            _print_json(storage_status(config.output.state_dir))
+            return 0
+        raise ValueError("unsupported storage command")
 
     if args.command == "web":
         serve(config, host=args.host, port=args.port)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.storage import append_run, connect
+from gp_control_plane.storage import append_run, connect, storage_status
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
     _CompactStdoutWriter,
@@ -205,6 +205,34 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             common = read_candidate_page(state_dir, view="common", domains=["youtube.com", "discord.com"])
             self.assertEqual(common["total"], 1)
             self.assertEqual(common["candidates"][0]["args"], "--payload tls_client_hello --lua-desync=common")
+
+    def test_storage_status_reports_normalized_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            parsed = {
+                "candidates": [
+                    {
+                        "domain": "youtube.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=fake",
+                    }
+                ],
+            }
+
+            upsert_candidates(state_dir, parsed, {"id": "run1"})
+            status = storage_status(state_dir)
+
+            self.assertEqual(status["schema_version"], "4")
+            self.assertEqual(status["expected_schema_version"], "4")
+            self.assertEqual(status["integrity_check"], "ok")
+            self.assertGreater(status["db_size_bytes"], 0)
+            self.assertEqual(status["tables"]["domains"], 1)
+            self.assertEqual(status["tables"]["strategies"], 1)
+            self.assertEqual(status["tables"]["strategy_domain_results"], 1)
+            self.assertEqual(status["views"]["domain_stats"], 1)
+            self.assertEqual(status["views"]["strategy_stats"], 1)
 
     def test_strategy_domain_results_has_no_persistent_counters(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
