@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from .storage import (
     import_candidates_json_if_needed,
     read_run_payloads,
     upsert_candidate_event,
+    upsert_candidate_event_conn,
 )
 from .zapret2 import (
     BLOCKCHECK_ENV_KEYS,
@@ -149,6 +151,23 @@ AMAZON_AWS_DOMAINS = [
 ]
 
 ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
+ETA_SAMPLE_MIN_ATTEMPTS = 3
+METRICS_INTERVAL_SECONDS = 10.0
+METRICS_MAX_BYTES = 1_000_000
+PHASE_CHECK_VPN = "checking_vpn"
+PHASE_CHECK_ZAPRET = "checking_zapret"
+PHASE_CHECK_DOMAIN = "checking_domain"
+PHASE_DISCOVERY = "strategy_discovery"
+PHASE_SUMMARY = "strategy_summary"
+PHASE_COMPLETE = "complete"
+PHASE_LABELS = {
+    PHASE_CHECK_VPN: "проверка VPN",
+    PHASE_CHECK_ZAPRET: "проверка zapret",
+    PHASE_CHECK_DOMAIN: "проверка доступности домена",
+    PHASE_DISCOVERY: "подбор стратегий",
+    PHASE_SUMMARY: "суммаризация стратегий",
+    PHASE_COMPLETE: "завершено",
+}
 _ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
 _SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
@@ -535,9 +554,12 @@ def close_stale_running_runs(state_dir: Path) -> int:
             "stdout_log": run.get("stdout_log", ""),
             "stderr_log": run.get("stderr_log", ""),
             "progress_log": run.get("progress_log", ""),
+            "metrics_log": run.get("metrics_log", ""),
+            "summary_fallback_log": run.get("summary_fallback_log", ""),
             "candidate_count": int(run.get("candidate_count") or 0),
             "common_candidate_count": int(run.get("common_candidate_count") or 0),
             "total_candidates": int(run.get("total_candidates") or 0),
+            "phase": run.get("phase") or (progress.get("phase") if isinstance(progress, dict) else ""),
             "stopped": True,
             "interrupted": True,
             "interrupted_reason": "web service stopped while run was marked active",
@@ -591,6 +613,7 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log) if stderr_log else "",
             "progress": progress,
+            "metrics": _read_latest_metrics(run),
         }
     return {
         "run_id": None,
@@ -599,6 +622,7 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
         "stdout_tail": "",
         "stderr_tail": "",
         "progress": progress_from_stdout("", {}),
+        "metrics": {},
     }
 
 
@@ -614,6 +638,23 @@ def _read_progress_log(run: dict[str, Any]) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _read_latest_metrics(run: dict[str, Any]) -> dict[str, Any]:
+    metrics_log = str(run.get("metrics_log") or "")
+    if not metrics_log:
+        return {}
+    path = Path(metrics_log)
+    if not path.is_file():
+        return {}
+    for line in reversed(_tail_lines(path, 20)):
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
 def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
@@ -698,19 +739,29 @@ class _LiveStdoutRecorder:
         self._available_path = _finder_dir(state_dir) / "available.ndjson"
         progress_log = str(run.get("progress_log") or "")
         self._progress_log = Path(progress_log) if progress_log else None
+        fallback_log = str(run.get("summary_fallback_log") or "")
+        self._summary_fallback_log = Path(fallback_log) if fallback_log else None
+        self._metrics = _RuntimeMetricsSampler(state_dir, run)
         self._last_progress_attempted = -1
         self._last_progress_written_at = 0.0
         self._section = ""
         self._current_script = ""
+        self._phase = PHASE_CHECK_VPN
         self._pending_attempt: str | None = None
         self._attempted = 0
         self._attempts_by_script: dict[str, int] = {}
+        self._attempt_times: deque[float] = deque(maxlen=21)
+        self._summary_verified = 0
+        self._summary_fallbacks = 0
+        self._summary_common_seen = 0
         self._summary: list[str] = []
         self._common: list[str] = []
         self._results: list[dict[str, Any]] = []
         self._common_results: list[dict[str, Any]] = []
         self._candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._common_candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self._conn: Any | None = None
+        self._conn_writes = 0
 
     def record_line(self, raw_line: str) -> None:
         line = raw_line.strip()
@@ -722,6 +773,7 @@ class _LiveStdoutRecorder:
 
     def parsed(self) -> dict[str, Any]:
         with self._lock:
+            self._close_conn_locked()
             candidates = list(self._candidates.values())
             common_candidates = list(self._common_candidates.values())
             results = list(self._results)
@@ -736,6 +788,10 @@ class _LiveStdoutRecorder:
                 "common_results": common_results,
                 "direct_available": [item for item in results if item.get("result") == "working without bypass"],
                 "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
+                "phase": self._phase,
+                "summary_verified": self._summary_verified,
+                "summary_fallbacks": self._summary_fallbacks,
+                "summary_common_seen": self._summary_common_seen,
                 "live_recorded": True,
             }
 
@@ -745,20 +801,30 @@ class _LiveStdoutRecorder:
             self._write_progress_locked(force=True, run=run)
             return progress
 
+    def close(self) -> None:
+        with self._lock:
+            self._close_conn_locked()
+
     def _record_line_locked(self, line: str) -> None:
         if line == "* SUMMARY":
             self._section = "summary"
+            self._phase = PHASE_SUMMARY
             return
         if line == "* COMMON":
             self._section = "common"
+            self._phase = PHASE_SUMMARY
             return
+        self._phase = _phase_from_line(line, self._phase)
         script = _script_name_from_line(line)
         if script:
             self._current_script = script
+            self._phase = PHASE_DISCOVERY
             self._attempts_by_script.setdefault(script, 0)
             return
         if _ATTEMPT_RE.match(line):
             self._attempted += 1
+            self._phase = PHASE_DISCOVERY
+            self._attempt_times.append(time.monotonic())
             self._attempts_by_script[self._current_script] = self._attempts_by_script.get(self._current_script, 0) + 1
         attempt = _live_attempt_line(line)
         if attempt:
@@ -786,7 +852,35 @@ class _LiveStdoutRecorder:
                 result_target.append(parsed)
             candidate = _candidate_from_result_line(line, scope=self._section)
             if candidate:
-                self._record_candidate_locked(candidate, common=self._section == "common")
+                self._record_summary_candidate_locked(candidate, common=self._section == "common")
+
+    def _record_summary_candidate_locked(self, candidate: dict[str, Any], common: bool) -> None:
+        if common:
+            self._summary_common_seen += 1
+            return
+        live_key = (
+            "domain",
+            str(candidate.get("test") or ""),
+            str(candidate.get("ip_version") or ""),
+            str(candidate.get("domain") or ""),
+            str(candidate.get("args") or ""),
+        )
+        if live_key in self._candidates:
+            self._summary_verified += 1
+            return
+        fallback = {**candidate, "scope": "domain", "source": "summary_fallback"}
+        self._summary_fallbacks += 1
+        self._record_candidate_locked(fallback, common=False)
+        if self._summary_fallback_log:
+            append_jsonl(
+                self._summary_fallback_log,
+                {
+                    "run_id": self._run["id"],
+                    "seen_at": now_iso(),
+                    "reason": "summary candidate was not recorded by live parser",
+                    "candidate": fallback,
+                },
+            )
 
     def _record_candidate_locked(self, candidate: dict[str, Any], common: bool) -> None:
         key = (
@@ -809,8 +903,10 @@ class _LiveStdoutRecorder:
             },
         )
         candidate_id = candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or ""))
-        upsert_candidate_event(
-            self._state_dir,
+        if self._conn is None:
+            self._conn = connect(self._state_dir)
+        upsert_candidate_event_conn(
+            self._conn,
             candidate_id=candidate_id,
             protocol=str(candidate.get("protocol") or ""),
             args=str(candidate.get("args") or ""),
@@ -823,6 +919,9 @@ class _LiveStdoutRecorder:
             seen_at=now_iso(),
             common=common,
         )
+        self._conn_writes += 1
+        if self._conn_writes >= 50:
+            self._flush_conn_locked()
 
     def _progress_locked(self, run: dict[str, Any]) -> dict[str, Any]:
         successful = len(
@@ -831,12 +930,18 @@ class _LiveStdoutRecorder:
                 for item in [*self._candidates.values(), *self._common_candidates.values()]
             }
         )
+        sample = _average_attempt_ms(self._attempt_times)
         return _progress_from_counts(
             run=run,
             attempted=self._attempted,
             attempts_by_script=dict(self._attempts_by_script),
             successful=successful,
             current_script=self._current_script,
+            phase=self._phase,
+            runtime_ms_per_attempt=sample,
+            runtime_sample_count=len(self._attempt_times),
+            summary_verified=self._summary_verified,
+            summary_fallbacks=self._summary_fallbacks,
         )
 
     def _write_progress_locked(self, force: bool = False, run: dict[str, Any] | None = None) -> None:
@@ -854,8 +959,187 @@ class _LiveStdoutRecorder:
             tmp.replace(self._progress_log)
             self._last_progress_attempted = self._attempted
             self._last_progress_written_at = now
+            self._metrics.maybe_write(progress)
         except OSError:
             return
+
+    def _flush_conn_locked(self) -> None:
+        if self._conn is None:
+            return
+        self._conn.commit()
+        self._conn_writes = 0
+
+    def _close_conn_locked(self) -> None:
+        if self._conn is None:
+            return
+        self._conn.commit()
+        self._conn.close()
+        self._conn = None
+        self._conn_writes = 0
+
+
+class _RuntimeMetricsSampler:
+    def __init__(self, state_dir: Path, run: dict[str, Any]):
+        self._state_dir = state_dir
+        self._run = run
+        metrics_log = str(run.get("metrics_log") or "")
+        self._path = Path(metrics_log) if metrics_log else None
+        self._last_written_at = 0.0
+        self._last_cpu: tuple[int, int, int] | None = None
+
+    def maybe_write(self, progress: dict[str, Any]) -> None:
+        if not self._path:
+            return
+        now = time.monotonic()
+        if now - self._last_written_at < METRICS_INTERVAL_SECONDS:
+            return
+        self._last_written_at = now
+        payload = {
+            "timestamp": now_iso(),
+            "run_id": self._run.get("id"),
+            "phase": progress.get("phase"),
+            "phase_label": progress.get("phase_label"),
+            "current_script": progress.get("current_script"),
+            "attempted": progress.get("attempted"),
+            "attempt_total": progress.get("attempt_total"),
+            "remaining_attempts": progress.get("remaining_attempts"),
+            "successful": progress.get("successful"),
+            "eta_seconds": progress.get("eta_seconds"),
+            "eta_status": progress.get("eta_status"),
+            "progress_status": progress.get("progress_status"),
+            "processes": _process_counts(),
+            "system": self._system_metrics(),
+            "files": _runtime_file_sizes(self._state_dir, self._run),
+        }
+        try:
+            _rotate_metrics_file(self._path)
+            append_jsonl(self._path, payload)
+        except OSError:
+            return
+
+    def _system_metrics(self) -> dict[str, Any]:
+        return {
+            "loadavg": _loadavg(),
+            "cpu_percent": self._cpu_percent(),
+            "memory": _meminfo(),
+        }
+
+    def _cpu_percent(self) -> dict[str, float] | None:
+        current = _read_cpu_totals()
+        if current is None:
+            return None
+        previous = self._last_cpu
+        self._last_cpu = current
+        if previous is None:
+            return None
+        total, idle, iowait = current
+        prev_total, prev_idle, prev_iowait = previous
+        delta_total = total - prev_total
+        if delta_total <= 0:
+            return None
+        busy = max(0, delta_total - (idle - prev_idle))
+        iowait_delta = max(0, iowait - prev_iowait)
+        return {
+            "busy": round((busy / delta_total) * 100.0, 1),
+            "iowait": round((iowait_delta / delta_total) * 100.0, 1),
+        }
+
+
+def _rotate_metrics_file(path: Path) -> None:
+    if not path.exists() or path.stat().st_size <= METRICS_MAX_BYTES:
+        return
+    rotated = path.with_suffix(path.suffix + ".1")
+    try:
+        if rotated.exists():
+            rotated.unlink()
+        path.replace(rotated)
+    except OSError:
+        return
+
+
+def _runtime_file_sizes(state_dir: Path, run: dict[str, Any]) -> dict[str, int]:
+    root = _finder_dir(state_dir)
+    paths = {
+        "stdout_log": Path(str(run.get("stdout_log") or "")),
+        "stderr_log": Path(str(run.get("stderr_log") or "")),
+        "progress_log": Path(str(run.get("progress_log") or "")),
+        "available_ndjson": root / "available.ndjson",
+        "sqlite": root / "state.sqlite3",
+        "sqlite_wal": root / "state.sqlite3-wal",
+    }
+    return {name: _file_size(path) for name, path in paths.items()}
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size) if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def _loadavg() -> list[float]:
+    try:
+        return [round(float(item), 2) for item in os.getloadavg()]
+    except (AttributeError, OSError):
+        return []
+
+
+def _meminfo() -> dict[str, int]:
+    path = Path("/proc/meminfo")
+    if not path.is_file():
+        return {}
+    wanted = {"MemTotal", "MemAvailable", "MemFree", "Buffers", "Cached", "SwapTotal", "SwapFree"}
+    result: dict[str, int] = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            key, _, raw_value = line.partition(":")
+            if key not in wanted:
+                continue
+            parts = raw_value.strip().split()
+            if parts:
+                result[key] = int(parts[0])
+    except (OSError, ValueError):
+        return {}
+    return result
+
+
+def _read_cpu_totals() -> tuple[int, int, int] | None:
+    path = Path("/proc/stat")
+    if not path.is_file():
+        return None
+    try:
+        first = path.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        parts = [int(item) for item in first.split()[1:]]
+    except (OSError, IndexError, ValueError):
+        return None
+    if len(parts) < 5:
+        return None
+    idle = parts[3] + parts[4]
+    iowait = parts[4]
+    return (sum(parts), idle, iowait)
+
+
+def _process_counts() -> dict[str, int]:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return {"curl": 0, "nfqws2": 0, "blockcheck2": 0}
+    counts = {"curl": 0, "nfqws2": 0, "blockcheck2": 0}
+    for child in proc.iterdir():
+        if not child.name.isdigit():
+            continue
+        try:
+            cmdline = (child / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+        except OSError:
+            continue
+        if not cmdline:
+            continue
+        if "curl" in cmdline:
+            counts["curl"] += 1
+        if "nfqws2" in cmdline:
+            counts["nfqws2"] += 1
+        if "blockcheck2" in cmdline:
+            counts["blockcheck2"] += 1
+    return counts
 
 
 def _run_process_with_live_stdout(
@@ -974,6 +1258,8 @@ def _run_blockcheck_live(
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
     progress_log = logs / f"{run_id}.{kind}.progress.json"
+    metrics_log = logs / f"{run_id}.{kind}.metrics.ndjson"
+    summary_fallback_log = logs / f"{run_id}.{kind}.summary-fallback.ndjson"
     attempt_plan = _standard_attempt_plan(
         domains=clean_domains,
         test=test,
@@ -994,7 +1280,10 @@ def _run_blockcheck_live(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "progress_log": str(progress_log),
+        "metrics_log": str(metrics_log),
+        "summary_fallback_log": str(summary_fallback_log),
         "candidate_count": 0,
+        "phase": PHASE_CHECK_VPN,
         "test": test,
         **option_fields,
         "attempt_plan": attempt_plan,
@@ -1023,10 +1312,16 @@ def _run_blockcheck_live(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "progress_log": str(progress_log),
+        "metrics_log": str(metrics_log),
+        "summary_fallback_log": str(summary_fallback_log),
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
         "common_candidate_count": len(parsed["common_candidates"]),
+        "phase": parsed.get("phase") or PHASE_COMPLETE,
+        "summary_verified": parsed.get("summary_verified", 0),
+        "summary_fallbacks": parsed.get("summary_fallbacks", 0),
+        "summary_common_seen": parsed.get("summary_common_seen", 0),
         "timed_out": process_result["timed_out"],
         "stopped": process_result["stopped"],
         "timeout_seconds": timeout_seconds,
@@ -1037,6 +1332,7 @@ def _run_blockcheck_live(
     run["progress"] = recorder.progress(run)
     if kind in {"standard-discovery", "multi-domain-discovery"}:
         run["total_candidates"] = candidate_total(state_dir) if parsed.get("live_recorded") else upsert_candidates(state_dir, parsed, run)
+    recorder.close()
     append_run(state_dir, run)
     return run
 
@@ -1191,12 +1487,14 @@ def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     )
     scripts = [_script_name_from_line(line) for line in lines if _script_name_from_line(line)]
     current_script = scripts[-1] if scripts else ""
+    phase = PHASE_SUMMARY if any(line.strip() in {"* SUMMARY", "* COMMON"} for line in lines) else (PHASE_DISCOVERY if current_script else PHASE_CHECK_VPN)
     return _progress_from_counts(
         run=run,
         attempted=attempted,
         attempts_by_script=attempts_by_script,
         successful=successful,
         current_script=current_script,
+        phase=phase,
     )
 
 
@@ -1207,6 +1505,11 @@ def _progress_from_counts(
     attempts_by_script: dict[str, int],
     successful: int,
     current_script: str,
+    phase: str = PHASE_CHECK_VPN,
+    runtime_ms_per_attempt: int | None = None,
+    runtime_sample_count: int | None = None,
+    summary_verified: int = 0,
+    summary_fallbacks: int = 0,
 ) -> dict[str, Any]:
     attempt_plan = _attempt_plan_for_run(run, current_script)
     script_order = [str(item) for item in attempt_plan.get("script_order") or []]
@@ -1214,7 +1517,6 @@ def _progress_from_counts(
     attempt_total = int(attempt_plan.get("total") or 0)
     current_script_attempted = attempts_by_script.get(current_script, 0)
     current_script_attempt_total = int(script_attempt_totals.get(current_script) or 0)
-    remaining_attempts = max(0, attempt_total - attempted) if attempt_total else None
     script_total = len(script_order) if script_order else (_standard_script_total() if current_script.startswith("standard/") else 0)
     script_index = _standard_script_index(current_script, script_order) if current_script else 0
     if script_total and script_index > script_total:
@@ -1224,17 +1526,55 @@ def _progress_from_counts(
     completed = status == "success"
     if completed and script_total:
         script_index = script_total
+    progress_status = "unknown"
+    effective_attempt_total = attempt_total
+    remaining_attempts = max(0, attempt_total - attempted) if attempt_total else None
     if attempt_total:
-        percent = 100.0 if completed else min(100.0, (attempted / attempt_total) * 100.0)
+        progress_status = "exact" if str(attempt_plan.get("source") or "") in {"shell", "test"} else "estimated"
+    if attempt_total and not finished and attempted >= attempt_total:
+        progress_status = "underestimated"
+        script_remaining = current_script_attempt_total - current_script_attempted if current_script_attempt_total else 0
+        if script_remaining > 0:
+            remaining_attempts = script_remaining
+            effective_attempt_total = attempted + script_remaining
+        else:
+            remaining_attempts = None
+            effective_attempt_total = attempted
+    if effective_attempt_total:
+        if completed:
+            percent = 100.0
+        elif remaining_attempts is None and progress_status == "underestimated":
+            percent = 99.0
+        else:
+            percent = min(99.9, (attempted / effective_attempt_total) * 100.0)
     else:
         percent = (script_index / script_total * 100.0) if script_total else None
     elapsed = _elapsed_seconds(run.get("timestamp"))
     eta_parallelism = _eta_parallelism_for_run(run)
-    eta_ms_per_attempt = _eta_ms_per_attempt_for_run(run)
-    eta = _eta_from_remaining_attempts(attempted, attempt_total, completed, eta_parallelism, eta_ms_per_attempt)
+    estimate_ms_per_attempt = _eta_ms_per_attempt_for_run(run)
+    eta_ms_per_attempt = estimate_ms_per_attempt
+    eta_status = "estimated"
+    if runtime_sample_count is not None:
+        if completed:
+            eta_status = "complete"
+        elif runtime_sample_count < ETA_SAMPLE_MIN_ATTEMPTS or runtime_ms_per_attempt is None:
+            eta_status = "calculating"
+            eta_ms_per_attempt = 0
+        else:
+            eta_status = "sample"
+            eta_ms_per_attempt = runtime_ms_per_attempt
+    if remaining_attempts is None and not completed:
+        eta = None
+        if progress_status == "underestimated":
+            eta_status = "underestimated"
+    elif eta_status == "calculating":
+        eta = None
+    else:
+        eta = _eta_from_remaining_attempts(remaining_attempts, completed, eta_parallelism, eta_ms_per_attempt or estimate_ms_per_attempt)
     return {
         "attempted": attempted,
         "attempt_total": attempt_total,
+        "effective_attempt_total": effective_attempt_total,
         "remaining_attempts": remaining_attempts,
         "successful": successful,
         "current_script": current_script,
@@ -1245,11 +1585,18 @@ def _progress_from_counts(
         "percent": percent,
         "elapsed_seconds": elapsed,
         "eta_seconds": eta,
-        "eta_estimate_ms_per_attempt": eta_ms_per_attempt,
+        "eta_estimate_ms_per_attempt": estimate_ms_per_attempt,
+        "eta_ms_per_attempt": eta_ms_per_attempt,
+        "eta_status": eta_status,
         "eta_parallelism": eta_parallelism,
         "repeats": _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10),
         "repeat_parallel": _truthy(run.get("repeat_parallel"), default=False),
         "attempt_plan_source": attempt_plan.get("source") or "",
+        "progress_status": progress_status,
+        "phase": phase,
+        "phase_label": _phase_label(phase),
+        "summary_verified": summary_verified,
+        "summary_fallbacks": summary_fallbacks,
     }
 
 
@@ -1265,6 +1612,43 @@ def _attempts_by_script(lines: list[str]) -> dict[str, int]:
         if _ATTEMPT_RE.match(line.strip()):
             result[current_script] = result.get(current_script, 0) + 1
     return result
+
+
+def _average_attempt_ms(samples: deque[float]) -> int | None:
+    if len(samples) < ETA_SAMPLE_MIN_ATTEMPTS:
+        return None
+    values = list(samples)
+    intervals = [right - left for left, right in zip(values, values[1:]) if right >= left]
+    if not intervals:
+        return None
+    return max(1, int((sum(intervals) / len(intervals)) * 1000))
+
+
+def _phase_label(phase: str) -> str:
+    return PHASE_LABELS.get(phase, phase or "-")
+
+
+def _phase_from_line(line: str, current: str) -> str:
+    text = line.strip().lower()
+    if not text:
+        return current
+    if text in {"* summary", "* common"}:
+        return PHASE_SUMMARY
+    if _ATTEMPT_RE.match(line.strip()) or _live_attempt_line(line):
+        return PHASE_DISCOVERY
+    if text.startswith("* script"):
+        return PHASE_DISCOVERY
+    if text.startswith("* checking"):
+        if "vpn" in text:
+            return PHASE_CHECK_VPN
+        if "dpi" in text or "bypass" in text or "zapret" in text or "nfqws" in text:
+            return PHASE_CHECK_ZAPRET
+        if "dns" in text or "domain" in text or "ip" in text or "port" in text or "http" in text:
+            return PHASE_CHECK_DOMAIN
+        if current in {PHASE_CHECK_VPN, PHASE_CHECK_ZAPRET, PHASE_CHECK_DOMAIN}:
+            return current
+        return PHASE_CHECK_DOMAIN
+    return current
 
 
 def _script_name_from_line(line: str) -> str:
@@ -1478,17 +1862,15 @@ def _eta_ms_per_attempt_for_run(run: dict[str, Any]) -> int:
 
 
 def _eta_from_remaining_attempts(
-    attempted: int,
-    attempt_total: int,
+    remaining: int | None,
     completed: bool,
     parallelism: int = 1,
     ms_per_attempt: int = ATTEMPT_TIMEOUT_ESTIMATE_MS,
 ) -> int | None:
     if completed:
         return 0
-    if not attempt_total:
+    if remaining is None:
         return None
-    remaining = max(0, attempt_total - attempted)
     if remaining <= 0:
         return 0
     effective_remaining = (remaining + max(1, parallelism) - 1) // max(1, parallelism)

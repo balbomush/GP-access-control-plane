@@ -577,12 +577,14 @@ pktws_check_http3()
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
             progress_log = state_dir / "strategy-finder" / "logs" / "run.progress.json"
+            metrics_log = state_dir / "strategy-finder" / "logs" / "run.metrics.ndjson"
             run = {
                 "id": "run-live",
                 "kind": "standard-discovery",
                 "status": "running",
                 "timestamp": "2026-06-20T00:00:00Z",
                 "progress_log": str(progress_log),
+                "metrics_log": str(metrics_log),
                 "attempt_plan": {
                     "total": 2,
                     "scripts": {"standard/10-test.sh": 2},
@@ -606,6 +608,7 @@ pktws_check_http3()
             self.assertEqual(progress["successful"], 1)
             self.assertEqual(len(live_lines), 1)
             self.assertTrue(progress_log.exists())
+            self.assertTrue(metrics_log.exists())
 
     def test_multidomain_runner_overrides_strategy_check_order(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -691,6 +694,51 @@ pktws_check_http3()
 
         self.assertEqual(progress["eta_estimate_ms_per_attempt"], 6300)
         self.assertEqual(progress["eta_seconds"], 31)
+
+    def test_running_progress_does_not_report_zero_eta_when_plan_is_underestimated(self) -> None:
+        plan = {
+            "total": 2,
+            "scripts": {"standard/10-test.sh": 2},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 3)
+
+        progress = progress_from_stdout(stdout, {"id": "run-underestimated", "status": "running", "attempt_plan": plan})
+
+        self.assertEqual(progress["progress_status"], "underestimated")
+        self.assertIsNone(progress["eta_seconds"])
+        self.assertEqual(progress["eta_status"], "underestimated")
+        self.assertEqual(progress["percent"], 99.0)
+
+    def test_live_summary_is_validation_and_only_fallback_writes_missing_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            progress_log = state_dir / "strategy-finder" / "logs" / "run.progress.json"
+            fallback_log = state_dir / "strategy-finder" / "logs" / "run.summary-fallback.ndjson"
+            run = {
+                "id": "run-summary",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(progress_log),
+                "summary_fallback_log": str(fallback_log),
+                "domains": ["youtube.com"],
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            recorder.record_line("* script : standard/10-test.sh")
+            recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=live")
+            recorder.record_line("!!!!! AVAILABLE !!!!!")
+            recorder.record_line("* SUMMARY")
+            recorder.record_line("curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=live")
+            recorder.record_line("curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=fallback")
+            parsed = recorder.parsed()
+
+            self.assertEqual(parsed["summary_verified"], 1)
+            self.assertEqual(parsed["summary_fallbacks"], 1)
+            self.assertEqual(len(parsed["candidates"]), 2)
+            self.assertTrue(fallback_log.exists())
 
 
 if __name__ == "__main__":

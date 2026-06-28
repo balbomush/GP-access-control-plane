@@ -1210,6 +1210,10 @@ pre {
               <div class="progress-value" id="progress-successful">-</div>
             </div>
             <div class="progress-cell">
+              <div class="progress-label">Этап</div>
+              <div class="progress-value" id="progress-phase">-</div>
+            </div>
+            <div class="progress-cell">
               <div class="progress-label">Текущий файл</div>
               <div class="progress-value" id="progress-scripts">-</div>
             </div>
@@ -1219,6 +1223,7 @@ pre {
             </div>
           </div>
           <div class="progress-note" id="progress-note">Прогресс оценочный: blockcheck2 не отдает общий счетчик стратегий до старта.</div>
+          <div class="progress-note" id="progress-metrics">Метрики появятся после старта подбора.</div>
         </div>
         <pre id="finder-log">Лога пока нет</pre>
       </section>
@@ -2051,6 +2056,7 @@ function renderRunCard(row){
         <div class="run-field-label">Статус</div>
         <div class="run-field-value run-status">${badge(runStatusLabel(status), statusTone[status] || '')}</div>
       </div>
+      ${runField('Этап', runPhaseText(row))}
       <div class="run-field">
         <div class="run-field-label">Стратегии</div>
         <div class="run-field-value">${badge(String(count), count > 0 ? 'good' : '')}</div>
@@ -2086,6 +2092,21 @@ function runStatusLabel(status){
     timeout: 'таймаут'
   };
   return labels[status] || status || '-';
+}
+function runPhaseText(row){
+  const progress = row.progress || {};
+  return progress.phase_label || phaseLabel(row.phase || progress.phase || '');
+}
+function phaseLabel(phase){
+  const labels = {
+    checking_vpn: 'проверка VPN',
+    checking_zapret: 'проверка zapret',
+    checking_domain: 'проверка доступности домена',
+    strategy_discovery: 'подбор стратегий',
+    strategy_summary: 'суммаризация стратегий',
+    complete: 'завершено'
+  };
+  return labels[phase] || phase || '-';
 }
 function runDomains(row, domainKey){
   const domains = Array.isArray(row.domains) ? row.domains.map((domain) => String(domain || '').trim()).filter(Boolean) : [];
@@ -2128,7 +2149,7 @@ function runCandidateCount(row){
 function runProgressText(row){
   const progress = row.progress || {};
   const attempted = Number(progress.attempted || 0);
-  const total = Number(progress.attempt_total || 0);
+  const total = Number(progress.effective_attempt_total || progress.attempt_total || 0);
   if (total) return `${attempted} из ${total}`;
   if (attempted) return String(attempted);
   return '-';
@@ -2145,6 +2166,7 @@ function renderLog(){
   const logNode = el('finder-log');
   logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
   renderProgress(log.progress || {});
+  renderRuntimeMetrics(log.metrics || {});
   if (state.activeTab === 'terminal') scrollLogToBottom();
 }
 function renderBackups(){
@@ -2222,8 +2244,10 @@ function renderProgress(progress){
   el('progress-fill').style.width = `${safePercent}%`;
   const attempted = Number(progress.attempted ?? 0);
   const attemptTotal = Number(progress.attempt_total ?? 0);
-  setText('progress-attempted', attemptTotal ? `${attempted} / ${attemptTotal}` : String(progress.attempted ?? 0));
+  const effectiveTotal = Number(progress.effective_attempt_total || attemptTotal || 0);
+  setText('progress-attempted', effectiveTotal ? `${attempted} / ${effectiveTotal}` : String(progress.attempted ?? 0));
   setText('progress-successful', String(progress.successful ?? 0));
+  setText('progress-phase', progress.phase_label || phaseLabel(progress.phase || ''));
   if (progress.script_total) {
     const scriptParts = [`Файл ${progress.script_index || 0} из ${progress.script_total}`];
     if (progress.current_script_attempt_total) {
@@ -2233,13 +2257,40 @@ function renderProgress(progress){
   } else {
     setText('progress-scripts', '-');
   }
-  setText('progress-eta', progress.eta_seconds == null ? '-' : formatDuration(Number(progress.eta_seconds)));
+  setText('progress-eta', progress.eta_seconds == null ? etaStatusText(progress.eta_status) : formatDuration(Number(progress.eta_seconds)));
   const current = progress.current_script ? `Текущий файл: ${progress.current_script}. ` : '';
   const total = attemptTotal ? `Всего попыток рассчитано по файлам zapret2: ${attemptTotal}. ` : '';
+  const under = progress.progress_status === 'underestimated' ? 'План попыток оказался меньше фактического вывода blockcheck2, время уточняется по live-данным. ' : '';
   const parallelism = Number(progress.eta_parallelism || 1);
   const parallelText = parallelism > 1 ? `, параллельных curl: ${parallelism}` : '';
-  const eta = progress.eta_estimate_ms_per_attempt ? `Время считается как оставшиеся попытки × ${progress.eta_estimate_ms_per_attempt} мс${parallelText}. ` : '';
-  setText('progress-note', `${current}${total}${eta}Прогресс считается по live-логу blockcheck2.`);
+  const etaMs = progress.eta_status === 'sample' ? progress.eta_ms_per_attempt : progress.eta_estimate_ms_per_attempt;
+  const eta = etaMs ? `Время считается как оставшиеся попытки × ${etaMs} мс${parallelText}. ` : '';
+  const fallback = Number(progress.summary_fallbacks || 0) > 0 ? `Fallback из summary: ${progress.summary_fallbacks}. ` : '';
+  setText('progress-note', `${current}${total}${under}${eta}${fallback}Прогресс считается по live-логу blockcheck2.`);
+}
+function etaStatusText(status){
+  if (status === 'calculating') return 'рассчитывается';
+  if (status === 'underestimated') return 'уточняется';
+  return '-';
+}
+function renderRuntimeMetrics(metrics){
+  const target = el('progress-metrics');
+  if (!target) return;
+  if (!metrics || !Object.keys(metrics).length) {
+    target.textContent = 'Метрики появятся после старта подбора.';
+    return;
+  }
+  const processes = metrics.processes || {};
+  const system = metrics.system || {};
+  const cpu = system.cpu_percent || {};
+  const memory = system.memory || {};
+  const files = metrics.files || {};
+  const memFree = memory.MemAvailable ? `RAM свободно: ${Math.round(Number(memory.MemAvailable) / 1024)} МБ` : '';
+  const cpuText = cpu.busy == null ? '' : `CPU: ${cpu.busy}%`;
+  const ioText = cpu.iowait == null ? '' : `iowait: ${cpu.iowait}%`;
+  const procText = `curl: ${processes.curl || 0}, nfqws2: ${processes.nfqws2 || 0}, blockcheck2: ${processes.blockcheck2 || 0}`;
+  const walText = files.sqlite_wal ? `SQLite WAL: ${formatBytes(files.sqlite_wal)}` : '';
+  target.textContent = [procText, cpuText, ioText, memFree, walText].filter(Boolean).join(' · ');
 }
 function formatDuration(seconds){
   if (!Number.isFinite(seconds)) return '-';

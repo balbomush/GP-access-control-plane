@@ -551,6 +551,37 @@ def upsert_candidate_event(
         )
 
 
+def upsert_candidate_event_conn(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: str,
+    protocol: str,
+    args: str,
+    status: str,
+    run_id: str,
+    domain: str,
+    domains: list[str],
+    test: str,
+    ip_version: str,
+    seen_at: str,
+    common: bool,
+) -> None:
+    _upsert_candidate_event_conn(
+        conn,
+        candidate_id=candidate_id,
+        protocol=protocol,
+        args=args,
+        status=status,
+        run_id=run_id,
+        domain=domain,
+        domains=domains,
+        test=test,
+        ip_version=ip_version,
+        seen_at=seen_at,
+        common=common,
+    )
+
+
 def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
     with connect(state_dir) as conn:
         rows = conn.execute(
