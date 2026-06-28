@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import hashlib
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ SCHEMA_MIGRATIONS = (
     (3, "minimal_backup_model"),
     (4, "runtime_observability"),
 )
+_MIGRATION_LOCK = threading.Lock()
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -37,7 +39,8 @@ def connect(state_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    _migrate_schema(conn)
+    with _MIGRATION_LOCK:
+        _migrate_schema(conn)
     return conn
 
 
@@ -305,9 +308,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         GROUP BY s.id, s.protocol;
         """
     )
+    current_schema_version = get_meta(conn, "schema_version")
     _ensure_column(conn, "domain_presets", "source_json", "TEXT NOT NULL DEFAULT '{}'")
-    _migrate_strategy_domain_results_schema(conn)
-    _recreate_stats_views(conn)
+    strategy_results_changed = _migrate_strategy_domain_results_schema(conn)
+    if strategy_results_changed or current_schema_version != str(SCHEMA_VERSION):
+        _recreate_stats_views(conn)
     _migrate_legacy_model(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
@@ -340,11 +345,11 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> None:
+def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> bool:
     columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(strategy_domain_results)").fetchall()}
     legacy_columns = {"success_count", "fail_count", "last_success_run_id", "last_fail_run_id"}
     if not (columns & legacy_columns):
-        return
+        return False
     conn.executescript(
         """
         DROP VIEW IF EXISTS domain_stats;
@@ -377,6 +382,7 @@ def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_source ON strategy_domain_results(source_mode);
         """
     )
+    return True
 
 
 def _recreate_stats_views(conn: sqlite3.Connection) -> None:
@@ -384,7 +390,7 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
         """
         DROP VIEW IF EXISTS domain_stats;
         DROP VIEW IF EXISTS strategy_stats;
-        CREATE VIEW domain_stats AS
+        CREATE VIEW IF NOT EXISTS domain_stats AS
         SELECT d.id AS domain_id,
                d.name AS domain,
                COUNT(DISTINCT r.strategy_id) AS strategy_count,
@@ -401,7 +407,7 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
             AND a.source_mode = r.source_mode
         GROUP BY d.id, d.name;
 
-        CREATE VIEW strategy_stats AS
+        CREATE VIEW IF NOT EXISTS strategy_stats AS
         SELECT s.id AS strategy_id,
                s.protocol,
                COUNT(DISTINCT r.domain_id) AS domain_count,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,21 @@ class StorageTests(unittest.TestCase):
             self.assertEqual([(int(row["version"]), str(row["name"])) for row in rows], list(SCHEMA_MIGRATIONS))
             status = storage_status(state_dir)
             self.assertEqual([item["version"] for item in status["migrations"]], [item[0] for item in SCHEMA_MIGRATIONS])
+
+    def test_concurrent_connects_do_not_race_stats_views(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            def read_stats_views(_: int) -> tuple[int, int]:
+                with connect(state_dir) as conn:
+                    domain_count = conn.execute("SELECT COUNT(*) FROM domain_stats").fetchone()[0]
+                    strategy_count = conn.execute("SELECT COUNT(*) FROM strategy_stats").fetchone()[0]
+                    return int(domain_count), int(strategy_count)
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(read_stats_views, range(24)))
+
+            self.assertEqual(results, [(0, 0)] * 24)
 
 
 if __name__ == "__main__":
