@@ -15,6 +15,8 @@ from gp_control_plane.zapret2 import (
     _cleanup_blockcheck_processes,
     _stop_process_group,
     check_install,
+    check_install_cached,
+    clear_install_check_cache,
     root_command,
     root_helper_status,
 )
@@ -53,6 +55,32 @@ class Zapret2Tests(unittest.TestCase):
 
         self.assertTrue(status["ready"])
         self.assertEqual(calls[0], ["/usr/bin/sudo", "-n", "/helper/gp-root-helper", "check"])
+
+    def test_check_install_cached_reuses_root_helper_result(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        clear_install_check_cache()
+        try:
+            with (
+                mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+                mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+                mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=True),
+                mock.patch("gp_control_plane.zapret2.os.access", return_value=True),
+                mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/bin/sudo"),
+                mock.patch("gp_control_plane.zapret2.subprocess.run", side_effect=fake_run),
+            ):
+                first = check_install_cached(ttl_seconds=60)
+                second = check_install_cached(ttl_seconds=60)
+        finally:
+            clear_install_check_cache()
+
+        self.assertTrue(first["root_helper_ready"])
+        self.assertEqual(second["root_helper_path"], "/helper/gp-root-helper")
+        self.assertEqual(len(calls), 1)
 
     def test_root_command_wraps_blockcheck_with_helper_and_env(self) -> None:
         env = {"BATCH": "1", "DOMAINS": "youtube.com", "ENABLE_HTTP3": "1", "IGNORED": "x"}

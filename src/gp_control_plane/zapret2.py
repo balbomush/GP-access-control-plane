@@ -5,6 +5,7 @@ import re
 import signal
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,9 @@ BLOCKCHECK_ENV_KEYS = (
     "ZAPRET_BASE",
     "ZAPRET_RW",
 )
+INSTALL_CHECK_CACHE_SECONDS = 30.0
+_INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
+_INSTALL_CHECK_LOCK = threading.Lock()
 
 
 def check_install() -> dict[str, str | bool]:
@@ -44,6 +48,26 @@ def check_install() -> dict[str, str | bool]:
         "root_helper_path": str(helper["path"]),
         "root_helper_error": str(helper["error"]),
     }
+
+
+def check_install_cached(ttl_seconds: float = INSTALL_CHECK_CACHE_SECONDS) -> dict[str, str | bool]:
+    now = time.monotonic()
+    with _INSTALL_CHECK_LOCK:
+        payload = _INSTALL_CHECK_CACHE.get("payload")
+        expires_at = float(_INSTALL_CHECK_CACHE.get("expires_at") or 0.0)
+        if isinstance(payload, dict) and now < expires_at:
+            return dict(payload)
+    fresh = check_install()
+    with _INSTALL_CHECK_LOCK:
+        _INSTALL_CHECK_CACHE["payload"] = dict(fresh)
+        _INSTALL_CHECK_CACHE["expires_at"] = now + max(1.0, float(ttl_seconds))
+    return fresh
+
+
+def clear_install_check_cache() -> None:
+    with _INSTALL_CHECK_LOCK:
+        _INSTALL_CHECK_CACHE["payload"] = None
+        _INSTALL_CHECK_CACHE["expires_at"] = 0.0
 
 
 def _stop_process_group(process: subprocess.Popen[str]) -> None:

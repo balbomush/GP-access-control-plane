@@ -26,7 +26,7 @@ from ..strategy_finder import (
     run_multi_domain_discovery,
     run_standard_discovery,
 )
-from ..zapret2 import check_install
+from ..zapret2 import check_install_cached
 
 
 def serve(config: AppConfig, host: str, port: int) -> None:
@@ -3290,7 +3290,7 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         "paths": {
             "state_dir": str(config.output.state_dir),
         },
-        "zapret2": check_install(),
+        "zapret2": check_install_cached(),
     }
 
 
