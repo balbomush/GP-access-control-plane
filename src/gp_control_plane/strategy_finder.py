@@ -21,7 +21,6 @@ from .state import append_jsonl, now_iso
 from .storage import (
     append_run,
     connect,
-    import_candidates_json_if_needed,
     read_run_payloads,
     upsert_candidate_event,
     upsert_candidate_event_conn,
@@ -341,7 +340,6 @@ def run_multi_domain_discovery(
 
 
 def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
-    _ensure_candidate_import(state_dir)
     with connect(state_dir) as conn:
         rows = conn.execute(
             """
@@ -363,7 +361,6 @@ def read_candidate_page(
     domains: list[str] | None = None,
     domain: str = "",
 ) -> dict[str, Any]:
-    _ensure_candidate_import(state_dir)
     limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
     offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
     query = query.strip().lower()
@@ -395,7 +392,6 @@ def read_candidate_page(
 
 
 def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str, Any]:
-    _ensure_candidate_import(state_dir)
     query = query.strip().lower()
     with connect(state_dir) as conn:
         tested_domains = _tested_domains_from_db(conn)
@@ -734,7 +730,6 @@ def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, An
 
 
 def candidate_total(state_dir: Path) -> int:
-    _ensure_candidate_import(state_dir)
     with connect(state_dir) as conn:
         return int(conn.execute("SELECT COUNT(*) AS count FROM strategies").fetchone()["count"])
 
@@ -749,7 +744,6 @@ class _LiveStdoutRecorder:
         self._lock = threading.Lock()
         self._state_dir = state_dir
         self._run = run
-        self._available_path = _finder_dir(state_dir) / "available.ndjson"
         progress_log = str(run.get("progress_log") or "")
         self._progress_log = Path(progress_log) if progress_log else None
         fallback_log = str(run.get("summary_fallback_log") or "")
@@ -912,14 +906,6 @@ class _LiveStdoutRecorder:
         if key in target:
             return
         target[key] = candidate
-        append_jsonl(
-            self._available_path,
-            {
-                **candidate,
-                "run_id": self._run["id"],
-                "seen_at": now_iso(),
-            },
-        )
         candidate_id = candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or ""))
         if self._conn is None:
             self._conn = connect(self._state_dir)
@@ -1081,7 +1067,6 @@ def _runtime_file_sizes(state_dir: Path, run: dict[str, Any]) -> dict[str, int]:
         "stdout_log": Path(str(run.get("stdout_log") or "")),
         "stderr_log": Path(str(run.get("stderr_log") or "")),
         "progress_log": Path(str(run.get("progress_log") or "")),
-        "available_ndjson": root / "available.ndjson",
         "sqlite": root / "state.sqlite3",
         "sqlite_wal": root / "state.sqlite3-wal",
     }
@@ -2489,17 +2474,6 @@ def _finder_dir(state_dir: Path) -> Path:
     path = state_dir / "strategy-finder"
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def _write_candidates(state_dir: Path, candidates: list[dict[str, Any]]) -> None:
-    path = _finder_dir(state_dir) / "candidates.json"
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(candidates, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
-def _ensure_candidate_import(state_dir: Path) -> None:
-    import_candidates_json_if_needed(state_dir, candidate_id_for)
 
 
 def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import hashlib
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -470,7 +469,6 @@ def append_run(state_dir: Path, run: dict[str, Any]) -> None:
 
 
 def read_run_payloads(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
-    _import_runs_jsonl_if_needed(state_dir)
     limit = max(1, min(int(limit or 50), 1000))
     with connect(state_dir) as conn:
         rows = conn.execute(
@@ -486,47 +484,6 @@ def read_run_payloads(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
         if isinstance(data, dict):
             result.append(data)
     return result
-
-
-def _import_runs_jsonl_if_needed(state_dir: Path) -> None:
-    path = state_dir / "strategy-finder" / "runs.jsonl"
-    if not path.exists():
-        return
-    stat = path.stat()
-    marker = f"{stat.st_size}:{stat.st_mtime_ns}"
-    with connect(state_dir) as conn:
-        if get_meta(conn, "imported_runs_jsonl") == marker:
-            return
-        existing = int(conn.execute("SELECT COUNT(*) AS count FROM runs").fetchone()["count"])
-        if existing:
-            set_meta(conn, "imported_runs_jsonl", marker)
-            conn.commit()
-            return
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO runs(id, kind, status, timestamp, payload_json)
-                    VALUES(?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(payload.get("id") or ""),
-                        str(payload.get("kind") or ""),
-                        str(payload.get("status") or ""),
-                        str(payload.get("timestamp") or ""),
-                        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-                    ),
-                )
-        set_meta(conn, "imported_runs_jsonl", marker)
-        conn.commit()
 
 
 def upsert_candidate_event(
@@ -855,128 +812,6 @@ def _upsert_strategy_domain_result_conn(
             """,
             (run_id, strategy_id, domain_id, protocol, source_mode, test, ip_version, seen_at),
         )
-
-
-def import_candidates_json_if_needed(state_dir: Path, candidate_id_for: Any) -> None:
-    path = state_dir / "strategy-finder" / "candidates.json"
-    if not path.exists():
-        return
-    stat = path.stat()
-    marker = f"{stat.st_size}:{stat.st_mtime_ns}"
-    with connect(state_dir) as conn:
-        if get_meta(conn, "imported_candidates_json") == marker:
-            return
-        existing = int(conn.execute("SELECT COUNT(*) AS count FROM candidates").fetchone()["count"])
-        if existing:
-            set_meta(conn, "imported_candidates_json", marker)
-            conn.commit()
-            return
-        for candidate in iter_candidate_json(path):
-            protocol = str(candidate.get("protocol") or "")
-            args = str(candidate.get("args") or "")
-            candidate_id = str(candidate.get("id") or candidate_id_for(protocol, args))
-            status = str(candidate.get("status") or "candidate")
-            first_seen = str(candidate.get("first_seen_at") or "")
-            last_seen = str(candidate.get("last_seen_at") or first_seen)
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO candidates(
-                    id, protocol, args, status, first_seen_at, last_seen_at, seen_count, common_seen_count
-                )
-                VALUES(?, ?, ?, ?, ?, ?, 0, 0)
-                """,
-                (candidate_id, protocol, args, status, first_seen, last_seen),
-            )
-            for seen in _list_of_dicts(candidate.get("seen")):
-                _upsert_candidate_event_conn(
-                    conn,
-                    candidate_id=candidate_id,
-                    protocol=protocol,
-                    args=args,
-                    status=status,
-                    run_id=str(seen.get("run_id") or ""),
-                    domain=str(seen.get("domain") or ""),
-                    domains=[],
-                    test=str(seen.get("test") or ""),
-                    ip_version=str(seen.get("ip_version") or ""),
-                    seen_at=str(seen.get("seen_at") or last_seen),
-                    common=False,
-                )
-            for seen in _list_of_dicts(candidate.get("common_seen")):
-                domains = [str(item or "") for item in seen.get("domains", [])] if isinstance(seen.get("domains"), list) else []
-                _upsert_candidate_event_conn(
-                    conn,
-                    candidate_id=candidate_id,
-                    protocol=protocol,
-                    args=args,
-                    status=status,
-                    run_id=str(seen.get("run_id") or ""),
-                    domain="",
-                    domains=domains,
-                    test=str(seen.get("test") or ""),
-                    ip_version=str(seen.get("ip_version") or ""),
-                    seen_at=str(seen.get("seen_at") or last_seen),
-                    common=True,
-                )
-        set_meta(conn, "imported_candidates_json", marker)
-        conn.commit()
-
-
-def iter_candidate_json(path: Path) -> Iterator[dict[str, Any]]:
-    if not path.exists():
-        return
-    decoder = json.JSONDecoder()
-    buffer = ""
-    eof = False
-
-    def fill(handle: Any) -> None:
-        nonlocal buffer, eof
-        chunk = handle.read(65536)
-        if chunk:
-            buffer += chunk
-        else:
-            eof = True
-
-    with path.open("r", encoding="utf-8") as handle:
-        fill(handle)
-        while True:
-            buffer = buffer.lstrip()
-            if buffer:
-                break
-            if eof:
-                return
-            fill(handle)
-        if not buffer.startswith("["):
-            return
-        buffer = buffer[1:]
-        while True:
-            while True:
-                buffer = buffer.lstrip()
-                if buffer:
-                    break
-                if eof:
-                    return
-                fill(handle)
-            if buffer.startswith("]"):
-                return
-            if buffer.startswith(","):
-                buffer = buffer[1:]
-                continue
-            while True:
-                try:
-                    value, end = decoder.raw_decode(buffer)
-                    break
-                except json.JSONDecodeError:
-                    if eof:
-                        return
-                    fill(handle)
-            if isinstance(value, dict):
-                yield value
-            buffer = buffer[end:]
-
-
-def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _unique_nonempty(values: list[str]) -> list[str]:

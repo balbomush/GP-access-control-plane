@@ -10,8 +10,7 @@ from typing import Any
 
 from . import __version__
 from .state import now_iso, read_state
-from .storage import connect, db_path, import_candidates_json_if_needed
-from .strategy_finder import candidate_id_for
+from .storage import connect, db_path
 
 
 SNAPSHOT_KEEP = 5
@@ -221,7 +220,6 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_at", restored_at),
         )
-        _mark_legacy_candidates_imported(conn, state_dir)
     info = snapshot_info(state_dir, snapshot_id)
     return {
         "restored": True,
@@ -349,7 +347,6 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
 
 
 def _export_domains(state_dir: Path, root: Path) -> int:
-    import_candidates_json_if_needed(state_dir, candidate_id_for)
     count = 0
     with connect(state_dir) as conn:
         with (root / "domains" / "domains.ndjson").open("w", encoding="utf-8") as handle:
@@ -369,7 +366,6 @@ def _export_domains(state_dir: Path, root: Path) -> int:
 
 
 def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
-    import_candidates_json_if_needed(state_dir, candidate_id_for)
     strategy_count = 0
     link_count = 0
     with connect(state_dir) as conn:
@@ -516,18 +512,6 @@ def _unique_nonempty(values: list[str]) -> list[str]:
         if item and item not in result:
             result.append(item)
     return result
-
-
-def _mark_legacy_candidates_imported(conn: Any, state_dir: Path) -> None:
-    path = state_dir / "strategy-finder" / "candidates.json"
-    if not path.exists():
-        return
-    stat = path.stat()
-    marker = f"{stat.st_size}:{stat.st_mtime_ns}"
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
-        ("imported_candidates_json", marker),
-    )
 
 
 def _prune_snapshots(state_dir: Path) -> None:

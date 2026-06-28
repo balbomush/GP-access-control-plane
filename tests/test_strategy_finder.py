@@ -8,8 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.state import append_jsonl
-from gp_control_plane.storage import connect
+from gp_control_plane.storage import append_run, connect
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
     _CompactStdoutWriter,
@@ -353,8 +352,8 @@ pktws_check_https_tls12()
             stderr = logs / "run.stderr.log"
             stdout.write_text("a\nb\nc\n", encoding="utf-8")
             stderr.write_text("err\n", encoding="utf-8")
-            append_jsonl(
-                root / "runs.jsonl",
+            append_run(
+                state_dir,
                 {
                     "id": "run",
                     "kind": "standard-discovery",
@@ -378,8 +377,8 @@ pktws_check_https_tls12()
             logs.mkdir(parents=True)
             stdout = logs / "run.stdout.log"
             stdout.write_text("\n".join(f"line-{index}" for index in range(1000)) + "\n", encoding="utf-8")
-            append_jsonl(
-                root / "runs.jsonl",
+            append_run(
+                state_dir,
                 {
                     "id": "run",
                     "kind": "standard-discovery",
@@ -395,8 +394,6 @@ pktws_check_https_tls12()
     def test_read_candidate_page_limits_results_and_reports_total(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
-            root = state_dir / "strategy-finder"
-            root.mkdir(parents=True)
             candidates = [
                 {
                     "id": f"tls-{index}",
@@ -407,7 +404,7 @@ pktws_check_https_tls12()
                 }
                 for index in range(3)
             ]
-            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+            _store_candidate_rows(state_dir, candidates)
 
             page = read_candidate_page(state_dir, limit=2)
 
@@ -419,8 +416,6 @@ pktws_check_https_tls12()
     def test_read_candidate_page_filters_common_domains(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
-            root = state_dir / "strategy-finder"
-            root.mkdir(parents=True)
             candidates = [
                 {
                     "id": "tls-common",
@@ -437,7 +432,7 @@ pktws_check_https_tls12()
                     "seen": [{"domain": "youtube.com"}],
                 },
             ]
-            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+            _store_candidate_rows(state_dir, candidates)
 
             page = read_candidate_page(state_dir, view="common", domains=["youtube.com", "discord.com"])
 
@@ -447,8 +442,6 @@ pktws_check_https_tls12()
     def test_read_candidate_page_filters_single_domain(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
-            root = state_dir / "strategy-finder"
-            root.mkdir(parents=True)
             candidates = [
                 {
                     "id": "tls-youtube",
@@ -472,7 +465,7 @@ pktws_check_https_tls12()
                     "common_seen": [{"domains": ["youtube.com", "discord.com"]}],
                 },
             ]
-            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+            _store_candidate_rows(state_dir, candidates)
 
             page = read_candidate_page(state_dir, domain="youtube.com")
 
@@ -482,8 +475,6 @@ pktws_check_https_tls12()
     def test_read_candidate_domain_index_counts_by_domain_and_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
-            root = state_dir / "strategy-finder"
-            root.mkdir(parents=True)
             candidates = [
                 {
                     "id": "tls-common",
@@ -507,7 +498,7 @@ pktws_check_https_tls12()
                     "common_seen": [{"domains": ["youtube.com", "discord.com"]}],
                 },
             ]
-            (root / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+            _store_candidate_rows(state_dir, candidates)
 
             index = read_candidate_domain_index(state_dir)
             youtube = next(item for item in index["domains"] if item["domain"] == "youtube.com")
@@ -531,8 +522,8 @@ pktws_check_https_tls12()
             progress = logs / "run.progress.json"
             stdout.write_text("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one\n", encoding="utf-8")
             progress.write_text(json.dumps({"attempted": 42, "successful": 7}), encoding="utf-8")
-            append_jsonl(
-                root / "runs.jsonl",
+            append_run(
+                state_dir,
                 {
                     "id": "run",
                     "kind": "standard-discovery",
@@ -553,8 +544,8 @@ pktws_check_https_tls12()
             state_dir = Path(raw)
             root = state_dir / "strategy-finder"
             root.mkdir(parents=True)
-            append_jsonl(
-                root / "runs.jsonl",
+            append_run(
+                state_dir,
                 {
                     "id": "run-active",
                     "kind": "multi-domain-discovery",
@@ -576,10 +567,8 @@ pktws_check_https_tls12()
     def test_read_runs_omits_heavy_summary_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
-            root = state_dir / "strategy-finder"
-            root.mkdir(parents=True)
-            append_jsonl(
-                root / "runs.jsonl",
+            append_run(
+                state_dir,
                 {
                     "id": "run-heavy",
                     "kind": "multi-domain-discovery",
@@ -625,13 +614,13 @@ pktws_check_https_tls12()
 
             parsed = recorder.parsed()
             progress = recorder.progress(run)
-            live_lines = (state_dir / "strategy-finder" / "available.ndjson").read_text(encoding="utf-8").splitlines()
+            candidates = read_candidates(state_dir)
 
             self.assertEqual(len(parsed["candidates"]), 1)
             self.assertEqual(parsed["candidates"][0]["domain"], "youtube.com")
             self.assertEqual(progress["attempted"], 1)
             self.assertEqual(progress["successful"], 1)
-            self.assertEqual(len(live_lines), 1)
+            self.assertEqual(len(candidates), 1)
             self.assertTrue(progress_log.exists())
             self.assertTrue(metrics_log.exists())
 
@@ -783,6 +772,47 @@ pktws_check_https_tls12()
             self.assertEqual(parsed["summary_fallbacks"], 1)
             self.assertEqual(len(parsed["candidates"]), 2)
             self.assertTrue(fallback_log.exists())
+
+
+def _store_candidate_rows(state_dir: Path, candidates: list[dict[str, object]]) -> None:
+    parsed: dict[str, list[dict[str, str]]] = {"candidates": [], "common_candidates": []}
+    common_domains: list[str] = []
+    for candidate in candidates:
+        protocol = str(candidate.get("protocol") or "tls")
+        args = str(candidate.get("args") or "")
+        test = "curl_test_http3" if protocol == "quic" else "curl_test_https_tls12"
+        seen_items = candidate.get("seen") if isinstance(candidate.get("seen"), list) else []
+        for seen in seen_items:
+            if not isinstance(seen, dict):
+                continue
+            domain = str(seen.get("domain") or "")
+            if not domain:
+                continue
+            parsed["candidates"].append(
+                {
+                    "domain": domain,
+                    "test": test,
+                    "ip_version": "4",
+                    "protocol": protocol,
+                    "args": args,
+                }
+            )
+        common_items = candidate.get("common_seen") if isinstance(candidate.get("common_seen"), list) else []
+        for seen in common_items:
+            if not isinstance(seen, dict):
+                continue
+            domains = [str(item or "") for item in seen.get("domains", [])] if isinstance(seen.get("domains"), list) else []
+            common_domains = [domain for domain in domains if domain]
+            parsed["common_candidates"].append(
+                {
+                    "domain": "",
+                    "test": test,
+                    "ip_version": "4",
+                    "protocol": protocol,
+                    "args": args,
+                }
+            )
+    upsert_candidates(state_dir, parsed, {"id": "run", "domains": common_domains})
 
 
 if __name__ == "__main__":
