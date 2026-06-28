@@ -16,6 +16,7 @@ from gp_control_plane.strategy_finder import (
     _RotatingTextWriter,
     _resolve_blockcheck_script,
     _standard_attempt_plan,
+    _stdout_log_mode,
     _write_multidomain_runner,
     candidate_id_for,
     close_stale_running_runs,
@@ -72,6 +73,11 @@ class StrategyFinderTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             options.normalized()
+
+    def test_stdout_log_mode_defaults_to_compact(self) -> None:
+        self.assertEqual(_stdout_log_mode({}), "compact")
+        self.assertEqual(_stdout_log_mode({"GP_DEBUG_STDOUT": "0"}), "compact")
+        self.assertEqual(_stdout_log_mode({"GP_DEBUG_STDOUT": "1"}), "debug")
 
     def test_parse_blockcheck_summary_extracts_candidates(self) -> None:
         stdout = """

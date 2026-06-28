@@ -47,6 +47,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/backups/upload", html)
         self.assertIn("settings-version", html)
         self.assertIn("settings-enable-ipv6", html)
+        self.assertIn("settings-debug-stdout", html)
+        self.assertIn("debug_stdout", html)
         self.assertIn("/api/settings", html)
         self.assertIn("/api/discovery-profiles", html)
         self.assertIn("discovery-profile-select", html)
@@ -343,7 +345,16 @@ class WebUiTests(unittest.TestCase):
             time.sleep(0.1)
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            body = json.dumps({"settings": {"enable_ipv6": True, "curl_parallelism_default": 6, "curl_parallelism_max": 8}})
+            body = json.dumps(
+                {
+                    "settings": {
+                        "enable_ipv6": True,
+                        "debug_stdout": True,
+                        "curl_parallelism_default": 6,
+                        "curl_parallelism_max": 8,
+                    }
+                }
+            )
             connection.request("POST", "/api/settings", body=body, headers={"Content-Type": "application/json"})
             response = connection.getresponse()
             saved = response.read().decode("utf-8")
@@ -351,6 +362,7 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertIn('"enable_ipv6":true', saved)
+            self.assertIn('"debug_stdout":true', saved)
             self.assertIn('"curl_parallelism_default":6', saved)
 
     def test_discovery_profiles_endpoint_saves_user_profile(self) -> None:

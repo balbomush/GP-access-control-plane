@@ -1394,6 +1394,10 @@ pre {
               <input id="settings-enable-ipv6" type="checkbox">
               IPv6-проверки
             </label>
+            <label class="checkbox-row">
+              <input id="settings-debug-stdout" type="checkbox">
+              Подробный debug-лог stdout
+            </label>
             <div class="field">
               <label for="settings-curl-default">Параллельных curl по умолчанию</label>
               <input id="settings-curl-default" type="number" min="1" max="10" value="4">
@@ -1415,6 +1419,7 @@ pre {
             <a class="button-link secondary" id="settings-stable-link" href="https://github.com/balbomush/GP-access-control-plane/releases/latest" target="_blank" rel="noreferrer">Открыть последний релиз</a>
             <a class="button-link secondary" id="settings-prerelease-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть предрелизы</a>
           </div>
+          <div class="helper-text">Подробный stdout нужен только для диагностики: он пишет больший debug-лог. Обычный runtime-log остается компактным.</div>
           <div class="helper-text">Обновление из web UI будет выполняться только когда подбор не запущен. До этого шага используются ссылки на релизы.</div>
         </div>
         <div class="preset-panel">
@@ -2464,9 +2469,10 @@ function runSettingsText(row){
     truthyOption(options.skip_ipblock, row.skip_ipblock) ? 'без IP-check' : 'с IP-check',
   ].join(', ');
   const ipv6 = truthyOption(options.enable_ipv6, row.enable_ipv6) ? ', IPv6' : '';
+  const debugLog = truthyOption(row.debug_stdout, false) ? ', debug-log' : '';
   const curl = row.kind === 'multi-domain-discovery' ? `, curl ${row.curl_parallelism || 4}` : '';
   const limit = row.timeout_seconds ? `, лимит ${formatDuration(Number(row.timeout_seconds || 0))}` : ', без лимита';
-  return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${curl}${limit}`;
+  return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${debugLog}${curl}${limit}`;
 }
 function truthyOption(primary, fallback){
   const value = primary === undefined || primary === null ? fallback : primary;
@@ -2486,6 +2492,7 @@ function runPayload(row){
     repeat_parallel: truthyOption(options.repeat_parallel, row.repeat_parallel),
     skip_dnscheck: truthyOption(options.skip_dnscheck, row.skip_dnscheck),
     skip_ipblock: truthyOption(options.skip_ipblock, row.skip_ipblock),
+    debug_stdout: truthyOption(row.debug_stdout, false),
   };
   if (row.timeout_seconds) payload.timeout_seconds = Number(row.timeout_seconds);
   if (row.kind === 'multi-domain-discovery') payload.curl_parallelism = Number(row.curl_parallelism || 4);
@@ -2654,10 +2661,12 @@ function renderSettings(){
   const settings = state.settings || {};
   setText('settings-version', `v${(state.status || {}).version || '-'}`);
   const ipv6 = el('settings-enable-ipv6');
+  const debugStdout = el('settings-debug-stdout');
   const curlDefault = el('settings-curl-default');
   const curlMax = el('settings-curl-max');
   const channel = el('settings-update-channel');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
+  if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
   if (curlDefault) curlDefault.value = String(settings.curl_parallelism_default || 4);
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
   if (channel) channel.value = settings.update_channel || 'stable';
@@ -2680,6 +2689,7 @@ function renderSettings(){
 function currentSettingsFromForm(){
   return {
     enable_ipv6: Boolean(el('settings-enable-ipv6')?.checked),
+    debug_stdout: Boolean(el('settings-debug-stdout')?.checked),
     curl_parallelism_default: Number(el('settings-curl-default')?.value || 4),
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
     update_channel: el('settings-update-channel')?.value || 'stable'
@@ -3367,6 +3377,7 @@ DEFAULT_SETTINGS = {
     "curl_parallelism_default": 4,
     "curl_parallelism_max": 10,
     "enable_ipv6": False,
+    "debug_stdout": False,
     "update_channel": "stable",
 }
 
@@ -3433,6 +3444,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "curl_parallelism_default": default_parallelism,
         "curl_parallelism_max": max_parallelism,
         "enable_ipv6": bool(raw.get("enable_ipv6")),
+        "debug_stdout": bool(raw.get("debug_stdout")),
         "update_channel": channel,
         "stable_release_url": "https://github.com/balbomush/GP-access-control-plane/releases/latest",
         "prerelease_url": "https://github.com/balbomush/GP-access-control-plane/releases",
@@ -3616,6 +3628,7 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
+        debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
     )
 
@@ -3639,6 +3652,7 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
         curl_parallelism=_bounded_int(payload.get("curl_parallelism"), default=int(settings.get("curl_parallelism_default") or 4), minimum=1, maximum=max_parallelism),
+        debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
     )
 

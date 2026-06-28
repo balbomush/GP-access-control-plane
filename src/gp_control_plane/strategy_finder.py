@@ -277,6 +277,7 @@ def run_standard_discovery(
     repeat_parallel: bool = False,
     skip_dnscheck: bool = True,
     skip_ipblock: bool = True,
+    debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     options = DiscoveryOptions(
@@ -298,6 +299,7 @@ def run_standard_discovery(
         timeout_seconds=timeout_seconds,
         test="standard",
         options=options,
+        debug_stdout=debug_stdout,
         stop_event=stop_event,
     )
 
@@ -317,6 +319,7 @@ def run_multi_domain_discovery(
     skip_dnscheck: bool = True,
     skip_ipblock: bool = True,
     curl_parallelism: int = 4,
+    debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     options = DiscoveryOptions(
@@ -337,6 +340,7 @@ def run_multi_domain_discovery(
         timeout_seconds=timeout_seconds,
         options=options,
         curl_parallelism=curl_parallelism,
+        debug_stdout=debug_stdout,
         stop_event=stop_event,
     )
 
@@ -1264,6 +1268,13 @@ def _stdout_log_mode(env: dict[str, str]) -> str:
     return "debug" if _truthy(env.get("GP_DEBUG_STDOUT"), default=False) else "compact"
 
 
+def _set_debug_stdout_env(env: dict[str, str], debug_stdout: bool | None) -> None:
+    if debug_stdout is True:
+        env["GP_DEBUG_STDOUT"] = "1"
+    elif debug_stdout is False:
+        env.pop("GP_DEBUG_STDOUT", None)
+
+
 def _run_process_with_live_stdout(
     command: list[str],
     env: dict[str, str],
@@ -1369,6 +1380,7 @@ def _run_blockcheck_live(
     test: str,
     options: DiscoveryOptions,
     candidate_id: str = "",
+    debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
@@ -1387,6 +1399,7 @@ def _run_blockcheck_live(
             **options.to_blockcheck_env(),
         }
     )
+    _set_debug_stdout_env(full_env, debug_stdout)
     command = root_command([str(blockcheck_path)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS)
 
     root = _finder_dir(state_dir)
@@ -1424,6 +1437,7 @@ def _run_blockcheck_live(
         "summary_fallback_log": str(summary_fallback_log),
         "debug_stdout_log": str(debug_stdout_log),
         "stdout_log_mode": _stdout_log_mode(full_env),
+        "debug_stdout": _stdout_log_mode(full_env) == "debug",
         "candidate_count": 0,
         "phase": PHASE_CHECK_VPN,
         "test": test,
@@ -1459,6 +1473,7 @@ def _run_blockcheck_live(
         "summary_fallback_log": str(summary_fallback_log),
         "debug_stdout_log": str(debug_stdout_log),
         "stdout_log_mode": _stdout_log_mode(full_env),
+        "debug_stdout": _stdout_log_mode(full_env) == "debug",
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),
@@ -1488,6 +1503,7 @@ def _run_multidomain_blockcheck_live(
     timeout_seconds: int,
     options: DiscoveryOptions,
     curl_parallelism: int,
+    debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
@@ -1515,6 +1531,7 @@ def _run_multidomain_blockcheck_live(
                 "ZAPRET_RW": str(zapret_base),
             }
         )
+        _set_debug_stdout_env(full_env, debug_stdout)
         return _run_blockcheck_command_live(
             command=root_command([str(runner)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS),
             env=full_env,
@@ -1525,6 +1542,7 @@ def _run_multidomain_blockcheck_live(
             test="standard",
             options=options,
             curl_parallelism=normalized_parallelism,
+            debug_stdout=debug_stdout,
             stop_event=stop_event,
         )
 
@@ -1540,9 +1558,11 @@ def _run_blockcheck_command_live(
     options: DiscoveryOptions,
     curl_parallelism: int | None = None,
     candidate_id: str = "",
+    debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     options = options.normalized()
+    _set_debug_stdout_env(env, debug_stdout)
     root = _finder_dir(state_dir)
     logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -1578,6 +1598,7 @@ def _run_blockcheck_command_live(
         "summary_fallback_log": str(summary_fallback_log),
         "debug_stdout_log": str(debug_stdout_log),
         "stdout_log_mode": _stdout_log_mode(env),
+        "debug_stdout": _stdout_log_mode(env) == "debug",
         "candidate_count": 0,
         "phase": PHASE_CHECK_VPN,
         "test": test,
@@ -1614,6 +1635,7 @@ def _run_blockcheck_command_live(
         "summary_fallback_log": str(summary_fallback_log),
         "debug_stdout_log": str(debug_stdout_log),
         "stdout_log_mode": _stdout_log_mode(env),
+        "debug_stdout": _stdout_log_mode(env) == "debug",
         "summary": parsed["summary"],
         "results": parsed["results"],
         "candidate_count": len(parsed["candidates"]),

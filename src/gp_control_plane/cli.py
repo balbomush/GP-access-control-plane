@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     finder_standard.add_argument("--repeat-parallel", action="store_true")
     finder_standard.add_argument("--no-skip-dnscheck", action="store_true")
     finder_standard.add_argument("--no-skip-ipblock", action="store_true")
+    finder_standard.add_argument("--debug-stdout", action="store_true", help="Keep full blockcheck stdout in a rotated debug log")
     finder_multi = finder_subparsers.add_parser(
         "multi-domain-discovery",
         help="Run experimental strategy-first discovery across multiple domains",
@@ -62,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     finder_multi.add_argument("--no-skip-dnscheck", action="store_true")
     finder_multi.add_argument("--no-skip-ipblock", action="store_true")
     finder_multi.add_argument("--curl-parallelism", type=int, default=4)
+    finder_multi.add_argument("--debug-stdout", action="store_true", help="Keep full blockcheck stdout in a rotated debug log")
     storage_parser = subparsers.add_parser("storage", help="Inspect local SQLite data")
     storage_subparsers = storage_parser.add_subparsers(dest="storage_command", required=True)
     storage_subparsers.add_parser("status", help="Print local SQLite status")
@@ -112,6 +114,7 @@ def _main(args: argparse.Namespace) -> int:
                 repeat_parallel=args.repeat_parallel,
                 skip_dnscheck=not args.no_skip_dnscheck,
                 skip_ipblock=not args.no_skip_ipblock,
+                debug_stdout=True if args.debug_stdout else None,
             )
             _print_json(run)
             return 0
@@ -130,6 +133,7 @@ def _main(args: argparse.Namespace) -> int:
                 skip_dnscheck=not args.no_skip_dnscheck,
                 skip_ipblock=not args.no_skip_ipblock,
                 curl_parallelism=args.curl_parallelism,
+                debug_stdout=True if args.debug_stdout else None,
             )
             _print_json(run)
             return 0
