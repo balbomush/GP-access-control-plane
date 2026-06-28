@@ -108,6 +108,10 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("dynamicCommonRows", html)
         self.assertIn("selectedFinderDomains", html)
         self.assertIn("selectedCommonDomains", html)
+        self.assertIn("candidateKnownVersion", html)
+        self.assertIn("candidateCacheValid", html)
+        self.assertIn("syncCandidateVersion", html)
+        self.assertIn("invalidateCandidateCaches", html)
         self.assertIn("common-controls", html)
         self.assertIn(".common-filter-panel .preset-grid", html)
         self.assertIn("common-domains", html)
@@ -330,6 +334,30 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('"process"', body)
             self.assertIn('"files"', body)
+
+    def test_status_endpoint_returns_candidate_version(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/status")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"candidate_version"', body)
+            self.assertIn('"size"', body)
+            self.assertIn('"mtime_ns"', body)
 
     def test_settings_endpoint_saves_runtime_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

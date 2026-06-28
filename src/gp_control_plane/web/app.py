@@ -17,6 +17,7 @@ from ..jobs import JobRunner
 from ..state import now_iso, read_state, write_state
 from ..storage import read_custom_presets, save_custom_presets
 from ..strategy_finder import (
+    candidate_storage_version,
     close_stale_running_runs,
     domain_sets,
     latest_log_tail,
@@ -1460,7 +1461,7 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, settings: null, settingsTouched: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, settings: null, settingsTouched: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -2123,9 +2124,47 @@ function currentCandidateQueryKey(options){
   }
   return String(opts.view || state.candidateView || 'domain');
 }
+function candidateVersionKey(version){
+  const value = version || {};
+  return `${Number(value.size || 0)}:${Number(value.mtime_ns || 0)}`;
+}
+function sameCandidateVersion(left, right){
+  return candidateVersionKey(left) === candidateVersionKey(right);
+}
+function candidateCacheValid(cached){
+  if (!cached) return false;
+  if (!state.candidateKnownVersion || !cached.version) return true;
+  return sameCandidateVersion(cached.version, state.candidateKnownVersion);
+}
+function rememberCandidateVersion(version){
+  if (!version) return;
+  state.candidateKnownVersion = version;
+  state.candidateVersion = version;
+}
+function invalidateCandidateCaches(){
+  state.candidates = [];
+  state.candidateTotal = 0;
+  state.candidateOffset = 0;
+  state.candidateHasMore = false;
+  state.candidatesLoaded = false;
+  state.candidateDomains = [];
+  state.candidateDomainTotal = 0;
+  state.candidateDomainStrategyTotal = 0;
+  state.candidateDomainsLoaded = false;
+  state.domainStrategies = {};
+  state.commonCandidateCache = {};
+  state.testedDomains = [];
+}
+function syncCandidateVersion(version){
+  if (!version) return;
+  if (state.candidateKnownVersion && !sameCandidateVersion(state.candidateKnownVersion, version)) {
+    invalidateCandidateCaches();
+  }
+  rememberCandidateVersion(version);
+}
 function loadCommonCandidateCache(key){
   const cached = state.commonCandidateCache[key];
-  if (!cached) return false;
+  if (!candidateCacheValid(cached)) return false;
   state.candidates = cached.candidates.slice();
   state.candidateTotal = cached.total;
   state.candidateOffset = cached.offset;
@@ -2841,7 +2880,7 @@ async function refreshDomainIndex(){
     state.candidateDomains = data.domains || [];
     state.candidateDomainTotal = Number(data.total || 0);
     state.candidateDomainStrategyTotal = Number(data.strategy_total || 0);
-    state.candidateVersion = data.version || null;
+    rememberCandidateVersion(data.version || null);
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidateDomainsLoaded = true;
     renderCandidatesOnly();
@@ -2862,8 +2901,10 @@ async function refreshDomainStrategies(domain, reset){
       total: Number(data.total || 0),
       hasMore: Boolean(data.has_more),
       loaded: true,
-      loadingAll: false
+      loadingAll: false,
+      version: data.version || state.candidateKnownVersion
     };
+    rememberCandidateVersion(data.version || null);
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     renderCandidatesOnly();
   } catch (error) {
@@ -2893,12 +2934,13 @@ async function loadAllDomainStrategies(domain){
       }
       candidates = [...candidates, ...rows];
       state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+      rememberCandidateVersion(data.version || null);
       guard += 1;
     }
-    state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false };
+    state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false, version: state.candidateKnownVersion };
     renderCandidatesOnly();
   } catch (error) {
-    state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false };
+    state.domainStrategies[key] = { candidates, total, hasMore, loaded: true, loadingAll: false, version: state.candidateKnownVersion };
     setMessage(`Ошибка загрузки всех стратегий домена: ${error.message}`, 'bad');
     renderCandidatesOnly();
   }
@@ -2930,6 +2972,7 @@ async function loadAllCommonStrategies(){
       }
       candidates = [...candidates, ...rows];
       state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+      rememberCandidateVersion(data.version || null);
       guard += 1;
     }
     if (state.candidateQueryKey !== queryKey) {
@@ -2963,7 +3006,7 @@ async function refreshCandidates(reset){
     state.candidateTotal = Number(data.total || 0);
     state.candidateOffset = Number(data.offset || 0);
     state.candidateHasMore = Boolean(data.has_more);
-    state.candidateVersion = data.version || null;
+    rememberCandidateVersion(data.version || null);
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidatesLoaded = true;
     state.candidateQueryKey = queryKey;
@@ -3003,6 +3046,7 @@ async function refresh(){
       getJson('/api/domain-sources')
     ]);
     state.status = status;
+    syncCandidateVersion(status.candidate_version || null);
     state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
@@ -3011,6 +3055,7 @@ async function refresh(){
     state.domainSources = domainSources;
     mergeCustomPresets((presets || {}).custom || {});
     renderAll({ skipCandidates: true });
+    if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   } finally {
@@ -3053,12 +3098,7 @@ async function restoreBackup(snapshotId){
     }
     if (data.restored) {
       setMessage('Бекап восстановлен', 'good');
-      state.candidates = [];
-      state.candidateDomains = [];
-      state.domainStrategies = {};
-      state.candidatesLoaded = false;
-      state.candidateDomainsLoaded = false;
-      state.testedDomains = [];
+      invalidateCandidateCaches();
       await refresh();
       if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
     }
@@ -3117,7 +3157,8 @@ document.addEventListener('click', (event) => {
     const domain = details.dataset.domain;
     const nextOpen = !Boolean(state.openCandidateDomains[domain]);
     state.openCandidateDomains[domain] = nextOpen;
-    if (nextOpen && !(state.domainStrategies[domain] || {}).loaded) {
+    const cachedDomain = state.domainStrategies[domain] || {};
+    if (nextOpen && (!cachedDomain.loaded || !candidateCacheValid(cachedDomain))) {
       state.domainStrategies[domain] = { candidates: [], total: 0, hasMore: false, loaded: false, loading: true };
       renderCandidates();
       refreshDomainStrategies(domain, true);
@@ -3142,11 +3183,10 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (button.dataset.action === 'refresh') {
+    invalidateCandidateCaches();
     refresh();
     if (state.activeTab === 'candidates') {
       if (state.candidateView === 'domain') {
-        state.domainStrategies = {};
-        state.openCandidateDomains = {};
         refreshDomainIndex();
       } else {
         refreshCandidates(true);
@@ -3366,6 +3406,7 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         "version": __version__,
         "state": read_state(config.output.state_dir),
         "settings": read_settings(config),
+        "candidate_version": candidate_storage_version(config.output.state_dir),
         "paths": {
             "state_dir": str(config.output.state_dir),
         },

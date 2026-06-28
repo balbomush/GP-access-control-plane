@@ -397,6 +397,10 @@ def read_candidate_page(
     }
 
 
+def candidate_storage_version(state_dir: Path) -> dict[str, int]:
+    return _storage_version(state_dir)
+
+
 def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str, Any]:
     query = query.strip().lower()
     with connect(state_dir) as conn:
