@@ -16,6 +16,7 @@ SCHEMA_MIGRATIONS = (
     (4, "runtime_observability"),
 )
 _MIGRATION_LOCK = threading.Lock()
+_MIGRATED_DB_PATHS: set[Path] = set()
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -36,11 +37,17 @@ def connect(state_dir: Path) -> sqlite3.Connection:
     path = db_path(state_dir)
     conn = sqlite3.connect(path, timeout=30, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
+    migration_key = path.resolve()
     with _MIGRATION_LOCK:
-        conn.execute("PRAGMA journal_mode=WAL")
+        if migration_key not in _MIGRATED_DB_PATHS:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            _migrate_schema(conn)
+            _MIGRATED_DB_PATHS.add(migration_key)
+            return conn
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        _migrate_schema(conn)
     return conn
 
 
