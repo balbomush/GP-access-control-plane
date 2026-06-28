@@ -1191,7 +1191,6 @@ pre {
                 </div>
               </div>
               <div class="preset-actions">
-                <button class="secondary" data-preset-use="finder" title="Подставляет выбранный пресет в список доменов подбора." type="button">Применить пресет</button>
                 <button class="secondary" data-preset-save="finder" title="Сохраняет текущий список доменов как пользовательский пресет или перезаписывает выбранный пользовательский пресет." type="button">Сохранить пресет</button>
                 <button class="secondary danger" data-preset-delete="finder" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
               </div>
@@ -1208,7 +1207,6 @@ pre {
                 </div>
               </div>
               <div class="preset-actions">
-                <button class="secondary" data-action="use-discovery-profile" title="Применяет сохраненные настройки blockcheck2, curl и лимита времени к форме подбора." type="button">Применить профиль</button>
                 <button class="secondary" data-action="save-discovery-profile" title="Сохраняет текущие настройки подбора как пользовательский профиль." type="button">Сохранить профиль</button>
                 <button class="secondary danger" data-action="delete-discovery-profile" title="Удаляет выбранный пользовательский профиль. Встроенные профили не удаляются." type="button">Удалить профиль</button>
               </div>
@@ -1318,9 +1316,6 @@ pre {
               <label for="common-preset-select">Пресет доменов для пересечения</label>
               <select id="common-preset-select"></select>
             </div>
-          </div>
-          <div class="preset-actions">
-            <button class="secondary" data-preset-use="common" title="Подставляет выбранный пресет в фильтр общих стратегий. Непротестированные домены будут пропущены." type="button">Применить пресет</button>
           </div>
           <div class="field">
             <label for="common-domains">Домены для поиска общих стратегий</label>
@@ -1489,7 +1484,8 @@ pre {
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
-const state = { status: null, settings: null, settingsTouched: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupRestorePreview: null, backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const CUSTOM_SELECT_VALUE = 'custom';
+const state = { status: null, settings: null, settingsTouched: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupRestorePreview: null, backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1669,23 +1665,50 @@ function currentDiscoveryProfileFromForm(){
     timeout_hours: Number.isFinite(timeoutHours) ? Math.max(1, Math.min(24, Math.round(timeoutHours))) : 6
   };
 }
+const DISCOVERY_PROFILE_CONTROL_IDS = new Set([
+  'enable-http',
+  'enable-tls12',
+  'enable-tls13',
+  'include-quic',
+  'enable-ipv6',
+  'scan-level',
+  'repeats',
+  'repeat-parallel',
+  'skip-dnscheck',
+  'skip-ipblock',
+  'curl-parallelism',
+  'limit-time-enabled',
+  'finder-timeout-hours'
+]);
+function markDiscoveryProfileCustom(){
+  if (state.loadingDiscoveryProfile) return;
+  const select = el('discovery-profile-select');
+  if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
+  const nameInput = el('discovery-profile-name');
+  if (nameInput) nameInput.value = 'custom';
+}
 function useDiscoveryProfile(profile){
   if (!profile) return;
-  el('enable-http').checked = Boolean(profile.enable_http);
-  el('enable-tls12').checked = Boolean(profile.enable_tls12);
-  el('enable-tls13').checked = Boolean(profile.enable_tls13);
-  el('include-quic').checked = Boolean(profile.include_quic);
-  el('enable-ipv6').checked = Boolean(profile.enable_ipv6);
-  el('scan-level').value = profile.scan_level || 'standard';
-  el('repeats').value = String(profile.repeats || 1);
-  el('repeat-parallel').checked = Boolean(profile.repeat_parallel);
-  el('skip-dnscheck').checked = Boolean(profile.skip_dnscheck);
-  el('skip-ipblock').checked = Boolean(profile.skip_ipblock);
-  el('curl-parallelism').value = String(profile.curl_parallelism || 4);
-  el('limit-time-enabled').checked = Boolean(profile.limit_time_enabled);
-  el('finder-timeout-hours').value = String(profile.timeout_hours || 6);
-  el('time-limit-field').hidden = !el('limit-time-enabled').checked;
-  state.settingsTouched = true;
+  state.loadingDiscoveryProfile = true;
+  try {
+    el('enable-http').checked = Boolean(profile.enable_http);
+    el('enable-tls12').checked = Boolean(profile.enable_tls12);
+    el('enable-tls13').checked = Boolean(profile.enable_tls13);
+    el('include-quic').checked = Boolean(profile.include_quic);
+    el('enable-ipv6').checked = Boolean(profile.enable_ipv6);
+    el('scan-level').value = profile.scan_level || 'standard';
+    el('repeats').value = String(profile.repeats || 1);
+    el('repeat-parallel').checked = Boolean(profile.repeat_parallel);
+    el('skip-dnscheck').checked = Boolean(profile.skip_dnscheck);
+    el('skip-ipblock').checked = Boolean(profile.skip_ipblock);
+    el('curl-parallelism').value = String(profile.curl_parallelism || 4);
+    el('limit-time-enabled').checked = Boolean(profile.limit_time_enabled);
+    el('finder-timeout-hours').value = String(profile.timeout_hours || 6);
+    el('time-limit-field').hidden = !el('limit-time-enabled').checked;
+    state.settingsTouched = true;
+  } finally {
+    state.loadingDiscoveryProfile = false;
+  }
 }
 function profileTitle(name, profile){
   return String((profile && profile.title) || name || '-');
@@ -1696,10 +1719,12 @@ function renderDiscoveryProfiles(){
   const current = select.value;
   const profiles = state.discoveryProfiles || {};
   const names = Object.keys(profiles).sort((a, b) => profileTitle(a, profiles[a]).localeCompare(profileTitle(b, profiles[b])));
-  select.innerHTML = names.map((name) => `<option value="${esc(name)}">${esc(profileTitle(name, profiles[name]))}</option>`).join('');
+  select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>` + names.map((name) => `<option value="${esc(name)}">${esc(profileTitle(name, profiles[name]))}</option>`).join('');
   if (current && profiles[current]) select.value = current;
+  else if (!current && profiles.balanced) select.value = 'balanced';
+  else if (current === CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
   const nameInput = el('discovery-profile-name');
-  if (nameInput && select.value && !nameInput.value) {
+  if (nameInput && select.value && select.value !== CUSTOM_SELECT_VALUE && !nameInput.value) {
     nameInput.value = select.value;
   }
 }
@@ -1728,8 +1753,8 @@ async function saveDiscoveryProfile(){
 async function deleteDiscoveryProfile(){
   const select = el('discovery-profile-select');
   const name = select ? select.value : '';
-  if (!name || ['balanced', 'deep'].includes(name)) {
-    setMessage('Встроенный профиль удалить нельзя', 'warn');
+  if (!name || name === CUSTOM_SELECT_VALUE || ['balanced', 'deep'].includes(name)) {
+    setMessage('Этот профиль удалить нельзя', 'warn');
     return;
   }
   const profiles = { ...(state.discoveryProfiles || {}) };
@@ -1740,16 +1765,6 @@ async function deleteDiscoveryProfile(){
   } catch (error) {
     setMessage(`Ошибка удаления профиля: ${error.message}`, 'bad');
   }
-}
-function useSelectedDiscoveryProfile(){
-  const select = el('discovery-profile-select');
-  const profile = select ? (state.discoveryProfiles || {})[select.value] : null;
-  if (!profile) {
-    setMessage('Профиль подбора не выбран', 'warn');
-    return;
-  }
-  useDiscoveryProfile(profile);
-  setMessage('Профиль подбора применен', 'good');
 }
 function hasEnabledProtocol(options){
   return Boolean(options.enable_http || options.enable_tls12 || options.enable_tls13 || options.include_quic);
@@ -1863,25 +1878,40 @@ function renderPresetSelect(target){
     const options = group.presets.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${uniqueDomainCount(preset.domains)})</option>`).join('');
     return `<optgroup label="${esc(group.label)}">${options}</optgroup>`;
   }).join('');
-  select.innerHTML = `${customGroup}${builtInGroups}`;
+  select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>${customGroup}${builtInGroups}`;
   if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+  else if (!previous && target === 'common' && [...select.options].some((option) => option.value === 'builtin:tested')) select.value = 'builtin:tested';
+  else if (!previous && [...select.options].some((option) => option.value === 'builtin:critical')) select.value = 'builtin:critical';
+  else select.value = CUSTOM_SELECT_VALUE;
 }
 function renderPresetSelects(){
   renderPresetSelect('finder');
   renderPresetSelect('common');
 }
+function markDomainPresetCustom(target){
+  if (state.loadingDomainPreset) return;
+  const select = el(`${target}-preset-select`);
+  if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
+  const nameInput = el(`${target}-preset-name`);
+  if (nameInput) nameInput.value = 'custom';
+}
 function usePreset(target){
   const domains = presetDomains(target, el(`${target}-preset-select`).value);
   const finalDomains = target === 'common' ? filterTestedDomains(domains) : domains;
-  el(`${target}-domains`).value = uniqueDomains(finalDomains).join('\\n');
-  updateEditorLineNumbers(`${target}-domains`);
-  if (target === 'finder') state.domainsTouched = true;
-  if (target === 'common') {
-    prepareCommonCandidateState();
-    renderCandidatesOnly();
-    if (selectedCommonDomains().length >= 2) refreshCandidates(true);
+  state.loadingDomainPreset = true;
+  try {
+    el(`${target}-domains`).value = uniqueDomains(finalDomains).join('\\n');
+    updateEditorLineNumbers(`${target}-domains`);
+    if (target === 'finder') state.domainsTouched = true;
+    if (target === 'common') {
+      prepareCommonCandidateState();
+      renderCandidatesOnly();
+      if (selectedCommonDomains().length >= 2) refreshCandidates(true);
+    }
+    else renderCandidates();
+  } finally {
+    state.loadingDomainPreset = false;
   }
-  else renderCandidates();
 }
 function presetNameForSave(target){
   const nameInput = el(`${target}-preset-name`);
@@ -1913,7 +1943,7 @@ function savePreset(target){
 function deletePreset(target){
   const selected = el(`${target}-preset-select`).value || '';
   if (!selected.startsWith('custom:')) {
-    showToast('Встроенные пресеты нельзя удалить', 'warn');
+    showToast('Этот пресет удалить нельзя', 'warn');
     return;
   }
   const name = selected.slice('custom:'.length);
@@ -2265,6 +2295,7 @@ function addCommonDomain(){
   input.value = '';
   hideCommonDomainSuggestions();
   updateEditorLineNumbers('common-domains');
+  markDomainPresetCustom('common');
   prepareCommonCandidateState();
   renderCandidatesOnly();
   if (selectedCommonDomains().length >= 2) refreshCandidates(true);
@@ -3284,10 +3315,6 @@ document.addEventListener('click', (event) => {
     saveSettings();
     return;
   }
-  if (button.dataset.action === 'use-discovery-profile') {
-    useSelectedDiscoveryProfile();
-    return;
-  }
   if (button.dataset.action === 'save-discovery-profile') {
     saveDiscoveryProfile();
     return;
@@ -3317,10 +3344,6 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (button.dataset.fill) fillDomains(button.dataset.fill);
-  if (button.dataset.presetUse) {
-    usePreset(button.dataset.presetUse);
-    return;
-  }
   if (button.dataset.presetSave) {
     savePreset(button.dataset.presetSave);
     return;
@@ -3394,12 +3417,17 @@ document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
+    markDomainPresetCustom('finder');
     if (state.candidateView === 'common') scheduleCandidateRefresh();
   }
   if (event.target && event.target.id === 'common-domains') {
     updateEditorLineNumbers('common-domains');
+    markDomainPresetCustom('common');
     scheduleCandidateRefresh();
     renderCommonDomainSuggestions();
+  }
+  if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
+    markDiscoveryProfileCustom();
   }
   if (event.target && event.target.id === 'common-domain-add') {
     renderCommonDomainSuggestions();
@@ -3428,17 +3456,27 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
+    markDiscoveryProfileCustom();
   }
   if (event.target && (event.target.id === 'finder-preset-select' || event.target.id === 'common-preset-select')) {
     const target = event.target.id.startsWith('finder') ? 'finder' : 'common';
     const value = event.target.value || '';
     const nameInput = el(`${target}-preset-name`);
-    if (nameInput) nameInput.value = value.startsWith('custom:') ? value.slice('custom:'.length) : '';
+    if (nameInput) nameInput.value = value === CUSTOM_SELECT_VALUE ? 'custom' : (value.startsWith('custom:') ? value.slice('custom:'.length) : '');
+    if (value !== CUSTOM_SELECT_VALUE) usePreset(target);
   }
   if (event.target && event.target.id === 'discovery-profile-select') {
-    const profile = (state.discoveryProfiles || {})[event.target.value];
     const nameInput = el('discovery-profile-name');
-    if (nameInput) nameInput.value = profileTitle(event.target.value, profile);
+    if (event.target.value === CUSTOM_SELECT_VALUE) {
+      if (nameInput) nameInput.value = 'custom';
+    } else {
+      const profile = (state.discoveryProfiles || {})[event.target.value];
+      if (nameInput) nameInput.value = profileTitle(event.target.value, profile);
+      useDiscoveryProfile(profile);
+    }
+  }
+  if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
+    markDiscoveryProfileCustom();
   }
   if (event.target && event.target.id === 'backup-restore-select') {
     refreshBackupRestorePreview(event.target.value || '');
