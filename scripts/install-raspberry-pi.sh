@@ -12,6 +12,8 @@ ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
 ROOT_HELPER_PATH="${GP_ROOT_HELPER_PATH:-/usr/local/libexec/gp-control-plane/gp-root-helper}"
 ROOT_HELPER_CONFIG="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
 SUDOERS_PATH="${GP_SUDOERS_PATH:-/etc/sudoers.d/gp-control-plane-root-helper}"
+SERVICE_MEMORY_HIGH="${GP_SERVICE_MEMORY_HIGH:-512M}"
+SERVICE_MEMORY_MAX="${GP_SERVICE_MEMORY_MAX:-1G}"
 
 log() {
   printf '\n==> %s\n' "$1"
@@ -215,6 +217,9 @@ Environment=PATH=$SERVICE_PATH
 Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
 Environment=GP_ZAPRET_DIR=$ZAPRET_DIR
 ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --config $INSTALL_DIR/configs/orchestrator.example.yaml --host $WEB_HOST --port $WEB_PORT
+MemoryAccounting=true
+MemoryHigh=$SERVICE_MEMORY_HIGH
+MemoryMax=$SERVICE_MEMORY_MAX
 Restart=always
 RestartSec=5
 

@@ -46,6 +46,19 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 
 Путь установки можно поменять через `GP_INSTALL_DIR`, но выбранный пользователь должен иметь право записи в этот каталог. Для обычной установки лучше оставить путь по умолчанию: `~/gp/GP-access-control-plane`.
 
+Установщик добавляет systemd-ограничители памяти для web-сервиса:
+
+```text
+MemoryHigh=512M
+MemoryMax=1G
+```
+
+Если для вашей платы нужны другие значения, задайте их при установке:
+
+```bash
+GP_SERVICE_MEMORY_HIGH=768M GP_SERVICE_MEMORY_MAX=1500M curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/main/scripts/install-raspberry-pi.sh | bash
+```
+
 Если репозиторий приватный, сначала настройте SSH-доступ к GitHub. Затем запустите установку через `git clone`:
 
 ```bash
