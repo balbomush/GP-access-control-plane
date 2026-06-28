@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -452,6 +453,36 @@ pktws_check_https_tls12()
 
             self.assertEqual(tail["stdout_tail"], "line-997\nline-998\nline-999")
 
+    def test_latest_log_tail_does_not_read_full_stdout_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            logs = root / "logs"
+            logs.mkdir(parents=True)
+            stdout = logs / "large.stdout.log"
+            stdout.write_text("\n".join(f"line-{index}" for index in range(5000)) + "\n", encoding="utf-8")
+            append_run(
+                state_dir,
+                {
+                    "id": "run-large-log",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout),
+                },
+            )
+
+            original_read_text = Path.read_text
+
+            def guarded_read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == stdout:
+                    raise AssertionError("stdout log must be read through tail, not full read_text")
+                return original_read_text(path, *args, **kwargs)
+
+            with patch.object(Path, "read_text", guarded_read_text):
+                tail = latest_log_tail(state_dir, max_lines=2)
+
+            self.assertEqual(tail["stdout_tail"], "line-4998\nline-4999")
+
     def test_read_candidate_page_limits_results_and_reports_total(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -473,6 +504,27 @@ pktws_check_https_tls12()
             self.assertEqual(len(page["candidates"]), 2)
             self.assertTrue(page["has_more"])
             self.assertEqual(page["tested_domains"], ["domain-0.test", "domain-1.test", "domain-2.test"])
+
+    def test_read_candidate_page_keeps_large_database_paged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            candidates = [
+                {
+                    "protocol": "tls",
+                    "args": f"--strategy {index}",
+                    "status": "candidate",
+                    "seen": [{"domain": "youtube.com"}],
+                }
+                for index in range(1200)
+            ]
+            _store_candidate_rows(state_dir, candidates)
+
+            page = read_candidate_page(state_dir, limit=25, domain="youtube.com")
+
+            self.assertEqual(page["total"], 1200)
+            self.assertEqual(len(page["candidates"]), 25)
+            self.assertTrue(page["has_more"])
+            self.assertLess(len(json.dumps(page, ensure_ascii=False)), 20000)
 
     def test_read_candidate_page_filters_common_domains(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
