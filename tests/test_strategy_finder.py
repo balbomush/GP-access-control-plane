@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from gp_control_plane.strategy_finder import (
     _LiveStdoutRecorder,
     _RotatingTextWriter,
     _resolve_blockcheck_script,
+    _run_process_with_live_stdout,
     _standard_attempt_plan,
     _stdout_log_mode,
     _write_multidomain_runner,
@@ -75,9 +77,10 @@ class StrategyFinderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             options.normalized()
 
-    def test_stdout_log_mode_defaults_to_compact(self) -> None:
-        self.assertEqual(_stdout_log_mode({}), "compact")
-        self.assertEqual(_stdout_log_mode({"GP_DEBUG_STDOUT": "0"}), "compact")
+    def test_stdout_log_mode_defaults_to_raw_terminal_output(self) -> None:
+        self.assertEqual(_stdout_log_mode({}), "raw")
+        self.assertEqual(_stdout_log_mode({"GP_DEBUG_STDOUT": "0"}), "raw")
+        self.assertEqual(_stdout_log_mode({"GP_COMPACT_STDOUT": "1"}), "compact")
         self.assertEqual(_stdout_log_mode({"GP_DEBUG_STDOUT": "1"}), "debug")
 
     def test_parse_blockcheck_summary_extracts_candidates(self) -> None:
@@ -755,6 +758,52 @@ pktws_check_https_tls12()
             self.assertNotIn("--failed", text)
             self.assertIn("--success", text)
             self.assertIn("!!!!! AVAILABLE !!!!!", text)
+
+    def test_raw_stdout_log_keeps_failed_attempts_for_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stdout_log = state_dir / "stdout.log"
+            stderr_log = state_dir / "stderr.log"
+            progress_log = state_dir / "progress.json"
+            metrics_log = state_dir / "metrics.ndjson"
+            run = {
+                "id": "run-raw",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(progress_log),
+                "metrics_log": str(metrics_log),
+                "attempt_plan": {
+                    "total": 1,
+                    "scripts": {"standard/10-test.sh": 1},
+                    "script_order": ["standard/10-test.sh"],
+                    "source": "test",
+                },
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+            command = [
+                sys.executable,
+                "-c",
+                "print('* script : standard/10-test.sh'); "
+                "print('- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --failed'); "
+                "print('UNAVAILABLE code=28')",
+            ]
+
+            result = _run_process_with_live_stdout(
+                command=command,
+                env=os.environ.copy(),
+                stdout_log=stdout_log,
+                stderr_log=stderr_log,
+                debug_stdout_log=None,
+                timeout_seconds=10,
+                stop_event=None,
+                recorder=recorder,
+            )
+            text = stdout_log.read_text(encoding="utf-8")
+
+            self.assertEqual(result["status"], "success")
+            self.assertIn("--failed", text)
+            self.assertIn("UNAVAILABLE code=28", text)
 
     def test_rotating_text_writer_limits_active_log_size(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

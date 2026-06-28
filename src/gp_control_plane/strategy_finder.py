@@ -1269,7 +1269,11 @@ class _CompactStdoutWriter:
 
 
 def _stdout_log_mode(env: dict[str, str]) -> str:
-    return "debug" if _truthy(env.get("GP_DEBUG_STDOUT"), default=False) else "compact"
+    if _truthy(env.get("GP_DEBUG_STDOUT"), default=False):
+        return "debug"
+    if _truthy(env.get("GP_COMPACT_STDOUT"), default=False):
+        return "compact"
+    return "raw"
 
 
 def _set_debug_stdout_env(env: dict[str, str], debug_stdout: bool | None) -> None:
@@ -1317,13 +1321,19 @@ def _run_process_with_live_stdout(
                     if process.stdout is None:
                         return
                     for line in process.stdout:
-                        compact_writer.write(line)
+                        if stdout_mode == "compact":
+                            compact_writer.write(line)
+                        else:
+                            stdout_handle.write(line)
+                            stdout_handle.flush()
                         if debug_handle:
                             debug_handle.write(line)
                         recorder.record_line(line)
                 except BaseException as exc:  # noqa: BLE001
                     reader_errors.append(exc)
                 finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
                     compact_writer.close()
                     if debug_handle:
                         debug_handle.flush()
