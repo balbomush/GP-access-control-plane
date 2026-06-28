@@ -948,6 +948,11 @@ tr:last-child td { border-bottom: 0; }
   align-items: start;
   padding: 12px;
 }
+.run-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 12px 12px;
+}
 .run-field {
   display: grid;
   gap: 4px;
@@ -2355,9 +2360,13 @@ function renderRunCard(row){
         <div class="run-field-value">${badge(String(count), count > 0 ? 'good' : '')}</div>
       </div>
       ${runField('Попытки', runProgressText(row))}
+      ${runField('Настройки', runSettingsText(row))}
       ${runField('Итог', runSummary(row))}
     </div>
     ${runDomains(row, domainKey)}
+    <div class="run-card-actions">
+      <button class="secondary" data-run-repeat="${esc(domainKey)}" type="button">Повторить с этими настройками</button>
+    </div>
   </article>`;
 }
 function runDomainKey(row){
@@ -2439,6 +2448,62 @@ function runSummary(row){
 }
 function runCandidateCount(row){
   return Number(row.candidate_count || 0) + Number(row.common_candidate_count || 0);
+}
+function runSettingsText(row){
+  const options = row.discovery_options || {};
+  const protocols = [];
+  if (truthyOption(options.enable_http, row.enable_http)) protocols.push('HTTP');
+  if (truthyOption(options.enable_tls12, row.enable_tls12 ?? row.enable_tls)) protocols.push('TLS 1.2');
+  if (truthyOption(options.enable_tls13, row.enable_tls13)) protocols.push('TLS 1.3');
+  if (truthyOption(options.enable_quic, row.include_quic ?? row.enable_quic)) protocols.push('QUIC');
+  const scan = options.scan_level || row.scan_level || 'standard';
+  const repeats = Number(options.repeats || row.repeats || 1);
+  const repeatParallel = truthyOption(options.repeat_parallel, row.repeat_parallel) ? ', параллельные повторы' : '';
+  const skip = [
+    truthyOption(options.skip_dnscheck, row.skip_dnscheck) ? 'без DNS' : 'с DNS',
+    truthyOption(options.skip_ipblock, row.skip_ipblock) ? 'без IP-check' : 'с IP-check',
+  ].join(', ');
+  const ipv6 = truthyOption(options.enable_ipv6, row.enable_ipv6) ? ', IPv6' : '';
+  const curl = row.kind === 'multi-domain-discovery' ? `, curl ${row.curl_parallelism || 4}` : '';
+  const limit = row.timeout_seconds ? `, лимит ${formatDuration(Number(row.timeout_seconds || 0))}` : ', без лимита';
+  return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${curl}${limit}`;
+}
+function truthyOption(primary, fallback){
+  const value = primary === undefined || primary === null ? fallback : primary;
+  return Boolean(value);
+}
+function runPayload(row){
+  const options = row.discovery_options || {};
+  const payload = {
+    domains: uniqueDomains(row.domains || []),
+    enable_http: truthyOption(options.enable_http, row.enable_http),
+    enable_tls12: truthyOption(options.enable_tls12, row.enable_tls12 ?? row.enable_tls),
+    enable_tls13: truthyOption(options.enable_tls13, row.enable_tls13),
+    include_quic: truthyOption(options.enable_quic, row.include_quic ?? row.enable_quic),
+    enable_ipv6: truthyOption(options.enable_ipv6, row.enable_ipv6),
+    scan_level: options.scan_level || row.scan_level || 'standard',
+    repeats: Number(options.repeats || row.repeats || 1),
+    repeat_parallel: truthyOption(options.repeat_parallel, row.repeat_parallel),
+    skip_dnscheck: truthyOption(options.skip_dnscheck, row.skip_dnscheck),
+    skip_ipblock: truthyOption(options.skip_ipblock, row.skip_ipblock),
+  };
+  if (row.timeout_seconds) payload.timeout_seconds = Number(row.timeout_seconds);
+  if (row.kind === 'multi-domain-discovery') payload.curl_parallelism = Number(row.curl_parallelism || 4);
+  return payload;
+}
+function repeatRun(runKey){
+  const row = state.finderRuns.find((item) => runDomainKey(item) === runKey || String(item.id || '') === runKey);
+  if (!row) {
+    setMessage('Запуск не найден в истории', 'bad');
+    return;
+  }
+  const payload = runPayload(row);
+  const multi = row.kind === 'multi-domain-discovery';
+  startJob(
+    multi ? '/api/jobs/zapret-multi-domain-discovery' : '/api/jobs/zapret-standard-discovery',
+    payload,
+    multi ? 'Повтор стратегии -> домены' : 'Повтор обычного поиска'
+  );
 }
 function runProgressText(row){
   const progress = row.progress || {};
@@ -3055,6 +3120,10 @@ document.addEventListener('click', (event) => {
   if (!button) return;
   if (button.dataset.commonDomainSuggestion) {
     chooseCommonDomainSuggestion(button.dataset.commonDomainSuggestion);
+    return;
+  }
+  if (button.dataset.runRepeat) {
+    repeatRun(button.dataset.runRepeat);
     return;
   }
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
