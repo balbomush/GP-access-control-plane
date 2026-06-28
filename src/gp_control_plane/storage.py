@@ -8,6 +8,12 @@ from typing import Any
 
 
 SCHEMA_VERSION = 4
+SCHEMA_MIGRATIONS = (
+    (1, "base_candidate_storage"),
+    (2, "normalized_domain_strategy_model"),
+    (3, "minimal_backup_model"),
+    (4, "runtime_observability"),
+)
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -44,6 +50,10 @@ def storage_status(state_dir: Path) -> dict[str, Any]:
         }
         counts = {table: _table_count(conn, table) for table in _STORAGE_STATUS_TABLES}
         view_counts = {view: _table_count(conn, view) for view in _STORAGE_STATUS_VIEWS}
+        migrations = [
+            {"version": int(row["version"]), "name": str(row["name"]), "applied_at": str(row["applied_at"])}
+            for row in conn.execute("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").fetchall()
+        ]
         integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
     return {
         "db_path": str(path),
@@ -56,6 +66,7 @@ def storage_status(state_dir: Path) -> dict[str, Any]:
         "tables": counts,
         "views": view_counts,
         "meta": meta,
+        "migrations": migrations,
     }
 
 
@@ -95,6 +106,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS runs (
@@ -296,6 +313,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
     )
+    _record_schema_migrations(conn)
     conn.commit()
 
 
@@ -306,6 +324,14 @@ def get_meta(conn: sqlite3.Connection, key: str) -> str:
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value))
+
+
+def _record_schema_migrations(conn: sqlite3.Connection) -> None:
+    for version, name in SCHEMA_MIGRATIONS:
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)",
+            (version, name),
+        )
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
