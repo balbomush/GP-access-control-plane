@@ -16,6 +16,7 @@ from gp_control_plane.backups import (
     restore_snapshot,
     restore_snapshot_if_idle,
     snapshot_archive_path,
+    _write_checksums,
 )
 from gp_control_plane.state import write_state
 from gp_control_plane.storage import read_custom_presets, save_custom_presets
@@ -114,9 +115,14 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             presets = read_custom_presets(state_dir)
 
             self.assertTrue(result["restored"])
+            self.assertIsNotNone(result["pre_restore_snapshot"])
             self.assertEqual(page["total"], 1)
             self.assertEqual(discord_page["total"], 0)
             self.assertEqual(presets["finder"], {"new": ["discord.com"]})
+            pre_restore = result["pre_restore_snapshot"]["id"]
+            pre_restore_strategy_file = state_dir.parent / "backups" / "snapshots" / pre_restore / "domains" / "domains.ndjson"
+            pre_restore_domains = pre_restore_strategy_file.read_text(encoding="utf-8")
+            self.assertIn("discord.com", pre_restore_domains)
 
     def test_snapshot_excludes_derived_strategy_stats(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -158,6 +164,51 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
 
             self.assertTrue(result["imported"])
             self.assertEqual(result["snapshot"]["id"], snapshot_id)
+
+    def test_restore_rejects_unsupported_backup_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+            manifest_path = snapshot_path / "manifest.yaml"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace('schema_version: "2"', 'schema_version: "999"'),
+                encoding="utf-8",
+            )
+            _write_checksums(snapshot_path)
+
+            with self.assertRaisesRegex(ValueError, "unsupported backup schema_version"):
+                restore_snapshot(state_dir, snapshot_id)
+
+    def test_import_rejects_unsupported_backup_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+            manifest_path = snapshot_path / "manifest.yaml"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace('schema_version: "2"', 'schema_version: "999"'),
+                encoding="utf-8",
+            )
+            _write_checksums(snapshot_path)
+            archive = snapshot_archive_path(state_dir, snapshot_id)
+
+            with self.assertRaisesRegex(ValueError, "unsupported backup schema_version"):
+                import_snapshot_archive(Path(raw) / "target-state", archive.read_bytes())
 
     def test_restore_snapshot_if_idle_skips_while_job_running(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

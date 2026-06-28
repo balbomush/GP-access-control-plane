@@ -14,6 +14,8 @@ from .storage import connect, db_path
 
 
 SNAPSHOT_KEEP = 5
+BACKUP_SCHEMA_VERSION = "2"
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = {BACKUP_SCHEMA_VERSION}
 
 
 def backups_dir(state_dir: Path) -> Path:
@@ -35,7 +37,7 @@ def create_snapshot_if_idle(state_dir: Path) -> dict[str, Any]:
     return create_snapshot(state_dir)
 
 
-def create_snapshot(state_dir: Path) -> dict[str, Any]:
+def create_snapshot(state_dir: Path, protect_ids: set[str] | None = None) -> dict[str, Any]:
     root = snapshots_dir(state_dir)
     root.mkdir(parents=True, exist_ok=True)
     snapshot_id = f"{now_iso().replace(':', '-')}-{uuid.uuid4().hex[:8]}"
@@ -50,7 +52,7 @@ def create_snapshot(state_dir: Path) -> dict[str, Any]:
             shutil.rmtree(final_dir)
         tmp_dir.replace(final_dir)
         _write_latest_marker(state_dir, snapshot_id)
-        _prune_snapshots(state_dir)
+        _prune_snapshots(state_dir, protect_ids=protect_ids)
     except Exception:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -95,12 +97,13 @@ def import_snapshot_archive(state_dir: Path, archive_bytes: bytes) -> dict[str, 
             raise ValueError("backup manifest.yaml not found")
         if not _verify_snapshot_path(extracted):
             raise ValueError("backup checksum verification failed")
+        _ensure_snapshot_compatible(extracted)
         final = root / snapshot_id
         if final.exists():
             shutil.rmtree(final)
         extracted.replace(final)
         _write_latest_marker(state_dir, snapshot_id)
-        _prune_snapshots(state_dir)
+        _prune_snapshots(state_dir, protect_ids={snapshot_id})
         return {"imported": True, "snapshot": snapshot_info(state_dir, snapshot_id)}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -112,6 +115,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         raise FileNotFoundError(snapshot_id)
     if not verify_snapshot(state_dir, snapshot_id):
         raise ValueError("backup checksum verification failed")
+    _ensure_snapshot_compatible(path)
+    pre_restore = create_snapshot(state_dir, protect_ids={snapshot_id})
     strategies = _read_ndjson(path / "strategies" / "strategies.ndjson")
     links = _read_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
     restored_at = now_iso()
@@ -222,6 +227,7 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     return {
         "restored": True,
         "snapshot": info,
+        "pre_restore_snapshot": pre_restore.get("snapshot"),
         "strategy_count": len(strategies),
         "restored_at": restored_at,
     }
@@ -244,6 +250,8 @@ def snapshot_info(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     manifest = _read_simple_manifest(manifest_path)
     return {
         "id": snapshot_id,
+        "schema_version": manifest.get("schema_version") or "",
+        "compatible": _is_supported_snapshot_manifest(manifest),
         "created_at": manifest.get("created_at") or snapshot_id,
         "completed": manifest.get("completed") == "true",
         "size_bytes": _dir_size(path),
@@ -271,6 +279,17 @@ def _verify_snapshot_path(path: Path) -> bool:
         if not target.is_file() or _sha256_file(target) != expected:
             return False
     return True
+
+
+def _ensure_snapshot_compatible(path: Path) -> None:
+    manifest = _read_simple_manifest(path / "manifest.yaml")
+    if not _is_supported_snapshot_manifest(manifest):
+        version = manifest.get("schema_version") or "missing"
+        raise ValueError(f"unsupported backup schema_version: {version}")
+
+
+def _is_supported_snapshot_manifest(manifest: dict[str, str]) -> bool:
+    return str(manifest.get("schema_version") or "") in SUPPORTED_BACKUP_SCHEMA_VERSIONS
 
 
 def _safe_zip_top(name: str) -> str:
@@ -328,7 +347,7 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
     domain_count = _export_domains(state_dir, root)
     strategy_count, link_count = _export_strategies(state_dir, root)
     manifest = {
-        "schema_version": "2",
+        "schema_version": BACKUP_SCHEMA_VERSION,
         "created_at": now_iso(),
         "snapshot_id": snapshot_id,
         "app_version": __version__,
@@ -512,10 +531,17 @@ def _unique_nonempty(values: list[str]) -> list[str]:
     return result
 
 
-def _prune_snapshots(state_dir: Path) -> None:
+def _prune_snapshots(state_dir: Path, protect_ids: set[str] | None = None) -> None:
+    protected = protect_ids or set()
     paths = _snapshot_paths(state_dir)
     paths.sort(key=lambda item: item.name, reverse=True)
-    for old in paths[SNAPSHOT_KEEP:]:
+    kept = 0
+    for old in paths:
+        if old.name in protected:
+            continue
+        kept += 1
+        if kept <= SNAPSHOT_KEEP:
+            continue
         shutil.rmtree(old, ignore_errors=True)
         archive = archives_dir(state_dir) / f"{old.name}.zip"
         if archive.exists():
