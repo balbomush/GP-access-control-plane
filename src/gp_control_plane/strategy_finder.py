@@ -918,7 +918,7 @@ class _LiveStdoutRecorder:
         target[key] = candidate
         candidate_id = candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or ""))
         if self._conn is None:
-            self._conn = connect(self._state_dir)
+            self._conn = connect(self._state_dir, check_same_thread=False)
         upsert_candidate_event_conn(
             self._conn,
             candidate_id=candidate_id,

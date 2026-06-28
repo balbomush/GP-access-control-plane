@@ -33,9 +33,9 @@ def db_path(state_dir: Path) -> Path:
     return root / "state.sqlite3"
 
 
-def connect(state_dir: Path) -> sqlite3.Connection:
+def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     path = db_path(state_dir)
-    conn = sqlite3.connect(path, timeout=30, factory=ClosingConnection)
+    conn = sqlite3.connect(path, timeout=30, factory=ClosingConnection, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     migration_key = path.resolve()
     with _MIGRATION_LOCK:

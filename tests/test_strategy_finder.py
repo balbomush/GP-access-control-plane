@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -804,6 +805,39 @@ pktws_check_https_tls12()
             self.assertEqual(result["status"], "success")
             self.assertIn("--failed", text)
             self.assertIn("UNAVAILABLE code=28", text)
+
+    def test_live_recorder_can_close_connection_from_controller_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            progress_log = state_dir / "strategy-finder" / "logs" / "run.progress.json"
+            metrics_log = state_dir / "strategy-finder" / "logs" / "run.metrics.ndjson"
+            run = {
+                "id": "run-threaded",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(progress_log),
+                "metrics_log": str(metrics_log),
+                "attempt_plan": {
+                    "total": 1,
+                    "scripts": {"standard/10-test.sh": 1},
+                    "script_order": ["standard/10-test.sh"],
+                    "source": "test",
+                },
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            def write_success() -> None:
+                recorder.record_line("* script : standard/10-test.sh")
+                recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello")
+                recorder.record_line("!!!!! AVAILABLE !!!!!")
+
+            thread = threading.Thread(target=write_success)
+            thread.start()
+            thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(recorder.parsed()["candidates"]), 1)
 
     def test_rotating_text_writer_limits_active_log_size(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
