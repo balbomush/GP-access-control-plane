@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -10,8 +11,20 @@ from .storage import read_custom_presets, save_custom_preset
 
 
 V2FLY_BASE_URL = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data"
+V2FLY_CONTENTS_URL = "https://api.github.com/repos/v2fly/domain-list-community/contents/data?ref=master"
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 _DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+_FALLBACK_V2FLY_CATEGORIES = [
+    "amazon",
+    "cloudflare",
+    "discord",
+    "facebook",
+    "google",
+    "instagram",
+    "meta",
+    "telegram",
+    "youtube",
+]
 
 
 def builtin_preset_sources() -> dict[str, dict[str, str]]:
@@ -24,6 +37,62 @@ def builtin_preset_sources() -> dict[str, dict[str, str]]:
         "cloudflare": _manual_source("cloudflare"),
         "amazon-aws": _manual_source("amazon-aws"),
     }
+
+
+def list_v2fly_categories(
+    query: str = "",
+    *,
+    limit: int = 80,
+    fetcher: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    source = "github"
+    try:
+        text = fetcher() if fetcher else fetch_v2fly_category_index()
+        categories = parse_v2fly_category_index(text)
+    except Exception:  # noqa: BLE001
+        source = "fallback"
+        categories = list(_FALLBACK_V2FLY_CATEGORIES)
+    needle = str(query or "").strip().lower()
+    if needle:
+        categories = [category for category in categories if needle in category]
+    clean_limit = max(1, min(int(limit or 80), 500))
+    return {
+        "source": source,
+        "query": needle,
+        "total": len(categories),
+        "categories": categories[:clean_limit],
+        "has_more": len(categories) > clean_limit,
+        "limit": clean_limit,
+    }
+
+
+def fetch_v2fly_category_index() -> str:
+    with urlopen(V2FLY_CONTENTS_URL, timeout=30) as response:  # noqa: S310
+        return response.read().decode("utf-8", errors="replace")
+
+
+def parse_v2fly_category_index(text: str) -> list[str]:
+    try:
+        payload = json.loads(text or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid v2fly category index") from exc
+    if not isinstance(payload, list):
+        raise ValueError("invalid v2fly category index")
+    categories: list[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "file":
+            continue
+        try:
+            clean = _clean_category(str(item.get("name") or ""))
+        except ValueError:
+            continue
+        if clean not in seen:
+            seen.add(clean)
+            categories.append(clean)
+    return sorted(categories)
 
 
 def preview_v2fly_preset(

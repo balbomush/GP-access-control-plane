@@ -7,7 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.domain_sources import import_v2fly_preset, parse_v2fly_domains, preview_v2fly_preset
+from gp_control_plane.domain_sources import (
+    import_v2fly_preset,
+    list_v2fly_categories,
+    parse_v2fly_category_index,
+    parse_v2fly_domains,
+    preview_v2fly_preset,
+)
 from gp_control_plane.storage import read_custom_presets
 
 
@@ -60,6 +66,32 @@ domain:youtube.com
             self.assertEqual(result["count"], 2)
             self.assertEqual(result["custom"]["finder"]["v2fly-discord"], ["discord.com", "discordcdn.com"])
             self.assertEqual(read_custom_presets(state_dir)["finder"]["v2fly-discord"], ["discord.com", "discordcdn.com"])
+
+    def test_parse_v2fly_category_index_keeps_files_only(self) -> None:
+        text = """
+[
+  {"name": "google", "type": "file"},
+  {"name": "youtube", "type": "file"},
+  {"name": "nested", "type": "dir"},
+  {"name": "../bad", "type": "file"}
+]
+"""
+
+        self.assertEqual(parse_v2fly_category_index(text), ["google", "youtube"])
+
+    def test_list_v2fly_categories_filters_index(self) -> None:
+        text = """
+[
+  {"name": "discord", "type": "file"},
+  {"name": "google", "type": "file"},
+  {"name": "youtube", "type": "file"}
+]
+"""
+
+        result = list_v2fly_categories("goo", fetcher=lambda: text)
+
+        self.assertEqual(result["source"], "github")
+        self.assertEqual(result["categories"], ["google"])
 
 
 if __name__ == "__main__":

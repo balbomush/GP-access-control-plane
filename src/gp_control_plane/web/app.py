@@ -20,8 +20,9 @@ from ..backups import (
 )
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
-from ..domain_sources import builtin_preset_sources, import_v2fly_preset, preview_v2fly_preset
+from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v2fly_categories, preview_v2fly_preset
 from ..jobs import JobRunner
+from ..releases import release_channel_info
 from ..state import now_iso, read_state, write_state
 from ..storage import read_custom_presets, save_custom_presets
 from ..strategy_finder import (
@@ -54,6 +55,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json(status_payload(config))
             elif path == "/api/settings":
                 self._json({"settings": read_settings(config)})
+            elif path == "/api/releases":
+                self._json(_release_info_payload(config, query))
             elif path == "/api/discovery-profiles":
                 self._json({"profiles": read_discovery_profiles(config)})
             elif path == "/api/diagnostics":
@@ -80,6 +83,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json({"custom": read_custom_presets(config.output.state_dir)})
             elif path == "/api/domain-sources":
                 self._json({"builtin": builtin_preset_sources()})
+            elif path == "/api/domain-sources/v2fly/categories":
+                self._json(_v2fly_categories_payload(query))
             elif path == "/api/backups/download":
                 self._download_backup(config, query)
             else:
@@ -93,6 +98,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path in {
                 "/api/status",
                 "/api/settings",
+                "/api/releases",
                 "/api/discovery-profiles",
                 "/api/diagnostics",
                 "/api/strategy-finder/domains",
@@ -104,6 +110,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/backups/restore-preview",
                 "/api/presets",
                 "/api/domain-sources",
+                "/api/domain-sources/v2fly/categories",
             }:
                 self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
             else:
@@ -634,6 +641,52 @@ button:disabled { opacity: .55; cursor: default; }
   font-size: 13px;
 }
 .source-preview strong { color: #e6edf3; }
+.settings-stack {
+  display: grid;
+  gap: 12px;
+}
+.setting-note {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: -2px;
+}
+.preset-grid > .setting-note {
+  grid-column: 1 / -1;
+}
+.release-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.release-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface-code);
+  display: grid;
+  gap: 6px;
+}
+.release-card strong { font-size: 16px; }
+.category-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.v2fly-category-list {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface-code);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px 10px;
+  max-height: 210px;
+  overflow: auto;
+}
+.v2fly-category-list .empty {
+  grid-column: 1 / -1;
+}
 .helper-text {
   color: var(--text-soft);
   font-size: 12px;
@@ -1165,7 +1218,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-downloads { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-downloads, .release-grid, .category-toolbar { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -1454,7 +1507,11 @@ pre {
         <div class="panel-header">
           <h2>Настройки</h2>
         </div>
-        <div class="preset-panel">
+        <div class="settings-stack">
+        <div class="preset-panel settings-discovery-panel">
+          <div class="panel-header">
+            <h2>Параметры подбора</h2>
+          </div>
           <div class="preset-grid">
             <label class="checkbox-row">
               <input id="settings-enable-ipv6" type="checkbox">
@@ -1464,31 +1521,51 @@ pre {
               <input id="settings-debug-stdout" type="checkbox">
               Подробный debug-лог stdout
             </label>
+            <div class="setting-note">Включает расширенную запись stdout blockcheck2 в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
             <div class="field">
               <label for="settings-curl-default">Параллельных curl по умолчанию</label>
               <input id="settings-curl-default" type="number" min="1" max="10" value="4">
+              <div class="setting-note">Стартовое значение для режима “стратегия -> домены”. Его можно менять под возможности платы и сети.</div>
             </div>
             <div class="field">
               <label for="settings-curl-max">Максимум параллельных curl</label>
               <input id="settings-curl-max" type="number" min="1" max="10" value="10">
-            </div>
-            <div class="field">
-              <label for="settings-update-channel">Канал обновлений</label>
-              <select id="settings-update-channel">
-                <option value="stable">Последний стабильный релиз</option>
-                <option value="prerelease">Предрелизы</option>
-              </select>
+              <div class="setting-note">Верхняя граница, выше которой UI не даст запустить параллельные curl.</div>
             </div>
           </div>
           <div class="button-row">
             <button data-action="save-settings" type="button">Сохранить настройки</button>
-            <a class="button-link secondary" id="settings-stable-link" href="https://github.com/balbomush/GP-access-control-plane/releases/latest" target="_blank" rel="noreferrer">Открыть последний релиз</a>
-            <a class="button-link secondary" id="settings-prerelease-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть предрелизы</a>
           </div>
-          <div class="helper-text">Подробный stdout нужен только для диагностики: он пишет больший debug-лог. Обычный runtime-log остается компактным.</div>
-          <div class="helper-text">Обновление из web UI будет выполняться только когда подбор не запущен. До этого шага используются ссылки на релизы.</div>
         </div>
-        <div class="preset-panel">
+        <div class="preset-panel settings-release-panel">
+          <div class="panel-header">
+            <h2>Релизы и обновления</h2>
+          </div>
+          <div class="release-grid">
+            <div class="release-card">
+              <span class="helper-text">Текущая версия</span>
+              <strong id="settings-release-current">v-</strong>
+            </div>
+            <div class="release-card">
+              <span class="helper-text">Канал</span>
+              <select id="settings-update-channel">
+                <option value="stable">Стабильные релизы</option>
+                <option value="prerelease">Предрелизы</option>
+              </select>
+            </div>
+            <div class="release-card">
+              <span class="helper-text">Доступно</span>
+              <strong id="settings-release-available">Не проверялось</strong>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="check-releases" type="button">Проверить релизы</button>
+            <button class="secondary" data-action="update-from-release" type="button">Обновить</button>
+            <a class="button-link secondary" id="settings-selected-release-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть страницу релизов</a>
+          </div>
+          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI будет доступно отдельным безопасным сценарием: без активного подбора, с бекапом и проверкой версии.</div>
+        </div>
+        <div class="preset-panel settings-domain-source-panel">
           <div class="panel-header">
             <h2>Источники доменов</h2>
             <span class="badge">v2fly</span>
@@ -1507,6 +1584,16 @@ pre {
             </div>
           </div>
           <div class="field">
+            <label for="v2fly-category-search">Каталог групп v2fly</label>
+            <div class="category-toolbar">
+              <input id="v2fly-category-search" autocomplete="off" placeholder="Найти группу, например youtube или discord">
+              <button class="secondary" data-action="v2fly-load-categories" type="button">Загрузить каталог</button>
+            </div>
+          </div>
+          <div class="v2fly-category-list" id="v2fly-category-list">
+            <div class="empty">Каталог еще не загружался. Можно загрузить список групп из v2fly или ввести категории вручную ниже.</div>
+          </div>
+          <div class="field">
             <label for="v2fly-categories">Категории v2fly/domain-list-community</label>
             <textarea id="v2fly-categories" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube&#10;google&#10;discord"></textarea>
           </div>
@@ -1516,6 +1603,7 @@ pre {
           </div>
           <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
           <div class="helper-text">Берутся только доменные правила v2fly: domain/full и явные доменные строки. keyword/regexp/include не превращаются в домены автоматически.</div>
+        </div>
         </div>
       </section>
     </section>
@@ -1527,7 +1615,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -2776,10 +2864,7 @@ function renderSettings(){
   if (curlDefault) curlDefault.value = String(settings.curl_parallelism_default || 4);
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
   if (channel) channel.value = settings.update_channel || 'stable';
-  const stableLink = el('settings-stable-link');
-  const prereleaseLink = el('settings-prerelease-link');
-  if (stableLink && settings.stable_release_url) stableLink.href = settings.stable_release_url;
-  if (prereleaseLink && settings.prerelease_url) prereleaseLink.href = settings.prerelease_url;
+  renderReleaseInfo();
   if (!state.settingsTouched) {
     const curlInput = el('curl-parallelism');
     if (curlInput) {
@@ -2790,7 +2875,34 @@ function renderSettings(){
     if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
   }
   renderDiscoveryProfiles();
+  renderV2flyCategoryCatalog();
   renderV2flyPreview();
+}
+function renderReleaseInfo(){
+  const version = (state.status || {}).version || '-';
+  const current = el('settings-release-current');
+  if (current) current.textContent = `v${String(version).replace(/^v/, '')}`;
+  const available = el('settings-release-available');
+  const result = el('settings-release-result');
+  const link = el('settings-selected-release-link');
+  const release = state.releaseInfo;
+  if (!release) {
+    if (available) available.textContent = 'Не проверялось';
+    if (result) result.textContent = 'Релизы еще не проверялись. Обновление из UI будет доступно отдельным безопасным сценарием: без активного подбора, с бекапом и проверкой версии.';
+    if (link) link.href = (state.settings || {}).prerelease_url || 'https://github.com/balbomush/GP-access-control-plane/releases';
+    return;
+  }
+  if (available) available.textContent = release.available_version || '-';
+  if (link && release.url) link.href = release.url;
+  if (result) {
+    if (release.checked) {
+      const update = release.update_available ? 'Доступно обновление.' : 'Текущая версия не старее найденной.';
+      const published = release.published_at ? ` Опубликовано: ${friendlyDate(release.published_at)}.` : '';
+      result.textContent = `${update} Канал: ${release.channel}. Версия: ${release.available_version || '-'}.${published}`;
+    } else {
+      result.textContent = `Не удалось проверить релизы: ${release.error || 'нет ответа GitHub'}. Ссылка на страницу релизов оставлена.`;
+    }
+  }
 }
 function currentSettingsFromForm(){
   return {
@@ -2811,6 +2923,20 @@ async function saveSettings(){
   } catch (error) {
     setMessage(`Ошибка сохранения настроек: ${error.message}`, 'bad');
   }
+}
+async function checkReleases(){
+  const channel = el('settings-update-channel')?.value || 'stable';
+  try {
+    const data = await getJson(`/api/releases?channel=${encodeURIComponent(channel)}`);
+    state.releaseInfo = (data || {}).release || null;
+    renderReleaseInfo();
+    setMessage('Релизы проверены', 'good');
+  } catch (error) {
+    setMessage(`Ошибка проверки релизов: ${error.message}`, 'bad');
+  }
+}
+function updateFromRelease(){
+  setMessage('Обновление из UI еще не включено: нужен безопасный сценарий с бекапом, проверкой версии и перезапуском сервиса', 'warn');
 }
 function v2flyCategories(){
   return parseDomains(el('v2fly-categories')?.value || '');
@@ -2838,6 +2964,53 @@ function renderV2flyPreview(){
     `<div>Добавится: ${esc(added)}, уйдет: ${esc(removed)}, без изменений: ${esc(preview.unchanged_count || 0)}</div>`,
     `<div>Категории: ${esc(sources)}</div>`
   ].join('');
+}
+function renderV2flyCategoryCatalog(){
+  const target = el('v2fly-category-list');
+  if (!target) return;
+  const categories = (state.v2flyCategories || {}).categories || [];
+  if (!categories.length) {
+    const source = state.v2flyCategorySource === 'loading' ? 'Загрузка каталога...' : 'Каталог еще не загружался. Можно загрузить список групп из v2fly или ввести категории вручную ниже.';
+    target.innerHTML = `<div class="empty">${esc(source)}</div>`;
+    return;
+  }
+  const selected = new Set(v2flyCategories());
+  target.innerHTML = categories.map((category) => `
+    <label class="checkbox-row">
+      <input type="checkbox" data-v2fly-category="${esc(category)}" ${selected.has(category) ? 'checked' : ''}>
+      ${esc(category)}
+    </label>
+  `).join('');
+}
+function syncV2flyCategoriesFromCatalog(){
+  const checked = Array.from(document.querySelectorAll('[data-v2fly-category]:checked')).map((input) => input.dataset.v2flyCategory);
+  const manual = v2flyCategories().filter((category) => !((state.v2flyCategories || {}).categories || []).includes(category));
+  const merged = uniqueDomains([...manual, ...checked]);
+  const textarea = el('v2fly-categories');
+  if (textarea) {
+    textarea.value = merged.join('\\n');
+    updateEditorLineNumbers('v2fly-categories');
+  }
+  state.v2flyPreview = null;
+  renderV2flyPreview();
+}
+async function loadV2flyCategories(){
+  const query = String(el('v2fly-category-search')?.value || '').trim();
+  state.v2flyCategorySource = 'loading';
+  renderV2flyCategoryCatalog();
+  try {
+    const data = await getJson(`/api/domain-sources/v2fly/categories?limit=120&query=${encodeURIComponent(query)}`);
+    state.v2flyCategories = data;
+    state.v2flyCategorySource = data.source || '';
+    renderV2flyCategoryCatalog();
+    const more = data.has_more ? ', показана первая часть' : '';
+    setMessage(`Каталог v2fly загружен: ${data.total || 0} групп${more}`, data.source === 'fallback' ? 'warn' : 'good');
+  } catch (error) {
+    state.v2flyCategories = { categories: [] };
+    state.v2flyCategorySource = '';
+    renderV2flyCategoryCatalog();
+    setMessage(`Ошибка загрузки каталога v2fly: ${error.message}`, 'bad');
+  }
 }
 async function previewV2flyPreset(){
   const payload = v2flyPayload();
@@ -3292,6 +3465,18 @@ document.addEventListener('click', (event) => {
     saveSettings();
     return;
   }
+  if (button.dataset.action === 'check-releases') {
+    checkReleases();
+    return;
+  }
+  if (button.dataset.action === 'update-from-release') {
+    updateFromRelease();
+    return;
+  }
+  if (button.dataset.action === 'v2fly-load-categories') {
+    loadV2flyCategories();
+    return;
+  }
   if (button.dataset.action === 'v2fly-preview') {
     previewV2flyPreset();
     return;
@@ -3387,6 +3572,9 @@ document.addEventListener('input', (event) => {
     state.v2flyPreview = null;
     renderV2flyPreview();
   }
+  if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
+    syncV2flyCategoriesFromCatalog();
+  }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
     state.domainsTouched = true;
@@ -3426,6 +3614,9 @@ document.addEventListener('change', (event) => {
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     state.v2flyPreview = null;
     renderV2flyPreview();
+  }
+  if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
+    syncV2flyCategoriesFromCatalog();
   }
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
@@ -3668,6 +3859,19 @@ def _candidate_domain_index_payload(config: AppConfig, query: dict[str, list[str
     return read_candidate_domain_index(
         config.output.state_dir,
         query=_query_str(query, "query", ""),
+    )
+
+
+def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    settings = read_settings(config)
+    channel = _query_str(query, "channel", str(settings.get("update_channel") or "stable"))
+    return {"release": release_channel_info(current_version=__version__, channel=channel)}
+
+
+def _v2fly_categories_payload(query: dict[str, list[str]]) -> dict[str, Any]:
+    return list_v2fly_categories(
+        query=_query_str(query, "query", ""),
+        limit=_query_int(query, "limit", 80),
     )
 
 
