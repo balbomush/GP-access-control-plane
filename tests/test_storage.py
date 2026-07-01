@@ -50,6 +50,31 @@ class StorageTests(unittest.TestCase):
             status = storage_status(state_dir)
             self.assertEqual([item["version"] for item in status["migrations"]], [item[0] for item in SCHEMA_MIGRATIONS])
 
+    def test_new_schema_does_not_create_legacy_candidate_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            with connect(state_dir) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+
+            table_names = {str(row["name"]) for row in rows}
+            self.assertFalse(
+                {
+                    "candidates",
+                    "candidate_domains",
+                    "candidate_common_domains",
+                    "candidate_seen_events",
+                    "presets",
+                }
+                & table_names
+            )
+
     def test_concurrent_connects_do_not_race_stats_views(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

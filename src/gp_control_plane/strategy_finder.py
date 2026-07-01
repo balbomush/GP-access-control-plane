@@ -2672,59 +2672,6 @@ def _storage_version(state_dir: Path) -> dict[str, int]:
     return _file_version(state_dir / "strategy-finder" / "state.sqlite3")
 
 
-def _iter_candidate_file(path: Path) -> Iterator[dict[str, Any]]:
-    if not path.exists():
-        return
-    decoder = json.JSONDecoder()
-    buffer = ""
-    eof = False
-
-    def fill(handle: Any) -> None:
-        nonlocal buffer, eof
-        chunk = handle.read(65536)
-        if chunk:
-            buffer += chunk
-        else:
-            eof = True
-
-    with path.open("r", encoding="utf-8") as handle:
-        fill(handle)
-        while True:
-            buffer = buffer.lstrip()
-            if buffer:
-                break
-            if eof:
-                return
-            fill(handle)
-        if not buffer.startswith("["):
-            return
-        buffer = buffer[1:]
-        while True:
-            while True:
-                buffer = buffer.lstrip()
-                if buffer:
-                    break
-                if eof:
-                    return
-                fill(handle)
-            if buffer.startswith("]"):
-                return
-            if buffer.startswith(","):
-                buffer = buffer[1:]
-                continue
-            while True:
-                try:
-                    value, end = decoder.raw_decode(buffer)
-                    break
-                except json.JSONDecodeError:
-                    if eof:
-                        return
-                    fill(handle)
-            if isinstance(value, dict):
-                yield value
-            buffer = buffer[end:]
-
-
 def _tail_lines(path: Path, max_lines: int) -> list[str]:
     max_lines = max(0, max_lines)
     if max_lines <= 0 or not path.exists():
@@ -2770,22 +2717,6 @@ def _candidate_common_domains(candidate: dict[str, Any]) -> list[str]:
             continue
         domains.update(str(domain or "").strip() for domain in item["domains"] if str(domain or "").strip())
     return sorted(domains)
-
-
-def _candidate_all_domains(candidate: dict[str, Any]) -> list[str]:
-    return sorted({*_candidate_domains(candidate), *_candidate_common_domains(candidate)})
-
-
-def _candidate_matches_query(candidate: dict[str, Any], query: str, domains: list[str]) -> bool:
-    haystack = " ".join(
-        [
-            str(candidate.get("id") or ""),
-            str(candidate.get("protocol") or ""),
-            str(candidate.get("args") or ""),
-            *domains,
-        ]
-    ).lower()
-    return query in haystack
 
 
 def _compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:

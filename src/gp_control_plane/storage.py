@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
     (3, "minimal_backup_model"),
     (4, "runtime_observability"),
+    (5, "remove_legacy_candidate_storage"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
@@ -88,11 +89,6 @@ _STORAGE_STATUS_TABLES = (
     "strategy_attempts",
     "domain_presets",
     "preset_domains",
-    "candidates",
-    "candidate_domains",
-    "candidate_common_domains",
-    "candidate_seen_events",
-    "presets",
 )
 
 _STORAGE_STATUS_VIEWS = ("domain_stats", "strategy_stats")
@@ -134,69 +130,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_runs_id_seq ON runs(id, seq);
         CREATE INDEX IF NOT EXISTS idx_runs_seq ON runs(seq);
-
-        CREATE TABLE IF NOT EXISTS candidates (
-            id TEXT PRIMARY KEY,
-            protocol TEXT NOT NULL DEFAULT '',
-            args TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'candidate',
-            first_seen_at TEXT NOT NULL DEFAULT '',
-            last_seen_at TEXT NOT NULL DEFAULT '',
-            seen_count INTEGER NOT NULL DEFAULT 0,
-            common_seen_count INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS idx_candidates_last_seen ON candidates(last_seen_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_candidates_protocol ON candidates(protocol);
-
-        CREATE TABLE IF NOT EXISTS candidate_domains (
-            candidate_id TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            protocol TEXT NOT NULL DEFAULT '',
-            first_seen_at TEXT NOT NULL DEFAULT '',
-            last_seen_at TEXT NOT NULL DEFAULT '',
-            seen_count INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(candidate_id, domain),
-            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_candidate_domains_domain ON candidate_domains(domain);
-
-        CREATE TABLE IF NOT EXISTS candidate_common_domains (
-            candidate_id TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            protocol TEXT NOT NULL DEFAULT '',
-            first_seen_at TEXT NOT NULL DEFAULT '',
-            last_seen_at TEXT NOT NULL DEFAULT '',
-            seen_count INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(candidate_id, domain),
-            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_candidate_common_domains_domain ON candidate_common_domains(domain);
-
-        CREATE TABLE IF NOT EXISTS candidate_seen_events (
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            candidate_id TEXT NOT NULL,
-            run_id TEXT NOT NULL DEFAULT '',
-            domain TEXT NOT NULL DEFAULT '',
-            domains_json TEXT NOT NULL DEFAULT '[]',
-            test TEXT NOT NULL DEFAULT '',
-            ip_version TEXT NOT NULL DEFAULT '',
-            is_common INTEGER NOT NULL DEFAULT 0,
-            seen_at TEXT NOT NULL DEFAULT '',
-            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_candidate_seen_candidate_seq ON candidate_seen_events(candidate_id, seq);
-        CREATE INDEX IF NOT EXISTS idx_candidate_seen_run ON candidate_seen_events(run_id);
-
-        CREATE TABLE IF NOT EXISTS presets (
-            scope TEXT NOT NULL,
-            name TEXT NOT NULL,
-            label TEXT NOT NULL DEFAULT '',
-            domains_json TEXT NOT NULL DEFAULT '[]',
-            source_json TEXT NOT NULL DEFAULT '{}',
-            updated_at TEXT NOT NULL DEFAULT '',
-            builtin INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(scope, name)
-        );
 
         CREATE TABLE IF NOT EXISTS domains (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,7 +253,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     strategy_results_changed = _migrate_strategy_domain_results_schema(conn)
     if strategy_results_changed or current_schema_version != str(SCHEMA_VERSION):
         _recreate_stats_views(conn)
-    _migrate_legacy_model(conn)
+    _drop_legacy_storage(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -434,89 +367,17 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
     )
 
 
-def _migrate_legacy_model(conn: sqlite3.Connection) -> None:
-    if get_meta(conn, "normalized_model_migrated") == "1":
-        return
-    for row in conn.execute(
+def _drop_legacy_storage(conn: sqlite3.Connection) -> None:
+    conn.executescript(
         """
-        SELECT id, protocol, args, status, first_seen_at, last_seen_at
-        FROM candidates
-        ORDER BY first_seen_at ASC, id ASC
+        DROP TABLE IF EXISTS candidate_seen_events;
+        DROP TABLE IF EXISTS candidate_common_domains;
+        DROP TABLE IF EXISTS candidate_domains;
+        DROP TABLE IF EXISTS candidates;
+        DROP TABLE IF EXISTS presets;
         """
-    ).fetchall():
-        _upsert_strategy_conn(
-            conn,
-            strategy_id=str(row["id"] or ""),
-            protocol=str(row["protocol"] or ""),
-            args=str(row["args"] or ""),
-            status=str(row["status"] or "candidate"),
-            seen_at=str(row["first_seen_at"] or row["last_seen_at"] or ""),
-        )
-        if row["last_seen_at"]:
-            conn.execute(
-                "UPDATE strategies SET last_seen_at = ? WHERE id = ?",
-                (str(row["last_seen_at"]), str(row["id"])),
-            )
-    for source_mode, table in (("single_domain", "candidate_domains"), ("multi_domain", "candidate_common_domains")):
-        for row in conn.execute(
-            f"""
-            SELECT candidate_id, domain, protocol, first_seen_at, last_seen_at, seen_count
-            FROM {table}
-            ORDER BY candidate_id, domain
-            """
-        ).fetchall():
-            domain_id = _upsert_domain_conn(
-                conn,
-                str(row["domain"] or ""),
-                created_at=str(row["first_seen_at"] or row["last_seen_at"] or ""),
-                updated_at=str(row["last_seen_at"] or row["first_seen_at"] or ""),
-            )
-            if domain_id is None:
-                continue
-            conn.execute(
-                """
-                INSERT INTO strategy_domain_results(
-                    strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at
-                )
-                VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(strategy_id, domain_id, source_mode) DO UPDATE SET
-                    protocol = excluded.protocol,
-                    last_seen_at = excluded.last_seen_at
-                """,
-                (
-                    str(row["candidate_id"] or ""),
-                    domain_id,
-                    str(row["protocol"] or ""),
-                    source_mode,
-                    str(row["first_seen_at"] or ""),
-                    str(row["last_seen_at"] or row["first_seen_at"] or ""),
-                ),
-            )
-    _migrate_legacy_presets(conn)
-    set_meta(conn, "normalized_model_migrated", "1")
-
-
-def _migrate_legacy_presets(conn: sqlite3.Connection) -> None:
-    rows = conn.execute("SELECT scope, name, domains_json, updated_at FROM presets WHERE builtin = 0").fetchall()
-    for row in rows:
-        scope = str(row["scope"] or "")
-        name = str(row["name"] or "")
-        if not scope or not name:
-            continue
-        try:
-            domains = json.loads(str(row["domains_json"] or "[]"))
-        except json.JSONDecodeError:
-            domains = []
-        if not isinstance(domains, list):
-            domains = []
-        _save_domain_preset_conn(
-            conn,
-            scope=scope,
-            name=name,
-            kind="user",
-            domains=_unique_nonempty([str(item or "") for item in domains]),
-            updated_at=str(row["updated_at"] or ""),
-        )
+    )
+    set_meta(conn, "legacy_storage_removed", "1")
 
 
 def _args_hash(args: str) -> str:
@@ -763,27 +624,12 @@ def save_custom_presets(state_dir: Path, presets: dict[str, Any], updated_at: st
                 continue
             clean[scope][name] = _unique_nonempty([str(item or "") for item in raw_domains])
     with connect(state_dir) as conn:
-        conn.execute("DELETE FROM presets WHERE builtin = 0")
         user_presets = conn.execute("SELECT id FROM domain_presets WHERE kind = 'user'").fetchall()
         for row in user_presets:
             conn.execute("DELETE FROM preset_domains WHERE preset_id = ?", (int(row["id"]),))
         conn.execute("DELETE FROM domain_presets WHERE kind = 'user'")
         for scope, scoped in clean.items():
             for name, domains in scoped.items():
-                conn.execute(
-                    """
-                    INSERT INTO presets(scope, name, label, domains_json, source_json, updated_at, builtin)
-                    VALUES(?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        scope,
-                        name,
-                        name,
-                        json.dumps(domains, ensure_ascii=False, separators=(",", ":")),
-                        "{}",
-                        updated_at,
-                    ),
-                )
                 _save_domain_preset_conn(
                     conn,
                     scope=scope,
@@ -815,26 +661,6 @@ def save_custom_preset(
         raise ValueError("preset must contain at least one domain")
     source_json = json.dumps(source or {}, ensure_ascii=False, separators=(",", ":"))
     with connect(state_dir) as conn:
-        conn.execute(
-            """
-            INSERT INTO presets(scope, name, label, domains_json, source_json, updated_at, builtin)
-            VALUES(?, ?, ?, ?, ?, ?, 0)
-            ON CONFLICT(scope, name) DO UPDATE SET
-                label = excluded.label,
-                domains_json = excluded.domains_json,
-                source_json = excluded.source_json,
-                updated_at = excluded.updated_at,
-                builtin = 0
-            """,
-            (
-                clean_scope,
-                clean_name,
-                clean_name,
-                json.dumps(clean_domains, ensure_ascii=False, separators=(",", ":")),
-                source_json,
-                updated_at,
-            ),
-        )
         _save_domain_preset_conn(
             conn,
             scope=clean_scope,
@@ -862,45 +688,6 @@ def _upsert_candidate_event_conn(
     seen_at: str,
     common: bool,
 ) -> None:
-    conn.execute(
-        """
-        INSERT INTO candidates(id, protocol, args, status, first_seen_at, last_seen_at, seen_count, common_seen_count)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            protocol = excluded.protocol,
-            args = excluded.args,
-            status = excluded.status,
-            last_seen_at = excluded.last_seen_at,
-            seen_count = candidates.seen_count + ?,
-            common_seen_count = candidates.common_seen_count + ?
-        """,
-        (
-            candidate_id,
-            protocol,
-            args,
-            status,
-            seen_at,
-            seen_at,
-            0 if common else 1,
-            1 if common else 0,
-            0 if common else 1,
-            1 if common else 0,
-        ),
-    )
-    domains_to_record = domains if common else ([domain] if domain else [])
-    table = "candidate_common_domains" if common else "candidate_domains"
-    for item in _unique_nonempty(domains_to_record):
-        conn.execute(
-            f"""
-            INSERT INTO {table}(candidate_id, domain, protocol, first_seen_at, last_seen_at, seen_count)
-            VALUES(?, ?, ?, ?, ?, 1)
-            ON CONFLICT(candidate_id, domain) DO UPDATE SET
-                protocol = excluded.protocol,
-                last_seen_at = excluded.last_seen_at,
-                seen_count = {table}.seen_count + 1
-            """,
-            (candidate_id, item, protocol, seen_at, seen_at),
-        )
     _upsert_strategy_domain_result_conn(
         conn,
         strategy_id=candidate_id,
@@ -914,24 +701,6 @@ def _upsert_candidate_event_conn(
         ip_version=ip_version,
         seen_at=seen_at,
         common=common,
-    )
-    conn.execute(
-        """
-        INSERT INTO candidate_seen_events(
-            candidate_id, run_id, domain, domains_json, test, ip_version, is_common, seen_at
-        )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            candidate_id,
-            run_id,
-            domain,
-            json.dumps(_unique_nonempty(domains), ensure_ascii=False, separators=(",", ":")),
-            test,
-            ip_version,
-            1 if common else 0,
-            seen_at,
-        ),
     )
 
 

@@ -213,10 +213,6 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         conn.execute("DELETE FROM strategy_attempts")
         conn.execute("DELETE FROM strategy_domain_results")
         conn.execute("DELETE FROM strategies")
-        conn.execute("DELETE FROM candidate_seen_events")
-        conn.execute("DELETE FROM candidate_common_domains")
-        conn.execute("DELETE FROM candidate_domains")
-        conn.execute("DELETE FROM candidates")
         for item in _read_ndjson(path / "domains" / "domains.ndjson"):
             domain = str(item.get("domain") or item.get("name") or "").strip()
             if not domain:
@@ -231,22 +227,6 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             candidate_id = str(item.get("id") or "").strip()
             if not candidate_id:
                 continue
-            conn.execute(
-                """
-                INSERT INTO candidates(id, protocol, args, status, first_seen_at, last_seen_at, seen_count, common_seen_count)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    candidate_id,
-                    str(item.get("protocol") or ""),
-                    str(item.get("args") or ""),
-                    str(item.get("status") or "candidate"),
-                    str(item.get("first_seen_at") or ""),
-                    str(item.get("last_seen_at") or ""),
-                    0,
-                    0,
-                ),
-            )
             conn.execute(
                 """
                 INSERT INTO strategies(id, protocol, args, args_hash, status, first_seen_at, last_seen_at)
@@ -264,30 +244,15 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             )
         known_ids = {
             str(row["id"])
-            for row in conn.execute("SELECT id FROM candidates").fetchall()
+            for row in conn.execute("SELECT id FROM strategies").fetchall()
         }
         for item in links:
             candidate_id = str(item.get("strategy_id") or item.get("candidate_id") or "").strip()
             domain = str(item.get("domain") or "").strip()
             if not candidate_id or not domain or candidate_id not in known_ids:
                 continue
-            table = "candidate_common_domains" if str(item.get("scope") or "") == "common" else "candidate_domains"
             domain_id = _restore_domain_id(conn, domain, str(item.get("first_seen_at") or ""), str(item.get("last_seen_at") or ""))
             source_mode = "multi_domain" if str(item.get("scope") or "") == "common" else "single_domain"
-            conn.execute(
-                f"""
-                INSERT OR REPLACE INTO {table}(candidate_id, domain, protocol, first_seen_at, last_seen_at, seen_count)
-                VALUES(?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    candidate_id,
-                    domain,
-                    str(item.get("protocol") or ""),
-                    str(item.get("first_seen_at") or ""),
-                    str(item.get("last_seen_at") or ""),
-                    1,
-                ),
-            )
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strategy_domain_results(
@@ -526,39 +491,6 @@ def _read_ndjson(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"invalid ndjson in {path.name}") from exc
             if isinstance(payload, dict):
                 result.append(payload)
-    return result
-
-
-def _read_user_presets(path: Path) -> dict[str, dict[str, list[str]]]:
-    result: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
-    if not path.is_file():
-        return result
-    current_scope = ""
-    current_name = ""
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        line = raw_line.strip()
-        if indent == 2 and line.endswith(":"):
-            scope = line[:-1].strip()
-            current_scope = scope if scope in result else ""
-            current_name = ""
-            continue
-        if indent == 4 and line.endswith(":") and current_scope:
-            current_name = line[:-1].strip()
-            if current_name:
-                result[current_scope][current_name] = []
-            continue
-        if indent >= 6 and line.startswith("- ") and current_scope and current_name:
-            raw_value = line[2:].strip()
-            try:
-                value = json.loads(raw_value)
-            except json.JSONDecodeError:
-                value = raw_value.strip('"')
-            domain = str(value or "").strip()
-            if domain and domain not in result[current_scope][current_name]:
-                result[current_scope][current_name].append(domain)
     return result
 
 
