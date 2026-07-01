@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,9 +40,22 @@ def read_state(state_dir: Path) -> dict[str, Any]:
 def write_state(state_dir: Path, state: dict[str, Any]) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / "state.json"
-    tmp = path.with_suffix(".json.tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    last_error: PermissionError | None = None
+    try:
+        for attempt in range(20):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(min(0.05 * (attempt + 1), 0.5))
+        if last_error:
+            raise last_error
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
