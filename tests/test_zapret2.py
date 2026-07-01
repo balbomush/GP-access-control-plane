@@ -35,6 +35,37 @@ class Zapret2Tests(unittest.TestCase):
         self.assertTrue(result["blockcheck_found"])
         self.assertEqual(result["blockcheck_path"], "/usr/bin/blockcheck2.sh")
         self.assertFalse(result["root_helper_ready"])
+        self.assertFalse(result["ready"])
+        self.assertTrue(any(item["id"] == "root-helper" and not item["ok"] for item in result["diagnostics"]))
+
+    def test_check_install_reports_human_diagnostics(self) -> None:
+        def fake_which(name: str) -> str | None:
+            return {
+                "nfqws2": "/usr/bin/nfqws2",
+                "blockcheck2.sh": "/usr/bin/blockcheck2.sh",
+                "curl": "/usr/bin/curl",
+                "nft": "/usr/sbin/nft",
+                "sudo": "/usr/bin/sudo",
+            }.get(name)
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+            mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=True),
+            mock.patch("gp_control_plane.zapret2.os.access", return_value=True),
+            mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=fake_which),
+            mock.patch("gp_control_plane.zapret2.subprocess.run", return_value=subprocess.CompletedProcess(["check"], 0, "", "")),
+        ):
+            result = check_install()
+
+        self.assertTrue(result["ready"])
+        diagnostics = {str(item["id"]): item for item in result["diagnostics"]}
+        self.assertTrue(diagnostics["nfqws2"]["ok"])
+        self.assertTrue(diagnostics["blockcheck"]["ok"])
+        self.assertTrue(diagnostics["root-helper"]["ok"])
+        self.assertTrue(diagnostics["curl"]["ok"])
+        self.assertTrue(diagnostics["nft"]["ok"])
+        self.assertIn("/usr/bin/nfqws2", str(diagnostics["nfqws2"]["message"]))
 
     def test_root_helper_status_uses_sudo_non_interactively(self) -> None:
         calls: list[list[str]] = []

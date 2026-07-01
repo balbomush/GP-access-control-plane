@@ -403,7 +403,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 }
 .status-check {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   color: var(--text-soft);
 }
@@ -424,6 +424,21 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 .status-check.fail::before {
   border-color: rgba(255, 76, 86, .8);
   background: rgba(255, 76, 86, .16);
+}
+.status-check-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.status-check-label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.status-check-message {
+  font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 .layout {
   display: grid;
@@ -2033,8 +2048,24 @@ function deletePreset(target){
   showToast('Пресет удален', 'good');
   if (target === 'common') refreshCandidates(true);
 }
-function statusCheck(label, ok){
-  return `<div class="status-check ${ok ? 'ok' : 'fail'}"><span>${esc(label)}</span></div>`;
+function statusCheck(label, ok, message){
+  const safeMessage = String(message || '');
+  return `<div class="status-check ${ok ? 'ok' : 'fail'}" title="${esc(safeMessage)}">
+    <span class="status-check-body">
+      <span class="status-check-label">${esc(label)}</span>
+      ${safeMessage ? `<span class="status-check-message">${esc(safeMessage)}</span>` : ''}
+    </span>
+  </div>`;
+}
+function zapretDiagnostics(zapret){
+  const diagnostics = Array.isArray(zapret.diagnostics) && zapret.diagnostics.length
+    ? zapret.diagnostics
+    : [
+        {label: 'nfqws2', ok: Boolean(zapret.nfqws2_found), message: zapret.nfqws2_found ? 'найден' : 'не найден'},
+        {label: 'blockcheck2', ok: Boolean(zapret.blockcheck_found), message: zapret.blockcheck_found ? 'найден' : 'не найден'},
+        {label: 'root-helper', ok: Boolean(zapret.root_helper_ready), message: zapret.root_helper_ready ? 'готов' : (zapret.root_helper_error || 'не готов')}
+      ];
+  return diagnostics.map((item) => statusCheck(item.label || item.id || '-', Boolean(item.ok), item.message || '')).join('');
 }
 function testedDomainCount(){
   const domains = new Set(Array.isArray(state.testedDomains) ? state.testedDomains : []);
@@ -2061,11 +2092,7 @@ function renderMetrics(){
   const version = (state.status || {}).version || '-';
   setText('app-version-badge', `v${version}`);
   setText('metric-zapret', ready ? 'Готов' : 'Не готов');
-  el('metric-zapret-note').innerHTML = `<div class="status-checks">
-    ${statusCheck('nfqws2', Boolean(zapret.nfqws2_found))}
-    ${statusCheck('blockcheck', Boolean(zapret.blockcheck_found))}
-    ${statusCheck('root-helper', rootReady)}
-  </div>`;
+  el('metric-zapret-note').innerHTML = `<div class="status-checks">${zapretDiagnostics(zapret)}</div>`;
   setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободна');
   const jobCard = el('metric-job-card');
   if (jobCard) jobCard.className = jobStatusClass(jobStatus, busy);

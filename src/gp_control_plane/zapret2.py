@@ -34,23 +34,32 @@ _INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 _INSTALL_CHECK_LOCK = threading.Lock()
 
 
-def check_install() -> dict[str, str | bool]:
+def check_install() -> dict[str, object]:
     nfqws2 = shutil.which("nfqws2")
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
+    nft = shutil.which("nft")
+    curl = shutil.which("curl")
     helper = root_helper_status()
-    return {
+    payload: dict[str, object] = {
         "nfqws2_found": bool(nfqws2),
         "nfqws2_path": nfqws2 or "",
         "blockcheck_found": bool(blockcheck),
         "blockcheck_path": blockcheck or "",
+        "nft_found": bool(nft),
+        "nft_path": nft or "",
+        "curl_found": bool(curl),
+        "curl_path": curl or "",
         "root_helper_found": bool(helper["found"]),
         "root_helper_ready": bool(helper["ready"]),
         "root_helper_path": str(helper["path"]),
         "root_helper_error": str(helper["error"]),
     }
+    payload["ready"] = bool(payload["nfqws2_found"] and payload["blockcheck_found"] and payload["root_helper_ready"])
+    payload["diagnostics"] = _install_diagnostics(payload)
+    return payload
 
 
-def check_install_cached(ttl_seconds: float = INSTALL_CHECK_CACHE_SECONDS) -> dict[str, str | bool]:
+def check_install_cached(ttl_seconds: float = INSTALL_CHECK_CACHE_SECONDS) -> dict[str, object]:
     now = time.monotonic()
     with _INSTALL_CHECK_LOCK:
         payload = _INSTALL_CHECK_CACHE.get("payload")
@@ -62,6 +71,62 @@ def check_install_cached(ttl_seconds: float = INSTALL_CHECK_CACHE_SECONDS) -> di
         _INSTALL_CHECK_CACHE["payload"] = dict(fresh)
         _INSTALL_CHECK_CACHE["expires_at"] = now + max(1.0, float(ttl_seconds))
     return fresh
+
+
+def _install_diagnostics(payload: dict[str, object]) -> list[dict[str, object]]:
+    diagnostics = [
+        {
+            "id": "nfqws2",
+            "label": "nfqws2",
+            "ok": bool(payload.get("nfqws2_found")),
+            "message": (
+                f"найден: {payload.get('nfqws2_path')}"
+                if payload.get("nfqws2_found")
+                else "не найден в PATH; установите zapret2 или проверьте ссылку на nfqws2"
+            ),
+        },
+        {
+            "id": "blockcheck",
+            "label": "blockcheck2",
+            "ok": bool(payload.get("blockcheck_found")),
+            "message": (
+                f"найден: {payload.get('blockcheck_path')}"
+                if payload.get("blockcheck_found")
+                else "не найден blockcheck2.sh/blockcheck.sh; установите zapret2"
+            ),
+        },
+        {
+            "id": "root-helper",
+            "label": "root-helper",
+            "ok": bool(payload.get("root_helper_ready")),
+            "message": (
+                "готов"
+                if payload.get("root_helper_ready")
+                else str(payload.get("root_helper_error") or "не готов; запустите установщик Raspberry Pi")
+            ),
+        },
+        {
+            "id": "curl",
+            "label": "curl",
+            "ok": bool(payload.get("curl_found")),
+            "message": (
+                f"найден: {payload.get('curl_path')}"
+                if payload.get("curl_found")
+                else "не найден; blockcheck2 не сможет проверять доступность доменов"
+            ),
+        },
+        {
+            "id": "nft",
+            "label": "nft",
+            "ok": bool(payload.get("nft_found")),
+            "message": (
+                f"найден: {payload.get('nft_path')}"
+                if payload.get("nft_found")
+                else "не найден в PATH; очистка временных nft-таблиц может быть недоступна"
+            ),
+        },
+    ]
+    return diagnostics
 
 
 def clear_install_check_cache() -> None:

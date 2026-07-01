@@ -243,6 +243,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("root-helper", html)
         self.assertIn("metric-job-card", html)
         self.assertIn("statusCheck", html)
+        self.assertIn("zapretDiagnostics", html)
+        self.assertIn("status-check-message", html)
         self.assertIn("testedDomainCount", html)
         self.assertNotIn("metric-last-run", html)
         self.assertNotIn("Последний запуск", html)
