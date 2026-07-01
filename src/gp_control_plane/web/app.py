@@ -24,7 +24,7 @@ from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v
 from ..jobs import JobRunner
 from ..releases import release_channel_info
 from ..state import now_iso, read_state, write_state
-from ..storage import read_custom_presets, save_custom_presets
+from ..storage import read_custom_presets, read_preset_domains_page, save_custom_presets, set_preset_domain_enabled
 from ..strategy_finder import (
     candidate_storage_version,
     close_stale_running_runs,
@@ -82,6 +82,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             elif path == "/api/presets":
                 self._json({"custom": read_custom_presets(config.output.state_dir)})
+            elif path == "/api/presets/domains":
+                self._json(_preset_domains_payload(config, query))
             elif path == "/api/domain-sources":
                 self._json({"builtin": builtin_preset_sources()})
             elif path == "/api/domain-sources/v2fly/categories":
@@ -110,6 +112,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/backups",
                 "/api/backups/restore-preview",
                 "/api/presets",
+                "/api/presets/domains",
                 "/api/domain-sources",
                 "/api/domain-sources/v2fly/categories",
             }:
@@ -165,6 +168,21 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             if path == "/api/presets":
                 saved = save_custom_presets(config.output.state_dir, payload.get("custom") or payload, now_iso())
                 self._json({"custom": saved})
+                return
+            if path == "/api/presets/domain-enabled":
+                try:
+                    result = set_preset_domain_enabled(
+                        config.output.state_dir,
+                        scope=str(payload.get("scope") or ""),
+                        name=str(payload.get("name") or ""),
+                        domain=str(payload.get("domain") or ""),
+                        enabled=bool(payload.get("enabled")),
+                        updated_at=now_iso(),
+                        kind=str(payload.get("kind") or "user"),
+                    )
+                    self._json({"domain": result, "custom": read_custom_presets(config.output.state_dir)})
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             if path == "/api/settings":
                 self._json({"settings": save_settings(config, payload.get("settings") or payload)})
@@ -3978,6 +3996,19 @@ def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dic
     return {"release": release_channel_info(current_version=__version__, channel=channel)}
 
 
+def _preset_domains_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return read_preset_domains_page(
+        config.output.state_dir,
+        scope=_query_str(query, "scope", ""),
+        name=_query_str(query, "name", ""),
+        kind=_query_str(query, "kind", "user"),
+        query=_query_str(query, "query", ""),
+        limit=_query_int(query, "limit", 200),
+        offset=_query_int(query, "offset", 0),
+        include_disabled=_query_bool(query, "include_disabled", True),
+    )
+
+
 def _v2fly_categories_payload(query: dict[str, list[str]]) -> dict[str, Any]:
     return list_v2fly_categories(
         query=_query_str(query, "query", ""),
@@ -4014,6 +4045,15 @@ def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _query_bool(query: dict[str, list[str]], key: str, default: bool) -> bool:
+    raw = _query_str(query, key, "1" if default else "0").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _query_domains(query: dict[str, list[str]], key: str) -> list[str]:

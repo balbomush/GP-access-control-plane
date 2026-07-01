@@ -446,6 +446,54 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"debug_stdout":true', saved)
             self.assertIn('"curl_parallelism_default":6', saved)
 
+    def test_preset_domain_endpoints_page_and_toggle_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps(
+                {"custom": {"finder": {"mine": ["youtube.com", "discord.com", "discordcdn.com"]}, "common": {}}}
+            )
+            connection.request("POST", "/api/presets", body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            self.assertEqual(response.status, 200)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/presets/domains?scope=finder&name=mine&limit=2")
+            response = connection.getresponse()
+            page = response.read().decode("utf-8")
+            connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertIn('"total":3', page)
+            self.assertIn('"has_more":true', page)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps({"scope": "finder", "name": "mine", "domain": "discord.com", "enabled": False})
+            connection.request(
+                "POST",
+                "/api/presets/domain-enabled",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            toggled = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"enabled":false', toggled)
+            self.assertNotIn('"discord.com","discordcdn.com"', toggled)
+
     def test_discovery_profiles_endpoint_saves_user_profile(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)

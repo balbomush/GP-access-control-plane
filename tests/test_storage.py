@@ -8,7 +8,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.storage import SCHEMA_MIGRATIONS, connect, storage_status
+from gp_control_plane.storage import (
+    SCHEMA_MIGRATIONS,
+    connect,
+    read_custom_presets,
+    read_preset_domains_page,
+    save_custom_presets,
+    set_preset_domain_enabled,
+    storage_status,
+)
 
 
 class StorageTests(unittest.TestCase):
@@ -36,6 +44,8 @@ class StorageTests(unittest.TestCase):
                     "idx_strategy_domain_results_domain_strategy",
                     "idx_strategy_domain_results_strategy_domain",
                     "idx_preset_domains_domain",
+                    "idx_preset_domains_preset_enabled_position",
+                    "idx_preset_domains_preset_position",
                 }.issubset(index_names)
             )
 
@@ -89,6 +99,55 @@ class StorageTests(unittest.TestCase):
                 results = list(pool.map(read_stats_views, range(24)))
 
             self.assertEqual(results, [(0, 0)] * 24)
+
+    def test_preset_domain_page_supports_search_and_pagination(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"big": ["youtube.com", "youtu.be", "discord.com"]}, "common": {}},
+                "2026-07-01T00:00:00Z",
+            )
+
+            page = read_preset_domains_page(state_dir, scope="finder", name="big", limit=2)
+            second = read_preset_domains_page(state_dir, scope="finder", name="big", limit=2, offset=2)
+            search = read_preset_domains_page(state_dir, scope="finder", name="big", query="youtu", limit=10)
+
+            self.assertEqual(page["total"], 3)
+            self.assertTrue(page["has_more"])
+            self.assertEqual([item["domain"] for item in page["domains"]], ["youtube.com", "youtu.be"])
+            self.assertFalse(second["has_more"])
+            self.assertEqual([item["domain"] for item in second["domains"]], ["discord.com"])
+            self.assertEqual([item["domain"] for item in search["domains"]], ["youtube.com", "youtu.be"])
+
+    def test_disabled_preset_domain_is_omitted_from_active_presets(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"mine": ["youtube.com", "discord.com"]}, "common": {}},
+                "2026-07-01T00:00:00Z",
+            )
+
+            result = set_preset_domain_enabled(
+                state_dir,
+                scope="finder",
+                name="mine",
+                domain="discord.com",
+                enabled=False,
+                updated_at="2026-07-01T01:00:00Z",
+            )
+            active = read_custom_presets(state_dir)
+            page = read_preset_domains_page(state_dir, scope="finder", name="mine", include_disabled=True)
+            enabled_only = read_preset_domains_page(state_dir, scope="finder", name="mine", include_disabled=False)
+
+            self.assertFalse(result["enabled"])
+            self.assertEqual(active["finder"]["mine"], ["youtube.com"])
+            self.assertEqual(
+                [(item["domain"], item["enabled"]) for item in page["domains"]],
+                [("youtube.com", True), ("discord.com", False)],
+            )
+            self.assertEqual([item["domain"] for item in enabled_only["domains"]], ["youtube.com"])
 
 
 if __name__ == "__main__":

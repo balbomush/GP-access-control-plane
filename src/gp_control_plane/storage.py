@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
     (3, "minimal_backup_model"),
     (4, "runtime_observability"),
     (5, "remove_legacy_candidate_storage"),
+    (6, "preset_domain_state"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
@@ -207,11 +208,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             preset_id INTEGER NOT NULL,
             domain_id INTEGER NOT NULL,
             position INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(preset_id, domain_id),
             FOREIGN KEY(preset_id) REFERENCES domain_presets(id) ON DELETE CASCADE,
             FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_preset_domains_domain ON preset_domains(domain_id);
+        CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_enabled_position ON preset_domains(preset_id, enabled, position);
+        CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_position ON preset_domains(preset_id, position);
 
         CREATE VIEW IF NOT EXISTS domain_stats AS
         SELECT d.id AS domain_id,
@@ -250,6 +254,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
     current_schema_version = get_meta(conn, "schema_version")
     _ensure_column(conn, "domain_presets", "source_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "preset_domains", "enabled", "INTEGER NOT NULL DEFAULT 1")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_enabled_position ON preset_domains(preset_id, enabled, position)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_position ON preset_domains(preset_id, position)")
     strategy_results_changed = _migrate_strategy_domain_results_schema(conn)
     if strategy_results_changed or current_schema_version != str(SCHEMA_VERSION):
         _recreate_stats_views(conn)
@@ -482,8 +491,8 @@ def _save_domain_preset_conn(
             continue
         conn.execute(
             """
-            INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position)
-            VALUES(?, ?, ?)
+            INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position, enabled)
+            VALUES(?, ?, ?, 1)
             """,
             (preset_id, domain_id, position),
         )
@@ -595,7 +604,7 @@ def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
             FROM domain_presets p
             LEFT JOIN preset_domains pd ON pd.preset_id = p.id
             LEFT JOIN domains d ON d.id = pd.domain_id
-            WHERE p.kind = 'user'
+            WHERE p.kind = 'user' AND COALESCE(pd.enabled, 1) = 1
             ORDER BY p.scope, p.name, pd.position, d.name
             """
         ).fetchall()
@@ -671,6 +680,151 @@ def save_custom_preset(
             source_json=source_json,
         )
     return read_custom_presets(state_dir)
+
+
+def read_preset_domains_page(
+    state_dir: Path,
+    *,
+    scope: str,
+    name: str,
+    kind: str = "user",
+    query: str = "",
+    limit: int = 200,
+    offset: int = 0,
+    include_disabled: bool = True,
+) -> dict[str, Any]:
+    clean_scope = str(scope or "").strip()
+    clean_name = str(name or "").strip()
+    clean_kind = str(kind or "user").strip() or "user"
+    clean_query = str(query or "").strip().lower()
+    clean_limit = max(1, min(int(limit or 200), 1000))
+    clean_offset = max(0, int(offset or 0))
+    if not clean_scope or not clean_name:
+        return _empty_preset_domains_page(clean_scope, clean_name, clean_kind, clean_query, clean_limit, clean_offset)
+    filters = ["p.scope = ?", "p.name = ?", "p.kind = ?"]
+    params: list[Any] = [clean_scope, clean_name, clean_kind]
+    if clean_query:
+        filters.append("LOWER(d.name) LIKE ?")
+        params.append(f"%{clean_query}%")
+    if not include_disabled:
+        filters.append("COALESCE(pd.enabled, 1) = 1")
+    where = " AND ".join(filters)
+    with connect(state_dir) as conn:
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM domain_presets p
+            JOIN preset_domains pd ON pd.preset_id = p.id
+            JOIN domains d ON d.id = pd.domain_id
+            WHERE {where}
+            """,
+            params,
+        ).fetchone()
+        total = int(total_row["count"]) if total_row else 0
+        rows = conn.execute(
+            f"""
+            SELECT d.name AS domain, pd.position, COALESCE(pd.enabled, 1) AS enabled
+            FROM domain_presets p
+            JOIN preset_domains pd ON pd.preset_id = p.id
+            JOIN domains d ON d.id = pd.domain_id
+            WHERE {where}
+            ORDER BY pd.position, d.name
+            LIMIT ? OFFSET ?
+            """,
+            [*params, clean_limit, clean_offset],
+        ).fetchall()
+    domains = [
+        {
+            "domain": str(row["domain"] or ""),
+            "position": int(row["position"] or 0),
+            "enabled": bool(row["enabled"]),
+        }
+        for row in rows
+    ]
+    return {
+        "scope": clean_scope,
+        "name": clean_name,
+        "kind": clean_kind,
+        "query": clean_query,
+        "limit": clean_limit,
+        "offset": clean_offset,
+        "total": total,
+        "has_more": clean_offset + len(domains) < total,
+        "domains": domains,
+    }
+
+
+def set_preset_domain_enabled(
+    state_dir: Path,
+    *,
+    scope: str,
+    name: str,
+    domain: str,
+    enabled: bool,
+    updated_at: str,
+    kind: str = "user",
+) -> dict[str, Any]:
+    clean_scope = str(scope or "").strip()
+    clean_name = str(name or "").strip()
+    clean_domain = str(domain or "").strip()
+    clean_kind = str(kind or "user").strip() or "user"
+    if clean_kind != "user":
+        raise ValueError("only user presets can be edited")
+    if clean_scope not in {"finder", "common"}:
+        raise ValueError("scope must be finder or common")
+    if not clean_name:
+        raise ValueError("preset name is required")
+    if not clean_domain:
+        raise ValueError("domain is required")
+    with connect(state_dir) as conn:
+        row = conn.execute(
+            """
+            SELECT pd.preset_id, pd.domain_id
+            FROM domain_presets p
+            JOIN preset_domains pd ON pd.preset_id = p.id
+            JOIN domains d ON d.id = pd.domain_id
+            WHERE p.scope = ? AND p.name = ? AND p.kind = 'user' AND d.name = ?
+            """,
+            (clean_scope, clean_name, clean_domain),
+        ).fetchone()
+        if not row:
+            raise ValueError("preset domain was not found")
+        conn.execute(
+            "UPDATE preset_domains SET enabled = ? WHERE preset_id = ? AND domain_id = ?",
+            (1 if enabled else 0, int(row["preset_id"]), int(row["domain_id"])),
+        )
+        conn.execute(
+            "UPDATE domain_presets SET updated_at = ? WHERE id = ?",
+            (updated_at, int(row["preset_id"])),
+        )
+    return {
+        "scope": clean_scope,
+        "name": clean_name,
+        "kind": clean_kind,
+        "domain": clean_domain,
+        "enabled": bool(enabled),
+    }
+
+
+def _empty_preset_domains_page(
+    scope: str,
+    name: str,
+    kind: str,
+    query: str,
+    limit: int,
+    offset: int,
+) -> dict[str, Any]:
+    return {
+        "scope": scope,
+        "name": name,
+        "kind": kind,
+        "query": query,
+        "limit": limit,
+        "offset": offset,
+        "total": 0,
+        "has_more": False,
+        "domains": [],
+    }
 
 
 def _upsert_candidate_event_conn(

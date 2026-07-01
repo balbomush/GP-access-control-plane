@@ -245,8 +245,8 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             upsert_candidates(state_dir, parsed, {"id": "run1"})
             status = storage_status(state_dir)
 
-            self.assertEqual(status["schema_version"], "5")
-            self.assertEqual(status["expected_schema_version"], "5")
+            self.assertEqual(status["schema_version"], "6")
+            self.assertEqual(status["expected_schema_version"], "6")
             self.assertEqual(status["integrity_check"], "ok")
             self.assertGreater(status["db_size_bytes"], 0)
             self.assertEqual(status["tables"]["domains"], 1)
