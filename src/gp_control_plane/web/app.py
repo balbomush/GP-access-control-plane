@@ -1213,6 +1213,21 @@ code {
   text-align: center;
   padding: 16px;
 }
+.loading-skeleton {
+  min-height: 160px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent),
+    linear-gradient(180deg, var(--surface), var(--surface-strong));
+  background-size: 220px 100%, 100% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-sweep 1.2s ease-in-out infinite;
+}
+@keyframes skeleton-sweep {
+  from { background-position: -240px 0, 0 0; }
+  to { background-position: calc(100% + 240px) 0, 0 0; }
+}
 pre {
   margin: 0;
   max-height: 470px;
@@ -1502,6 +1517,7 @@ pre {
           <button data-action="create-backup" type="button">Создать бекап сейчас</button>
         </div>
         <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
+        <div class="helper-text" id="backups-updated-at"></div>
         <div class="preset-panel backup-upload-panel">
           <div class="panel-header">
             <h2>Загрузка ZIP-бекапа</h2>
@@ -1643,6 +1659,10 @@ let refreshInFlight = false;
 let candidateRefreshTimer = null;
 let candidateRequestSeq = 0;
 let domainIndexRequestSeq = 0;
+state.candidateLoading = false;
+state.candidateUpdatedAt = '';
+state.backupsLoading = false;
+state.backupsUpdatedAt = '';
 
 function el(id){ return document.getElementById(id); }
 function esc(value){
@@ -1693,6 +1713,11 @@ function friendlyDate(value){
   if (!value) return '-';
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('ru-RU');
+}
+function friendlyTime(value){
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toLocaleTimeString('ru-RU');
 }
 function shortPath(value){
   if (!value) return '-';
@@ -2128,7 +2153,11 @@ function renderCandidates(){
   const selectedDomains = selectedCommonDomains();
   const commonNote = state.candidateView === 'common' && selectedDomains.length >= 2 ? ` · общие для ${selectedDomains.length} доменов` : '';
   const loaded = isDomainView ? state.candidateDomainsLoaded : state.candidatesLoaded;
-  const loadedNote = loaded ? `Показано ${activeRows.length} из ${total}` : 'Список загружается по запросу';
+  const updated = friendlyTime(state.candidateUpdatedAt);
+  const updatedNote = updated ? ` · обновлено ${updated}` : '';
+  const loadedNote = state.candidateLoading
+    ? 'Загружается...'
+    : (loaded ? `Показано ${activeRows.length} из ${total}${updatedNote}` : 'Список загружается по запросу');
   setText('candidate-summary', `${loadedNote}${commonNote}`);
   document.querySelectorAll('[data-candidate-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.candidateView === state.candidateView);
@@ -2143,6 +2172,10 @@ function renderCandidates(){
 }
 function renderDomainCandidates(){
   const groups = state.candidateDomains || [];
+  if (state.candidateLoading && !state.candidateDomainsLoaded) {
+    el('candidates-table').innerHTML = '<div class="loading-skeleton" aria-label="Загрузка кандидатов"></div>';
+    return;
+  }
   if (!groups.length) {
     el('candidates-table').innerHTML = `<div class="empty">${state.candidateDomainsLoaded ? 'По фильтру ничего не найдено' : 'Откройте вкладку или обновите список, чтобы загрузить домены'}</div>`;
     return;
@@ -2168,6 +2201,10 @@ function renderDomainCandidates(){
 }
 function renderCommonCandidates(rows){
   const selectedDomains = selectedCommonDomains();
+  if (state.candidateLoading && !state.candidatesLoaded) {
+    el('candidates-table').innerHTML = '<div class="loading-skeleton" aria-label="Загрузка кандидатов"></div>';
+    return;
+  }
   if (selectedDomains.length < 2) {
     el('candidates-table').innerHTML = `<div class="empty">Выберите минимум два домена во вкладке Подбор, чтобы увидеть стратегии, найденные сразу для всех выбранных доменов.</div>`;
     return;
@@ -2776,8 +2813,17 @@ function renderBackups(){
   const rows = state.backups || [];
   const countNode = el('backups-count');
   if (countNode) countNode.textContent = String(rows.length);
+  const updatedNode = el('backups-updated-at');
+  if (updatedNode) {
+    const updated = friendlyTime(state.backupsUpdatedAt);
+    updatedNode.textContent = updated ? `Список обновлен ${updated}` : '';
+  }
   const target = el('backups-table');
   if (!target) return;
+  if (state.backupsLoading && !state.backupsLoaded) {
+    target.innerHTML = '<div class="loading-skeleton" aria-label="Загрузка бекапов"></div>';
+    return;
+  }
   if (!rows.length) {
     target.innerHTML = `<div class="empty">${state.backupsLoaded ? 'Бекапов пока нет' : 'Откройте вкладку, чтобы загрузить бекапы'}</div>`;
     return;
@@ -3152,6 +3198,8 @@ function candidateParams(offset, options){
 }
 async function refreshDomainIndex(){
   const requestId = ++domainIndexRequestSeq;
+  state.candidateLoading = true;
+  renderCandidatesOnly();
   try {
     const params = new URLSearchParams();
     const data = await getJson(`/api/strategy-finder/candidate-domains?${params.toString()}`);
@@ -3162,8 +3210,13 @@ async function refreshDomainIndex(){
     rememberCandidateVersion(data.version || null);
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidateDomainsLoaded = true;
+    state.candidateUpdatedAt = new Date().toISOString();
+    state.candidateLoading = false;
     renderCandidatesOnly();
   } catch (error) {
+    if (requestId !== domainIndexRequestSeq) return;
+    state.candidateLoading = false;
+    renderCandidatesOnly();
     setMessage(`Ошибка загрузки доменов: ${error.message}`, 'bad');
   }
 }
@@ -3277,6 +3330,8 @@ async function refreshCandidates(reset){
   const offset = reset ? 0 : state.candidates.length;
   const queryKey = currentCandidateQueryKey();
   state.commonLoadingAll = false;
+  state.candidateLoading = true;
+  renderCandidatesOnly();
   try {
     const data = await getJson(`/api/strategy-finder/candidates?${candidateParams(offset).toString()}`);
     if (requestId !== candidateRequestSeq) return;
@@ -3289,9 +3344,14 @@ async function refreshCandidates(reset){
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidatesLoaded = true;
     state.candidateQueryKey = queryKey;
+    state.candidateUpdatedAt = new Date().toISOString();
+    state.candidateLoading = false;
     if (queryKey.startsWith('common:')) storeCommonCandidateCache(queryKey);
     renderCandidatesOnly();
   } catch (error) {
+    if (requestId !== candidateRequestSeq) return;
+    state.candidateLoading = false;
+    renderCandidatesOnly();
     setMessage(`Ошибка загрузки кандидатов: ${error.message}`, 'bad');
   }
 }
@@ -3343,12 +3403,18 @@ async function refresh(){
   }
 }
 async function refreshBackups(){
+  state.backupsLoading = true;
+  renderBackups();
   try {
     const data = await getJson('/api/backups');
     state.backups = data.snapshots || [];
     state.backupsLoaded = true;
+    state.backupsUpdatedAt = new Date().toISOString();
+    state.backupsLoading = false;
     renderBackups();
   } catch (error) {
+    state.backupsLoading = false;
+    renderBackups();
     setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
   }
 }
