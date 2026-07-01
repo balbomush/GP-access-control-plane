@@ -157,6 +157,7 @@ ETA_SAMPLE_WINSORIZE_MIN_INTERVALS = 20
 ETA_SAMPLE_WINSORIZE_RATIO = 0.1
 LIVE_CANDIDATE_FLUSH_SIZE = 50
 LIVE_CANDIDATE_QUEUE_MAX_BATCHES = 128
+LIVE_CANDIDATE_SAMPLE_LIMIT = 200
 _CANDIDATE_WRITER_STOP = object()
 METRICS_INTERVAL_SECONDS = 10.0
 METRICS_MAX_BYTES = 1_000_000
@@ -778,12 +779,19 @@ class _LiveStdoutRecorder:
         self._summary_verified = 0
         self._summary_fallbacks = 0
         self._summary_common_seen = 0
-        self._summary: list[str] = []
-        self._common: list[str] = []
-        self._results: list[dict[str, Any]] = []
-        self._common_results: list[dict[str, Any]] = []
-        self._candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
-        self._common_candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self._summary_line_count = 0
+        self._common_line_count = 0
+        self._result_count = 0
+        self._common_result_count = 0
+        self._direct_available_count = 0
+        self._not_working_count = 0
+        self._candidate_count = 0
+        self._common_candidate_count = 0
+        self._candidate_keys: set[tuple[str, str, str, str, str]] = set()
+        self._common_candidate_keys: set[tuple[str, str, str, str, str]] = set()
+        self._successful_strategy_keys: set[tuple[str, str]] = set()
+        self._candidate_samples: list[dict[str, Any]] = []
+        self._common_candidate_samples: list[dict[str, Any]] = []
         self._pending_candidate_events: list[dict[str, Any]] = []
         self._candidate_writer_queue: queue.Queue[list[dict[str, Any]] | object] = queue.Queue(
             maxsize=LIVE_CANDIDATE_QUEUE_MAX_BATCHES
@@ -803,20 +811,26 @@ class _LiveStdoutRecorder:
     def parsed(self) -> dict[str, Any]:
         self.close()
         with self._lock:
-            candidates = list(self._candidates.values())
-            common_candidates = list(self._common_candidates.values())
-            results = list(self._results)
-            common_results = list(self._common_results)
+            candidates = list(self._candidate_samples)
+            common_candidates = list(self._common_candidate_samples)
             return {
-                "summary": list(self._summary),
-                "common": list(self._common),
+                "summary": [],
+                "common": [],
                 "live_summary": [str(item.get("raw") or "") for item in candidates if item.get("raw")],
                 "candidates": candidates,
                 "common_candidates": common_candidates,
-                "results": results,
-                "common_results": common_results,
-                "direct_available": [item for item in results if item.get("result") == "working without bypass"],
-                "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
+                "results": [],
+                "common_results": [],
+                "direct_available": [],
+                "not_working": [],
+                "summary_line_count": self._summary_line_count,
+                "common_line_count": self._common_line_count,
+                "result_count": self._result_count,
+                "common_result_count": self._common_result_count,
+                "direct_available_count": self._direct_available_count,
+                "not_working_count": self._not_working_count,
+                "candidate_count": self._candidate_count,
+                "common_candidate_count": self._common_candidate_count,
                 "phase": self._phase,
                 "summary_verified": self._summary_verified,
                 "summary_fallbacks": self._summary_fallbacks,
@@ -890,12 +904,20 @@ class _LiveStdoutRecorder:
             self._record_candidate_locked(live_success, common=False)
             return
         if self._section in {"summary", "common"}:
-            target = self._common if self._section == "common" else self._summary
-            target.append(line)
+            if self._section == "common":
+                self._common_line_count += 1
+            else:
+                self._summary_line_count += 1
             parsed = _parse_result_line(line)
             if parsed:
-                result_target = self._common_results if self._section == "common" else self._results
-                result_target.append(parsed)
+                if self._section == "common":
+                    self._common_result_count += 1
+                else:
+                    self._result_count += 1
+                    if parsed.get("result") == "working without bypass":
+                        self._direct_available_count += 1
+                    if "not working" in str(parsed.get("result") or ""):
+                        self._not_working_count += 1
             candidate = _candidate_from_result_line(line, scope=self._section)
             if candidate:
                 self._record_summary_candidate_locked(candidate, common=self._section == "common")
@@ -911,7 +933,7 @@ class _LiveStdoutRecorder:
             str(candidate.get("domain") or ""),
             str(candidate.get("args") or ""),
         )
-        if live_key in self._candidates:
+        if live_key in self._candidate_keys:
             self._summary_verified += 1
             return
         fallback = {**candidate, "scope": "domain", "source": "summary_fallback"}
@@ -936,10 +958,19 @@ class _LiveStdoutRecorder:
             str(candidate.get("domain") or ""),
             str(candidate.get("args") or ""),
         )
-        target = self._common_candidates if common else self._candidates
+        target = self._common_candidate_keys if common else self._candidate_keys
         if key in target:
             return
-        target[key] = candidate
+        target.add(key)
+        if common:
+            self._common_candidate_count += 1
+            if len(self._common_candidate_samples) < LIVE_CANDIDATE_SAMPLE_LIMIT:
+                self._common_candidate_samples.append(candidate)
+        else:
+            self._candidate_count += 1
+            if len(self._candidate_samples) < LIVE_CANDIDATE_SAMPLE_LIMIT:
+                self._candidate_samples.append(candidate)
+        self._successful_strategy_keys.add((str(candidate.get("protocol") or ""), str(candidate.get("args") or "")))
         candidate_id = candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or ""))
         self._pending_candidate_events.append(
             {
@@ -964,12 +995,7 @@ class _LiveStdoutRecorder:
             self._enqueue_pending_candidate_events_locked()
 
     def _progress_locked(self, run: dict[str, Any]) -> dict[str, Any]:
-        successful = len(
-            {
-                (str(item.get("protocol") or ""), str(item.get("args") or ""))
-                for item in [*self._candidates.values(), *self._common_candidates.values()]
-            }
-        )
+        successful = len(self._successful_strategy_keys)
         sample = _average_attempt_ms(self._attempt_times)
         return _progress_from_counts(
             run=run,
@@ -1552,10 +1578,14 @@ def _run_blockcheck_live(
         "debug_stdout_log": str(debug_stdout_log),
         "stdout_log_mode": _stdout_log_mode(full_env),
         "debug_stdout": _stdout_log_mode(full_env) == "debug",
-        "summary": parsed["summary"],
-        "results": parsed["results"],
-        "candidate_count": len(parsed["candidates"]),
-        "common_candidate_count": len(parsed["common_candidates"]),
+        "candidate_count": int(parsed.get("candidate_count") or len(parsed["candidates"])),
+        "common_candidate_count": int(parsed.get("common_candidate_count") or len(parsed["common_candidates"])),
+        "summary_line_count": int(parsed.get("summary_line_count") or 0),
+        "common_line_count": int(parsed.get("common_line_count") or 0),
+        "result_count": int(parsed.get("result_count") or 0),
+        "common_result_count": int(parsed.get("common_result_count") or 0),
+        "direct_available_count": int(parsed.get("direct_available_count") or 0),
+        "not_working_count": int(parsed.get("not_working_count") or 0),
         "phase": parsed.get("phase") or PHASE_COMPLETE,
         "summary_verified": parsed.get("summary_verified", 0),
         "summary_fallbacks": parsed.get("summary_fallbacks", 0),
@@ -1714,10 +1744,14 @@ def _run_blockcheck_command_live(
         "debug_stdout_log": str(debug_stdout_log),
         "stdout_log_mode": _stdout_log_mode(env),
         "debug_stdout": _stdout_log_mode(env) == "debug",
-        "summary": parsed["summary"],
-        "results": parsed["results"],
-        "candidate_count": len(parsed["candidates"]),
-        "common_candidate_count": len(parsed["common_candidates"]),
+        "candidate_count": int(parsed.get("candidate_count") or len(parsed["candidates"])),
+        "common_candidate_count": int(parsed.get("common_candidate_count") or len(parsed["common_candidates"])),
+        "summary_line_count": int(parsed.get("summary_line_count") or 0),
+        "common_line_count": int(parsed.get("common_line_count") or 0),
+        "result_count": int(parsed.get("result_count") or 0),
+        "common_result_count": int(parsed.get("common_result_count") or 0),
+        "direct_available_count": int(parsed.get("direct_available_count") or 0),
+        "not_working_count": int(parsed.get("not_working_count") or 0),
         "phase": parsed.get("phase") or PHASE_COMPLETE,
         "summary_verified": parsed.get("summary_verified", 0),
         "summary_fallbacks": parsed.get("summary_fallbacks", 0),

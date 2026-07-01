@@ -1099,6 +1099,9 @@ pktws_check_https_tls12()
 
             self.assertEqual(parsed["summary_verified"], 1)
             self.assertEqual(parsed["summary_fallbacks"], 1)
+            self.assertEqual(parsed["summary_line_count"], 2)
+            self.assertEqual(parsed["summary"], [])
+            self.assertEqual(parsed["results"], [])
             self.assertEqual(len(parsed["candidates"]), 2)
             self.assertTrue(fallback_log.exists())
 
@@ -1177,6 +1180,29 @@ pktws_check_https_tls12()
             self.assertEqual(candidate_total(state_dir), 1)
             self.assertTrue(writer_threads)
             self.assertNotIn(caller_thread, writer_threads)
+
+    def test_live_recorder_keeps_only_candidate_sample_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_SAMPLE_LIMIT", 2):
+            state_dir = Path(raw)
+            recorder = _LiveStdoutRecorder(
+                state_dir,
+                {
+                    "id": "run-candidate-sample",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "domains": ["youtube.com"],
+                },
+            )
+
+            for index in range(5):
+                recorder.record_line(f"- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=item-{index}")
+                recorder.record_line("!!!!! AVAILABLE !!!!!")
+
+            parsed = recorder.parsed()
+
+            self.assertEqual(parsed["candidate_count"], 5)
+            self.assertEqual(len(parsed["candidates"]), 2)
+            self.assertEqual(candidate_total(state_dir), 5)
 
 
 def _store_candidate_rows(state_dir: Path, candidates: list[dict[str, object]]) -> None:
