@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.backups import (
     create_snapshot,
     create_snapshot_if_idle,
+    delete_snapshot,
+    delete_snapshot_if_idle,
     import_snapshot_archive,
     list_snapshots,
     restore_snapshot,
@@ -61,6 +63,46 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertFalse(result["created"])
             self.assertTrue(result["queued"])
             self.assertEqual(list_snapshots(state_dir)["snapshots"], [])
+
+    def test_delete_snapshot_removes_files_and_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            archive = snapshot_archive_path(state_dir, snapshot_id)
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+
+            result = delete_snapshot(state_dir, snapshot_id)
+
+            self.assertTrue(result["deleted"])
+            self.assertFalse(snapshot_path.exists())
+            self.assertFalse(archive.exists())
+            self.assertEqual(list_snapshots(state_dir)["snapshots"], [])
+
+    def test_delete_snapshot_if_idle_skips_while_job_running(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            write_state(state_dir, {"current_job": "job-1", "last_error": None})
+
+            result = delete_snapshot_if_idle(state_dir, snapshot_id)
+
+            self.assertFalse(result["deleted"])
+            self.assertTrue(result["queued"])
+            self.assertEqual(list_snapshots(state_dir)["snapshots"][0]["id"], snapshot_id)
 
     def test_custom_presets_are_not_exported_to_minimal_backup(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

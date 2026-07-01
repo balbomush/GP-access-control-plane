@@ -9,7 +9,15 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .. import __version__
-from ..backups import create_snapshot_if_idle, import_snapshot_archive, list_snapshots, restore_snapshot_if_idle, restore_snapshot_preview, snapshot_file_path
+from ..backups import (
+    create_snapshot_if_idle,
+    delete_snapshot_if_idle,
+    import_snapshot_archive,
+    list_snapshots,
+    restore_snapshot_if_idle,
+    restore_snapshot_preview,
+    snapshot_file_path,
+)
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
 from ..domain_sources import builtin_preset_sources, import_v2fly_preset, preview_v2fly_preset
@@ -134,6 +142,15 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                     if not snapshot_id:
                         raise ValueError("snapshot is required")
                     self._json(restore_snapshot_if_idle(config.output.state_dir, snapshot_id), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/backups/delete":
+                try:
+                    snapshot_id = str(payload.get("snapshot") or "").strip()
+                    if not snapshot_id:
+                        raise ValueError("snapshot is required")
+                    self._json(delete_snapshot_if_idle(config.output.state_dir, snapshot_id), status=HTTPStatus.ACCEPTED)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                 return
@@ -654,31 +671,9 @@ button:disabled { opacity: .55; cursor: default; }
   display: grid;
   gap: 12px;
 }
-.backup-restore-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: end;
-}
-.restore-preview {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  color: var(--text-soft);
-  display: grid;
-  gap: 8px;
-  font-size: 13px;
-  line-height: 1.45;
-  margin: 10px 0 12px;
-  padding: 10px 12px;
-}
-.restore-preview-row {
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-}
-.restore-preview-row strong {
-  color: var(--text);
+.backup-upload-panel {
+  margin: 12px 0;
+  border-style: dashed;
 }
 .backup-card {
   border: 1px solid var(--line);
@@ -697,9 +692,14 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .backup-downloads {
   display: grid;
-  grid-template-columns: minmax(180px, .35fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   align-items: start;
+}
+.backup-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .backup-download-block {
   display: grid;
@@ -1165,7 +1165,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-restore-panel, .backup-downloads { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-downloads { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -1432,19 +1432,19 @@ pre {
         <div class="button-row">
           <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
           <button data-action="create-backup" type="button">Создать бекап сейчас</button>
-          <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
-          <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
-          <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
         </div>
         <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
-        <div class="backup-restore-panel">
-          <div class="field">
-            <label for="backup-restore-select">Бекап для восстановления</label>
-            <select id="backup-restore-select"></select>
+        <div class="preset-panel backup-upload-panel">
+          <div class="panel-header">
+            <h2>Загрузка ZIP-бекапа</h2>
           </div>
-          <button class="secondary danger" data-action="restore-selected-backup" type="button">Восстановить выбранный бекап</button>
+          <div class="button-row">
+            <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
+            <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
+            <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
+          </div>
+          <div class="helper-text">Загруженный архив появится в списке ниже. Восстановление выполняется только из карточки конкретного бекапа.</div>
         </div>
-        <div id="backup-restore-preview" class="restore-preview">Выберите бекап, чтобы увидеть, какие данные будут заменены.</div>
         <div id="backups-table" class="backup-list"></div>
       </section>
     </section>
@@ -1527,7 +1527,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupRestorePreview: null, backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -2661,7 +2661,6 @@ function renderBackups(){
   const rows = state.backups || [];
   const countNode = el('backups-count');
   if (countNode) countNode.textContent = String(rows.length);
-  renderBackupRestorePanel(rows);
   const target = el('backups-table');
   if (!target) return;
   if (!rows.length) {
@@ -2669,50 +2668,6 @@ function renderBackups(){
     return;
   }
   target.innerHTML = rows.map((item) => backupCard(item)).join('');
-}
-function renderBackupRestorePanel(rows){
-  const select = el('backup-restore-select');
-  const button = document.querySelector('[data-action="restore-selected-backup"]');
-  if (!select || !button) return;
-  const previous = select.value;
-  select.innerHTML = rows.length
-    ? rows.map((item) => {
-      const id = String(item.id || '');
-      const label = `${id} · ${item.created_at || '-'}`;
-      return `<option value="${esc(id)}">${esc(label)}</option>`;
-    }).join('')
-    : '<option value="">Бекапов нет</option>';
-  if (rows.some((item) => String(item.id || '') === previous)) select.value = previous;
-  button.disabled = !rows.length;
-  if (!rows.length) state.backupRestorePreview = null;
-  renderBackupRestorePreview();
-}
-function renderBackupRestorePreview(){
-  const target = el('backup-restore-preview');
-  if (!target) return;
-  const preview = state.backupRestorePreview;
-  if (!preview) {
-    target.textContent = 'Выберите бекап, чтобы увидеть, какие данные будут заменены.';
-    return;
-  }
-  if (preview.loading) {
-    target.textContent = 'Проверяется содержимое бекапа...';
-    return;
-  }
-  if (preview.error) {
-    target.textContent = `Не удалось проверить бекап: ${preview.error}`;
-    return;
-  }
-  const entities = Array.isArray(preview.entities) ? preview.entities : [];
-  const checksum = preview.checksum_ok ? badge('checksum ok', 'good') : badge('checksum fail', 'bad');
-  const compatible = preview.compatible ? badge('совместим', 'good') : badge('несовместим', 'bad');
-  target.innerHTML = `<div>${checksum} ${compatible}</div>${entities.map((item) => {
-    const action = item.will_replace ? 'будет заменено' : 'останется без изменений';
-    return `<div class="restore-preview-row">
-      <strong>${esc(item.label || item.key)}</strong>
-      <span>${esc(action)} · сейчас: ${esc(item.current_count ?? 0)} · в бекапе: ${esc(item.backup_count ?? 0)}</span>
-    </div>`;
-  }).join('')}`;
 }
 function backupCard(item){
   const id = String(item.id || '');
@@ -2730,11 +2685,12 @@ function backupCard(item){
       <div>Размер: ${esc(formatBytes(item.size_bytes || 0))}</div>
       <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
     </div>
+    <div class="backup-card-actions">
+      <a class="backup-archive-link" href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
+      <button class="secondary danger" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
+      <button class="secondary danger" data-backup-delete="${esc(id)}" type="button">Удалить бекап</button>
+    </div>
     <div class="backup-downloads">
-      <div class="backup-download-block backup-archive">
-        <div class="backup-section-title">Архив</div>
-        <a class="backup-archive-link" href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
-      </div>
       <div class="backup-download-block">
         <div class="backup-section-title">Файлы бекапа</div>
         <div class="backup-file-links">
@@ -3180,27 +3136,9 @@ async function refreshBackups(){
     state.backups = data.snapshots || [];
     state.backupsLoaded = true;
     renderBackups();
-    const selected = el('backup-restore-select')?.value || '';
-    if (selected) refreshBackupRestorePreview(selected);
   } catch (error) {
     setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
   }
-}
-async function refreshBackupRestorePreview(snapshotId){
-  const id = String(snapshotId || '').trim();
-  if (!id) {
-    state.backupRestorePreview = null;
-    renderBackupRestorePreview();
-    return;
-  }
-  state.backupRestorePreview = { loading: true };
-  renderBackupRestorePreview();
-  try {
-    state.backupRestorePreview = await getJson(`/api/backups/restore-preview?snapshot=${encodeURIComponent(id)}`);
-  } catch (error) {
-    state.backupRestorePreview = { error: error.message };
-  }
-  renderBackupRestorePreview();
 }
 async function createBackup(){
   try {
@@ -3234,6 +3172,25 @@ async function restoreBackup(snapshotId){
     }
   } catch (error) {
     setMessage(`Ошибка восстановления бекапа: ${error.message}`, 'bad');
+  }
+}
+async function deleteBackup(snapshotId){
+  const id = String(snapshotId || '').trim();
+  if (!id) return;
+  const ok = window.confirm(`Удалить бекап ${id}? Архив и файлы бекапа будут удалены.`);
+  if (!ok) return;
+  try {
+    const data = await postJson('/api/backups/delete', { snapshot: id });
+    if (data.queued) {
+      setMessage('Подбор идет. Бекап можно удалить после остановки или завершения', 'warn');
+      return;
+    }
+    if (data.deleted) {
+      setMessage('Бекап удален', 'good');
+      await refreshBackups();
+    }
+  } catch (error) {
+    setMessage(`Ошибка удаления бекапа: ${error.message}`, 'bad');
   }
 }
 async function uploadBackup(){
@@ -3343,8 +3300,12 @@ document.addEventListener('click', (event) => {
     importV2flyPreset();
     return;
   }
-  if (button.dataset.action === 'restore-selected-backup') {
-    restoreBackup(el('backup-restore-select')?.value || '');
+  if (button.dataset.backupRestore) {
+    restoreBackup(button.dataset.backupRestore);
+    return;
+  }
+  if (button.dataset.backupDelete) {
+    deleteBackup(button.dataset.backupDelete);
     return;
   }
   if (button.dataset.action === 'upload-backup') {
@@ -3487,9 +3448,6 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
     markDiscoveryProfileCustom();
-  }
-  if (event.target && event.target.id === 'backup-restore-select') {
-    refreshBackupRestorePreview(event.target.value || '');
   }
 });
 document.addEventListener('keydown', (event) => {

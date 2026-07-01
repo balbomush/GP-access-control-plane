@@ -67,6 +67,31 @@ def restore_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any
     return restore_snapshot(state_dir, snapshot_id)
 
 
+def delete_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
+    state = read_state(state_dir)
+    if state.get("current_job"):
+        return {"deleted": False, "queued": True, "reason": "job is running"}
+    return delete_snapshot(state_dir, snapshot_id)
+
+
+def delete_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
+    path = _snapshot_path(state_dir, snapshot_id)
+    if not path.is_dir():
+        raise FileNotFoundError(snapshot_id)
+    shutil.rmtree(path)
+    archive = archives_dir(state_dir) / f"{path.name}.zip"
+    if archive.exists():
+        archive.unlink()
+    latest = backups_dir(state_dir) / "latest.txt"
+    if latest.exists() and latest.read_text(encoding="utf-8").strip() == path.name:
+        remaining = sorted(_snapshot_paths(state_dir), key=lambda item: item.stat().st_mtime, reverse=True)
+        if remaining:
+            _write_latest_marker(state_dir, remaining[0].name)
+        else:
+            latest.unlink()
+    return {"deleted": True, "snapshot": path.name}
+
+
 def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     path = _snapshot_path(state_dir, snapshot_id)
     if not path.is_dir():
