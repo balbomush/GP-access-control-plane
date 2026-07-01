@@ -154,6 +154,7 @@ ETA_SAMPLE_MIN_ATTEMPTS = 3
 ETA_SAMPLE_MAX_POINTS = 201
 ETA_SAMPLE_WINSORIZE_MIN_INTERVALS = 20
 ETA_SAMPLE_WINSORIZE_RATIO = 0.1
+LIVE_CANDIDATE_FLUSH_SIZE = 50
 METRICS_INTERVAL_SECONDS = 10.0
 METRICS_MAX_BYTES = 1_000_000
 STDOUT_LOG_MAX_BYTES = 2_000_000
@@ -780,6 +781,7 @@ class _LiveStdoutRecorder:
         self._common_results: list[dict[str, Any]] = []
         self._candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._common_candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self._pending_candidate_events: list[dict[str, Any]] = []
         self._conn: Any | None = None
         self._conn_writes = 0
 
@@ -920,24 +922,26 @@ class _LiveStdoutRecorder:
             return
         target[key] = candidate
         candidate_id = candidate_id_for(str(candidate.get("protocol") or ""), str(candidate.get("args") or ""))
-        if self._conn is None:
-            self._conn = connect(self._state_dir, check_same_thread=False)
-        upsert_candidate_event_conn(
-            self._conn,
-            candidate_id=candidate_id,
-            protocol=str(candidate.get("protocol") or ""),
-            args=str(candidate.get("args") or ""),
-            status="candidate",
-            run_id=str(self._run.get("id") or ""),
-            domain=str(candidate.get("domain") or ""),
-            domains=[str(item or "") for item in self._run.get("domains", [])] if common and isinstance(self._run.get("domains"), list) else [],
-            test=str(candidate.get("test") or ""),
-            ip_version=str(candidate.get("ip_version") or ""),
-            seen_at=now_iso(),
-            common=common,
+        self._pending_candidate_events.append(
+            {
+                "candidate_id": candidate_id,
+                "protocol": str(candidate.get("protocol") or ""),
+                "args": str(candidate.get("args") or ""),
+                "status": "candidate",
+                "run_id": str(self._run.get("id") or ""),
+                "domain": str(candidate.get("domain") or ""),
+                "domains": (
+                    [str(item or "") for item in self._run.get("domains", [])]
+                    if common and isinstance(self._run.get("domains"), list)
+                    else []
+                ),
+                "test": str(candidate.get("test") or ""),
+                "ip_version": str(candidate.get("ip_version") or ""),
+                "seen_at": now_iso(),
+                "common": common,
+            }
         )
-        self._conn_writes += 1
-        if self._conn_writes >= 50:
+        if len(self._pending_candidate_events) >= LIVE_CANDIDATE_FLUSH_SIZE:
             self._flush_conn_locked()
 
     def _progress_locked(self, run: dict[str, Any]) -> dict[str, Any]:
@@ -981,15 +985,22 @@ class _LiveStdoutRecorder:
             return
 
     def _flush_conn_locked(self) -> None:
-        if self._conn is None:
-            return
-        self._conn.commit()
-        self._conn_writes = 0
+        if self._pending_candidate_events:
+            if self._conn is None:
+                self._conn = connect(self._state_dir, check_same_thread=False)
+            events = self._pending_candidate_events
+            self._pending_candidate_events = []
+            for event in events:
+                upsert_candidate_event_conn(self._conn, **event)
+            self._conn_writes += len(events)
+        if self._conn is not None:
+            self._conn.commit()
+            self._conn_writes = 0
 
     def _close_conn_locked(self) -> None:
+        self._flush_conn_locked()
         if self._conn is None:
             return
-        self._conn.commit()
         self._conn.close()
         self._conn = None
         self._conn_writes = 0

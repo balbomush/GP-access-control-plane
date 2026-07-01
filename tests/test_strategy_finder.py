@@ -26,6 +26,7 @@ from gp_control_plane.strategy_finder import (
     _stdout_log_mode,
     _write_multidomain_runner,
     candidate_id_for,
+    candidate_total,
     close_stale_running_runs,
     latest_log_tail,
     parse_blockcheck_stdout,
@@ -1024,6 +1025,51 @@ pktws_check_https_tls12()
             self.assertEqual(parsed["summary_fallbacks"], 1)
             self.assertEqual(len(parsed["candidates"]), 2)
             self.assertTrue(fallback_log.exists())
+
+    def test_live_recorder_flushes_candidate_buffer_on_close(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            recorder = _LiveStdoutRecorder(
+                state_dir,
+                {
+                    "id": "run-buffer-close",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "domains": ["youtube.com"],
+                },
+            )
+
+            recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=one")
+            recorder.record_line("!!!!! AVAILABLE !!!!!")
+
+            self.assertEqual(candidate_total(state_dir), 0)
+
+            recorder.close()
+
+            self.assertEqual(candidate_total(state_dir), 1)
+
+    def test_live_recorder_flushes_candidate_buffer_by_size(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_FLUSH_SIZE", 2):
+            state_dir = Path(raw)
+            recorder = _LiveStdoutRecorder(
+                state_dir,
+                {
+                    "id": "run-buffer-size",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "domains": ["youtube.com", "discord.com"],
+                },
+            )
+
+            recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=one")
+            recorder.record_line("!!!!! AVAILABLE !!!!!")
+            self.assertEqual(candidate_total(state_dir), 0)
+
+            recorder.record_line("- curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=two")
+            recorder.record_line("!!!!! AVAILABLE !!!!!")
+
+            self.assertEqual(candidate_total(state_dir), 2)
+            recorder.close()
 
 
 def _store_candidate_rows(state_dir: Path, candidates: list[dict[str, object]]) -> None:
