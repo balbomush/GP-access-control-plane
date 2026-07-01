@@ -13,7 +13,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.storage import append_run, connect, storage_status
+from gp_control_plane.storage import (
+    append_run,
+    connect,
+    storage_status,
+    upsert_candidate_event_conn as storage_upsert_candidate_event_conn,
+)
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
     _CompactStdoutWriter,
@@ -1139,8 +1144,39 @@ pktws_check_https_tls12()
             recorder.record_line("- curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=two")
             recorder.record_line("!!!!! AVAILABLE !!!!!")
 
-            self.assertEqual(candidate_total(state_dir), 2)
+            with recorder._lock:
+                self.assertEqual(len(recorder._pending_candidate_events), 0)
             recorder.close()
+            self.assertEqual(candidate_total(state_dir), 2)
+
+    def test_live_recorder_writes_candidates_on_background_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_FLUSH_SIZE", 1):
+            state_dir = Path(raw)
+            caller_thread = threading.get_ident()
+            writer_threads: list[int] = []
+
+            def capture_write(conn, **event):
+                writer_threads.append(threading.get_ident())
+                storage_upsert_candidate_event_conn(conn, **event)
+
+            recorder = _LiveStdoutRecorder(
+                state_dir,
+                {
+                    "id": "run-writer-thread",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "domains": ["youtube.com"],
+                },
+            )
+
+            with patch("gp_control_plane.strategy_finder.upsert_candidate_event_conn", side_effect=capture_write):
+                recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=thread")
+                recorder.record_line("!!!!! AVAILABLE !!!!!")
+                recorder.close()
+
+            self.assertEqual(candidate_total(state_dir), 1)
+            self.assertTrue(writer_threads)
+            self.assertNotIn(caller_thread, writer_threads)
 
 
 def _store_candidate_rows(state_dir: Path, candidates: list[dict[str, object]]) -> None:

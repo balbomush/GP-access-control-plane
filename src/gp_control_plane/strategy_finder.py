@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -155,6 +156,8 @@ ETA_SAMPLE_MAX_POINTS = 201
 ETA_SAMPLE_WINSORIZE_MIN_INTERVALS = 20
 ETA_SAMPLE_WINSORIZE_RATIO = 0.1
 LIVE_CANDIDATE_FLUSH_SIZE = 50
+LIVE_CANDIDATE_QUEUE_MAX_BATCHES = 128
+_CANDIDATE_WRITER_STOP = object()
 METRICS_INTERVAL_SECONDS = 10.0
 METRICS_MAX_BYTES = 1_000_000
 STDOUT_LOG_MAX_BYTES = 2_000_000
@@ -782,8 +785,12 @@ class _LiveStdoutRecorder:
         self._candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._common_candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._pending_candidate_events: list[dict[str, Any]] = []
-        self._conn: Any | None = None
-        self._conn_writes = 0
+        self._candidate_writer_queue: queue.Queue[list[dict[str, Any]] | object] = queue.Queue(
+            maxsize=LIVE_CANDIDATE_QUEUE_MAX_BATCHES
+        )
+        self._candidate_writer: threading.Thread | None = None
+        self._candidate_writer_closed = False
+        self._candidate_writer_error: BaseException | None = None
 
     def record_line(self, raw_line: str) -> None:
         line = raw_line.strip()
@@ -794,8 +801,8 @@ class _LiveStdoutRecorder:
             self._write_progress_locked()
 
     def parsed(self) -> dict[str, Any]:
+        self.close()
         with self._lock:
-            self._close_conn_locked()
             candidates = list(self._candidates.values())
             common_candidates = list(self._common_candidates.values())
             results = list(self._results)
@@ -829,8 +836,20 @@ class _LiveStdoutRecorder:
             self._write_progress_locked(force=True, run=run or self._run)
 
     def close(self) -> None:
+        writer: threading.Thread | None = None
         with self._lock:
-            self._close_conn_locked()
+            if not self._candidate_writer_closed:
+                self._enqueue_pending_candidate_events_locked()
+                self._candidate_writer_closed = True
+                if self._candidate_writer is not None:
+                    self._candidate_writer_queue.put(_CANDIDATE_WRITER_STOP)
+                    writer = self._candidate_writer
+            elif self._candidate_writer is not None and self._candidate_writer.is_alive():
+                writer = self._candidate_writer
+        if writer is not None:
+            writer.join()
+        if self._candidate_writer_error is not None:
+            raise RuntimeError("live candidate writer failed") from self._candidate_writer_error
 
     def _record_line_locked(self, line: str) -> None:
         if line == "* SUMMARY":
@@ -942,7 +961,7 @@ class _LiveStdoutRecorder:
             }
         )
         if len(self._pending_candidate_events) >= LIVE_CANDIDATE_FLUSH_SIZE:
-            self._flush_conn_locked()
+            self._enqueue_pending_candidate_events_locked()
 
     def _progress_locked(self, run: dict[str, Any]) -> dict[str, Any]:
         successful = len(
@@ -984,26 +1003,45 @@ class _LiveStdoutRecorder:
         except OSError:
             return
 
-    def _flush_conn_locked(self) -> None:
-        if self._pending_candidate_events:
-            if self._conn is None:
-                self._conn = connect(self._state_dir, check_same_thread=False)
-            events = self._pending_candidate_events
-            self._pending_candidate_events = []
-            for event in events:
-                upsert_candidate_event_conn(self._conn, **event)
-            self._conn_writes += len(events)
-        if self._conn is not None:
-            self._conn.commit()
-            self._conn_writes = 0
-
-    def _close_conn_locked(self) -> None:
-        self._flush_conn_locked()
-        if self._conn is None:
+    def _enqueue_pending_candidate_events_locked(self) -> None:
+        if not self._pending_candidate_events:
             return
-        self._conn.close()
-        self._conn = None
-        self._conn_writes = 0
+        if self._candidate_writer_closed:
+            raise RuntimeError("live candidate writer is already closed")
+        if self._candidate_writer_error is not None:
+            raise RuntimeError("live candidate writer failed") from self._candidate_writer_error
+        self._ensure_candidate_writer_locked()
+        events = self._pending_candidate_events
+        self._pending_candidate_events = []
+        self._candidate_writer_queue.put(events)
+
+    def _ensure_candidate_writer_locked(self) -> None:
+        if self._candidate_writer is not None and self._candidate_writer.is_alive():
+            return
+        if self._candidate_writer_error is not None:
+            raise RuntimeError("live candidate writer failed") from self._candidate_writer_error
+        self._candidate_writer = threading.Thread(
+            target=self._candidate_writer_loop,
+            name=f"gp-live-candidate-writer-{self._run.get('id') or 'run'}",
+            daemon=True,
+        )
+        self._candidate_writer.start()
+
+    def _candidate_writer_loop(self) -> None:
+        try:
+            with connect(self._state_dir) as conn:
+                while True:
+                    item = self._candidate_writer_queue.get()
+                    if item is _CANDIDATE_WRITER_STOP:
+                        return
+                    events = item
+                    if not isinstance(events, list):
+                        continue
+                    for event in events:
+                        upsert_candidate_event_conn(conn, **event)
+                    conn.commit()
+        except BaseException as exc:  # pragma: no cover - covered through close()
+            self._candidate_writer_error = exc
 
 
 class _RuntimeMetricsSampler:
