@@ -1754,6 +1754,23 @@ pre {
           </div>
           <div class="helper-text" id="preset-manager-note">Выберите пользовательский список, чтобы посмотреть домены. Большие списки загружаются порциями.</div>
           <div id="preset-manager-list" class="preset-domain-list"></div>
+          <div class="field">
+            <label for="preset-editor-name">Редактор списка</label>
+            <input id="preset-editor-name" autocomplete="off" placeholder="Название списка">
+          </div>
+          <div class="field">
+            <div class="code-editor text-editor">
+              <pre class="line-numbers" data-line-numbers-for="preset-editor-domains" aria-hidden="true">1</pre>
+              <textarea id="preset-editor-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube.com&#10;discord.com"></textarea>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="preset-editor-load" type="button">Загрузить выбранный список</button>
+            <button class="secondary" data-action="preset-editor-preview" type="button">Показать изменения</button>
+            <button data-action="preset-editor-save" type="button">Сохранить список</button>
+            <button class="secondary" data-action="preset-editor-export" type="button">Скачать TXT</button>
+          </div>
+          <div class="source-preview" id="preset-editor-preview">Изменения еще не проверялись.</div>
         </div>
         </div>
       </section>
@@ -3397,6 +3414,131 @@ async function togglePresetDomain(domain, enabled){
     refreshPresetManager(true);
   }
 }
+function renderPresetEditorPreview(preview){
+  const target = el('preset-editor-preview');
+  if (!target) return;
+  if (!preview) {
+    target.textContent = 'Изменения еще не проверялись.';
+    return;
+  }
+  target.innerHTML = [
+    `<div><strong>${esc(preview.name)}</strong>: ${esc(preview.total)} уникальных доменов</div>`,
+    `<div>Добавится: ${esc(preview.added)}, удалится: ${esc(preview.removed)}, без изменений: ${esc(preview.unchanged)}</div>`,
+    `<div>Область: ${preview.scope === 'common' ? 'Общие стратегии' : 'Подбор'}</div>`
+  ].join('');
+}
+function presetEditorDomains(){
+  return uniqueDomains(parseDomains(el('preset-editor-domains')?.value || ''));
+}
+function presetEditorScope(){
+  return el('preset-manager-scope')?.value || state.presetManager.scope || 'finder';
+}
+function presetEditorName(){
+  return String(el('preset-editor-name')?.value || el('preset-manager-name')?.value || '').trim();
+}
+async function loadPresetEditorFromSelection(){
+  const scope = presetEditorScope();
+  const name = el('preset-manager-name')?.value || state.presetManager.name || '';
+  if (!name) {
+    setMessage('Выберите пользовательский список', 'warn');
+    return;
+  }
+  try {
+    const domains = await fetchAllPresetDomains(scope, name);
+    const nameInput = el('preset-editor-name');
+    const domainsInput = el('preset-editor-domains');
+    if (nameInput) nameInput.value = name;
+    if (domainsInput) {
+      domainsInput.value = domains.join('\\n');
+      updateEditorLineNumbers('preset-editor-domains');
+    }
+    renderPresetEditorPreview(null);
+    setMessage('Список загружен в редактор', 'good');
+  } catch (error) {
+    setMessage(`Ошибка загрузки списка в редактор: ${error.message}`, 'bad');
+  }
+}
+async function buildPresetEditorPreview(){
+  const scope = presetEditorScope();
+  const name = presetEditorName();
+  const domains = presetEditorDomains();
+  if (!name || !domains.length) {
+    setMessage('Укажите название списка и хотя бы один домен', 'warn');
+    return null;
+  }
+  let current = [];
+  if ((state.customPresetMeta[scope] || {})[name]) {
+    current = await fetchAllPresetDomains(scope, name);
+  }
+  const currentSet = new Set(current);
+  const nextSet = new Set(domains);
+  const added = domains.filter((domain) => !currentSet.has(domain));
+  const removed = current.filter((domain) => !nextSet.has(domain));
+  const preview = {
+    scope,
+    name,
+    total: domains.length,
+    added: added.length,
+    removed: removed.length,
+    unchanged: domains.length - added.length
+  };
+  renderPresetEditorPreview(preview);
+  return preview;
+}
+async function previewPresetEditor(){
+  try {
+    await buildPresetEditorPreview();
+    setMessage('Изменения списка посчитаны', 'good');
+  } catch (error) {
+    setMessage(`Ошибка проверки списка: ${error.message}`, 'bad');
+  }
+}
+async function savePresetEditor(){
+  try {
+    const preview = await buildPresetEditorPreview();
+    if (!preview) return;
+    const domains = presetEditorDomains();
+    const data = await postJson('/api/presets/save', { scope: preview.scope, name: preview.name, domains });
+    mergePresetResponse(data);
+    state.customPresets[preview.scope][preview.name] = domains;
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    state.presetManager.scope = preview.scope;
+    state.presetManager.name = preview.name;
+    state.presetManager.domains = [];
+    state.presetManager.total = 0;
+    state.presetManager.hasMore = false;
+    state.presetManager.loaded = false;
+    renderPresetSelects();
+    renderPresetManager();
+    await refreshPresetManager(true);
+    setMessage('Список сохранен', 'good');
+  } catch (error) {
+    setMessage(`Ошибка сохранения списка: ${error.message}`, 'bad');
+  }
+}
+async function exportPresetEditor(){
+  try {
+    let domains = presetEditorDomains();
+    const scope = presetEditorScope();
+    const name = presetEditorName() || el('preset-manager-name')?.value || 'domains';
+    if (!domains.length && name) domains = await fetchAllPresetDomains(scope, name);
+    if (!domains.length) {
+      setMessage('Нет доменов для экспорта', 'warn');
+      return;
+    }
+    const blob = new Blob([domains.join('\\n') + '\\n'], { type: 'text/plain;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${name.replace(/[^a-z0-9._-]+/gi, '-') || 'domains'}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+    setMessage('TXT сформирован', 'good');
+  } catch (error) {
+    setMessage(`Ошибка экспорта списка: ${error.message}`, 'bad');
+  }
+}
 function syncV2flyCategoriesFromCatalog(){
   const checked = Array.from(document.querySelectorAll('[data-v2fly-category]:checked')).map((input) => input.dataset.v2flyCategory);
   const manual = v2flyCategories().filter((category) => !((state.v2flyCategories || {}).categories || []).includes(category));
@@ -3929,6 +4071,22 @@ document.addEventListener('click', (event) => {
     refreshPresetManager(false);
     return;
   }
+  if (button.dataset.action === 'preset-editor-load') {
+    loadPresetEditorFromSelection();
+    return;
+  }
+  if (button.dataset.action === 'preset-editor-preview') {
+    previewPresetEditor();
+    return;
+  }
+  if (button.dataset.action === 'preset-editor-save') {
+    savePresetEditor();
+    return;
+  }
+  if (button.dataset.action === 'preset-editor-export') {
+    exportPresetEditor();
+    return;
+  }
   if (button.dataset.backupRestore) {
     restoreBackup(button.dataset.backupRestore);
     return;
@@ -4018,6 +4176,13 @@ document.addEventListener('input', (event) => {
   }
   if (event.target && event.target.id === 'preset-manager-query') {
     state.presetManager.query = String(event.target.value || '').trim();
+  }
+  if (event.target && event.target.id === 'preset-editor-domains') {
+    updateEditorLineNumbers('preset-editor-domains');
+    renderPresetEditorPreview(null);
+  }
+  if (event.target && event.target.id === 'preset-editor-name') {
+    renderPresetEditorPreview(null);
   }
   if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
     syncV2flyCategoriesFromCatalog();
