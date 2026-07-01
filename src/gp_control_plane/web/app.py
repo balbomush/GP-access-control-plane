@@ -310,6 +310,16 @@ body { margin: 0; min-width: 320px; }
 .brand { display: grid; gap: 4px; min-width: 0; }
 h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 .subtitle { color: var(--text-soft); font-size: 13px; }
+.topbar-version {
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 700;
+}
 .main {
   max-width: 1240px;
   margin: 0 auto;
@@ -319,7 +329,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 }
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .metric {
@@ -348,11 +358,58 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   background: var(--surface-soft);
   border-color: var(--line-strong);
 }
+.metric-status-running,
+.metric-status-queued,
+.metric-status-stopping {
+  border-color: rgba(255, 174, 66, .65);
+}
+.metric-status-success {
+  border-color: rgba(83, 221, 133, .65);
+}
+.metric-status-stopped,
+.metric-status-timeout {
+  border-color: rgba(255, 174, 66, .65);
+}
+.metric-status-failed {
+  border-color: rgba(255, 76, 86, .75);
+}
+.status-checks {
+  display: grid;
+  gap: 4px;
+}
+.status-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+}
+.status-check::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-code);
+  flex: 0 0 auto;
+}
+.status-check.ok::before {
+  border-color: rgba(83, 221, 133, .8);
+  background: rgba(83, 221, 133, .18);
+  box-shadow: inset 0 0 0 2px var(--surface);
+}
+.status-check.fail::before {
+  border-color: rgba(255, 76, 86, .8);
+  background: rgba(255, 76, 86, .16);
+}
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+.finder-layout {
+  grid-template-columns: minmax(0, 520px);
+  max-width: 560px;
 }
 .stack { display: grid; gap: 16px; min-width: 0; }
 .panel {
@@ -1128,7 +1185,7 @@ pre {
         <h1>Подбор стратегий zapret2</h1>
         <div class="subtitle">Raspberry Pi · blockcheck2 · live-лог</div>
       </div>
-      <button class="secondary" data-action="refresh" title="Обновляет статус, историю, лог и список найденных кандидатов.">Обновить</button>
+      <span class="topbar-version" id="app-version-badge">v-</span>
     </div>
   </header>
   <main class="main">
@@ -1138,25 +1195,21 @@ pre {
         <div class="metric-value" id="metric-zapret">Загрузка</div>
         <div class="metric-note" id="metric-zapret-note">-</div>
       </div>
-      <div class="metric">
+      <button class="metric metric-button" data-tab="terminal" id="metric-job-card" type="button">
         <div class="metric-label">Задание</div>
         <div class="metric-value" id="metric-job">-</div>
         <div class="metric-note" id="metric-job-note">-</div>
-      </div>
-      <button class="metric metric-button" data-tab="candidates" type="button">
-        <div class="metric-label">Кандидаты</div>
-        <div class="metric-value" id="metric-candidates">0</div>
-        <div class="metric-note" id="metric-candidates-note">найдено blockcheck2</div>
       </button>
-      <div class="metric">
-        <div class="metric-label">Последний запуск</div>
-        <div class="metric-value" id="metric-last-run">-</div>
-        <div class="metric-note" id="metric-last-run-note">-</div>
-      </div>
+      <button class="metric metric-button" data-tab="candidates" type="button">
+        <div class="metric-label">Домены</div>
+        <div class="metric-value" id="metric-candidates">0</div>
+        <div class="metric-note" id="metric-candidates-note">протестировано</div>
+      </button>
     </section>
 
     <nav class="tabs" role="tablist" aria-label="Разделы">
       <button class="tab-button active" data-tab="finder" type="button">Подбор</button>
+      <button class="tab-button" data-tab="history" type="button">История</button>
       <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
       <button class="tab-button" data-tab="backups" type="button">Бекапы</button>
@@ -1164,7 +1217,7 @@ pre {
     </nav>
 
     <section class="tab-page active" data-tab-page="finder">
-    <div class="layout">
+    <div class="layout finder-layout">
       <div class="stack">
         <section class="panel">
           <div class="panel-header">
@@ -1201,14 +1254,6 @@ pre {
                   <label for="discovery-profile-select">Профиль подбора</label>
                   <select id="discovery-profile-select"></select>
                 </div>
-                <div class="field">
-                  <label for="discovery-profile-name">Название для сохранения</label>
-                  <input id="discovery-profile-name" autocomplete="off" placeholder="мой-профиль">
-                </div>
-              </div>
-              <div class="preset-actions">
-                <button class="secondary" data-action="save-discovery-profile" title="Сохраняет текущие настройки подбора как пользовательский профиль." type="button">Сохранить профиль</button>
-                <button class="secondary danger" data-action="delete-discovery-profile" title="Удаляет выбранный пользовательский профиль. Встроенные профили не удаляются." type="button">Удалить профиль</button>
               </div>
             </div>
             <label class="checkbox-row">
@@ -1278,25 +1323,23 @@ pre {
             <div class="button-row run-actions">
               <button data-action="standard-discovery" title="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта.">Обычный поиск: домены по очереди</button>
               <button class="secondary" data-action="multi-domain-discovery" title="Экспериментальный режим: одна стратегия запускается один раз, затем параллельно проверяется на выбранных доменах.">Эксперимент: стратегия сразу по доменам</button>
-              <button class="secondary" data-action="refresh" title="Обновляет статус, историю, лог и список найденных кандидатов.">Обновить данные</button>
               <button class="secondary danger" data-action="stop-current" title="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." disabled>Остановить текущий запуск</button>
             </div>
             <div class="message" id="message">Готово</div>
           </div>
         </section>
       </div>
-
-      <div class="stack">
-        <section class="panel">
-          <div class="panel-header">
-            <h2>История запусков</h2>
-            <span class="badge" id="finder-runs-count">0</span>
-          </div>
-          <div id="finder-runs-table"></div>
-        </section>
-
-      </div>
     </div>
+    </section>
+
+    <section class="tab-page history-page" data-tab-page="history">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>История запусков</h2>
+          <span class="badge" id="finder-runs-count">0</span>
+        </div>
+        <div id="finder-runs-table"></div>
+      </section>
     </section>
 
     <section class="tab-page candidates-page" data-tab-page="candidates">
@@ -1410,7 +1453,6 @@ pre {
       <section class="panel">
         <div class="panel-header">
           <h2>Настройки</h2>
-          <span class="badge" id="settings-version">-</span>
         </div>
         <div class="preset-panel">
           <div class="preset-grid">
@@ -1485,7 +1527,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupRestorePreview: null, backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false };
+const state = { status: null, settings: null, settingsTouched: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, backups: [], backupRestorePreview: null, backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1508,8 +1550,11 @@ function esc(value){
 function setText(id, value){ el(id).textContent = value; }
 function setMessage(text, tone){
   const node = el('message');
+  state.formMessage = text || '';
+  state.formMessageTone = tone || '';
   node.textContent = text;
   node.className = 'message' + (tone ? ' ' + tone : '');
+  renderMetrics();
 }
 function showToast(text, tone){
   const node = el('toast');
@@ -1656,15 +1701,6 @@ function discoveryOptions(){
     skip_ipblock: el('skip-ipblock').checked
   };
 }
-function currentDiscoveryProfileFromForm(){
-  const timeoutHours = Number(el('finder-timeout-hours').value || 6);
-  return {
-    ...discoveryOptions(),
-    curl_parallelism: curlParallelism(),
-    limit_time_enabled: el('limit-time-enabled').checked,
-    timeout_hours: Number.isFinite(timeoutHours) ? Math.max(1, Math.min(24, Math.round(timeoutHours))) : 6
-  };
-}
 const DISCOVERY_PROFILE_CONTROL_IDS = new Set([
   'enable-http',
   'enable-tls12',
@@ -1684,8 +1720,6 @@ function markDiscoveryProfileCustom(){
   if (state.loadingDiscoveryProfile) return;
   const select = el('discovery-profile-select');
   if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
-  const nameInput = el('discovery-profile-name');
-  if (nameInput) nameInput.value = 'custom';
 }
 function useDiscoveryProfile(profile){
   if (!profile) return;
@@ -1723,48 +1757,6 @@ function renderDiscoveryProfiles(){
   if (current && profiles[current]) select.value = current;
   else if (!current && profiles.balanced) select.value = 'balanced';
   else if (current === CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
-  const nameInput = el('discovery-profile-name');
-  if (nameInput && select.value && select.value !== CUSTOM_SELECT_VALUE && !nameInput.value) {
-    nameInput.value = select.value;
-  }
-}
-async function persistDiscoveryProfiles(profiles){
-  const data = await postJson('/api/discovery-profiles', { profiles });
-  state.discoveryProfiles = data.profiles || {};
-  renderDiscoveryProfiles();
-}
-async function saveDiscoveryProfile(){
-  const name = String(el('discovery-profile-name')?.value || '').trim();
-  if (!name) {
-    setMessage('Укажите название профиля подбора', 'warn');
-    return;
-  }
-  const profiles = { ...(state.discoveryProfiles || {}) };
-  profiles[name] = { ...currentDiscoveryProfileFromForm(), title: name };
-  try {
-    await persistDiscoveryProfiles(profiles);
-    const savedName = Object.keys(state.discoveryProfiles || {}).find((key) => profileTitle(key, state.discoveryProfiles[key]) === name) || name;
-    el('discovery-profile-select').value = savedName;
-    setMessage('Профиль подбора сохранен', 'good');
-  } catch (error) {
-    setMessage(`Ошибка сохранения профиля: ${error.message}`, 'bad');
-  }
-}
-async function deleteDiscoveryProfile(){
-  const select = el('discovery-profile-select');
-  const name = select ? select.value : '';
-  if (!name || name === CUSTOM_SELECT_VALUE || ['balanced', 'deep'].includes(name)) {
-    setMessage('Этот профиль удалить нельзя', 'warn');
-    return;
-  }
-  const profiles = { ...(state.discoveryProfiles || {}) };
-  delete profiles[name];
-  try {
-    await persistDiscoveryProfiles(profiles);
-    setMessage('Профиль подбора удален', 'good');
-  } catch (error) {
-    setMessage(`Ошибка удаления профиля: ${error.message}`, 'bad');
-  }
 }
 function hasEnabledProtocol(options){
   return Boolean(options.enable_http || options.enable_tls12 || options.enable_tls13 || options.include_quic);
@@ -1953,6 +1945,21 @@ function deletePreset(target){
   showToast('Пресет удален', 'good');
   if (target === 'common') refreshCandidates(true);
 }
+function statusCheck(label, ok){
+  return `<div class="status-check ${ok ? 'ok' : 'fail'}"><span>${esc(label)}</span></div>`;
+}
+function testedDomainCount(){
+  const domains = new Set(Array.isArray(state.testedDomains) ? state.testedDomains : []);
+  (state.candidateDomains || []).forEach((item) => {
+    if (item && item.domain) domains.add(String(item.domain));
+  });
+  return Math.max(Number(state.candidateDomainTotal || 0), domains.size);
+}
+function jobStatusClass(status, busy){
+  const normalized = busy ? String(status || 'running').toLowerCase() : 'idle';
+  const safe = normalized.replace(/[^a-z0-9_-]/g, '') || 'idle';
+  return `metric metric-button metric-status-${safe}`;
+}
 function renderMetrics(){
   const status = state.status || {};
   const board = status.state || {};
@@ -1961,17 +1968,30 @@ function renderMetrics(){
   const rootReady = Boolean(zapret.root_helper_ready);
   const busy = isBusy();
   const jobStatus = board.current_job_status || (busy ? 'running' : '');
-  const run = latestRun();
+  const progress = (state.finderLog && state.finderLog.progress) || {};
+  const phase = progress.phase_label || phaseLabel(progress.phase || '');
+  const version = (state.status || {}).version || '-';
+  setText('app-version-badge', `v${version}`);
   setText('metric-zapret', ready ? 'Готов' : 'Не готов');
-  setText('metric-zapret-note', `nfqws2: ${zapret.nfqws2_found ? 'да' : 'нет'}, blockcheck: ${zapret.blockcheck_found ? 'да' : 'нет'}, root-helper: ${rootReady ? 'да' : 'нет'}`);
+  el('metric-zapret-note').innerHTML = `<div class="status-checks">
+    ${statusCheck('nfqws2', Boolean(zapret.nfqws2_found))}
+    ${statusCheck('blockcheck', Boolean(zapret.blockcheck_found))}
+    ${statusCheck('root-helper', rootReady)}
+  </div>`;
   setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободна');
-  setText('metric-job-note', busy ? `${board.current_job_name || 'job'} · ID ${board.current_job}` : `Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
-  const candidateMetric = state.candidateView === 'domain' ? state.candidateDomainStrategyTotal : (state.candidateTotal || state.candidates.length);
-  const loadedMetric = state.candidateView === 'domain' ? `${state.candidateDomains.length} доменов` : `${state.candidates.length} стратегий`;
-  setText('metric-candidates', String(candidateMetric));
-  setText('metric-candidates-note', state.candidatesLoaded || state.candidateDomainsLoaded ? `загружено ${loadedMetric}` : 'открыть список');
-  setText('metric-last-run', run ? (run.status || '-') : '-');
-  setText('metric-last-run-note', run ? friendlyDate(run.timestamp) : 'запусков еще не было');
+  const jobCard = el('metric-job-card');
+  if (jobCard) jobCard.className = jobStatusClass(jobStatus, busy);
+  const jobDetails = [];
+  if (busy) {
+    jobDetails.push(phase ? `этап: ${phase}` : (jobNames[board.current_job_name] || board.current_job_name || 'идет поиск'));
+  } else {
+    jobDetails.push(`обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
+  }
+  if (state.formMessage) jobDetails.push(state.formMessage);
+  setText('metric-job-note', jobDetails.join(' · '));
+  const testedCount = testedDomainCount();
+  setText('metric-candidates', String(testedCount));
+  setText('metric-candidates-note', state.candidateDomainsLoaded ? `загружено ${state.candidateDomains.length} доменов` : 'открыть список');
   const jobBadge = el('job-badge');
   jobBadge.textContent = busy ? 'В работе' : 'Свободна';
   jobBadge.className = busy ? 'badge warn' : 'badge good';
@@ -2790,7 +2810,6 @@ function renderRuntimeMetrics(metrics){
 }
 function renderSettings(){
   const settings = state.settings || {};
-  setText('settings-version', `v${(state.status || {}).version || '-'}`);
   const ipv6 = el('settings-enable-ipv6');
   const debugStdout = el('settings-debug-stdout');
   const curlDefault = el('settings-curl-default');
@@ -3147,7 +3166,8 @@ async function refresh(){
     state.domainSources = domainSources;
     mergeCustomPresets((presets || {}).custom || {});
     renderAll({ skipCandidates: true });
-    if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
+    if (!state.candidateDomainsLoaded) refreshDomainIndex();
+    else if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   } finally {
@@ -3315,14 +3335,6 @@ document.addEventListener('click', (event) => {
     saveSettings();
     return;
   }
-  if (button.dataset.action === 'save-discovery-profile') {
-    saveDiscoveryProfile();
-    return;
-  }
-  if (button.dataset.action === 'delete-discovery-profile') {
-    deleteDiscoveryProfile();
-    return;
-  }
   if (button.dataset.action === 'v2fly-preview') {
     previewV2flyPreset();
     return;
@@ -3466,12 +3478,10 @@ document.addEventListener('change', (event) => {
     if (value !== CUSTOM_SELECT_VALUE) usePreset(target);
   }
   if (event.target && event.target.id === 'discovery-profile-select') {
-    const nameInput = el('discovery-profile-name');
     if (event.target.value === CUSTOM_SELECT_VALUE) {
-      if (nameInput) nameInput.value = 'custom';
+      markDiscoveryProfileCustom();
     } else {
       const profile = (state.discoveryProfiles || {})[event.target.value];
-      if (nameInput) nameInput.value = profileTitle(event.target.value, profile);
       useDiscoveryProfile(profile);
     }
   }
