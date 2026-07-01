@@ -12,6 +12,7 @@ from .storage import read_custom_presets, save_custom_preset
 
 V2FLY_BASE_URL = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data"
 V2FLY_CONTENTS_URL = "https://api.github.com/repos/v2fly/domain-list-community/contents/data?ref=master"
+_COVERAGE_NOTE = "publicly known verifiable domain set; not a guarantee of full service coverage"
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 _DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
 _FALLBACK_V2FLY_CATEGORIES = [
@@ -112,6 +113,7 @@ def preview_v2fly_preset(
     return {
         "scope": clean_scope,
         "preset": clean_name,
+        "coverage_note": _COVERAGE_NOTE,
         "categories": collected["categories"],
         "sources": collected["sources"],
         "domains": collected["domains"],
@@ -261,6 +263,7 @@ def _manual_source(key: str) -> dict[str, str]:
     return {
         "type": "manual",
         "source": "gp-control-plane built-in preset",
+        "coverage_note": _COVERAGE_NOTE,
         "key": key,
         "url": "src/gp_control_plane/strategy_finder.py",
     }

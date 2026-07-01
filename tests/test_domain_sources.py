@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.domain_sources import (
+    builtin_preset_sources,
     import_v2fly_preset,
     list_v2fly_categories,
     parse_v2fly_category_index,
@@ -48,8 +49,14 @@ domain:youtube.com
             )
 
             self.assertEqual(preview["count"], 2)
+            self.assertIn("not a guarantee", preview["coverage_note"])
             self.assertEqual(preview["added"], ["youtube.com", "www.youtube.com"])
             self.assertEqual(read_custom_presets(state_dir)["finder"], {})
+
+    def test_builtin_preset_sources_disclose_coverage_limit(self) -> None:
+        sources = builtin_preset_sources()
+
+        self.assertIn("not a guarantee", sources["google-youtube"]["coverage_note"])
 
     def test_import_v2fly_preset_saves_user_preset(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

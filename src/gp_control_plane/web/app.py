@@ -1636,7 +1636,7 @@ pre {
             <button data-action="v2fly-import" type="button">Сохранить в пресет</button>
           </div>
           <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
-          <div class="helper-text">Берутся только доменные правила v2fly: domain/full и явные доменные строки. keyword/regexp/include не превращаются в домены автоматически.</div>
+          <div class="helper-text">Берутся только доменные правила v2fly: domain/full и явные доменные строки. Это публично известный проверяемый набор доменов, а не гарантия полного покрытия сервиса. keyword/regexp/include не превращаются в домены автоматически.</div>
         </div>
         </div>
       </section>
@@ -3047,10 +3047,12 @@ function renderV2flyPreview(){
   const added = Array.isArray(preview.added) ? preview.added.length : 0;
   const removed = Array.isArray(preview.removed) ? preview.removed.length : 0;
   const sources = Array.isArray(preview.sources) ? preview.sources.map((source) => `${source.category}: ${source.domains}`).join(', ') : '-';
+  const coverageNote = preview.coverage_note ? 'Публично известный проверяемый набор, не гарантия полного покрытия сервиса.' : '';
   target.innerHTML = [
     `<div><strong>${esc(preview.preset || '-')}</strong>: ${esc(preview.count || 0)} доменов</div>`,
     `<div>Добавится: ${esc(added)}, уйдет: ${esc(removed)}, без изменений: ${esc(preview.unchanged_count || 0)}</div>`,
-    `<div>Категории: ${esc(sources)}</div>`
+    `<div>Категории: ${esc(sources)}</div>`,
+    coverageNote ? `<div>${esc(coverageNote)}</div>` : ''
   ].join('');
 }
 function renderV2flyCategoryCatalog(){

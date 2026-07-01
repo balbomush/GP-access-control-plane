@@ -79,6 +79,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("v2fly-preset-name", html)
         self.assertIn("v2fly-categories", html)
         self.assertIn("v2fly-preview-result", html)
+        self.assertIn("не гарантия полного покрытия сервиса", html)
         self.assertIn("renderV2flyCategoryCatalog", html)
         self.assertIn("loadV2flyCategories", html)
         self.assertIn("previewV2flyPreset", html)
