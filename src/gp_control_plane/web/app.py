@@ -24,7 +24,15 @@ from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v
 from ..jobs import JobRunner
 from ..releases import release_channel_info
 from ..state import now_iso, read_state, write_state
-from ..storage import read_custom_presets, read_preset_domains_page, save_custom_presets, set_preset_domain_enabled
+from ..storage import (
+    delete_custom_preset,
+    read_custom_preset_index,
+    read_custom_presets,
+    read_preset_domains_page,
+    save_custom_preset,
+    save_custom_presets,
+    set_preset_domain_enabled,
+)
 from ..strategy_finder import (
     candidate_storage_version,
     close_stale_running_runs,
@@ -81,7 +89,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             elif path == "/api/presets":
-                self._json({"custom": read_custom_presets(config.output.state_dir)})
+                self._json(_presets_payload(config, query))
             elif path == "/api/presets/domains":
                 self._json(_preset_domains_payload(config, query))
             elif path == "/api/domain-sources":
@@ -113,6 +121,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/backups/restore-preview",
                 "/api/presets",
                 "/api/presets/domains",
+                "/api/presets/save",
+                "/api/presets/delete",
                 "/api/domain-sources",
                 "/api/domain-sources/v2fly/categories",
             }:
@@ -167,7 +177,39 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 return
             if path == "/api/presets":
                 saved = save_custom_presets(config.output.state_dir, payload.get("custom") or payload, now_iso())
-                self._json({"custom": saved})
+                self._json({"custom": saved, "metadata": read_custom_preset_index(config.output.state_dir)})
+                return
+            if path == "/api/presets/save":
+                try:
+                    scope = str(payload.get("scope") or "")
+                    name = str(payload.get("name") or "")
+                    domains = _payload_string_list(payload, "domains")
+                    save_custom_preset(
+                        config.output.state_dir,
+                        scope=scope,
+                        name=name,
+                        domains=domains,
+                        updated_at=now_iso(),
+                    )
+                    self._json(
+                        {
+                            "custom": {scope: {name: domains}, "finder" if scope == "common" else "common": {}},
+                            "metadata": read_custom_preset_index(config.output.state_dir),
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/presets/delete":
+                try:
+                    metadata = delete_custom_preset(
+                        config.output.state_dir,
+                        scope=str(payload.get("scope") or ""),
+                        name=str(payload.get("name") or ""),
+                    )
+                    self._json({"custom": {"finder": {}, "common": {}}, "metadata": metadata})
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             if path == "/api/presets/domain-enabled":
                 try:
@@ -180,7 +222,13 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                         updated_at=now_iso(),
                         kind=str(payload.get("kind") or "user"),
                     )
-                    self._json({"domain": result, "custom": read_custom_presets(config.output.state_dir)})
+                    self._json(
+                        {
+                            "domain": result,
+                            "custom": {"finder": {}, "common": {}},
+                            "metadata": read_custom_preset_index(config.output.state_dir),
+                        }
+                    )
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -722,6 +770,32 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .v2fly-category-list .empty {
   grid-column: 1 / -1;
+}
+.preset-domain-list {
+  display: grid;
+  gap: 6px;
+}
+.preset-domain-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--surface-code);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.preset-domain-row.disabled {
+  opacity: .58;
+}
+.preset-domain-row input {
+  width: 18px;
+  min-height: 18px;
+}
+.preset-domain-name {
+  overflow-wrap: anywhere;
 }
 .helper-text {
   color: var(--text-soft);
@@ -1656,6 +1730,31 @@ pre {
           <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
           <div class="helper-text">Берутся только доменные правила v2fly: domain/full и явные доменные строки. Это публично известный проверяемый набор доменов, а не гарантия полного покрытия сервиса. keyword/regexp/include не превращаются в домены автоматически.</div>
         </div>
+        <div class="preset-panel settings-preset-manager-panel">
+          <div class="panel-header">
+            <h2>Списки доменов</h2>
+            <span class="badge" id="preset-manager-count">0</span>
+          </div>
+          <div class="preset-grid">
+            <div class="field">
+              <label for="preset-manager-scope">Где используется</label>
+              <select id="preset-manager-scope">
+                <option value="finder">Подбор</option>
+                <option value="common">Общие стратегии</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="preset-manager-name">Пользовательский список</label>
+              <select id="preset-manager-name"></select>
+            </div>
+          </div>
+          <div class="domain-picker-row">
+            <input id="preset-manager-query" autocomplete="off" placeholder="Найти домен в списке">
+            <button class="secondary" data-action="preset-manager-refresh" type="button">Показать домены</button>
+          </div>
+          <div class="helper-text" id="preset-manager-note">Выберите пользовательский список, чтобы посмотреть домены. Большие списки загружаются порциями.</div>
+          <div id="preset-manager-list" class="preset-domain-list"></div>
+        </div>
         </div>
       </section>
     </section>
@@ -1667,7 +1766,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -1932,7 +2031,7 @@ function persistCustomPresets(){
     body: JSON.stringify({custom: state.customPresets})
   }).catch(() => {});
 }
-function mergeCustomPresets(remote){
+function mergeCustomPresets(remote, metadata){
   const result = { finder: {}, common: {} };
   for (const scope of ['finder', 'common']) {
     result[scope] = {
@@ -1941,7 +2040,44 @@ function mergeCustomPresets(remote){
     };
   }
   state.customPresets = result;
+  state.customPresetMeta = normalizeCustomPresetMeta(metadata, state.customPresets);
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+}
+function normalizeCustomPresetMeta(metadata, presets){
+  const result = { finder: {}, common: {} };
+  for (const scope of ['finder', 'common']) {
+    const remote = metadata && typeof metadata[scope] === 'object' ? metadata[scope] : {};
+    Object.entries(remote).forEach(([name, meta]) => {
+      result[scope][name] = {
+        name,
+        label: (meta && meta.label) || name,
+        enabled_count: Number((meta && meta.enabled_count) || 0),
+        total_count: Number((meta && meta.total_count) || 0),
+        updated_at: (meta && meta.updated_at) || ''
+      };
+    });
+    Object.entries((presets && presets[scope]) || {}).forEach(([name, domains]) => {
+      if (!result[scope][name]) {
+        const count = uniqueDomainCount(domains);
+        result[scope][name] = { name, label: name, enabled_count: count, total_count: count, updated_at: '' };
+      }
+    });
+  }
+  return result;
+}
+function customPresetNames(target){
+  return [...new Set([
+    ...Object.keys((state.customPresetMeta && state.customPresetMeta[target]) || {}),
+    ...Object.keys((state.customPresets && state.customPresets[target]) || {})
+  ])].sort((a, b) => a.localeCompare(b));
+}
+function customPresetCount(target, name){
+  const meta = (state.customPresetMeta[target] || {})[name];
+  if (meta) return Number(meta.enabled_count || 0);
+  return uniqueDomainCount((state.customPresets[target] || {})[name] || []);
+}
+function mergePresetResponse(data){
+  mergeCustomPresets((data || {}).custom || {}, (data || {}).metadata || {});
 }
 function builtInPresets(target){
   const groups = presetGroups(target);
@@ -2011,9 +2147,9 @@ function renderPresetSelect(target){
   const select = el(`${target}-preset-select`);
   if (!select) return;
   const previous = select.value;
-  const customEntries = Object.entries(state.customPresets[target] || {}).sort(([a], [b]) => a.localeCompare(b));
+  const customEntries = customPresetNames(target);
   const customGroup = customEntries.length
-    ? `<optgroup label="Персональные">${customEntries.map(([name, domains]) => `<option value="custom:${esc(name)}">${esc(name)} (${uniqueDomainCount(domains)})</option>`).join('')}</optgroup>`
+    ? `<optgroup label="Персональные">${customEntries.map((name) => `<option value="custom:${esc(name)}">${esc(name)} (${customPresetCount(target, name)})</option>`).join('')}</optgroup>`
     : '';
   const builtInGroups = presetGroups(target).map((group) => {
     const options = group.presets.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${uniqueDomainCount(preset.domains)})</option>`).join('');
@@ -2036,8 +2172,47 @@ function markDomainPresetCustom(target){
   const nameInput = el(`${target}-preset-name`);
   if (nameInput) nameInput.value = 'custom';
 }
-function usePreset(target){
-  const domains = presetDomains(target, el(`${target}-preset-select`).value);
+async function fetchAllPresetDomains(target, name){
+  const cached = (state.customPresets[target] || {})[name] || [];
+  const expected = customPresetCount(target, name);
+  if (expected > 0 && cached.length && cached.length >= expected) return uniqueDomains(cached);
+  let offset = 0;
+  let hasMore = true;
+  let domains = [];
+  let guard = 0;
+  while (hasMore && guard < 1000) {
+    const params = new URLSearchParams();
+    params.set('scope', target);
+    params.set('name', name);
+    params.set('kind', 'user');
+    params.set('include_disabled', '0');
+    params.set('limit', '500');
+    params.set('offset', String(offset));
+    const data = await getJson(`/api/presets/domains?${params.toString()}`);
+    const rows = Array.isArray(data.domains) ? data.domains : [];
+    domains = domains.concat(rows.map((row) => row.domain).filter(Boolean));
+    hasMore = Boolean(data.has_more);
+    offset += rows.length;
+    if (!rows.length) break;
+    guard += 1;
+  }
+  state.customPresets[target][name] = uniqueDomains(domains);
+  localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+  return state.customPresets[target][name];
+}
+async function usePreset(target){
+  const selected = el(`${target}-preset-select`).value;
+  let domains = presetDomains(target, selected);
+  if (selected.startsWith('custom:')) {
+    const name = selected.slice('custom:'.length);
+    setMessage('Загружается пользовательский список доменов', 'warn');
+    try {
+      domains = await fetchAllPresetDomains(target, name);
+    } catch (error) {
+      setMessage(`Ошибка загрузки пользовательского списка: ${error.message}`, 'bad');
+      return;
+    }
+  }
   const finalDomains = target === 'common' ? filterTestedDomains(domains) : domains;
   state.loadingDomainPreset = true;
   try {
@@ -2062,7 +2237,7 @@ function presetNameForSave(target){
   if (selected.startsWith('custom:')) return selected.slice('custom:'.length);
   return '';
 }
-function savePreset(target){
+async function savePreset(target){
   const name = presetNameForSave(target);
   if (!name) {
     showToast('Укажите название пользовательского пресета', 'warn');
@@ -2073,26 +2248,40 @@ function savePreset(target){
     showToast('В пресете должен быть хотя бы один домен', 'warn');
     return;
   }
-  state.customPresets[target][name] = domains;
-  persistCustomPresets();
-  renderPresetSelect(target);
-  el(`${target}-preset-select`).value = `custom:${name}`;
-  showToast('Пресет сохранен', 'good');
-  if (target === 'common') refreshCandidates(true);
-  else renderCandidates();
+  try {
+    const data = await postJson('/api/presets/save', { scope: target, name, domains });
+    mergePresetResponse(data);
+    state.customPresets[target][name] = domains;
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    renderPresetSelect(target);
+    el(`${target}-preset-select`).value = `custom:${name}`;
+    renderPresetManager();
+    showToast('Пресет сохранен', 'good');
+    if (target === 'common') refreshCandidates(true);
+    else renderCandidates();
+  } catch (error) {
+    showToast(`Ошибка сохранения пресета: ${error.message}`, 'bad');
+  }
 }
-function deletePreset(target){
+async function deletePreset(target){
   const selected = el(`${target}-preset-select`).value || '';
   if (!selected.startsWith('custom:')) {
     showToast('Этот пресет удалить нельзя', 'warn');
     return;
   }
   const name = selected.slice('custom:'.length);
-  delete state.customPresets[target][name];
-  persistCustomPresets();
-  renderPresetSelect(target);
-  showToast('Пресет удален', 'good');
-  if (target === 'common') refreshCandidates(true);
+  try {
+    const data = await postJson('/api/presets/delete', { scope: target, name });
+    delete state.customPresets[target][name];
+    mergePresetResponse(data);
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    renderPresetSelect(target);
+    renderPresetManager();
+    showToast('Пресет удален', 'good');
+    if (target === 'common') refreshCandidates(true);
+  } catch (error) {
+    showToast(`Ошибка удаления пресета: ${error.message}`, 'bad');
+  }
 }
 function statusCheck(label, ok, message){
   const safeMessage = String(message || '');
@@ -2983,6 +3172,7 @@ function renderSettings(){
   renderDiscoveryProfiles();
   renderV2flyCategoryCatalog();
   renderV2flyPreview();
+  renderPresetManager();
 }
 function renderReleaseInfo(){
   const version = (state.status || {}).version || '-';
@@ -3090,6 +3280,123 @@ function renderV2flyCategoryCatalog(){
     </label>
   `).join('');
 }
+function presetManagerMeta(scope){
+  return (state.customPresetMeta && state.customPresetMeta[scope]) || {};
+}
+function renderPresetManager(){
+  const scopeSelect = el('preset-manager-scope');
+  const nameSelect = el('preset-manager-name');
+  const list = el('preset-manager-list');
+  if (!scopeSelect || !nameSelect || !list) return;
+  const manager = state.presetManager;
+  const scope = manager.scope || scopeSelect.value || 'finder';
+  if (scopeSelect.value !== scope) scopeSelect.value = scope;
+  const names = customPresetNames(scope);
+  if (!manager.name || !names.includes(manager.name)) manager.name = names[0] || '';
+  nameSelect.innerHTML = names.length
+    ? names.map((name) => `<option value="${esc(name)}">${esc(name)} (${customPresetCount(scope, name)})</option>`).join('')
+    : '<option value="">Нет пользовательских списков</option>';
+  nameSelect.value = manager.name || '';
+  const meta = manager.name ? presetManagerMeta(scope)[manager.name] : null;
+  const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : '0';
+  setText('preset-manager-count', count);
+  const query = el('preset-manager-query');
+  if (query && query.value !== manager.query) query.value = manager.query || '';
+  const note = el('preset-manager-note');
+  if (!manager.name) {
+    note.textContent = 'Пользовательских списков пока нет. Создайте список в подборе или импортируйте его из v2fly.';
+    list.innerHTML = '';
+    return;
+  }
+  const loaded = Array.isArray(manager.domains) ? manager.domains : [];
+  const updated = meta && meta.updated_at ? ` · обновлено ${friendlyDate(meta.updated_at)}` : '';
+  note.textContent = manager.loading
+    ? 'Загрузка списка...'
+    : `Показано ${loaded.length} из ${manager.total || 0}. Активно ${meta ? meta.enabled_count : 0}${updated}`;
+  if (!manager.loaded && !manager.loading) {
+    list.innerHTML = '<div class="empty">Нажмите “Показать домены”, чтобы загрузить список.</div>';
+    return;
+  }
+  if (manager.loading && !loaded.length) {
+    list.innerHTML = '<div class="loading-skeleton" aria-label="Загрузка списка доменов"></div>';
+    return;
+  }
+  const rows = loaded.map((item) => `
+    <label class="preset-domain-row ${item.enabled ? '' : 'disabled'}">
+      <input type="checkbox" data-preset-domain-toggle="${esc(item.domain)}" ${item.enabled ? 'checked' : ''}>
+      <span class="preset-domain-name">${esc(item.domain)}</span>
+    </label>
+  `).join('');
+  const more = manager.hasMore
+    ? `<button class="secondary" data-action="preset-manager-load-more" type="button">Показать еще 200</button>`
+    : '';
+  list.innerHTML = rows || '<div class="empty">По этому фильтру домены не найдены.</div>';
+  if (more) list.insertAdjacentHTML('beforeend', `<div class="button-row">${more}</div>`);
+}
+async function refreshPresetManager(reset){
+  const manager = state.presetManager;
+  const scope = el('preset-manager-scope')?.value || manager.scope || 'finder';
+  const name = el('preset-manager-name')?.value || manager.name || '';
+  const query = String(el('preset-manager-query')?.value || '').trim();
+  if (!name) {
+    manager.scope = scope;
+    manager.name = '';
+    manager.query = query;
+    manager.domains = [];
+    manager.total = 0;
+    manager.hasMore = false;
+    manager.loaded = false;
+    renderPresetManager();
+    return;
+  }
+  const offset = reset ? 0 : (manager.domains || []).length;
+  Object.assign(manager, { scope, name, query, loading: true });
+  renderPresetManager();
+  try {
+    const params = new URLSearchParams();
+    params.set('scope', scope);
+    params.set('name', name);
+    params.set('kind', 'user');
+    params.set('include_disabled', '1');
+    params.set('limit', '200');
+    params.set('offset', String(offset));
+    if (query) params.set('query', query);
+    const data = await getJson(`/api/presets/domains?${params.toString()}`);
+    const rows = Array.isArray(data.domains) ? data.domains : [];
+    manager.domains = reset ? rows : [...(manager.domains || []), ...rows];
+    manager.total = Number(data.total || 0);
+    manager.hasMore = Boolean(data.has_more);
+    manager.loading = false;
+    manager.loaded = true;
+    renderPresetManager();
+  } catch (error) {
+    manager.loading = false;
+    renderPresetManager();
+    setMessage(`Ошибка загрузки списка доменов: ${error.message}`, 'bad');
+  }
+}
+async function togglePresetDomain(domain, enabled){
+  const manager = state.presetManager;
+  if (!manager.name || !domain) return;
+  try {
+    const data = await postJson('/api/presets/domain-enabled', {
+      scope: manager.scope || 'finder',
+      name: manager.name,
+      domain,
+      enabled
+    });
+    mergePresetResponse(data);
+    manager.domains = (manager.domains || []).map((item) => item.domain === domain ? { ...item, enabled } : item);
+    if (state.customPresets[manager.scope || 'finder']) delete state.customPresets[manager.scope || 'finder'][manager.name];
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    renderPresetSelects();
+    renderPresetManager();
+    showToast(enabled ? 'Домен включен' : 'Домен выключен', 'good');
+  } catch (error) {
+    showToast(`Ошибка изменения домена: ${error.message}`, 'bad');
+    refreshPresetManager(true);
+  }
+}
 function syncV2flyCategoriesFromCatalog(){
   const checked = Array.from(document.querySelectorAll('[data-v2fly-category]:checked')).map((input) => input.dataset.v2flyCategory);
   const manual = v2flyCategories().filter((category) => !((state.v2flyCategories || {}).categories || []).includes(category));
@@ -3144,8 +3451,9 @@ async function importV2flyPreset(){
   try {
     const data = await postJson('/api/domain-sources/v2fly/import', payload);
     state.v2flyPreview = data;
-    mergeCustomPresets((data || {}).custom || {});
+    mergePresetResponse(data);
     renderPresetSelects();
+    renderPresetManager();
     renderV2flyPreview();
     setMessage(`Пресет сохранен: ${data.count || 0} доменов`, 'good');
   } catch (error) {
@@ -3415,7 +3723,7 @@ async function refresh(){
     state.domainSets = domainSets;
     state.discoveryProfiles = (discoveryProfiles || {}).profiles || {};
     state.domainSources = domainSources;
-    mergeCustomPresets((presets || {}).custom || {});
+    mergeCustomPresets((presets || {}).custom || {}, (presets || {}).metadata || {});
     renderAll({ skipCandidates: true });
     if (!state.candidateDomainsLoaded) refreshDomainIndex();
     else if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
@@ -3613,6 +3921,14 @@ document.addEventListener('click', (event) => {
     importV2flyPreset();
     return;
   }
+  if (button.dataset.action === 'preset-manager-refresh') {
+    refreshPresetManager(true);
+    return;
+  }
+  if (button.dataset.action === 'preset-manager-load-more') {
+    refreshPresetManager(false);
+    return;
+  }
   if (button.dataset.backupRestore) {
     restoreBackup(button.dataset.backupRestore);
     return;
@@ -3700,6 +4016,9 @@ document.addEventListener('input', (event) => {
     state.v2flyPreview = null;
     renderV2flyPreview();
   }
+  if (event.target && event.target.id === 'preset-manager-query') {
+    state.presetManager.query = String(event.target.value || '').trim();
+  }
   if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
     syncV2flyCategoriesFromCatalog();
   }
@@ -3746,6 +4065,9 @@ document.addEventListener('change', (event) => {
   if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
     syncV2flyCategoriesFromCatalog();
   }
+  if (event.target && event.target.dataset && event.target.dataset.presetDomainToggle) {
+    togglePresetDomain(event.target.dataset.presetDomainToggle, Boolean(event.target.checked));
+  }
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
     markDiscoveryProfileCustom();
@@ -3756,6 +4078,23 @@ document.addEventListener('change', (event) => {
     const nameInput = el(`${target}-preset-name`);
     if (nameInput) nameInput.value = value === CUSTOM_SELECT_VALUE ? 'custom' : (value.startsWith('custom:') ? value.slice('custom:'.length) : '');
     if (value !== CUSTOM_SELECT_VALUE) usePreset(target);
+  }
+  if (event.target && event.target.id === 'preset-manager-scope') {
+    state.presetManager.scope = event.target.value || 'finder';
+    state.presetManager.name = '';
+    state.presetManager.domains = [];
+    state.presetManager.total = 0;
+    state.presetManager.hasMore = false;
+    state.presetManager.loaded = false;
+    renderPresetManager();
+  }
+  if (event.target && event.target.id === 'preset-manager-name') {
+    state.presetManager.name = event.target.value || '';
+    state.presetManager.domains = [];
+    state.presetManager.total = 0;
+    state.presetManager.hasMore = false;
+    state.presetManager.loaded = false;
+    renderPresetManager();
   }
   if (event.target && event.target.id === 'discovery-profile-select') {
     if (event.target.value === CUSTOM_SELECT_VALUE) {
@@ -3988,6 +4327,15 @@ def _candidate_domain_index_payload(config: AppConfig, query: dict[str, list[str
         config.output.state_dir,
         query=_query_str(query, "query", ""),
     )
+
+
+def _presets_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {"metadata": read_custom_preset_index(config.output.state_dir)}
+    if _query_bool(query, "include_domains", False):
+        payload["custom"] = read_custom_presets(config.output.state_dir)
+    else:
+        payload["custom"] = {"finder": {}, "common": {}}
+    return payload
 
 
 def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:

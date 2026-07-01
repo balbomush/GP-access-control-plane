@@ -621,6 +621,36 @@ def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
     return result
 
 
+def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    with connect(state_dir) as conn:
+        rows = conn.execute(
+            """
+            SELECT p.scope, p.name, p.label, p.updated_at,
+                   COUNT(pd.domain_id) AS total_count,
+                   COUNT(CASE WHEN COALESCE(pd.enabled, 1) = 1 THEN 1 END) AS enabled_count
+            FROM domain_presets p
+            LEFT JOIN preset_domains pd ON pd.preset_id = p.id
+            WHERE p.kind = 'user'
+            GROUP BY p.id, p.scope, p.name, p.label, p.updated_at
+            ORDER BY p.scope, p.name
+            """
+        ).fetchall()
+    result: dict[str, dict[str, dict[str, Any]]] = {"finder": {}, "common": {}}
+    for row in rows:
+        scope = str(row["scope"] or "")
+        name = str(row["name"] or "")
+        if not scope or not name:
+            continue
+        result.setdefault(scope, {})[name] = {
+            "name": name,
+            "label": str(row["label"] or name),
+            "enabled_count": int(row["enabled_count"] or 0),
+            "total_count": int(row["total_count"] or 0),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+    return result
+
+
 def save_custom_presets(state_dir: Path, presets: dict[str, Any], updated_at: str) -> dict[str, dict[str, list[str]]]:
     clean: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
     for scope in ("finder", "common"):
@@ -680,6 +710,21 @@ def save_custom_preset(
             source_json=source_json,
         )
     return read_custom_presets(state_dir)
+
+
+def delete_custom_preset(state_dir: Path, *, scope: str, name: str) -> dict[str, dict[str, dict[str, Any]]]:
+    clean_scope = str(scope or "").strip()
+    clean_name = str(name or "").strip()
+    if clean_scope not in {"finder", "common"}:
+        raise ValueError("scope must be finder or common")
+    if not clean_name:
+        raise ValueError("preset name is required")
+    with connect(state_dir) as conn:
+        conn.execute(
+            "DELETE FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'user'",
+            (clean_scope, clean_name),
+        )
+    return read_custom_preset_index(state_dir)
 
 
 def read_preset_domains_page(

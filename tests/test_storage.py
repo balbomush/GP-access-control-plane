@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.storage import (
     SCHEMA_MIGRATIONS,
     connect,
+    delete_custom_preset,
+    read_custom_preset_index,
     read_custom_presets,
     read_preset_domains_page,
     save_custom_presets,
@@ -148,6 +150,43 @@ class StorageTests(unittest.TestCase):
                 [("youtube.com", True), ("discord.com", False)],
             )
             self.assertEqual([item["domain"] for item in enabled_only["domains"]], ["youtube.com"])
+
+    def test_custom_preset_index_reports_enabled_and_total_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"mine": ["youtube.com", "discord.com"]}, "common": {}},
+                "2026-07-01T00:00:00Z",
+            )
+            set_preset_domain_enabled(
+                state_dir,
+                scope="finder",
+                name="mine",
+                domain="discord.com",
+                enabled=False,
+                updated_at="2026-07-01T01:00:00Z",
+            )
+
+            index = read_custom_preset_index(state_dir)
+
+            self.assertEqual(index["finder"]["mine"]["enabled_count"], 1)
+            self.assertEqual(index["finder"]["mine"]["total_count"], 2)
+
+    def test_delete_custom_preset_removes_one_scope_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"mine": ["youtube.com"]}, "common": {"mine": ["discord.com"]}},
+                "2026-07-01T00:00:00Z",
+            )
+
+            index = delete_custom_preset(state_dir, scope="finder", name="mine")
+
+            self.assertNotIn("mine", index["finder"])
+            self.assertIn("mine", index["common"])
+            self.assertEqual(read_custom_presets(state_dir)["common"]["mine"], ["discord.com"])
 
 
 if __name__ == "__main__":
