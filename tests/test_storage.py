@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from gp_control_plane.storage import (
     SCHEMA_MIGRATIONS,
     connect,
     delete_custom_preset,
+    db_path,
     read_custom_preset_index,
     read_custom_presets,
     read_preset_domains_page,
@@ -101,6 +103,65 @@ class StorageTests(unittest.TestCase):
                 results = list(pool.map(read_stats_views, range(24)))
 
             self.assertEqual(results, [(0, 0)] * 24)
+
+    def test_migrates_existing_preset_domains_without_enabled_column(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            path = db_path(state_dir)
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO meta(key, value) VALUES('schema_version', '5');
+                    CREATE TABLE domain_presets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope TEXT NOT NULL DEFAULT '',
+                        name TEXT NOT NULL DEFAULT '',
+                        kind TEXT NOT NULL DEFAULT 'user',
+                        label TEXT NOT NULL DEFAULT '',
+                        source_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL DEFAULT '',
+                        UNIQUE(scope, name, kind)
+                    );
+                    CREATE TABLE domains (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        service_group TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE preset_domains (
+                        preset_id INTEGER NOT NULL,
+                        domain_id INTEGER NOT NULL,
+                        position INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(preset_id, domain_id)
+                    );
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with connect(state_dir) as conn:
+                columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(preset_domains)").fetchall()}
+                indexes = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        """
+                        SELECT name
+                        FROM sqlite_master
+                        WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex%'
+                        """
+                    ).fetchall()
+                }
+
+            self.assertIn("enabled", columns)
+            self.assertIn("idx_preset_domains_preset_enabled_position", indexes)
 
     def test_preset_domain_page_supports_search_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

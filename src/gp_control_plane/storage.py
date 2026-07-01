@@ -214,8 +214,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_preset_domains_domain ON preset_domains(domain_id);
-        CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_enabled_position ON preset_domains(preset_id, enabled, position);
-        CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_position ON preset_domains(preset_id, position);
 
         CREATE VIEW IF NOT EXISTS domain_stats AS
         SELECT d.id AS domain_id,
