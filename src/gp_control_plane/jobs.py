@@ -62,7 +62,7 @@ class JobRunner:
         if cancel_hook:
             threading.Thread(target=self._run_cancel_hook, args=(cancel_hook,), daemon=True).start()
         self._record(job_id, name, "stopping", now_iso())
-        self._set_current_job(job_id, name, "stopping")
+        self._set_current_job_if_active(job_id, name, "stopping")
         return {"id": job_id, "name": name, "status": "stopping"}
 
     @staticmethod
@@ -74,26 +74,28 @@ class JobRunner:
 
     def _run(self, job_id: str, name: str, func: Callable[[threading.Event], Any], cancel_event: threading.Event) -> None:
         self._record(job_id, name, "running", now_iso())
-        self._set_current_job(job_id, name, "running")
-        state = read_state(self.state_dir)
+        self._set_current_job_if_active(job_id, name, "running")
+        last_error: str | None = None
+        last_job_status = "failed"
         try:
             result = func(cancel_event)
             status = "stopped" if isinstance(result, dict) and result.get("status") == "stopped" else "success"
             self._record(job_id, name, status, now_iso(), result=result)
-            state = read_state(self.state_dir)
-            state["last_error"] = None
-            state["last_job_status"] = status
+            last_error = None
+            last_job_status = status
         except Exception as exc:  # noqa: BLE001
             self._record(job_id, name, "failed", now_iso(), error=str(exc))
-            state = read_state(self.state_dir)
-            state["last_error"] = str(exc)
-            state["last_job_status"] = "failed"
+            last_error = str(exc)
+            last_job_status = "failed"
         finally:
-            state["current_job"] = None
-            state["current_job_name"] = None
-            state["current_job_status"] = None
-            write_state(self.state_dir, state)
             with self._lock:
+                state = read_state(self.state_dir)
+                state["last_error"] = last_error
+                state["last_job_status"] = last_job_status
+                state["current_job"] = None
+                state["current_job_name"] = None
+                state["current_job_status"] = None
+                write_state(self.state_dir, state)
                 if self._active == job_id:
                     self._active = None
                     self._active_name = None
@@ -116,6 +118,16 @@ class JobRunner:
         append_jsonl(self.state_dir / "jobs.jsonl", payload)
 
     def _set_current_job(self, job_id: str, name: str, status: str) -> None:
+        with self._lock:
+            self._set_current_job_locked(job_id, name, status)
+
+    def _set_current_job_if_active(self, job_id: str, name: str, status: str) -> None:
+        with self._lock:
+            if self._active != job_id:
+                return
+            self._set_current_job_locked(job_id, name, status)
+
+    def _set_current_job_locked(self, job_id: str, name: str, status: str) -> None:
         state = read_state(self.state_dir)
         state["current_job"] = job_id
         state["current_job_name"] = name
