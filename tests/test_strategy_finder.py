@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,8 @@ from gp_control_plane.strategy_finder import (
     _CompactStdoutWriter,
     _LiveStdoutRecorder,
     _RotatingTextWriter,
+    _average_attempt_ms,
+    _progress_from_counts,
     _resolve_blockcheck_script,
     _run_process_with_live_stdout,
     _standard_attempt_plan,
@@ -913,6 +916,45 @@ pktws_check_https_tls12()
         self.assertEqual(progress["remaining_attempts"], 20)
         self.assertEqual(progress["eta_parallelism"], 4)
         self.assertEqual(progress["eta_seconds"], 10)
+
+    def test_live_sample_eta_does_not_divide_by_parallelism_twice(self) -> None:
+        plan = {
+            "total": 100,
+            "scripts": {"standard/10-test.sh": 100},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+
+        progress = _progress_from_counts(
+            run={
+                "id": "run-live-sample",
+                "kind": "multi-domain-discovery",
+                "status": "running",
+                "attempt_plan": plan,
+                "curl_parallelism": 4,
+            },
+            attempted=20,
+            attempts_by_script={"standard/10-test.sh": 20},
+            successful=0,
+            current_script="standard/10-test.sh",
+            runtime_ms_per_attempt=500,
+            runtime_sample_count=50,
+        )
+
+        self.assertEqual(progress["remaining_attempts"], 80)
+        self.assertEqual(progress["eta_status"], "sample")
+        self.assertEqual(progress["eta_method"], "live_smoothed")
+        self.assertEqual(progress["eta_configured_parallelism"], 4)
+        self.assertEqual(progress["eta_parallelism"], 1)
+        self.assertEqual(progress["eta_seconds"], 40)
+
+    def test_average_attempt_ms_winsorizes_large_live_outliers(self) -> None:
+        timestamps = [0.0]
+        intervals = [1.0] * 22 + [20.0] * 3
+        for value in intervals:
+            timestamps.append(timestamps[-1] + value)
+
+        self.assertLess(_average_attempt_ms(deque(timestamps)), 4000)
 
     def test_progress_eta_accounts_for_sequential_repeats(self) -> None:
         plan = {

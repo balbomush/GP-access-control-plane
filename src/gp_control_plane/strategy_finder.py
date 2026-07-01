@@ -151,6 +151,9 @@ AMAZON_AWS_DOMAINS = [
 
 ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
 ETA_SAMPLE_MIN_ATTEMPTS = 3
+ETA_SAMPLE_MAX_POINTS = 201
+ETA_SAMPLE_WINSORIZE_MIN_INTERVALS = 20
+ETA_SAMPLE_WINSORIZE_RATIO = 0.1
 METRICS_INTERVAL_SECONDS = 10.0
 METRICS_MAX_BYTES = 1_000_000
 STDOUT_LOG_MAX_BYTES = 2_000_000
@@ -767,7 +770,7 @@ class _LiveStdoutRecorder:
         self._pending_attempt: str | None = None
         self._attempted = 0
         self._attempts_by_script: dict[str, int] = {}
-        self._attempt_times: deque[float] = deque(maxlen=21)
+        self._attempt_times: deque[float] = deque(maxlen=ETA_SAMPLE_MAX_POINTS)
         self._summary_verified = 0
         self._summary_fallbacks = 0
         self._summary_common_seen = 0
@@ -1751,18 +1754,27 @@ def _progress_from_counts(
         percent = (script_index / script_total * 100.0) if script_total else None
     elapsed = _elapsed_seconds(run.get("timestamp"))
     eta_parallelism = _eta_parallelism_for_run(run)
+    eta_configured_parallelism = eta_parallelism
     estimate_ms_per_attempt = _eta_ms_per_attempt_for_run(run)
     eta_ms_per_attempt = estimate_ms_per_attempt
     eta_status = "estimated"
+    eta_method = "timeout_estimate"
     if runtime_sample_count is not None:
         if completed:
             eta_status = "complete"
+            eta_method = "complete"
         elif runtime_sample_count < ETA_SAMPLE_MIN_ATTEMPTS or runtime_ms_per_attempt is None:
             eta_status = "calculating"
+            eta_method = "waiting_for_sample"
             eta_ms_per_attempt = 0
         else:
             eta_status = "sample"
+            eta_method = "live_smoothed"
             eta_ms_per_attempt = runtime_ms_per_attempt
+            # Live intervals are already the observed throughput of the active
+            # curl queue. Dividing them by curl_parallelism again makes long
+            # multi-domain runs look much shorter than they are.
+            eta_parallelism = 1
     if remaining_attempts is None and not completed:
         eta = None
         if progress_status == "underestimated":
@@ -1789,6 +1801,10 @@ def _progress_from_counts(
         "eta_ms_per_attempt": eta_ms_per_attempt,
         "eta_status": eta_status,
         "eta_parallelism": eta_parallelism,
+        "eta_configured_parallelism": eta_configured_parallelism,
+        "eta_method": eta_method,
+        "eta_sample_count": runtime_sample_count or 0,
+        "eta_sample_window": ETA_SAMPLE_MAX_POINTS - 1,
         "repeats": _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10),
         "repeat_parallel": _truthy(run.get("repeat_parallel"), default=False),
         "attempt_plan_source": attempt_plan.get("source") or "",
@@ -1821,7 +1837,21 @@ def _average_attempt_ms(samples: deque[float]) -> int | None:
     intervals = [right - left for left, right in zip(values, values[1:]) if right >= left]
     if not intervals:
         return None
+    if len(intervals) >= ETA_SAMPLE_WINSORIZE_MIN_INTERVALS:
+        intervals = _winsorized(intervals, ETA_SAMPLE_WINSORIZE_RATIO)
     return max(1, int((sum(intervals) / len(intervals)) * 1000))
+
+
+def _winsorized(values: list[float], ratio: float) -> list[float]:
+    if not values:
+        return []
+    ordered = sorted(values)
+    edge = int(len(ordered) * ratio)
+    if edge <= 0 or edge * 2 >= len(ordered):
+        return values
+    low = ordered[edge]
+    high = ordered[-edge - 1]
+    return [min(max(value, low), high) for value in values]
 
 
 def _phase_label(phase: str) -> str:
