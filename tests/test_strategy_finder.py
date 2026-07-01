@@ -1041,6 +1041,33 @@ pktws_check_https_tls12()
         self.assertEqual(progress["eta_status"], "underestimated")
         self.assertEqual(progress["percent"], 99.0)
 
+    def test_running_progress_detects_underestimated_current_script(self) -> None:
+        plan = {
+            "total": 100,
+            "scripts": {"standard/50-fake-multi.sh": 10, "standard/60-next.sh": 90},
+            "script_order": ["standard/50-fake-multi.sh", "standard/60-next.sh"],
+            "source": "shell",
+        }
+        stdout = "\n".join(
+            ["* script : standard/50-fake-multi.sh"]
+            + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 15
+        )
+
+        progress = progress_from_stdout(
+            stdout,
+            {"id": "run-script-underestimated", "status": "running", "attempt_plan": plan},
+        )
+
+        self.assertEqual(progress["attempted"], 15)
+        self.assertEqual(progress["current_script_attempted"], 15)
+        self.assertEqual(progress["current_script_attempt_total"], 10)
+        self.assertEqual(progress["progress_status"], "underestimated")
+        self.assertEqual(progress["effective_attempt_total"], 100)
+        self.assertIsNone(progress["remaining_attempts"])
+        self.assertIsNone(progress["eta_seconds"])
+        self.assertEqual(progress["eta_status"], "underestimated")
+        self.assertLess(progress["percent"], 99.0)
+
     def test_live_summary_is_validation_and_only_fallback_writes_missing_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

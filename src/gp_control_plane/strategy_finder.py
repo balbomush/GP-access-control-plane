@@ -1757,20 +1757,32 @@ def _progress_from_counts(
     remaining_attempts = max(0, attempt_total - attempted) if attempt_total else None
     if attempt_total:
         progress_status = "exact" if str(attempt_plan.get("source") or "") in {"shell", "test"} else "estimated"
-    if attempt_total and not finished and attempted >= attempt_total:
+    current_script_underestimated = bool(
+        attempt_total
+        and current_script_attempt_total
+        and current_script_attempted > current_script_attempt_total
+    )
+    if attempt_total and not finished and (attempted >= attempt_total or current_script_underestimated):
         progress_status = "underestimated"
-        script_remaining = current_script_attempt_total - current_script_attempted if current_script_attempt_total else 0
-        if script_remaining > 0:
-            remaining_attempts = script_remaining
-            effective_attempt_total = attempted + script_remaining
-        else:
+        if current_script_underestimated and attempted < attempt_total:
             remaining_attempts = None
-            effective_attempt_total = attempted
+            effective_attempt_total = attempt_total
+        else:
+            script_remaining = current_script_attempt_total - current_script_attempted if current_script_attempt_total else 0
+            if script_remaining > 0:
+                remaining_attempts = script_remaining
+                effective_attempt_total = attempted + script_remaining
+            else:
+                remaining_attempts = None
+                effective_attempt_total = attempted
     if effective_attempt_total:
         if completed:
             percent = 100.0
         elif remaining_attempts is None and progress_status == "underestimated":
-            percent = 99.0
+            if effective_attempt_total and attempted < effective_attempt_total:
+                percent = min(99.0, (attempted / effective_attempt_total) * 100.0)
+            else:
+                percent = 99.0
         else:
             percent = min(99.9, (attempted / effective_attempt_total) * 100.0)
     else:
