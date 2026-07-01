@@ -2836,7 +2836,8 @@ function renderProgress(progress){
   setText('progress-successful', String(progress.successful ?? 0));
   setText('progress-phase', progress.phase_label || phaseLabel(progress.phase || ''));
   if (progress.script_total) {
-    const scriptParts = [`Файл ${progress.script_index || 0} из ${progress.script_total}`];
+    const completedFiles = Math.max(0, Math.min(Number(progress.script_total || 0), Number(progress.script_index || 0) - 1));
+    const scriptParts = [`Файл ${progress.script_index || 0} из ${progress.script_total}`, `завершено: ${completedFiles}`];
     if (progress.current_script_attempt_total) {
       scriptParts.push(`попыток в файле: ${progress.current_script_attempted || 0} из ${progress.current_script_attempt_total}`);
     }
@@ -2851,9 +2852,20 @@ function renderProgress(progress){
   const parallelism = Number(progress.eta_parallelism || 1);
   const parallelText = parallelism > 1 ? `, параллельных curl: ${parallelism}` : '';
   const etaMs = progress.eta_status === 'sample' ? progress.eta_ms_per_attempt : progress.eta_estimate_ms_per_attempt;
+  const etaMode = `Режим ETA: ${etaModeLabel(progress)}. `;
   const eta = etaMs ? `Время считается как оставшиеся попытки × ${etaMs} мс${parallelText}. ` : '';
   const fallback = Number(progress.summary_fallbacks || 0) > 0 ? `Fallback из summary: ${progress.summary_fallbacks}. ` : '';
-  setText('progress-note', `${current}${total}${under}${eta}${fallback}Прогресс считается по live-логу blockcheck2.`);
+  setText('progress-note', `${current}${total}${under}${etaMode}${eta}${fallback}Прогресс считается по live-логу blockcheck2.`);
+}
+function etaModeLabel(progress){
+  const status = String(progress.eta_status || '');
+  const progressStatus = String(progress.progress_status || '');
+  if (status === 'sample') return 'по live-скорости';
+  if (status === 'calculating') return 'сбор выборки';
+  if (status === 'underestimated' || progressStatus === 'underestimated') return 'уточняется';
+  if (status === 'complete') return 'завершено';
+  if (status === 'estimated') return 'по таймауту';
+  return status || '-';
 }
 function etaStatusText(status){
   if (status === 'calculating') return 'рассчитывается';

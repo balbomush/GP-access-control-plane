@@ -251,6 +251,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("data-action=\"refresh\"", html)
         self.assertNotIn("Обновить данные", html)
         self.assertIn("runStatusLabel(status)", html)
+        self.assertIn("etaModeLabel(progress)", html)
         self.assertIn("останавливается", html)
         self.assertIn("остановлено", html)
         self.assertIn("сохраняются результаты", html)
