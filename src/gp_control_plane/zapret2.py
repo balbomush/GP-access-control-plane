@@ -242,6 +242,10 @@ def _cleanup_blockcheck_processes() -> None:
     patterns = (
         "/opt/zapret2/nfq2/nfqws2",
         "curl --connect-to",
+        "blockcheck2.sh",
+        "blockcheck.sh",
+        "gp_multidomain_strategy",
+        "pktws_curl_test_update",
     )
     pids = _blockcheck_process_pids(patterns)
     if not pids:

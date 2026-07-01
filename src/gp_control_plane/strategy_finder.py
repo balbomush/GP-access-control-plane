@@ -1297,6 +1297,11 @@ def _set_debug_stdout_env(env: dict[str, str], debug_stdout: bool | None) -> Non
         env.pop("GP_DEBUG_STDOUT", None)
 
 
+def stop_active_blockcheck_runtime() -> None:
+    _cleanup_blockcheck_processes()
+    _cleanup_nft_blockcheck_tables()
+
+
 def _run_process_with_live_stdout(
     command: list[str],
     env: dict[str, str],
@@ -1380,6 +1385,13 @@ def _run_process_with_live_stdout(
                     wait_timeout = min(1.0, remaining)
                 try:
                     returncode = process.wait(timeout=wait_timeout)
+                    if stop_event is not None and stop_event.is_set():
+                        stopped = True
+                        status = "stopped"
+                        _cleanup_blockcheck_processes()
+                        _cleanup_nft_blockcheck_tables()
+                        recorder.mark_phase(PHASE_SAVING)
+                        break
                     if returncode != 0:
                         status = "failed"
                     break

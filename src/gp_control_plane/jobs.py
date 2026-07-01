@@ -26,8 +26,14 @@ class JobRunner:
         self._active: str | None = None
         self._active_name: str | None = None
         self._active_cancel: threading.Event | None = None
+        self._active_cancel_hook: Callable[[], Any] | None = None
 
-    def start(self, name: str, func: Callable[[threading.Event], Any]) -> Job:
+    def start(
+        self,
+        name: str,
+        func: Callable[[threading.Event], Any],
+        cancel_hook: Callable[[], Any] | None = None,
+    ) -> Job:
         with self._lock:
             if self._active:
                 raise RuntimeError(f"job already running: {self._active}")
@@ -36,6 +42,7 @@ class JobRunner:
             self._active = job_id
             self._active_name = name
             self._active_cancel = cancel_event
+            self._active_cancel_hook = cancel_hook
         created_at = now_iso()
         job = Job(id=job_id, name=name, status="queued", created_at=created_at)
         self._record(job_id, name, "queued", created_at)
@@ -51,9 +58,19 @@ class JobRunner:
             job_id = self._active
             name = self._active_name
             self._active_cancel.set()
+            cancel_hook = self._active_cancel_hook
+        if cancel_hook:
+            threading.Thread(target=self._run_cancel_hook, args=(cancel_hook,), daemon=True).start()
         self._record(job_id, name, "stopping", now_iso())
         self._set_current_job(job_id, name, "stopping")
         return {"id": job_id, "name": name, "status": "stopping"}
+
+    @staticmethod
+    def _run_cancel_hook(cancel_hook: Callable[[], Any]) -> None:
+        try:
+            cancel_hook()
+        except Exception:
+            return
 
     def _run(self, job_id: str, name: str, func: Callable[[threading.Event], Any], cancel_event: threading.Event) -> None:
         self._record(job_id, name, "running", now_iso())
@@ -81,6 +98,7 @@ class JobRunner:
                     self._active = None
                     self._active_name = None
                     self._active_cancel = None
+                    self._active_cancel_hook = None
             if self._on_idle:
                 try:
                     self._on_idle()

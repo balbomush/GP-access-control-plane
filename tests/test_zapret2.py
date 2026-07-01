@@ -159,20 +159,19 @@ table inet blockcheck42
         self.assertEqual(_blockcheck_nft_tables(output), [("inet", "blockcheck1460063"), ("inet", "blockcheck42")])
 
     def test_cleanup_blockcheck_processes_kills_remaining_pids(self) -> None:
-        pgrep_outputs = iter(
-            [
-                subprocess.CompletedProcess(["pgrep"], 0, "101\n", ""),
-                subprocess.CompletedProcess(["pgrep"], 0, "102\n", ""),
-                subprocess.CompletedProcess(["pgrep"], 1, "", ""),
-                subprocess.CompletedProcess(["pgrep"], 0, "102\n", ""),
-            ]
-        )
+        pgrep_calls: dict[str, int] = {}
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
             if command[0] == "pgrep":
-                return next(pgrep_outputs)
+                pattern = command[-1]
+                pgrep_calls[pattern] = pgrep_calls.get(pattern, 0) + 1
+                if pattern == "/opt/zapret2/nfq2/nfqws2" and pgrep_calls[pattern] == 1:
+                    return subprocess.CompletedProcess(command, 0, "101\n", "")
+                if pattern == "curl --connect-to":
+                    return subprocess.CompletedProcess(command, 0, "102\n", "")
+                return subprocess.CompletedProcess(command, 1, "", "")
             return subprocess.CompletedProcess(command, 0, "", "")
 
         with (
@@ -188,6 +187,8 @@ table inet blockcheck42
         self.assertIn(["sudo", "-n", "/helper/gp-root-helper", "kill", "TERM", "101", "102"], calls)
         self.assertIn(["kill", "-KILL", "102"], calls)
         self.assertIn(["sudo", "-n", "/helper/gp-root-helper", "kill", "KILL", "102"], calls)
+        self.assertIn(["pgrep", "-f", "blockcheck2.sh"], calls)
+        self.assertIn(["pgrep", "-f", "gp_multidomain_strategy"], calls)
 
 
 if __name__ == "__main__":

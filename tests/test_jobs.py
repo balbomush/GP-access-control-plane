@@ -61,6 +61,44 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["last_job_status"], "failed")
             self.assertIn("postprocess failed", state["last_error"])
 
+    def test_cancel_active_runs_cancel_hook_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+            hook_called = threading.Event()
+
+            def stoppable_job(stop: threading.Event) -> dict[str, str]:
+                self.assertTrue(stop.wait(timeout=2))
+                time.sleep(0.1)
+                return {"status": "stopped"}
+
+            runner.start("stoppable", stoppable_job, cancel_hook=hook_called.set)
+            result = runner.cancel_active()
+
+            self.assertEqual(result["status"], "stopping")
+            self.assertTrue(hook_called.wait(timeout=1))
+            state = _wait_for_idle_state(state_dir)
+            self.assertEqual(state["last_job_status"], "stopped")
+
+    def test_cancel_hook_error_does_not_block_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+
+            def stoppable_job(stop: threading.Event) -> dict[str, str]:
+                self.assertTrue(stop.wait(timeout=2))
+                return {"status": "stopped"}
+
+            def broken_hook() -> None:
+                raise RuntimeError("cleanup failed")
+
+            runner.start("stoppable", stoppable_job, cancel_hook=broken_hook)
+            result = runner.cancel_active()
+
+            self.assertEqual(result["status"], "stopping")
+            state = _wait_for_idle_state(state_dir)
+            self.assertEqual(state["last_job_status"], "stopped")
+
 
 def _wait_for_idle_state(state_dir: Path) -> dict[str, object]:
     deadline = time.monotonic() + 5

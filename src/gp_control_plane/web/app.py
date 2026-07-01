@@ -35,6 +35,7 @@ from ..strategy_finder import (
     read_runs,
     run_multi_domain_discovery,
     run_standard_discovery,
+    stop_active_blockcheck_runtime,
 )
 from ..zapret2 import check_install_cached
 
@@ -187,18 +188,20 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/jobs/zapret-standard-discovery": (
                     "zapret-standard-discovery",
                     lambda stop: _job_zapret_standard_discovery(config, payload, stop),
+                    stop_active_blockcheck_runtime,
                 ),
                 "/api/jobs/zapret-multi-domain-discovery": (
                     "zapret-multi-domain-discovery",
                     lambda stop: _job_zapret_multi_domain_discovery(config, payload, stop),
+                    stop_active_blockcheck_runtime,
                 ),
             }
             if path not in jobs:
                 self._not_found()
                 return
-            name, func = jobs[path]
+            name, func, cancel_hook = jobs[path]
             try:
-                job = runner.start(name, func)
+                job = runner.start(name, func, cancel_hook=cancel_hook)
             except Exception as exc:  # noqa: BLE001
                 self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                 return

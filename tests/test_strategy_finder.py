@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections import deque
 from pathlib import Path
@@ -809,6 +810,49 @@ pktws_check_https_tls12()
             self.assertEqual(result["status"], "success")
             self.assertIn("--failed", text)
             self.assertIn("UNAVAILABLE code=28", text)
+
+    def test_stop_event_wins_over_nonzero_process_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stdout_log = state_dir / "stdout.log"
+            stderr_log = state_dir / "stderr.log"
+            run = {
+                "id": "run-stop-race",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(state_dir / "progress.json"),
+                "metrics_log": str(state_dir / "metrics.ndjson"),
+                "attempt_plan": {"total": 1, "scripts": {}, "script_order": [], "source": "test"},
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+            stop_event = threading.Event()
+            command = [sys.executable, "-c", "import sys,time; time.sleep(0.2); sys.exit(1)"]
+
+            def request_stop() -> None:
+                time.sleep(0.05)
+                stop_event.set()
+
+            stopper = threading.Thread(target=request_stop)
+            stopper.start()
+            with (
+                patch("gp_control_plane.strategy_finder._cleanup_blockcheck_processes"),
+                patch("gp_control_plane.strategy_finder._cleanup_nft_blockcheck_tables"),
+            ):
+                result = _run_process_with_live_stdout(
+                    command=command,
+                    env=os.environ.copy(),
+                    stdout_log=stdout_log,
+                    stderr_log=stderr_log,
+                    debug_stdout_log=None,
+                    timeout_seconds=10,
+                    stop_event=stop_event,
+                    recorder=recorder,
+                )
+            stopper.join(timeout=2)
+
+            self.assertEqual(result["status"], "stopped")
+            self.assertTrue(result["stopped"])
 
     def test_live_recorder_can_close_connection_from_controller_thread(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
