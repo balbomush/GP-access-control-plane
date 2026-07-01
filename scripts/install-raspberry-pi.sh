@@ -171,9 +171,15 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   if [ -n "$(run_as_target git -C "$INSTALL_DIR" status --short)" ]; then
     fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."
   fi
-  run_as_target git -C "$INSTALL_DIR" fetch origin "$BRANCH"
-  run_as_target git -C "$INSTALL_DIR" checkout "$BRANCH"
-  run_as_target git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
+  run_as_target git -C "$INSTALL_DIR" fetch origin "$BRANCH" || run_as_target git -C "$INSTALL_DIR" fetch origin "tag" "$BRANCH"
+  if run_as_target git -C "$INSTALL_DIR" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
+    run_as_target git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
+    run_as_target git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
+  elif run_as_target git -C "$INSTALL_DIR" rev-parse --verify --quiet "refs/tags/$BRANCH" >/dev/null; then
+    run_as_target git -C "$INSTALL_DIR" checkout --detach "$BRANCH"
+  else
+    fail "Cannot find branch or tag: $BRANCH"
+  fi
 elif [ -e "$INSTALL_DIR" ]; then
   fail "Install path exists but is not a git repository: $INSTALL_DIR"
 else

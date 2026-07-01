@@ -327,6 +327,10 @@ def _run_root_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sudo, "-n", helper, *args], text=True, capture_output=True, check=False)
 
 
+def run_root_helper_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return _run_root_helper(args)
+
+
 def _root_helper_path() -> str:
     return os.environ.get("GP_ROOT_HELPER", DEFAULT_ROOT_HELPER)
 

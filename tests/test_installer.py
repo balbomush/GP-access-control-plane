@@ -21,6 +21,9 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("MemoryHigh=$SERVICE_MEMORY_HIGH", installer)
         self.assertIn("MemoryMax=$SERVICE_MEMORY_MAX", installer)
         self.assertIn("run-env", helper)
+        self.assertIn("queue-update", helper)
+        self.assertIn("systemd-run", helper)
+        self.assertIn("GP_BRANCH", helper)
         self.assertIn("nft-delete-blockcheck-table", helper)
         self.assertIn("unsupported run target", helper)
 

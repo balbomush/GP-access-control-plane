@@ -22,6 +22,7 @@ from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
 from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v2fly_categories, preview_v2fly_preset
 from ..jobs import JobRunner
+from ..release_update import queue_release_update, release_update_plan
 from ..releases import release_channel_info
 from ..state import now_iso, read_state, write_state
 from ..storage import (
@@ -66,6 +67,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json({"settings": read_settings(config)})
             elif path == "/api/releases":
                 self._json(_release_info_payload(config, query))
+            elif path == "/api/releases/update-plan":
+                self._json(_release_update_plan_payload(config, query))
             elif path == "/api/discovery-profiles":
                 self._json({"profiles": read_discovery_profiles(config)})
             elif path == "/api/diagnostics":
@@ -110,6 +113,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/status",
                 "/api/settings",
                 "/api/releases",
+                "/api/releases/update-plan",
+                "/api/releases/update",
                 "/api/discovery-profiles",
                 "/api/diagnostics",
                 "/api/strategy-finder/domains",
@@ -234,6 +239,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 return
             if path == "/api/settings":
                 self._json({"settings": save_settings(config, payload.get("settings") or payload)})
+                return
+            if path == "/api/releases/update":
+                try:
+                    self._json(_queue_release_update_payload(config, payload), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                 return
             if path == "/api/discovery-profiles":
                 self._json({"profiles": save_discovery_profiles(config, payload.get("profiles") or payload)})
@@ -1686,10 +1697,10 @@ pre {
           </div>
           <div class="button-row">
             <button class="secondary" data-action="check-releases" type="button">Проверить релизы</button>
-            <button class="secondary" data-action="update-from-release" type="button">Обновить</button>
+            <button class="secondary" data-action="update-from-release" type="button">Обновить alpha</button>
             <a class="button-link secondary" id="settings-selected-release-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть страницу релизов</a>
           </div>
-          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI будет доступно отдельным безопасным сценарием: без активного подбора, с бекапом и проверкой версии.</div>
+          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI работает как alpha-сценарий: без активного подбора, с бекапом и проверкой версии.</div>
         </div>
         <div class="preset-panel settings-domain-source-panel">
           <div class="panel-header">
@@ -1783,7 +1794,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseUpdate: null, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Стратегия -> домены',
@@ -3201,17 +3212,25 @@ function renderReleaseInfo(){
   const release = state.releaseInfo;
   if (!release) {
     if (available) available.textContent = 'Не проверялось';
-    if (result) result.textContent = 'Релизы еще не проверялись. Обновление из UI будет доступно отдельным безопасным сценарием: без активного подбора, с бекапом и проверкой версии.';
+    if (result) result.textContent = 'Релизы еще не проверялись. Обновление из UI работает как alpha-сценарий: без активного подбора, с бекапом и проверкой версии.';
     if (link) link.href = (state.settings || {}).prerelease_url || 'https://github.com/balbomush/GP-access-control-plane/releases';
     return;
   }
   if (available) available.textContent = release.available_version || '-';
   if (link && release.url) link.href = release.url;
   if (result) {
+    if (state.releaseUpdate) {
+      const queued = state.releaseUpdate;
+      const snapshot = queued.snapshot && queued.snapshot.id ? queued.snapshot.id : (queued.snapshot || {});
+      const stdout = queued.helper_stdout ? ` ${queued.helper_stdout}` : '';
+      result.textContent = `Alpha-обновление поставлено в очередь. Перед обновлением создан бекап: ${snapshot || '-'}.${stdout}`;
+      return;
+    }
     if (release.checked) {
       const update = release.update_available ? 'Доступно обновление.' : 'Текущая версия не старее найденной.';
       const published = release.published_at ? ` Опубликовано: ${friendlyDate(release.published_at)}.` : '';
-      result.textContent = `${update} Канал: ${release.channel}. Версия: ${release.available_version || '-'}.${published}`;
+      const body = release.body ? `\n\n${String(release.body).slice(0, 1200)}` : '';
+      result.textContent = `${update} Канал: ${release.channel}. Версия: ${release.available_version || '-'}.${published}${body}`;
     } else {
       result.textContent = `Не удалось проверить релизы: ${release.error || 'нет ответа GitHub'}. Ссылка на страницу релизов оставлена.`;
     }
@@ -3248,8 +3267,28 @@ async function checkReleases(){
     setMessage(`Ошибка проверки релизов: ${error.message}`, 'bad');
   }
 }
-function updateFromRelease(){
-  setMessage('Обновление из UI еще не включено: нужен безопасный сценарий с бекапом, проверкой версии и перезапуском сервиса', 'warn');
+async function updateFromRelease(){
+  const channel = el('settings-update-channel')?.value || 'stable';
+  try {
+    const planData = await getJson(`/api/releases/update-plan?channel=${encodeURIComponent(channel)}`);
+    const plan = (planData || {}).plan || {};
+    state.releaseInfo = plan.release || state.releaseInfo;
+    renderReleaseInfo();
+    if (!plan.can_update) {
+      setMessage(`Обновление не готово: ${plan.blocked_reason || 'нет доступного обновления'}`, 'warn');
+      return;
+    }
+    const steps = Array.isArray(plan.steps) ? plan.steps.join('\\n- ') : '';
+    const confirmed = window.confirm(`Запустить alpha-обновление приложения?\\n\\nБудет выполнено:\\n- ${steps}`);
+    if (!confirmed) return;
+    const data = await postJson('/api/releases/update', { channel });
+    state.releaseUpdate = (data || {}).update || null;
+    state.releaseInfo = state.releaseUpdate ? state.releaseUpdate.release : state.releaseInfo;
+    renderReleaseInfo();
+    setMessage('Alpha-обновление поставлено в очередь. Сервис может кратко пропасть и подняться снова.', 'good');
+  } catch (error) {
+    setMessage(`Обновление не запущено: ${error.message}`, 'bad');
+  }
 }
 function v2flyCategories(){
   return parseDomains(el('v2fly-categories')?.value || '');
@@ -4507,6 +4546,18 @@ def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dic
     settings = read_settings(config)
     channel = _query_str(query, "channel", str(settings.get("update_channel") or "stable"))
     return {"release": release_channel_info(current_version=__version__, channel=channel)}
+
+
+def _release_update_plan_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    settings = read_settings(config)
+    channel = _query_str(query, "channel", str(settings.get("update_channel") or "stable"))
+    return {"plan": release_update_plan(config.output.state_dir, channel=channel)}
+
+
+def _queue_release_update_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    settings = read_settings(config)
+    channel = str(payload.get("channel") or settings.get("update_channel") or "stable")
+    return {"update": queue_release_update(config.output.state_dir, channel=channel, install_dir=Path.cwd())}
 
 
 def _preset_domains_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:

@@ -56,10 +56,72 @@ validate_run_target() {
   printf '%s\n' "$target"
 }
 
+validate_update_ref() {
+  ref="${1:-}"
+  [ -n "$ref" ] || fail "release ref is required"
+  case "$ref" in
+    *..*|/*|*\\*|*[!A-Za-z0-9._/-]*) fail "unsupported release ref: $ref" ;;
+    *) printf '%s\n' "$ref" ;;
+  esac
+}
+
+validate_install_dir() {
+  [ "$#" -ge 1 ] || fail "install directory is required"
+  install_dir="$(real_path "$1")"
+  [ -d "$install_dir/.git" ] || fail "install directory is not a git repository: $install_dir"
+  [ -x "$install_dir/scripts/install-raspberry-pi.sh" ] || fail "installer is not executable: $install_dir/scripts/install-raspberry-pi.sh"
+  printf '%s\n' "$install_dir"
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 run_target() {
   target="$(validate_run_target "$@")"
   shift
   exec "$target" "$@"
+}
+
+queue_update() {
+  install_dir="$(validate_install_dir "$1")"
+  ref="$(validate_update_ref "$2")"
+  service_name="${GP_SERVICE_NAME:-gp-control-plane-web.service}"
+  case "$service_name" in
+    gp-control-plane-web.service|gp-control-plane-web@*.service) ;;
+    *) fail "unsupported service name: $service_name" ;;
+  esac
+
+  log_dir="$install_dir/build/state/release-updates"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  unit="gp-control-plane-update-$stamp"
+  script="$log_dir/$unit.sh"
+  log_file="$log_dir/$unit.log"
+  repo_url="$(git -C "$install_dir" remote get-url origin 2>/dev/null || printf '%s\n' 'https://github.com/balbomush/GP-access-control-plane.git')"
+
+  mkdir -p "$log_dir"
+  cat > "$script" <<SCRIPT
+#!/bin/sh
+set -eu
+umask 022
+exec > $(shell_quote "$log_file") 2>&1
+echo "gp-control-plane update queued at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "install_dir=$(shell_quote "$install_dir")"
+echo "ref=$(shell_quote "$ref")"
+export GP_INSTALL_DIR=$(shell_quote "$install_dir")
+export GP_BRANCH=$(shell_quote "$ref")
+export GP_REPO_URL=$(shell_quote "$repo_url")
+export GP_SERVICE_NAME=$(shell_quote "$service_name")
+bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh")
+SCRIPT
+  chmod 0700 "$script"
+
+  if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --unit="$unit" --collect --property=Type=oneshot /bin/sh "$script" >/dev/null
+  else
+    nohup /bin/sh "$script" >/dev/null 2>&1 &
+  fi
+  printf 'queued=true\nunit=%s\nlog=%s\n' "$unit" "$log_file"
 }
 
 require_root
@@ -86,6 +148,10 @@ case "$command" in
       shift
     done
     run_target "$@"
+    ;;
+  queue-update)
+    [ "$#" -eq 2 ] || fail "queue-update requires install directory and release ref"
+    queue_update "$@"
     ;;
   kill)
     signal="$(validate_signal "${1:-}")"

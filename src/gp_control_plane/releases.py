@@ -32,6 +32,8 @@ def release_channel_info(
             "current_version": current_version,
             "available_version": available_version or "-",
             "available_name": str(selected.get("name") or available_version or ""),
+            "body": str(selected.get("body") or ""),
+            "assets": _release_assets(selected),
             "published_at": str(selected.get("published_at") or ""),
             "url": release_url,
             "checked": True,
@@ -45,6 +47,8 @@ def release_channel_info(
             "current_version": current_version,
             "available_version": "-",
             "available_name": "",
+            "body": "",
+            "assets": [],
             "published_at": "",
             "url": LATEST_RELEASE_URL if clean_channel == "stable" else RELEASES_PAGE_URL,
             "checked": False,
@@ -82,6 +86,22 @@ def _select_release(releases: list[dict[str, Any]], channel: str) -> dict[str, A
         if channel == "stable" and not prerelease:
             return release
     return None
+
+
+def _release_assets(release: dict[str, Any]) -> list[dict[str, str]]:
+    assets = release.get("assets") if isinstance(release.get("assets"), list) else []
+    result: list[dict[str, str]] = []
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "name": str(item.get("name") or ""),
+                "url": str(item.get("browser_download_url") or ""),
+                "size": str(item.get("size") or ""),
+            }
+        )
+    return result
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
