@@ -163,6 +163,16 @@ METRICS_INTERVAL_SECONDS = 10.0
 METRICS_MAX_BYTES = 1_000_000
 STDOUT_LOG_MAX_BYTES = 2_000_000
 DEBUG_STDOUT_LOG_MAX_BYTES = 10_000_000
+LOG_RETENTION_MAX_FILES = 120
+LOG_RETENTION_MAX_TOTAL_BYTES = 100_000_000
+LOG_RETENTION_SUFFIXES = (
+    ".stdout.log",
+    ".stderr.log",
+    ".debug.stdout.log",
+    ".progress.json",
+    ".metrics.ndjson",
+    ".summary-fallback.ndjson",
+)
 PHASE_CHECK_VPN = "checking_vpn"
 PHASE_CHECK_ZAPRET = "checking_zapret"
 PHASE_CHECK_DOMAIN = "checking_domain"
@@ -1511,6 +1521,7 @@ def _run_blockcheck_live(
     root = _finder_dir(state_dir)
     logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    _cleanup_old_strategy_logs(logs)
     run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
@@ -1834,11 +1845,15 @@ def _progress_from_counts(
     status = str(run.get("status") or "")
     finished = status in {"success", "failed", "timeout", "stopped"}
     completed = status == "success"
+    if finished and phase == PHASE_SAVING:
+        phase = PHASE_COMPLETE
     if completed and script_total:
         script_index = script_total
     progress_status = "unknown"
     effective_attempt_total = attempt_total
     remaining_attempts = max(0, attempt_total - attempted) if attempt_total else None
+    if finished:
+        remaining_attempts = None
     if attempt_total:
         progress_status = "exact" if str(attempt_plan.get("source") or "") in {"shell", "test"} else "estimated"
     current_script_underestimated = bool(
@@ -1894,7 +1909,11 @@ def _progress_from_counts(
             # curl queue. Dividing them by curl_parallelism again makes long
             # multi-domain runs look much shorter than they are.
             eta_parallelism = 1
-    if remaining_attempts is None and not completed:
+    if finished and not completed:
+        eta = None
+        eta_status = status or "finished"
+        eta_method = "finished"
+    elif remaining_attempts is None and not completed:
         eta = None
         if progress_status == "underestimated":
             eta_status = "underestimated"
@@ -2715,6 +2734,41 @@ def _finder_dir(state_dir: Path) -> Path:
     return path
 
 
+def _cleanup_old_strategy_logs(logs: Path) -> dict[str, int]:
+    if not logs.is_dir():
+        return {"removed_files": 0, "removed_bytes": 0}
+    files: list[tuple[float, int, Path]] = []
+    for path in logs.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if not any(name.endswith(suffix) for suffix in LOG_RETENTION_SUFFIXES):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        files.append((stat.st_mtime, int(stat.st_size), path))
+    files.sort(key=lambda item: item[0], reverse=True)
+    kept_count = 0
+    kept_bytes = 0
+    removed_files = 0
+    removed_bytes = 0
+    for _mtime, size, path in files:
+        keep = kept_count < LOG_RETENTION_MAX_FILES and kept_bytes + size <= LOG_RETENTION_MAX_TOTAL_BYTES
+        if keep:
+            kept_count += 1
+            kept_bytes += size
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed_files += 1
+        removed_bytes += size
+    return {"removed_files": removed_files, "removed_bytes": removed_bytes}
+
+
 def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -2739,11 +2793,11 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
     if include_events:
         seen_rows = conn.execute(
             """
-            SELECT a.run_id, d.name AS domain, a.test_name AS test, a.ip_version, a.checked_at AS seen_at
-            FROM strategy_attempts a
-            JOIN domains d ON d.id = a.domain_id
-            WHERE a.strategy_id = ? AND a.source_mode = 'single_domain' AND a.result = 'success'
-            ORDER BY a.id ASC
+            SELECT d.name AS domain, r.first_seen_at AS seen_at
+            FROM strategy_domain_results r
+            JOIN domains d ON d.id = r.domain_id
+            WHERE r.strategy_id = ? AND r.source_mode = 'single_domain'
+            ORDER BY r.first_seen_at ASC, d.name ASC
             """,
             (row["id"],),
         ).fetchall()
@@ -2752,23 +2806,17 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
             SELECT DISTINCT d.name AS domain
             FROM strategy_domain_results r
             JOIN domains d ON d.id = r.domain_id
-            LEFT JOIN (
-                SELECT domain_id, MIN(id) AS first_attempt_id
-                FROM strategy_attempts
-                WHERE strategy_id = ? AND source_mode = 'multi_domain'
-                GROUP BY domain_id
-            ) a ON a.domain_id = d.id
             WHERE r.strategy_id = ? AND r.source_mode = 'multi_domain'
-            ORDER BY COALESCE(a.first_attempt_id, 2147483647), d.name ASC
+            ORDER BY r.first_seen_at ASC, d.name ASC
             """,
-            (row["id"], row["id"]),
+            (row["id"],),
         ).fetchall()
         candidate["seen"] = [
             {
-                "run_id": item["run_id"],
+                "run_id": "",
                 "domain": item["domain"],
-                "test": item["test"],
-                "ip_version": item["ip_version"],
+                "test": "",
+                "ip_version": "",
                 "seen_at": item["seen_at"],
             }
             for item in seen_rows

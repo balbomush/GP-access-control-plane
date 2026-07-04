@@ -213,13 +213,15 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 - `domains` - домены;
 - `strategies` - уникальные стратегии;
 - `strategy_domain_results` - результат "стратегия работает на домене";
-- `strategy_attempts` - история успешных проверок;
+- `strategy_attempts` - техническая таблица совместимости/диагностики; новые успешные связи пишутся не сюда, а в `strategy_domain_results`;
 - `domain_presets` и `preset_domains` - пользовательские пресеты доменов;
 - `runs` - история запусков.
 
 Списки кандидатов, стратегии домена и общие стратегии считаются SQL-запросами по этим таблицам, без полного обхода всех стратегий в Python.
 
-Старые файлы `strategy-finder/candidates.json`, `strategy-finder/runs.jsonl`, `strategy-finder/available.ndjson` могут остаться после обновления. При первом чтении они импортируются в SQLite для совместимости.
+Старые файлы `strategy-finder/candidates.json`, `strategy-finder/runs.jsonl`, `strategy-finder/available.ndjson` могут остаться после обновления. При первом чтении они импортируются в SQLite для совместимости, после чего legacy-файлы и старые строки попыток очищаются, а SQLite сжимается при необходимости.
+
+Логи подбора в `strategy-finder/logs/` ротируются: активные stdout/debug-файлы ограничены по размеру, а старые крупные runtime-логи удаляются перед новым запуском по лимиту количества и суммарного размера.
 
 Файловые бекапы лежат отдельно:
 

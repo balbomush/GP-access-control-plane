@@ -160,7 +160,7 @@ class StorageTests(unittest.TestCase):
 
             with connect(state_dir) as conn:
                 raw = str(conn.execute("SELECT payload_json FROM runs WHERE id = 'old-run'").fetchone()["payload_json"])
-                self.assertEqual(get_meta(conn, "schema_version"), "7")
+                self.assertEqual(get_meta(conn, "schema_version"), "8")
                 self.assertEqual(get_meta(conn, "run_payloads_compacted_v7"), "1")
 
             stored = json.loads(raw)
@@ -176,6 +176,50 @@ class StorageTests(unittest.TestCase):
             self.assertFalse((state_dir / "strategy-finder" / "available.ndjson").exists())
             self.assertFalse((state_dir / "strategy-finder" / "runs.jsonl").exists())
             self.assertFalse((state_dir / "strategy-finder" / "candidates.json").exists())
+
+    def test_migration_trims_strategy_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            path = db_path(state_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO meta(key, value) VALUES('schema_version', '7');
+                    CREATE TABLE strategy_attempts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL DEFAULT '',
+                        strategy_id TEXT NOT NULL,
+                        domain_id INTEGER NOT NULL,
+                        protocol TEXT NOT NULL DEFAULT '',
+                        source_mode TEXT NOT NULL DEFAULT 'single_domain',
+                        test_name TEXT NOT NULL DEFAULT '',
+                        ip_version TEXT NOT NULL DEFAULT '',
+                        result TEXT NOT NULL DEFAULT '',
+                        error_code TEXT NOT NULL DEFAULT '',
+                        duration_ms INTEGER NOT NULL DEFAULT 0,
+                        checked_at TEXT NOT NULL DEFAULT ''
+                    );
+                    INSERT INTO strategy_attempts(strategy_id, domain_id, result) VALUES('s1', 1, 'success');
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with connect(state_dir) as conn:
+                attempts = conn.execute("SELECT COUNT(*) FROM strategy_attempts").fetchone()[0]
+                schema = get_meta(conn, "schema_version")
+                trimmed = get_meta(conn, "strategy_attempts_trimmed_count")
+
+            self.assertEqual(schema, "8")
+            self.assertEqual(int(attempts), 0)
+            self.assertEqual(trimmed, "1")
 
     def test_new_schema_does_not_create_legacy_candidate_tables(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

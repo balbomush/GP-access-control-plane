@@ -21,10 +21,12 @@ from gp_control_plane.storage import (
 )
 from gp_control_plane.strategy_finder import (
     DiscoveryOptions,
+    LOG_RETENTION_MAX_FILES,
     _CompactStdoutWriter,
     _LiveStdoutRecorder,
     _RotatingTextWriter,
     _average_attempt_ms,
+    _cleanup_old_strategy_logs,
     _progress_from_counts,
     _resolve_blockcheck_script,
     _run_process_with_live_stdout,
@@ -132,7 +134,8 @@ curl_test_https_tls12 ipv4 web.telegram.org : nfqws2 not working
 
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["id"], candidate_id_for("tls", "--payload tls_client_hello --lua-desync=fake"))
-            self.assertEqual(len(candidates[0]["seen"]), 2)
+            self.assertEqual(len(candidates[0]["seen"]), 1)
+            self.assertEqual(candidates[0]["seen"][0]["domain"], "youtube.com")
             self.assertNotIn("verifications", candidates[0])
 
     def test_parse_blockcheck_common_extracts_common_candidates(self) -> None:
@@ -173,7 +176,7 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             candidates = read_candidates(state_dir)
 
             self.assertEqual(len(candidates), 1)
-            self.assertEqual(candidates[0]["common_seen"][0]["domains"], ["youtube.com", "discord.com"])
+            self.assertEqual(sorted(candidates[0]["common_seen"][0]["domains"]), ["discord.com", "youtube.com"])
 
     def test_upsert_candidates_writes_normalized_model(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -210,7 +213,7 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
                 )
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) AS count FROM strategy_attempts").fetchone()["count"],
-                    3,
+                    0,
                 )
                 self.assertEqual(
                     conn.execute("SELECT strategy_count FROM domain_stats WHERE domain = 'youtube.com'").fetchone()[0],
@@ -245,8 +248,8 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             upsert_candidates(state_dir, parsed, {"id": "run1"})
             status = storage_status(state_dir)
 
-            self.assertEqual(status["schema_version"], "7")
-            self.assertEqual(status["expected_schema_version"], "7")
+            self.assertEqual(status["schema_version"], "8")
+            self.assertEqual(status["expected_schema_version"], "8")
             self.assertEqual(status["integrity_check"], "ok")
             self.assertGreater(status["db_size_bytes"], 0)
             self.assertEqual(status["tables"]["domains"], 1)
@@ -319,7 +322,8 @@ UNAVAILABLE code=28
             candidates = read_candidates(state_dir)
 
             self.assertEqual(len(candidates), 1)
-            self.assertEqual(candidates[0]["seen"][0]["run_id"], "stopped-run")
+            self.assertEqual(candidates[0]["seen"][0]["domain"], "youtube.com")
+            self.assertEqual(candidates[0]["seen"][0]["run_id"], "")
 
     def test_progress_counts_attempts_and_successes(self) -> None:
         stdout = """
@@ -417,6 +421,9 @@ pktws_check_https_tls12()
         self.assertEqual(progress["attempted"], 25)
         self.assertEqual(progress["percent"], 25.0)
         self.assertEqual(progress["script_index"], 1)
+        self.assertIsNone(progress["remaining_attempts"])
+        self.assertIsNone(progress["eta_seconds"])
+        self.assertEqual(progress["eta_status"], "stopped")
 
     def test_latest_log_tail_reads_recent_run_output(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -466,6 +473,26 @@ pktws_check_https_tls12()
             tail = latest_log_tail(state_dir, max_lines=3)
 
             self.assertEqual(tail["stdout_tail"], "line-997\nline-998\nline-999")
+
+    def test_old_strategy_logs_are_rotated_before_new_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            logs = Path(raw) / "logs"
+            logs.mkdir()
+            for index in range(LOG_RETENTION_MAX_FILES + 5):
+                path = logs / f"run-{index}.standard-discovery.stdout.log"
+                path.write_text(f"log {index}\n", encoding="utf-8")
+                os.utime(path, (index + 1, index + 1))
+            keep = logs / "manual-note.txt"
+            keep.write_text("do not delete\n", encoding="utf-8")
+
+            result = _cleanup_old_strategy_logs(logs)
+
+            remaining_logs = list(logs.glob("*.stdout.log"))
+            self.assertEqual(len(remaining_logs), LOG_RETENTION_MAX_FILES)
+            self.assertEqual(result["removed_files"], 5)
+            self.assertTrue(keep.exists())
+            self.assertTrue((logs / f"run-{LOG_RETENTION_MAX_FILES + 4}.standard-discovery.stdout.log").exists())
+            self.assertFalse((logs / "run-0.standard-discovery.stdout.log").exists())
 
     def test_latest_log_tail_does_not_read_full_stdout_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

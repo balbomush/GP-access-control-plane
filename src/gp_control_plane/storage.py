@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
@@ -17,6 +17,7 @@ SCHEMA_MIGRATIONS = (
     (5, "remove_legacy_candidate_storage"),
     (6, "preset_domain_state"),
     (7, "compact_runtime_payloads"),
+    (8, "trim_strategy_attempt_diagnostics"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
@@ -245,15 +246,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                COUNT(DISTINCT r.strategy_id) AS strategy_count,
                COUNT(DISTINCT CASE WHEN r.protocol = 'tls' THEN r.strategy_id END) AS tls_strategy_count,
                COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count,
-               COUNT(CASE WHEN a.result = 'success' THEN 1 END) AS success_count,
-               COUNT(CASE WHEN a.result != 'success' AND a.result != '' THEN 1 END) AS fail_count,
-               MAX(CASE WHEN a.result = 'success' THEN a.checked_at ELSE '' END) AS last_success_at
+               COUNT(r.strategy_id) AS success_count,
+               0 AS fail_count,
+               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
         FROM domains d
         LEFT JOIN strategy_domain_results r ON r.domain_id = d.id
-        LEFT JOIN strategy_attempts a
-            ON a.domain_id = r.domain_id
-            AND a.strategy_id = r.strategy_id
-            AND a.source_mode = r.source_mode
         GROUP BY d.id, d.name;
 
         CREATE VIEW IF NOT EXISTS strategy_stats AS
@@ -262,15 +259,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                COUNT(DISTINCT r.domain_id) AS domain_count,
                COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS single_domain_count,
                COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count,
-               COUNT(CASE WHEN a.result = 'success' THEN 1 END) AS success_count,
-               COUNT(CASE WHEN a.result != 'success' AND a.result != '' THEN 1 END) AS fail_count,
-               MAX(CASE WHEN a.result = 'success' THEN a.checked_at ELSE '' END) AS last_success_at
+               COUNT(r.domain_id) AS success_count,
+               0 AS fail_count,
+               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
         FROM strategies s
         LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
-        LEFT JOIN strategy_attempts a
-            ON a.strategy_id = r.strategy_id
-            AND a.domain_id = r.domain_id
-            AND a.source_mode = r.source_mode
         GROUP BY s.id, s.protocol;
         """
     )
@@ -286,6 +279,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         _recreate_stats_views(conn)
     _drop_legacy_storage(conn)
     _compact_run_payloads(conn)
+    _trim_strategy_attempts(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -368,15 +362,11 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
                COUNT(DISTINCT r.strategy_id) AS strategy_count,
                COUNT(DISTINCT CASE WHEN r.protocol = 'tls' THEN r.strategy_id END) AS tls_strategy_count,
                COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count,
-               COUNT(CASE WHEN a.result = 'success' THEN 1 END) AS success_count,
-               COUNT(CASE WHEN a.result != 'success' AND a.result != '' THEN 1 END) AS fail_count,
-               MAX(CASE WHEN a.result = 'success' THEN a.checked_at ELSE '' END) AS last_success_at
+               COUNT(r.strategy_id) AS success_count,
+               0 AS fail_count,
+               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
         FROM domains d
         LEFT JOIN strategy_domain_results r ON r.domain_id = d.id
-        LEFT JOIN strategy_attempts a
-            ON a.domain_id = r.domain_id
-            AND a.strategy_id = r.strategy_id
-            AND a.source_mode = r.source_mode
         GROUP BY d.id, d.name;
 
         CREATE VIEW IF NOT EXISTS strategy_stats AS
@@ -385,15 +375,11 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
                COUNT(DISTINCT r.domain_id) AS domain_count,
                COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS single_domain_count,
                COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count,
-               COUNT(CASE WHEN a.result = 'success' THEN 1 END) AS success_count,
-               COUNT(CASE WHEN a.result != 'success' AND a.result != '' THEN 1 END) AS fail_count,
-               MAX(CASE WHEN a.result = 'success' THEN a.checked_at ELSE '' END) AS last_success_at
+               COUNT(r.domain_id) AS success_count,
+               0 AS fail_count,
+               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
         FROM strategies s
         LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
-        LEFT JOIN strategy_attempts a
-            ON a.strategy_id = r.strategy_id
-            AND a.domain_id = r.domain_id
-            AND a.source_mode = r.source_mode
         GROUP BY s.id, s.protocol;
         """
     )
@@ -410,6 +396,17 @@ def _drop_legacy_storage(conn: sqlite3.Connection) -> None:
         """
     )
     set_meta(conn, "legacy_storage_removed", "1")
+
+
+def _trim_strategy_attempts(conn: sqlite3.Connection) -> None:
+    if get_meta(conn, "strategy_attempts_trimmed_v8") == "1":
+        return
+    count = _table_count(conn, "strategy_attempts")
+    if count:
+        conn.execute("DELETE FROM strategy_attempts")
+        set_meta(conn, "needs_vacuum", "1")
+    set_meta(conn, "strategy_attempts_trimmed_v8", "1")
+    set_meta(conn, "strategy_attempts_trimmed_count", str(count))
 
 
 def compact_run_payload(run: dict[str, Any]) -> dict[str, Any]:
@@ -1116,16 +1113,6 @@ def _upsert_strategy_domain_result_conn(
                 last_seen_at = excluded.last_seen_at
             """,
             (strategy_id, domain_id, protocol, source_mode, seen_at, seen_at),
-        )
-        conn.execute(
-            """
-            INSERT INTO strategy_attempts(
-                run_id, strategy_id, domain_id, protocol, source_mode, test_name,
-                ip_version, result, error_code, duration_ms, checked_at
-            )
-            VALUES(?, ?, ?, ?, ?, ?, ?, 'success', '', 0, ?)
-            """,
-            (run_id, strategy_id, domain_id, protocol, source_mode, test, ip_version, seen_at),
         )
 
 
