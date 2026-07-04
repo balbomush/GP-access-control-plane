@@ -22,8 +22,9 @@ def release_update_plan(
     channel: str,
     current_version: str = __version__,
     fetcher: Callable[[], str] | None = None,
+    tag_fetcher: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
-    release = release_channel_info(current_version=current_version, channel=channel, fetcher=fetcher)
+    release = release_channel_info(current_version=current_version, channel=channel, fetcher=fetcher, tag_fetcher=tag_fetcher)
     state = read_state(state_dir)
     active_job = str(state.get("current_job") or "")
     reason = ""
@@ -56,9 +57,16 @@ def queue_release_update(
     install_dir: Path | None = None,
     current_version: str = __version__,
     fetcher: Callable[[], str] | None = None,
+    tag_fetcher: Callable[[], str] | None = None,
     helper_runner: HelperRunner | None = None,
 ) -> dict[str, Any]:
-    plan = release_update_plan(state_dir, channel=channel, current_version=current_version, fetcher=fetcher)
+    plan = release_update_plan(
+        state_dir,
+        channel=channel,
+        current_version=current_version,
+        fetcher=fetcher,
+        tag_fetcher=tag_fetcher,
+    )
     if not plan["can_update"]:
         raise RuntimeError(str(plan["blocked_reason"] or "update is not allowed"))
     release = plan["release"]

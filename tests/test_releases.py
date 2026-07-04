@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.release_update import queue_release_update, release_update_plan, release_update_status
-from gp_control_plane.releases import parse_github_releases, release_channel_info
+from gp_control_plane.releases import parse_git_tags, parse_github_releases, release_channel_info
 from gp_control_plane.state import write_state
 
 
@@ -44,6 +44,46 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(info["available_version"], "v0.4.0-beta.1")
         self.assertEqual(info["url"], "https://example.test/beta")
 
+    def test_release_channel_info_falls_back_to_git_tags(self) -> None:
+        tags = """
+aaaa refs/tags/v0.2.0
+bbbb refs/tags/v0.3.1
+cccc refs/tags/v0.4.0-alpha.1
+"""
+
+        info = release_channel_info(
+            current_version="0.3.0",
+            channel="stable",
+            fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+            tag_fetcher=lambda: tags,
+        )
+
+        self.assertTrue(info["checked"])
+        self.assertEqual(info["source"], "git-tags")
+        self.assertEqual(info["available_version"], "v0.3.1")
+        self.assertTrue(info["update_available"])
+        self.assertIn("rate limited", info["error"])
+
+    def test_release_channel_info_falls_back_to_prerelease_tag(self) -> None:
+        tags = """
+aaaa refs/tags/v0.2.0
+bbbb refs/tags/v0.3.1
+cccc refs/tags/v0.4.0-alpha.1
+dddd refs/tags/v0.4.0-alpha.2
+"""
+
+        info = release_channel_info(
+            current_version="0.3.1",
+            channel="prerelease",
+            fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+            tag_fetcher=lambda: tags,
+        )
+
+        self.assertTrue(info["checked"])
+        self.assertEqual(info["source"], "git-tags")
+        self.assertEqual(info["available_version"], "v0.4.0-alpha.2")
+        self.assertTrue(info["update_available"])
+
     def test_parse_github_releases_skips_drafts(self) -> None:
         payload = """
 [
@@ -53,6 +93,15 @@ class ReleaseTests(unittest.TestCase):
 """
 
         self.assertEqual([item["tag_name"] for item in parse_github_releases(payload)], ["v0.3.1"])
+
+    def test_parse_git_tags_reads_tag_names(self) -> None:
+        payload = """
+111 refs/heads/main
+222 refs/tags/v0.3.0
+333 refs/tags/v0.3.1
+"""
+
+        self.assertEqual(parse_git_tags(payload), ["v0.3.0", "v0.3.1"])
 
     def test_release_update_plan_blocks_active_job(self) -> None:
         payload = """
@@ -103,6 +152,35 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(result["target_ref"], "v0.3.1")
             self.assertIn("pre-update", result["rollback_instruction"])
             self.assertTrue(any("restore" in step for step in result["steps"]))
+
+    def test_queue_release_update_can_use_git_tag_fallback(self) -> None:
+        tags = """
+aaaa refs/tags/v0.3.0
+bbbb refs/tags/v0.3.1
+"""
+        calls: list[list[str]] = []
+
+        def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
+
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            install_dir = Path(raw) / "repo"
+            install_dir.mkdir()
+
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+                tag_fetcher=lambda: tags,
+                install_dir=install_dir,
+                helper_runner=fake_helper,
+            )
+
+            self.assertEqual(result["release"]["source"], "git-tags")
+            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1"])
 
     def test_release_update_status_reads_helper_log(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
