@@ -42,7 +42,7 @@ def release_update_plan(
         "steps": [
             "check selected release channel",
             "create backup before code change",
-            "queue alpha installer through root-helper",
+            "queue installer through root-helper",
             "verify installed ref/version after installer finishes",
             "if verification fails, restore the pre-update backup from Backups",
             "service will come back on the selected release",

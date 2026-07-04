@@ -851,6 +851,12 @@ button:disabled { opacity: .55; cursor: default; }
   gap: 6px;
 }
 .release-card strong { font-size: 16px; }
+.release-log {
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--mono);
+}
 .category-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1941,23 +1947,31 @@ pre {
               <strong id="settings-release-current">v-</strong>
             </div>
             <div class="release-card">
-              <span class="helper-text">Канал</span>
-              <select id="settings-update-channel">
-                <option value="stable">Стабильные релизы</option>
-                <option value="prerelease">Предрелизы</option>
-              </select>
+              <span class="helper-text">Стабильный релиз</span>
+              <strong id="settings-release-stable">Не проверялось</strong>
+              <a id="settings-release-stable-link" href="https://github.com/balbomush/GP-access-control-plane/releases/latest" target="_blank" rel="noreferrer">Открыть</a>
             </div>
             <div class="release-card">
-              <span class="helper-text">Доступно</span>
-              <strong id="settings-release-available">Не проверялось</strong>
+              <span class="helper-text">Alpha / prerelease</span>
+              <strong id="settings-release-prerelease">Не проверялось</strong>
+              <a id="settings-release-prerelease-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть</a>
             </div>
           </div>
-          <div class="button-row">
-            <button class="secondary" data-action="check-releases" type="button">Проверить релизы</button>
-            <button class="secondary tooltip-button" data-action="update-from-release" data-tooltip="Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап." type="button">Установить выбранное обновление</button>
-            <a class="button-link secondary" id="settings-selected-release-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть страницу релизов</a>
+          <div class="release-card">
+            <label for="settings-update-channel">Канал установки</label>
+            <select id="settings-update-channel">
+              <option value="stable">Стабильные релизы</option>
+              <option value="prerelease">Предрелизы</option>
+            </select>
+            <div class="setting-note">Stable ставит последний стабильный релиз. Предрелизы ставят последнюю alpha/prerelease-версию.</div>
           </div>
-          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI работает как alpha-сценарий: без активного подбора, с бекапом и проверкой версии.</div>
+          <div class="button-row">
+            <button class="secondary" data-action="check-releases" type="button">Проверить обновления</button>
+            <button class="secondary tooltip-button" data-action="update-from-release" data-tooltip="Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап." type="button">Установить выбранное обновление</button>
+            <button class="secondary" data-action="toggle-update-log" type="button">Показать лог обновления</button>
+          </div>
+          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI работает только без активного подбора, с бекапом и проверкой версии.</div>
+          <pre class="source-preview release-log" id="settings-release-log" hidden></pre>
         </div>
         </div>
       </section>
@@ -1970,7 +1984,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseUpdate: null, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2619,6 +2633,9 @@ function renderMetrics(){
   });
   document.querySelectorAll('button[data-action="update-from-release"]').forEach((button) => {
     button.disabled = busy;
+    button.dataset.tooltip = busy
+      ? 'Обновление можно запускать только когда подбор стратегий остановлен.'
+      : 'Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап.';
   });
   document.querySelectorAll('button[data-action="stop-current"]').forEach((button) => {
     button.disabled = !busy;
@@ -3450,24 +3467,33 @@ function renderReleaseInfo(){
   const version = (state.status || {}).version || '-';
   const current = el('settings-release-current');
   if (current) current.textContent = `v${String(version).replace(/^v/, '')}`;
-  const available = el('settings-release-available');
+  const stable = el('settings-release-stable');
+  const prerelease = el('settings-release-prerelease');
+  const stableLink = el('settings-release-stable-link');
+  const prereleaseLink = el('settings-release-prerelease-link');
   const result = el('settings-release-result');
-  const link = el('settings-selected-release-link');
-  const release = state.releaseInfo;
-  if (!release) {
-    if (available) available.textContent = 'Не проверялось';
-    if (result) result.textContent = 'Релизы еще не проверялись. Обновление из UI работает как alpha-сценарий: без активного подбора, с бекапом и проверкой версии.';
-    if (link) link.href = (state.settings || {}).prerelease_url || 'https://github.com/balbomush/GP-access-control-plane/releases';
+  const log = el('settings-release-log');
+  const selectedChannel = el('settings-update-channel')?.value || (state.settings || {}).update_channel || 'stable';
+  const selectedRelease = selectedChannel === 'prerelease' ? state.releasePrerelease : state.releaseStable;
+  if (stable) stable.textContent = releaseVersionLabel(state.releaseStable);
+  if (prerelease) prerelease.textContent = releaseVersionLabel(state.releasePrerelease);
+  if (stableLink && state.releaseStable && state.releaseStable.url) stableLink.href = state.releaseStable.url;
+  if (prereleaseLink && state.releasePrerelease && state.releasePrerelease.url) prereleaseLink.href = state.releasePrerelease.url;
+  if (log) {
+    const tail = state.releaseUpdate && state.releaseUpdate.log_tail ? state.releaseUpdate.log_tail : '';
+    log.textContent = tail || 'Лог обновления пока пуст. Он появится после постановки обновления в очередь и работы helper-скрипта.';
+  }
+  if (!selectedRelease) {
+    if (result) result.textContent = 'Релизы еще не проверялись. Обновление из UI работает только без активного подбора, с бекапом и проверкой версии.';
     return;
   }
-  if (available) available.textContent = release.available_version || '-';
-  if (link && release.url) link.href = release.url;
   if (result) {
     if (state.releaseUpdate) {
       const queued = state.releaseUpdate;
       const snapshot = queued.snapshot && queued.snapshot.id ? queued.snapshot.id : (queued.snapshot || {});
       const status = queued.status || 'queued';
       const installed = queued.installed_version ? ` Установленная версия: v${String(queued.installed_version).replace(/^v/, '')}.` : '';
+      const verified = queued.verified ? ' Проверка версии: успешно.' : (status === 'success' ? ' Проверка версии: завершена.' : ' Проверка версии: ожидается после установки.');
       const log = queued.log_path ? ` Лог: ${queued.log_path}.` : '';
       const error = queued.error ? ` Ошибка: ${queued.error}.` : '';
       const rollback = status === 'failed' && queued.rollback_instruction ? ` Откат: ${queued.rollback_instruction}` : '';
@@ -3477,18 +3503,24 @@ function renderReleaseInfo(){
         success: 'Обновление завершено и версия проверена',
         failed: 'Обновление завершилось ошибкой'
       }[status] || `Статус обновления: ${status}`;
-      result.textContent = `${statusText}. Перед обновлением создан бекап: ${snapshot || '-'}.${installed}${log}${error}${rollback}`;
+      result.textContent = `${statusText}. Перед обновлением создан бекап: ${snapshot || '-'}.${installed}${verified}${log}${error}${rollback}`;
       return;
     }
-    if (release.checked) {
-      const update = release.update_available ? 'Доступно обновление.' : 'Текущая версия не старее найденной.';
-      const published = release.published_at ? ` Опубликовано: ${friendlyDate(release.published_at)}.` : '';
-      const body = release.body ? `\n\n${String(release.body).slice(0, 1200)}` : '';
-      result.textContent = `${update} Канал: ${release.channel}. Версия: ${release.available_version || '-'}.${published}${body}`;
+    if (selectedRelease.checked) {
+      const update = selectedRelease.update_available ? 'Доступно обновление.' : 'Текущая версия не старее найденной.';
+      const published = selectedRelease.published_at ? ` Опубликовано: ${friendlyDate(selectedRelease.published_at)}.` : '';
+      const body = selectedRelease.body ? `\n\n${String(selectedRelease.body).slice(0, 1200)}` : '';
+      result.textContent = `${update} Канал: ${selectedRelease.channel}. Версия: ${selectedRelease.available_version || '-'}.${published}${body}`;
     } else {
-      result.textContent = `Не удалось проверить релизы: ${release.error || 'нет ответа GitHub'}. Ссылка на страницу релизов оставлена.`;
+      result.textContent = `Не удалось проверить релизы: ${selectedRelease.error || 'нет ответа GitHub'}. Ссылки на страницу релизов оставлены.`;
     }
   }
+}
+function releaseVersionLabel(release){
+  if (!release) return 'Не проверялось';
+  if (!release.checked) return 'Ошибка проверки';
+  const suffix = release.update_available ? ' доступно' : ' актуально';
+  return `${release.available_version || '-'} · ${suffix}`;
 }
 function currentSettingsFromForm(){
   return {
@@ -3514,12 +3546,20 @@ async function checkReleases(){
   const channel = el('settings-update-channel')?.value || 'stable';
   try {
     const data = await getJson(`/api/releases?channel=${encodeURIComponent(channel)}`);
-    state.releaseInfo = (data || {}).release || null;
+    rememberReleasePayload(data || {});
     renderReleaseInfo();
-    setMessage('Релизы проверены', 'good');
+    setMessage('Обновления проверены', 'good');
   } catch (error) {
     setMessage(`Ошибка проверки релизов: ${error.message}`, 'bad');
   }
+}
+function rememberReleasePayload(data){
+  const releases = (data || {}).releases || {};
+  if (releases.stable) state.releaseStable = releases.stable;
+  if (releases.prerelease) state.releasePrerelease = releases.prerelease;
+  state.releaseInfo = (data || {}).release || state.releaseInfo;
+  if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
+  if (state.releaseInfo && state.releaseInfo.channel === 'prerelease') state.releasePrerelease = state.releaseInfo;
 }
 async function updateFromRelease(){
   const channel = el('settings-update-channel')?.value || 'stable';
@@ -3527,22 +3567,31 @@ async function updateFromRelease(){
     const planData = await getJson(`/api/releases/update-plan?channel=${encodeURIComponent(channel)}`);
     const plan = (planData || {}).plan || {};
     state.releaseInfo = plan.release || state.releaseInfo;
+    if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
+    if (state.releaseInfo && state.releaseInfo.channel === 'prerelease') state.releasePrerelease = state.releaseInfo;
     renderReleaseInfo();
     if (!plan.can_update) {
       setMessage(`Обновление не готово: ${plan.blocked_reason || 'нет доступного обновления'}`, 'warn');
       return;
     }
     const steps = Array.isArray(plan.steps) ? plan.steps.join('\\n- ') : '';
-    const confirmed = window.confirm(`Запустить alpha-обновление приложения?\\n\\nБудет выполнено:\\n- ${steps}`);
+    const confirmed = window.confirm(`Запустить обновление приложения из выбранного канала?\\n\\nБудет выполнено:\\n- ${steps}`);
     if (!confirmed) return;
     const data = await postJson('/api/releases/update', { channel });
     state.releaseUpdate = (data || {}).update || null;
     state.releaseInfo = state.releaseUpdate ? state.releaseUpdate.release : state.releaseInfo;
+    if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
+    if (state.releaseInfo && state.releaseInfo.channel === 'prerelease') state.releasePrerelease = state.releaseInfo;
     renderReleaseInfo();
-    setMessage('Alpha-обновление поставлено в очередь. Сервис может кратко пропасть и подняться снова.', 'good');
+    setMessage('Обновление поставлено в очередь. Сервис может кратко пропасть и подняться снова.', 'good');
   } catch (error) {
     setMessage(`Обновление не запущено: ${error.message}`, 'bad');
   }
+}
+function toggleUpdateLog(){
+  const log = el('settings-release-log');
+  if (!log) return;
+  log.hidden = !log.hidden;
 }
 function v2flyCategories(){
   return parseDomains(el('v2fly-categories')?.value || '');
@@ -4390,6 +4439,10 @@ document.addEventListener('click', (event) => {
     updateFromRelease();
     return;
   }
+  if (button.dataset.action === 'toggle-update-log') {
+    toggleUpdateLog();
+    return;
+  }
   if (button.dataset.action === 'v2fly-load-categories') {
     loadV2flyCategories();
     return;
@@ -4483,6 +4536,9 @@ document.addEventListener('input', (event) => {
   }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
+  }
+  if (event.target && event.target.id === 'settings-update-channel') {
+    renderReleaseInfo();
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-categories') suggestV2flyPresetName();
@@ -4850,7 +4906,10 @@ def _presets_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str
 def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     settings = read_settings(config)
     channel = _query_str(query, "channel", str(settings.get("update_channel") or "stable"))
-    return {"release": release_channel_info(current_version=__version__, channel=channel)}
+    stable = release_channel_info(current_version=__version__, channel="stable")
+    prerelease = release_channel_info(current_version=__version__, channel="prerelease")
+    selected = prerelease if channel == "prerelease" else stable
+    return {"release": selected, "releases": {"stable": stable, "prerelease": prerelease}}
 
 
 def _release_update_plan_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
