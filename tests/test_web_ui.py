@@ -416,9 +416,21 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"process"', body)
             self.assertIn('"files"', body)
 
-    def test_status_endpoint_returns_candidate_version(self) -> None:
+    def test_status_endpoint_returns_candidate_version_and_release_update(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
+            log_path = tmp / "update.log"
+            log_path.write_text("installed_version=0.3.1\nstatus=success\n", encoding="utf-8")
+            write_state(
+                tmp / "state",
+                {
+                    "release_update": {
+                        "status": "queued",
+                        "target_ref": "v0.3.1",
+                        "log_path": str(log_path),
+                    }
+                },
+            )
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
@@ -439,6 +451,8 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"candidate_version"', body)
             self.assertIn('"size"', body)
             self.assertIn('"mtime_ns"', body)
+            self.assertIn('"release_update"', body)
+            self.assertIn('"status":"success"', body)
 
     def test_settings_endpoint_saves_runtime_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

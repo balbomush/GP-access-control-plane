@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from gp_control_plane.release_update import queue_release_update, release_update_plan
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from gp_control_plane.release_update import queue_release_update, release_update_plan, release_update_status
 from gp_control_plane.releases import parse_github_releases, release_channel_info
 from gp_control_plane.state import write_state
 
@@ -96,6 +99,45 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1"])
             self.assertIn("snapshot", result)
             self.assertIn("queued=true", result["helper_stdout"])
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["target_ref"], "v0.3.1")
+            self.assertIn("pre-update", result["rollback_instruction"])
+            self.assertTrue(any("restore" in step for step in result["steps"]))
+
+    def test_release_update_status_reads_helper_log(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            log_path = Path(raw) / "update.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "gp-control-plane update queued",
+                        "installed_ref=v0.3.1",
+                        "installed_version=0.3.1",
+                        "status=success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "status": "queued",
+                        "target_ref": "v0.3.1",
+                        "log_path": str(log_path),
+                        "release": {"available_version": "v0.3.1"},
+                    }
+                },
+            )
+
+            status = release_update_status(state_dir, current_version="0.3.1")
+
+            self.assertEqual(status["status"], "success")
+            self.assertTrue(status["verified"])
+            self.assertEqual(status["installed_ref"], "v0.3.1")
+            self.assertEqual(status["installed_version"], "0.3.1")
+            self.assertIn("status=success", status["log_tail"])
 
 
 if __name__ == "__main__":

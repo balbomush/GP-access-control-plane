@@ -24,6 +24,9 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("queue-update", helper)
         self.assertIn("systemd-run", helper)
         self.assertIn("GP_BRANCH", helper)
+        self.assertIn("installed_version=", helper)
+        self.assertIn("status=success", helper)
+        self.assertIn("status=failed", helper)
         self.assertIn("nft-delete-blockcheck-table", helper)
         self.assertIn("unsupported run target", helper)
 

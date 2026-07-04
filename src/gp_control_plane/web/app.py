@@ -22,7 +22,7 @@ from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
 from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v2fly_categories, preview_v2fly_preset
 from ..jobs import JobRunner
-from ..release_update import queue_release_update, release_update_plan
+from ..release_update import queue_release_update, release_update_plan, release_update_status
 from ..releases import release_channel_info
 from ..state import now_iso, read_state, write_state
 from ..storage import (
@@ -3222,8 +3222,18 @@ function renderReleaseInfo(){
     if (state.releaseUpdate) {
       const queued = state.releaseUpdate;
       const snapshot = queued.snapshot && queued.snapshot.id ? queued.snapshot.id : (queued.snapshot || {});
-      const stdout = queued.helper_stdout ? ` ${queued.helper_stdout}` : '';
-      result.textContent = `Alpha-обновление поставлено в очередь. Перед обновлением создан бекап: ${snapshot || '-'}.${stdout}`;
+      const status = queued.status || 'queued';
+      const installed = queued.installed_version ? ` Установленная версия: v${String(queued.installed_version).replace(/^v/, '')}.` : '';
+      const log = queued.log_path ? ` Лог: ${queued.log_path}.` : '';
+      const error = queued.error ? ` Ошибка: ${queued.error}.` : '';
+      const rollback = status === 'failed' && queued.rollback_instruction ? ` Откат: ${queued.rollback_instruction}` : '';
+      const statusText = {
+        queued: 'Обновление поставлено в очередь',
+        running: 'Обновление выполняется',
+        success: 'Обновление завершено и версия проверена',
+        failed: 'Обновление завершилось ошибкой'
+      }[status] || `Статус обновления: ${status}`;
+      result.textContent = `${statusText}. Перед обновлением создан бекап: ${snapshot || '-'}.${installed}${log}${error}${rollback}`;
       return;
     }
     if (release.checked) {
@@ -3897,6 +3907,7 @@ async function refresh(){
       getJson('/api/domain-sources')
     ]);
     state.status = status;
+    state.releaseUpdate = status.release_update || state.releaseUpdate;
     syncCandidateVersion(status.candidate_version || null);
     state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
@@ -4356,6 +4367,7 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         "version": __version__,
         "state": read_state(config.output.state_dir),
         "settings": read_settings(config),
+        "release_update": release_update_status(config.output.state_dir, current_version=__version__),
         "candidate_version": candidate_storage_version(config.output.state_dir),
         "paths": {
             "state_dir": str(config.output.state_dir),

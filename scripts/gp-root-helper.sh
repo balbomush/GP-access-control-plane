@@ -112,7 +112,27 @@ export GP_INSTALL_DIR=$(shell_quote "$install_dir")
 export GP_BRANCH=$(shell_quote "$ref")
 export GP_REPO_URL=$(shell_quote "$repo_url")
 export GP_SERVICE_NAME=$(shell_quote "$service_name")
-bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh")
+if bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh"); then
+  installed_ref="$(git -C $(shell_quote "$install_dir") describe --tags --exact-match 2>/dev/null || git -C $(shell_quote "$install_dir") rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  installed_commit="$(git -C $(shell_quote "$install_dir") rev-parse --short HEAD 2>/dev/null || true)"
+  installed_version="$($(shell_quote "$install_dir/.venv/bin/gp-control-plane") --version 2>/dev/null | awk '{print $NF}' || true)"
+  expected_version="$(printf '%s' $(shell_quote "$ref") | sed 's/^v//')"
+  echo "installed_ref=$installed_ref"
+  echo "installed_commit=$installed_commit"
+  echo "installed_version=$installed_version"
+  if [ "$installed_ref" = $(shell_quote "$ref") ] || [ "$installed_version" = "$expected_version" ]; then
+    echo "status=success"
+  else
+    echo "status=failed"
+    echo "error=installed ref/version does not match requested release"
+    exit 127
+  fi
+else
+  code="$?"
+  echo "status=failed"
+  echo "error=installer failed with code $code"
+  exit "$code"
+fi
 SCRIPT
   chmod 0700 "$script"
 
