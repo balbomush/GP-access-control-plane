@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.release_update import queue_release_update, release_update_plan, release_update_status
 from gp_control_plane.releases import parse_git_tags, parse_github_releases, release_channel_info
-from gp_control_plane.state import write_state
+from gp_control_plane.state import read_state, write_state
 
 
 class ReleaseTests(unittest.TestCase):
@@ -198,6 +198,35 @@ bbbb refs/tags/v0.3.1
             self.assertEqual(result["release"]["source"], "git-tags")
             self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1"])
 
+    def test_queue_release_update_prewrites_state_before_root_helper(self) -> None:
+        payload = """
+[
+  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
+]
+"""
+
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            install_dir = Path(raw) / "repo"
+            install_dir.mkdir()
+
+            def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
+                state = read_state(state_dir)
+                self.assertEqual(state["release_update"]["status"], "queueing")
+                self.assertEqual(state["release_update"]["target_ref"], "v0.3.1")
+                return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
+
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=lambda: payload,
+                install_dir=install_dir,
+                helper_runner=fake_helper,
+            )
+
+            self.assertEqual(result["status"], "queued")
+
     def test_release_update_status_reads_helper_log(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
@@ -232,6 +261,40 @@ bbbb refs/tags/v0.3.1
             self.assertEqual(status["installed_ref"], "v0.3.1")
             self.assertEqual(status["installed_version"], "0.3.1")
             self.assertIn("status=success", status["log_tail"])
+
+    def test_release_update_status_recovers_after_service_restart_before_final_state_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            log_dir = state_dir / "release-updates"
+            log_dir.mkdir(parents=True)
+            log_path = log_dir / "gp-control-plane-update-test.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "installed_ref=v0.3.1",
+                        "installed_version=0.3.1",
+                        "status=success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "status": "queueing",
+                        "target_ref": "v0.3.1",
+                        "release": {"available_version": "v0.3.1"},
+                    }
+                },
+            )
+
+            status = release_update_status(state_dir, current_version="0.3.1")
+
+            self.assertEqual(status["status"], "success")
+            self.assertTrue(status["verified"])
+            self.assertEqual(status["log_path"], str(log_path))
+            self.assertEqual(status["installed_ref"], "v0.3.1")
 
 
 if __name__ == "__main__":

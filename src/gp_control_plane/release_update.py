@@ -76,27 +76,43 @@ def queue_release_update(
 
     snapshot = create_snapshot(state_dir)
     root = (install_dir or Path.cwd()).resolve()
-    runner = helper_runner or run_root_helper_command
-    result = runner(["queue-update", str(root), tag])
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "root-helper update queue failed").strip())
-    helper = _parse_key_value_lines(result.stdout)
-
     queued_at = now_iso()
     payload = {
         "queued": True,
-        "status": "queued",
+        "status": "queueing",
         "queued_at": queued_at,
         "release": release,
         "snapshot": snapshot.get("snapshot"),
-        "helper_stdout": result.stdout.strip(),
-        "helper": helper,
-        "unit": helper.get("unit", ""),
-        "log_path": helper.get("log", ""),
+        "helper_stdout": "",
+        "helper": {},
+        "unit": "",
+        "log_path": "",
         "target_ref": tag,
         "rollback_instruction": "If update verification fails, open Backups and restore the pre-update snapshot.",
         "steps": plan["steps"],
     }
+    state = read_state(state_dir)
+    state["release_update"] = payload
+    write_state(state_dir, state)
+    append_jsonl(state_dir / "release-updates.jsonl", payload)
+
+    runner = helper_runner or run_root_helper_command
+    result = runner(["queue-update", str(root), tag])
+    if result.returncode != 0:
+        payload["status"] = "failed"
+        payload["error"] = (result.stderr or result.stdout or "root-helper update queue failed").strip()
+        state = read_state(state_dir)
+        state["release_update"] = payload
+        write_state(state_dir, state)
+        append_jsonl(state_dir / "release-updates.jsonl", payload)
+        raise RuntimeError((result.stderr or result.stdout or "root-helper update queue failed").strip())
+    helper = _parse_key_value_lines(result.stdout)
+
+    payload["status"] = "queued"
+    payload["helper_stdout"] = result.stdout.strip()
+    payload["helper"] = helper
+    payload["unit"] = helper.get("unit", "")
+    payload["log_path"] = helper.get("log", "")
     state = read_state(state_dir)
     state["release_update"] = payload
     write_state(state_dir, state)
@@ -129,7 +145,17 @@ def release_update_status(
     target = str(payload.get("target_ref") or release.get("available_version") or "")
     installed_version = str(log_values.get("installed_version") or "")
     installed_ref = str(log_values.get("installed_ref") or "")
-    if status == "queued" and log_tail:
+    if not log_path:
+        latest_log = _latest_update_log(state_dir)
+        if latest_log:
+            log_path = str(latest_log)
+            log_tail = _tail_text(latest_log)
+            log_values = _parse_key_value_lines(log_tail)
+            payload["log_tail"] = log_tail
+            installed_version = str(log_values.get("installed_version") or installed_version)
+            installed_ref = str(log_values.get("installed_ref") or installed_ref)
+            status = str(log_values.get("status") or status)
+    if status in {"queued", "queueing"} and log_tail:
         status = "running"
     if status not in {"failed", "success"} and target and _version_matches(target, current_version):
         status = "success"
@@ -168,6 +194,16 @@ def _tail_text(path: Path) -> str:
     if len(lines) > UPDATE_LOG_TAIL_LINES:
         lines = lines[-UPDATE_LOG_TAIL_LINES:]
     return "\n".join(lines)
+
+
+def _latest_update_log(state_dir: Path) -> Path | None:
+    log_dir = state_dir / "release-updates"
+    if not log_dir.is_dir():
+        return None
+    logs = [path for path in log_dir.glob("*.log") if path.is_file()]
+    if not logs:
+        return None
+    return max(logs, key=lambda path: path.stat().st_mtime)
 
 
 def _version_matches(target: str, current: str) -> bool:
