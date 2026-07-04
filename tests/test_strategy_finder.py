@@ -35,7 +35,9 @@ from gp_control_plane.strategy_finder import (
     _write_multidomain_runner,
     candidate_id_for,
     candidate_total,
+    classify_domain_input,
     close_stale_running_runs,
+    curl_failure_info,
     latest_log_tail,
     parse_blockcheck_stdout,
     progress_from_stdout,
@@ -43,7 +45,9 @@ from gp_control_plane.strategy_finder import (
     read_candidate_page,
     read_candidates,
     read_runs,
+    run_standard_discovery,
     upsert_candidates,
+    validate_domain_inputs,
 )
 
 
@@ -90,6 +94,43 @@ class StrategyFinderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             options.normalized()
 
+    def test_domain_validation_rejects_non_domain_rules(self) -> None:
+        result = validate_domain_inputs(
+            [
+                "YouTube.COM",
+                "*.example.com",
+                "keyword:discord",
+                "regexp:^google",
+                "domain:google.com",
+                "https://youtube.com/watch",
+                "googlevideo.com",
+            ]
+        )
+
+        self.assertEqual(result["domains"], ["youtube.com", "googlevideo.com"])
+        self.assertEqual(result["valid_count"], 2)
+        self.assertEqual(result["skipped_count"], 5)
+        skipped_statuses = {item["status"] for item in result["domain_skipped"]}
+        self.assertIn("wildcard", skipped_statuses)
+        self.assertIn("domain_list_rule", skipped_statuses)
+        self.assertIn("url", skipped_statuses)
+        service = classify_domain_input("googlevideo.com")
+        self.assertTrue(service["valid"])
+        self.assertEqual(service["status"], "service")
+
+    def test_invalid_only_domain_run_fails_before_blockcheck_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaises(ValueError):
+                run_standard_discovery(["keyword:discord"], Path(raw), timeout_seconds=1)
+
+    def test_curl_failure_info_maps_human_statuses(self) -> None:
+        self.assertEqual(curl_failure_info("3")["label"], "некорректная строка домена")
+        self.assertEqual(curl_failure_info("6")["label"], "DNS ошибка")
+        self.assertEqual(curl_failure_info("28")["label"], "таймаут")
+        self.assertEqual(curl_failure_info("35")["label"], "SSL/connect ошибка")
+        self.assertEqual(curl_failure_info("60", domain="googlevideo.com")["label"], "TLS/SNI проблема")
+        self.assertEqual(curl_failure_info("7", test="curl_test_http3")["label"], "QUIC/connect ошибка")
+
     def test_stdout_log_mode_defaults_to_raw_terminal_output(self) -> None:
         self.assertEqual(_stdout_log_mode({}), "raw")
         self.assertEqual(_stdout_log_mode({"GP_DEBUG_STDOUT": "0"}), "raw")
@@ -111,6 +152,26 @@ curl_test_https_tls12 ipv4 web.telegram.org : nfqws2 not working
         self.assertEqual(parsed["candidates"][0]["protocol"], "tls")
         self.assertEqual(parsed["candidates"][1]["protocol"], "quic")
         self.assertEqual(parsed["not_working"][0]["domain"], "web.telegram.org")
+
+    def test_parse_blockcheck_stdout_reports_curl_diagnostics(self) -> None:
+        stdout = """
+- curl_test_https_tls12 ipv4 googlevideo.com : nfqws2 --payload=tls_client_hello --lua-desync=multidisorder
+UNAVAILABLE code=60
+- curl_test_https_tls12 ipv4 no-such-domain.invalid : nfqws2 --payload=tls_client_hello --lua-desync=fake
+UNAVAILABLE code=6
+- curl_test_http3 ipv4 discord.com : nfqws2 --filter-udp=443 --lua-desync=fake
+UNAVAILABLE code=7
+"""
+
+        parsed = parse_blockcheck_stdout(stdout)
+        by_domain = {item["domain"]: item for item in parsed["domain_diagnostics"]}
+
+        self.assertEqual(by_domain["googlevideo.com"]["status"], "tls_sni_problem")
+        self.assertEqual(by_domain["googlevideo.com"]["label"], "TLS/SNI проблема")
+        self.assertEqual(by_domain["no-such-domain.invalid"]["status"], "dns_error")
+        self.assertEqual(by_domain["discord.com"]["status"], "quic_connect_error")
+        self.assertEqual(parsed["curl_diagnostics_summary"], {"60": 1, "6": 1, "7": 1})
+        self.assertFalse(parsed["curl_diagnostics"][0]["strategy_failure"])
 
     def test_upsert_candidates_persists_unique_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -324,6 +385,21 @@ UNAVAILABLE code=28
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["seen"][0]["domain"], "youtube.com")
             self.assertEqual(candidates[0]["seen"][0]["run_id"], "")
+
+    def test_live_recorder_preserves_unavailable_curl_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            run = {"id": "run-diagnostics", "domains": ["googlevideo.com"]}
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            recorder.record_line("- curl_test_https_tls12 ipv4 googlevideo.com : nfqws2 --payload=tls_client_hello")
+            recorder.record_line("UNAVAILABLE code=60")
+            parsed = recorder.parsed()
+
+            self.assertEqual(parsed["curl_diagnostics_summary"], {"60": 1})
+            self.assertEqual(parsed["domain_diagnostics"][0]["domain"], "googlevideo.com")
+            self.assertEqual(parsed["domain_diagnostics"][0]["status"], "tls_sni_problem")
+            self.assertFalse(parsed["curl_diagnostics"][0]["strategy_failure"])
 
     def test_progress_counts_attempts_and_successes(self) -> None:
         stdout = """

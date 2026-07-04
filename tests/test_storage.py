@@ -99,6 +99,40 @@ class StorageTests(unittest.TestCase):
             self.assertNotIn("summary", stored)
             self.assertNotIn("candidates", read_back)
 
+    def test_append_run_keeps_compact_domain_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            append_run(
+                state_dir,
+                {
+                    "id": "run-diagnostics",
+                    "kind": "standard-discovery",
+                    "status": "stopped",
+                    "timestamp": "2026-07-01T00:00:00Z",
+                    "domains": ["youtube.com"],
+                    "domain_skipped": [
+                        {
+                            "raw": "*.example.com",
+                            "status": "wildcard",
+                            "label": "некорректная строка домена",
+                        }
+                    ],
+                    "domain_diagnostics": [
+                        {
+                            "domain": "googlevideo.com",
+                            "status": "tls_sni_problem",
+                            "label": "TLS/SNI проблема",
+                            "codes": {"60": 1},
+                        }
+                    ],
+                },
+            )
+
+            stored = read_run_payloads(state_dir, limit=10)[0]
+
+            self.assertEqual(stored["domain_skipped"][0]["raw"], "*.example.com")
+            self.assertEqual(stored["domain_diagnostics"][0]["status"], "tls_sni_problem")
+
     def test_migration_compacts_runtime_payloads_and_legacy_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

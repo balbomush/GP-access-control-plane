@@ -192,6 +192,55 @@ PHASE_LABELS = {
 _ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
 _SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+    re.IGNORECASE,
+)
+_DOMAIN_LIST_PREFIXES = ("domain:", "full:", "keyword:", "regexp:", "include:", "geosite:")
+_SERVICE_DOMAIN_SUFFIXES = (
+    "googlevideo.com",
+    "googleapis.com",
+    "googleusercontent.com",
+    "gstatic.com",
+    "gvt1.com",
+    "ggpht.com",
+    "cloudflare-ech.com",
+    "cloudfront.net",
+    "amazonaws.com",
+    "discordcdn.com",
+)
+_CURL_FAILURE_INFO = {
+    "3": {
+        "status": "invalid_domain",
+        "label": "некорректная строка домена",
+        "message": "curl не смог разобрать строку как домен или URL.",
+    },
+    "6": {
+        "status": "dns_error",
+        "label": "DNS ошибка",
+        "message": "домен не резолвится или DNS не вернул адрес.",
+    },
+    "7": {
+        "status": "quic_connect_error",
+        "label": "QUIC/connect ошибка",
+        "message": "соединение не установилось; для HTTP3/QUIC это отдельный сетевой сбой.",
+    },
+    "28": {
+        "status": "timeout",
+        "label": "таймаут",
+        "message": "соединение не завершилось за лимит времени.",
+    },
+    "35": {
+        "status": "ssl_connect_error",
+        "label": "SSL/connect ошибка",
+        "message": "ошибка TLS/SSL или уровня соединения.",
+    },
+    "60": {
+        "status": "tls_sni_problem",
+        "label": "TLS/SNI проблема",
+        "message": "сертификат или hostname не совпали; для service-доменов это не всегда провал стратегии.",
+    },
+}
 DEFAULT_PAGE_LIMIT = 200
 MAX_PAGE_LIMIT = 200
 
@@ -277,6 +326,163 @@ def domain_sets() -> dict[str, list[str]]:
     }
 
 
+def classify_domain_input(value: Any) -> dict[str, Any]:
+    raw = str(value or "").strip()
+    if not raw:
+        return _domain_classification(raw, "", False, "empty", "пустая строка", "строка домена пустая")
+    lowered = raw.lower()
+    if lowered.startswith(_DOMAIN_LIST_PREFIXES):
+        prefix = lowered.split(":", 1)[0]
+        return _domain_classification(
+            raw,
+            "",
+            False,
+            "domain_list_rule",
+            "некорректная строка домена",
+            f"строка выглядит как правило domain-list ({prefix}:), а не как готовый домен",
+        )
+    if raw.startswith("*.") or "*" in raw:
+        return _domain_classification(
+            raw,
+            "",
+            False,
+            "wildcard",
+            "некорректная строка домена",
+            "wildcard-строки нельзя передавать в curl как один домен",
+        )
+    if "://" in raw or any(char in raw for char in "/?#[]@"):
+        return _domain_classification(
+            raw,
+            "",
+            False,
+            "url",
+            "некорректная строка домена",
+            "ожидается домен без схемы, пути и query-параметров",
+        )
+    if ":" in raw:
+        return _domain_classification(
+            raw,
+            "",
+            False,
+            "port_or_ipv6",
+            "некорректная строка домена",
+            "ожидается домен без порта и без IPv6-литерала",
+        )
+    domain = raw.rstrip(".").lower()
+    try:
+        ascii_domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return _domain_classification(
+            raw,
+            "",
+            False,
+            "idna",
+            "некорректная строка домена",
+            "домен не удалось привести к IDNA-формату",
+        )
+    if not _HOSTNAME_RE.match(ascii_domain):
+        return _domain_classification(
+            raw,
+            "",
+            False,
+            "hostname",
+            "некорректная строка домена",
+            "строка не похожа на обычный DNS hostname",
+        )
+    domain_type = "service" if _is_service_domain(ascii_domain) else "https"
+    label = "service-домен" if domain_type == "service" else "обычный HTTPS-домен"
+    message = (
+        "у service-доменов прямой curl может давать TLS/SNI code=60 из-за hostname/сертификата"
+        if domain_type == "service"
+        else "строка подходит для проверки curl/blockcheck2"
+    )
+    return _domain_classification(raw, ascii_domain, True, domain_type, label, message)
+
+
+def validate_domain_inputs(domains: list[Any], *, default_to_critical: bool = False) -> dict[str, Any]:
+    raw_values = [str(domain).strip() for domain in domains if str(domain or "").strip()]
+    if not raw_values and default_to_critical:
+        raw_values = list(CRITICAL_DOMAINS)
+    valid: list[str] = []
+    seen: set[str] = set()
+    classification: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for raw in raw_values:
+        item = classify_domain_input(raw)
+        if item["valid"]:
+            domain = str(item["domain"])
+            if domain not in seen:
+                valid.append(domain)
+                seen.add(domain)
+                classification.append(item)
+            continue
+        skipped.append(item)
+    summary: dict[str, int] = {}
+    for item in [*classification, *skipped]:
+        status = str(item.get("status") or "unknown")
+        summary[status] = summary.get(status, 0) + 1
+    return {
+        "input_count": len(raw_values),
+        "valid_count": len(valid),
+        "skipped_count": len(skipped),
+        "domains": valid,
+        "domain_classification": classification,
+        "domain_skipped": skipped,
+        "summary": summary,
+    }
+
+
+def curl_failure_info(code: Any, *, test: str = "", domain: str = "") -> dict[str, Any]:
+    code_text = str(code or "").strip()
+    base = dict(
+        _CURL_FAILURE_INFO.get(
+            code_text,
+            {
+                "status": "curl_error",
+                "label": "curl ошибка",
+                "message": "curl вернул ошибку, для которой пока нет отдельной трактовки.",
+            },
+        )
+    )
+    if code_text == "7" and "http3" not in str(test).lower():
+        base["label"] = "connect ошибка"
+        base["message"] = "соединение не установилось."
+    if code_text == "60" and _is_service_domain(str(domain or "")):
+        base["service_domain"] = True
+        base["message"] = (
+            "service-домен вернул TLS/SNI mismatch; это надо показывать отдельно от провала стратегии."
+        )
+    base["code"] = code_text
+    return base
+
+
+def _domain_classification(raw: str, domain: str, valid: bool, status: str, label: str, message: str) -> dict[str, Any]:
+    return {
+        "raw": raw,
+        "domain": domain,
+        "valid": valid,
+        "status": status,
+        "label": label,
+        "message": message,
+    }
+
+
+def _is_service_domain(domain: str) -> bool:
+    value = str(domain or "").lower().rstrip(".")
+    return any(value == suffix or value.endswith(f".{suffix}") for suffix in _SERVICE_DOMAIN_SUFFIXES)
+
+
+def _domain_validation_run_fields(validation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "domain_input_count": int(validation.get("input_count") or 0),
+        "domain_valid_count": int(validation.get("valid_count") or 0),
+        "domain_skipped_count": int(validation.get("skipped_count") or 0),
+        "domain_skipped": list(validation.get("domain_skipped") or [])[:50],
+        "domain_classification": list(validation.get("domain_classification") or [])[:100],
+        "domain_validation_summary": dict(validation.get("summary") or {}),
+    }
+
+
 def _ipvs_value(options: DiscoveryOptions) -> str:
     return "4 6" if options.enable_ipv6 else "4"
 
@@ -310,13 +516,17 @@ def run_standard_discovery(
         skip_dnscheck=skip_dnscheck,
         skip_ipblock=skip_ipblock,
     ).normalized()
+    domain_validation = validate_domain_inputs(domains, default_to_critical=True)
+    if not domain_validation["domains"]:
+        raise ValueError("no valid domains to check")
     return _run_blockcheck_live(
         state_dir=state_dir,
         kind="standard-discovery",
-        domains=domains,
+        domains=list(domain_validation["domains"]),
         timeout_seconds=timeout_seconds,
         test="standard",
         options=options,
+        domain_validation=domain_validation,
         debug_stdout=debug_stdout,
         stop_event=stop_event,
     )
@@ -352,12 +562,16 @@ def run_multi_domain_discovery(
         skip_dnscheck=skip_dnscheck,
         skip_ipblock=skip_ipblock,
     ).normalized()
+    domain_validation = validate_domain_inputs(domains, default_to_critical=True)
+    if not domain_validation["domains"]:
+        raise ValueError("no valid domains to check")
     return _run_multidomain_blockcheck_live(
         state_dir=state_dir,
-        domains=domains,
+        domains=list(domain_validation["domains"]),
         timeout_seconds=timeout_seconds,
         options=options,
         curl_parallelism=curl_parallelism,
+        domain_validation=domain_validation,
         debug_stdout=debug_stdout,
         stop_event=stop_event,
     )
@@ -705,6 +919,7 @@ def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
     common_candidates = _candidate_lines(common, scope="common")
     results = [_parse_result_line(line) for line in summary if _parse_result_line(line)]
     common_results = [_parse_result_line(line) for line in common if _parse_result_line(line)]
+    diagnostic_counts, diagnostic_codes, curl_diagnostics = _diagnostic_counts_from_stdout(stdout, results)
     return {
         "summary": summary,
         "common": common,
@@ -715,6 +930,10 @@ def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
         "common_results": common_results,
         "direct_available": [item for item in results if item.get("result") == "working without bypass"],
         "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
+        "domain_diagnostics": _domain_diagnostics_from_counts(diagnostic_counts, diagnostic_codes),
+        "curl_diagnostics": curl_diagnostics,
+        "curl_diagnostics_summary": _curl_summary(curl_diagnostics),
+        "dominant_failure": _dominant_failure_from_counts(diagnostic_counts),
     }
 
 
@@ -799,6 +1018,10 @@ class _LiveStdoutRecorder:
         self._not_working_count = 0
         self._candidate_count = 0
         self._common_candidate_count = 0
+        self._domain_status_counts: dict[str, dict[str, int]] = {}
+        self._domain_code_counts: dict[str, dict[str, int]] = {}
+        self._curl_code_counts: dict[str, int] = {}
+        self._curl_diagnostics: list[dict[str, Any]] = []
         self._candidate_keys: set[tuple[str, str, str, str, str]] = set()
         self._common_candidate_keys: set[tuple[str, str, str, str, str]] = set()
         self._successful_strategy_keys: set[tuple[str, str]] = set()
@@ -843,6 +1066,13 @@ class _LiveStdoutRecorder:
                 "not_working_count": self._not_working_count,
                 "candidate_count": self._candidate_count,
                 "common_candidate_count": self._common_candidate_count,
+                "domain_diagnostics": _domain_diagnostics_from_counts(
+                    self._domain_status_counts,
+                    self._domain_code_counts,
+                ),
+                "curl_diagnostics": list(self._curl_diagnostics),
+                "curl_diagnostics_summary": dict(self._curl_code_counts),
+                "dominant_failure": _dominant_failure_from_counts(self._domain_status_counts),
                 "phase": self._phase,
                 "summary_verified": self._summary_verified,
                 "summary_fallbacks": self._summary_fallbacks,
@@ -909,6 +1139,7 @@ class _LiveStdoutRecorder:
             self._pending_attempt = None
             return
         if line.startswith("UNAVAILABLE") or line.startswith("FAILED"):
+            self._record_unavailable_locked(line)
             self._pending_attempt = None
             return
         live_success = _candidate_from_live_success_line(line)
@@ -928,11 +1159,57 @@ class _LiveStdoutRecorder:
                     self._result_count += 1
                     if parsed.get("result") == "working without bypass":
                         self._direct_available_count += 1
+                        self._record_domain_status_locked(
+                            str(parsed.get("domain") or ""),
+                            "direct_available",
+                        )
                     if "not working" in str(parsed.get("result") or ""):
                         self._not_working_count += 1
+                        self._record_domain_status_locked(
+                            str(parsed.get("domain") or ""),
+                            "needs_discovery",
+                        )
             candidate = _candidate_from_result_line(line, scope=self._section)
             if candidate:
                 self._record_summary_candidate_locked(candidate, common=self._section == "common")
+
+    def _record_unavailable_locked(self, line: str) -> None:
+        if not self._pending_attempt:
+            return
+        parsed = _parse_result_line(self._pending_attempt)
+        if not parsed:
+            return
+        domain = str(parsed.get("domain") or "")
+        if not domain:
+            return
+        code = _curl_code_from_line(line)
+        test = str(parsed.get("test") or "")
+        info = curl_failure_info(code, test=test, domain=domain)
+        status = str(info.get("status") or "curl_error")
+        self._record_domain_status_locked(domain, status)
+        if code:
+            self._curl_code_counts[code] = self._curl_code_counts.get(code, 0) + 1
+            domain_codes = self._domain_code_counts.setdefault(domain, {})
+            domain_codes[code] = domain_codes.get(code, 0) + 1
+        if len(self._curl_diagnostics) < LIVE_CANDIDATE_SAMPLE_LIMIT:
+            self._curl_diagnostics.append(
+                {
+                    "domain": domain,
+                    "test": test,
+                    "protocol": _protocol_from_test(test),
+                    "code": code,
+                    "status": status,
+                    "label": info.get("label") or status,
+                    "message": info.get("message") or "",
+                    "strategy_failure": _is_strategy_failure(info),
+                }
+            )
+
+    def _record_domain_status_locked(self, domain: str, status: str) -> None:
+        if not domain:
+            return
+        counts = self._domain_status_counts.setdefault(domain, {})
+        counts[status] = counts.get(status, 0) + 1
 
     def _record_summary_candidate_locked(self, candidate: dict[str, Any], common: bool) -> None:
         if common:
@@ -1496,6 +1773,7 @@ def _run_blockcheck_live(
     test: str,
     options: DiscoveryOptions,
     candidate_id: str = "",
+    domain_validation: dict[str, Any] | None = None,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
@@ -1503,7 +1781,11 @@ def _run_blockcheck_live(
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
     options = options.normalized()
-    clean_domains = _clean_domains(domains)
+    domain_validation = domain_validation or validate_domain_inputs(domains, default_to_critical=True)
+    clean_domains = list(domain_validation["domains"])
+    if not clean_domains:
+        raise ValueError("no valid domains to check")
+    validation_fields = _domain_validation_run_fields(domain_validation)
     blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     full_env = os.environ.copy()
     full_env.update(
@@ -1561,6 +1843,7 @@ def _run_blockcheck_live(
         "phase": PHASE_CHECK_VPN,
         "test": test,
         **option_fields,
+        **validation_fields,
         "attempt_plan": attempt_plan,
     }
     append_run(state_dir, started)
@@ -1605,6 +1888,10 @@ def _run_blockcheck_live(
         "direct_available_count": int(parsed.get("direct_available_count") or 0),
         "not_working_count": int(parsed.get("not_working_count") or 0),
         "phase": parsed.get("phase") or PHASE_COMPLETE,
+        "domain_diagnostics": parsed.get("domain_diagnostics") or [],
+        "curl_diagnostics": parsed.get("curl_diagnostics") or [],
+        "curl_diagnostics_summary": parsed.get("curl_diagnostics_summary") or {},
+        "dominant_failure": parsed.get("dominant_failure") or {},
         "summary_verified": parsed.get("summary_verified", 0),
         "summary_fallbacks": parsed.get("summary_fallbacks", 0),
         "summary_common_seen": parsed.get("summary_common_seen", 0),
@@ -1613,6 +1900,7 @@ def _run_blockcheck_live(
         "timeout_seconds": timeout_seconds,
         "test": test,
         **option_fields,
+        **validation_fields,
         "attempt_plan": attempt_plan,
     }
     run["progress"] = recorder.progress(run)
@@ -1629,6 +1917,7 @@ def _run_multidomain_blockcheck_live(
     timeout_seconds: int,
     options: DiscoveryOptions,
     curl_parallelism: int,
+    domain_validation: dict[str, Any] | None = None,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
@@ -1636,7 +1925,10 @@ def _run_multidomain_blockcheck_live(
     if not blockcheck:
         raise RuntimeError("blockcheck2.sh/blockcheck.sh not found in PATH")
     options = options.normalized()
-    clean_domains = _clean_domains(domains)
+    domain_validation = domain_validation or validate_domain_inputs(domains, default_to_critical=True)
+    clean_domains = list(domain_validation["domains"])
+    if not clean_domains:
+        raise ValueError("no valid domains to check")
     blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     zapret_base = blockcheck_path.parent
     normalized_parallelism = _bounded_int(curl_parallelism, default=4, minimum=1, maximum=10)
@@ -1668,6 +1960,7 @@ def _run_multidomain_blockcheck_live(
             test="standard",
             options=options,
             curl_parallelism=normalized_parallelism,
+            domain_validation=domain_validation,
             debug_stdout=debug_stdout,
             stop_event=stop_event,
         )
@@ -1684,10 +1977,16 @@ def _run_blockcheck_command_live(
     options: DiscoveryOptions,
     curl_parallelism: int | None = None,
     candidate_id: str = "",
+    domain_validation: dict[str, Any] | None = None,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     options = options.normalized()
+    domain_validation = domain_validation or validate_domain_inputs(domains, default_to_critical=True)
+    domains = list(domain_validation["domains"])
+    if not domains:
+        raise ValueError("no valid domains to check")
+    validation_fields = _domain_validation_run_fields(domain_validation)
     _set_debug_stdout_env(env, debug_stdout)
     root = _finder_dir(state_dir)
     logs = root / "logs"
@@ -1732,6 +2031,7 @@ def _run_blockcheck_command_live(
         "test": test,
         **option_fields,
         "curl_parallelism": curl_parallelism,
+        **validation_fields,
         "attempt_plan": attempt_plan,
     }
     append_run(state_dir, started)
@@ -1776,6 +2076,10 @@ def _run_blockcheck_command_live(
         "direct_available_count": int(parsed.get("direct_available_count") or 0),
         "not_working_count": int(parsed.get("not_working_count") or 0),
         "phase": parsed.get("phase") or PHASE_COMPLETE,
+        "domain_diagnostics": parsed.get("domain_diagnostics") or [],
+        "curl_diagnostics": parsed.get("curl_diagnostics") or [],
+        "curl_diagnostics_summary": parsed.get("curl_diagnostics_summary") or {},
+        "dominant_failure": parsed.get("dominant_failure") or {},
         "summary_verified": parsed.get("summary_verified", 0),
         "summary_fallbacks": parsed.get("summary_fallbacks", 0),
         "summary_common_seen": parsed.get("summary_common_seen", 0),
@@ -1785,6 +2089,7 @@ def _run_blockcheck_command_live(
         "test": test,
         **option_fields,
         "curl_parallelism": curl_parallelism,
+        **validation_fields,
         "attempt_plan": attempt_plan,
     }
     run["progress"] = recorder.progress(run)
@@ -2410,6 +2715,76 @@ def _live_available_lines(stdout: str) -> list[str]:
     return result
 
 
+def _diagnostic_counts_from_stdout(
+    stdout: str,
+    summary_results: list[dict[str, Any] | None],
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]], list[dict[str, Any]]]:
+    status_counts: dict[str, dict[str, int]] = {}
+    code_counts: dict[str, dict[str, int]] = {}
+    diagnostics: list[dict[str, Any]] = []
+    pending: str | None = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        attempt = _live_attempt_line(line)
+        if attempt:
+            pending = attempt
+            continue
+        if (line.startswith("UNAVAILABLE") or line.startswith("FAILED")) and pending:
+            parsed = _parse_result_line(pending)
+            if parsed:
+                domain = str(parsed.get("domain") or "")
+                test = str(parsed.get("test") or "")
+                code = _curl_code_from_line(line)
+                info = curl_failure_info(code, test=test, domain=domain)
+                _increment_nested(status_counts, domain, str(info.get("status") or "curl_error"))
+                if code:
+                    _increment_nested(code_counts, domain, code)
+                if len(diagnostics) < LIVE_CANDIDATE_SAMPLE_LIMIT:
+                    diagnostics.append(
+                        {
+                            "domain": domain,
+                            "test": test,
+                            "protocol": _protocol_from_test(test),
+                            "code": code,
+                            "status": info.get("status") or "curl_error",
+                            "label": info.get("label") or "curl ошибка",
+                            "message": info.get("message") or "",
+                            "strategy_failure": _is_strategy_failure(info),
+                        }
+                    )
+            pending = None
+            continue
+        if line == "!!!!! AVAILABLE !!!!!":
+            pending = None
+    for item in summary_results:
+        if not item:
+            continue
+        domain = str(item.get("domain") or "")
+        result = str(item.get("result") or "")
+        if result == "working without bypass":
+            _increment_nested(status_counts, domain, "direct_available")
+        elif "not working" in result:
+            _increment_nested(status_counts, domain, "needs_discovery")
+    return status_counts, code_counts, diagnostics
+
+
+def _increment_nested(target: dict[str, dict[str, int]], first: str, second: str) -> None:
+    if not first or not second:
+        return
+    counts = target.setdefault(first, {})
+    counts[second] = counts.get(second, 0) + 1
+
+
+def _curl_summary(diagnostics: list[dict[str, Any]]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in diagnostics:
+        code = str(item.get("code") or "")
+        if not code:
+            continue
+        result[code] = result.get(code, 0) + 1
+    return result
+
+
 def _live_attempt_line(line: str) -> str | None:
     if not line.startswith("- "):
         return None
@@ -2421,6 +2796,89 @@ def _live_attempt_line(line: str) -> str | None:
     if result.startswith("nfqws2 ") and result != "nfqws2 not working":
         return normalized
     return None
+
+
+def _curl_code_from_line(line: str) -> str:
+    match = re.search(r"(?:code|код)\s*=\s*(\d+)", line, re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _is_strategy_failure(info: dict[str, Any]) -> bool:
+    status = str(info.get("status") or "")
+    return status not in {"invalid_domain", "dns_error", "tls_sni_problem"}
+
+
+def _domain_status_info(status: str) -> dict[str, str]:
+    mapping = {
+        "direct_available": {
+            "label": "прямой доступ",
+            "message": "домен открывается без zapret; подбор стратегии для него не нужен.",
+        },
+        "needs_discovery": {
+            "label": "нужен подбор",
+            "message": "домен не открылся напрямую и может требовать подбора стратегии.",
+        },
+    }
+    if status in mapping:
+        return mapping[status]
+    for item in _CURL_FAILURE_INFO.values():
+        if item["status"] == status:
+            return {"label": str(item["label"]), "message": str(item["message"])}
+    return {"label": status or "неизвестно", "message": ""}
+
+
+def _domain_diagnostics_from_counts(
+    domain_status_counts: dict[str, dict[str, int]],
+    domain_code_counts: dict[str, dict[str, int]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for domain, counts in sorted(domain_status_counts.items()):
+        status = _dominant_status(counts)
+        info = _domain_status_info(status)
+        codes = domain_code_counts.get(domain, {})
+        result.append(
+            {
+                "domain": domain,
+                "status": status,
+                "label": info["label"],
+                "message": info["message"],
+                "count": int(counts.get(status, 0)),
+                "total": int(sum(counts.values())),
+                "codes": dict(sorted(codes.items(), key=lambda item: (-item[1], item[0]))),
+            }
+        )
+    return result
+
+
+def _dominant_failure_from_counts(domain_status_counts: dict[str, dict[str, int]]) -> dict[str, Any]:
+    totals: dict[str, int] = {}
+    for counts in domain_status_counts.values():
+        for status, count in counts.items():
+            if status == "direct_available":
+                continue
+            totals[status] = totals.get(status, 0) + int(count)
+    if not totals:
+        return {}
+    status = _dominant_status(totals)
+    info = _domain_status_info(status)
+    return {"status": status, "label": info["label"], "message": info["message"], "count": totals[status]}
+
+
+def _dominant_status(counts: dict[str, int]) -> str:
+    priority = {
+        "invalid_domain": 90,
+        "dns_error": 80,
+        "tls_sni_problem": 70,
+        "ssl_connect_error": 60,
+        "quic_connect_error": 55,
+        "timeout": 50,
+        "needs_discovery": 40,
+        "curl_error": 30,
+        "direct_available": 10,
+    }
+    if not counts:
+        return ""
+    return sorted(counts.items(), key=lambda item: (-int(item[1]), -priority.get(item[0], 0), item[0]))[0][0]
 
 
 def _standard_script_total() -> int:
@@ -2720,12 +3178,7 @@ def _clean_domains(domains: list[str]) -> list[str]:
 
 
 def _clean_domain_list(domains: list[str]) -> list[str]:
-    result: list[str] = []
-    for domain in domains:
-        value = str(domain).strip()
-        if value and value not in result:
-            result.append(value)
-    return result
+    return list(validate_domain_inputs(list(domains), default_to_critical=False)["domains"])
 
 
 def _finder_dir(state_dir: Path) -> Path:

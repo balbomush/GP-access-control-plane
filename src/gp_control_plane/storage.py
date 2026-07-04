@@ -39,7 +39,14 @@ _RUN_PAYLOAD_DROP_KEYS = {
     "common_candidate_samples",
 }
 _RUN_PAYLOAD_STRUCTURED_LIST_KEYS = {"domains"}
+_RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS = {
+    "domain_skipped",
+    "domain_classification",
+    "domain_diagnostics",
+    "curl_diagnostics",
+}
 _RUN_PAYLOAD_MAX_SCALAR_LIST = 500
+_RUN_PAYLOAD_MAX_OBJECT_LIST = 100
 _RUN_PAYLOAD_MAX_STRING = 8192
 _LEGACY_RUNTIME_FILES = ("available.ndjson", "runs.jsonl", "candidates.json")
 
@@ -430,6 +437,11 @@ def _compact_payload_value(key: str, value: Any, *, depth: int) -> Any:
     if isinstance(value, list):
         if key in _RUN_PAYLOAD_STRUCTURED_LIST_KEYS:
             return [str(item) for item in value if str(item or "").strip()]
+        if key in _RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS:
+            return [
+                _compact_payload_value("", item, depth=depth + 1)
+                for item in value[:_RUN_PAYLOAD_MAX_OBJECT_LIST]
+            ]
         if all(item is None or isinstance(item, bool | int | float | str) for item in value):
             return [
                 _compact_payload_value("", item, depth=depth + 1)

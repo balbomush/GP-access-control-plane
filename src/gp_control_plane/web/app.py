@@ -1393,6 +1393,35 @@ tr:last-child td { border-bottom: 0; }
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
+.run-diagnostics {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  padding: 10px 14px;
+}
+.run-diagnostics summary {
+  cursor: pointer;
+  font-weight: 800;
+  list-style: none;
+}
+.run-diagnostics summary::-webkit-details-marker { display: none; }
+.run-diagnostic-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.run-diagnostic-chip {
+  max-width: 100%;
+  background: #0d1726;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  padding: 4px 9px;
+}
+.run-diagnostic-chip.warn { border-color: var(--warn); color: var(--warn); }
+.run-diagnostic-chip.bad { border-color: var(--danger); color: var(--danger); }
+.run-diagnostic-note { margin-top: 8px; }
 code {
   display: block;
   max-width: 100%;
@@ -3135,9 +3164,11 @@ function renderRunCard(row){
       </div>
       ${runField('Попытки', runProgressText(row))}
       ${runField('Настройки', runSettingsText(row))}
+      ${runField('Диагностика', runDiagnosticsSummary(row))}
       ${runField('Итог', runSummary(row))}
     </div>
     ${runDomains(row, domainKey)}
+    ${runDiagnostics(row)}
     <div class="run-card-actions">
       <button class="secondary" data-run-repeat="${esc(domainKey)}" type="button">Повторить с этими настройками</button>
     </div>
@@ -3204,6 +3235,36 @@ function runDomains(row, domainKey){
 function runDomainChips(domains){
   if (!domains.length) return '<span class="run-domain-chip">-</span>';
   return domains.map((domain) => `<span class="run-domain-chip">${esc(domain)}</span>`).join('');
+}
+function runDiagnosticsSummary(row){
+  const skipped = Number(row.domain_skipped_count || 0);
+  const dominant = row.dominant_failure || {};
+  if (dominant.label) return `${dominant.label}: ${dominant.count || 0}`;
+  if (skipped) return `пропущено строк: ${skipped}`;
+  const diagnostics = Array.isArray(row.domain_diagnostics) ? row.domain_diagnostics : [];
+  if (diagnostics.length) return diagnostics.map((item) => item.label || item.status).filter(Boolean).slice(0, 2).join(', ');
+  return '-';
+}
+function runDiagnostics(row){
+  const skipped = Array.isArray(row.domain_skipped) ? row.domain_skipped : [];
+  const diagnostics = Array.isArray(row.domain_diagnostics) ? row.domain_diagnostics : [];
+  const curlSummary = row.curl_diagnostics_summary || {};
+  if (!skipped.length && !diagnostics.length && !Object.keys(curlSummary).length) return '';
+  const skippedItems = skipped.slice(0, 20).map((item) => diagnosticChip(`${item.raw || '-'}: ${item.label || item.status || '-'}`, 'bad')).join('');
+  const domainItems = diagnostics.slice(0, 30).map((item) => {
+    const codes = item.codes && Object.keys(item.codes).length ? `, curl ${Object.keys(item.codes).join('/')}` : '';
+    const tone = ['dns_error', 'invalid_domain', 'tls_sni_problem'].includes(item.status) ? 'bad' : 'warn';
+    return diagnosticChip(`${item.domain || '-'}: ${item.label || item.status || '-'}${codes}`, tone);
+  }).join('');
+  const codeItems = Object.entries(curlSummary).map(([code, count]) => diagnosticChip(`curl code=${code}: ${count}`, 'warn')).join('');
+  return `<details class="run-diagnostics">
+    <summary>Диагностика доменов</summary>
+    <div class="run-diagnostic-list">${skippedItems}${domainItems}${codeItems}</div>
+    <div class="run-diagnostic-note">Коды curl показывают причину провала проверки: DNS, timeout, TLS/SNI, QUIC/connect или некорректную строку.</div>
+  </details>`;
+}
+function diagnosticChip(text, tone){
+  return `<span class="run-diagnostic-chip ${esc(tone || '')}">${esc(text)}</span>`;
 }
 function isDiscoveryRun(row){
   return row.kind === 'standard-discovery' || row.kind === 'multi-domain-discovery';
