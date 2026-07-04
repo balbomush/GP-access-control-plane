@@ -245,8 +245,8 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             upsert_candidates(state_dir, parsed, {"id": "run1"})
             status = storage_status(state_dir)
 
-            self.assertEqual(status["schema_version"], "6")
-            self.assertEqual(status["expected_schema_version"], "6")
+            self.assertEqual(status["schema_version"], "7")
+            self.assertEqual(status["expected_schema_version"], "7")
             self.assertEqual(status["integrity_check"], "ok")
             self.assertGreater(status["db_size_bytes"], 0)
             self.assertEqual(status["tables"]["domains"], 1)
@@ -997,6 +997,29 @@ pktws_check_https_tls12()
         self.assertEqual(progress["eta_configured_parallelism"], 4)
         self.assertEqual(progress["eta_parallelism"], 1)
         self.assertEqual(progress["eta_seconds"], 40)
+
+    def test_progress_elapsed_uses_started_at(self) -> None:
+        progress = _progress_from_counts(
+            run={
+                "id": "finished-run",
+                "kind": "multi-domain-discovery",
+                "status": "success",
+                "started_at": "2026-06-20T00:00:00Z",
+                "timestamp": "2999-01-01T00:00:00Z",
+                "attempt_plan": {
+                    "total": 1,
+                    "scripts": {"standard/10-test.sh": 1},
+                    "script_order": ["standard/10-test.sh"],
+                    "source": "test",
+                },
+            },
+            attempted=1,
+            attempts_by_script={"standard/10-test.sh": 1},
+            successful=1,
+            current_script="standard/10-test.sh",
+        )
+
+        self.assertGreater(progress["elapsed_seconds"], 0)
 
     def test_average_attempt_ms_winsorizes_large_live_outliers(self) -> None:
         timestamps = [0.0]

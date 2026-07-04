@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import sqlite3
 import sys
 import tempfile
@@ -11,9 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.storage import (
     SCHEMA_MIGRATIONS,
+    append_run,
     connect,
     delete_custom_preset,
     db_path,
+    get_meta,
+    read_run_payloads,
     read_custom_preset_index,
     read_custom_presets,
     read_preset_domains_page,
@@ -63,6 +67,109 @@ class StorageTests(unittest.TestCase):
             self.assertEqual([(int(row["version"]), str(row["name"])) for row in rows], list(SCHEMA_MIGRATIONS))
             status = storage_status(state_dir)
             self.assertEqual([item["version"] for item in status["migrations"]], [item[0] for item in SCHEMA_MIGRATIONS])
+
+    def test_append_run_stores_compact_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            heavy_run = {
+                "id": "run-heavy",
+                "kind": "multi-domain-discovery",
+                "status": "success",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "started_at": "2026-07-01T00:00:00Z",
+                "completed_at": "2026-07-01T00:01:00Z",
+                "domains": ["youtube.com"],
+                "candidate_count": 1,
+                "progress": {"elapsed_seconds": 60},
+                "candidates": [{"protocol": "tls", "args": "--heavy"}],
+                "summary": {"items": ["x"] * 1000},
+            }
+
+            append_run(state_dir, heavy_run)
+
+            with connect(state_dir) as conn:
+                raw = str(conn.execute("SELECT payload_json FROM runs").fetchone()["payload_json"])
+            stored = json.loads(raw)
+            read_back = read_run_payloads(state_dir, limit=10)[0]
+
+            self.assertEqual(stored["id"], "run-heavy")
+            self.assertEqual(stored["candidate_count"], 1)
+            self.assertEqual(stored["progress"]["elapsed_seconds"], 60)
+            self.assertNotIn("candidates", stored)
+            self.assertNotIn("summary", stored)
+            self.assertNotIn("candidates", read_back)
+
+    def test_migration_compacts_runtime_payloads_and_legacy_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            path = db_path(state_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO meta(key, value) VALUES('schema_version', '6');
+                    CREATE TABLE runs (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id TEXT NOT NULL,
+                        kind TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT '',
+                        timestamp TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL
+                    );
+                    """
+                )
+                heavy_run = {
+                    "id": "old-run",
+                    "kind": "multi-domain-discovery",
+                    "status": "success",
+                    "timestamp": "2026-07-01T00:00:00Z",
+                    "domains": ["youtube.com"],
+                    "candidate_count": 2,
+                    "candidates": [{"args": "--a"}, {"args": "--b"}],
+                    "common_candidates": [{"args": "--a"}],
+                    "summary": {"items": list(range(100))},
+                }
+                conn.execute(
+                    "INSERT INTO runs(id, kind, status, timestamp, payload_json) VALUES(?, ?, ?, ?, ?)",
+                    (
+                        "old-run",
+                        "multi-domain-discovery",
+                        "success",
+                        "2026-07-01T00:00:00Z",
+                        json.dumps(heavy_run, separators=(",", ":")),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            for name in ("available.ndjson", "runs.jsonl", "candidates.json"):
+                (state_dir / "strategy-finder" / name).write_text("legacy\n", encoding="utf-8")
+            (state_dir / "strategy-finder" / "jobs.jsonl").write_text(
+                json.dumps({"id": "job", "result": heavy_run}, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+
+            with connect(state_dir) as conn:
+                raw = str(conn.execute("SELECT payload_json FROM runs WHERE id = 'old-run'").fetchone()["payload_json"])
+                self.assertEqual(get_meta(conn, "schema_version"), "7")
+                self.assertEqual(get_meta(conn, "run_payloads_compacted_v7"), "1")
+
+            stored = json.loads(raw)
+            job = json.loads((state_dir / "strategy-finder" / "jobs.jsonl").read_text(encoding="utf-8"))
+
+            self.assertEqual(stored["candidate_count"], 2)
+            self.assertNotIn("candidates", stored)
+            self.assertNotIn("common_candidates", stored)
+            self.assertNotIn("summary", stored)
+            self.assertNotIn("candidates", job["result"])
+            self.assertFalse((state_dir / "strategy-finder" / "available.ndjson").exists())
+            self.assertFalse((state_dir / "strategy-finder" / "runs.jsonl").exists())
+            self.assertFalse((state_dir / "strategy-finder" / "candidates.json").exists())
 
     def test_new_schema_does_not_create_legacy_candidate_tables(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

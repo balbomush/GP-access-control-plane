@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .state import append_jsonl, now_iso, read_state, write_state
+from .storage import compact_run_payload
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,11 @@ class JobRunner:
             "status": status,
             "timestamp": timestamp,
         }
-        payload.update(extra)
+        for key, value in extra.items():
+            if key == "result" and isinstance(value, dict):
+                payload[key] = compact_run_payload(value)
+            else:
+                payload[key] = value
         append_jsonl(self.state_dir / "jobs.jsonl", payload)
 
     def _set_current_job(self, job_id: str, name: str, status: str) -> None:

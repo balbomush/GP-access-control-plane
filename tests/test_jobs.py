@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -98,6 +99,31 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "stopping")
             state = _wait_for_idle_state(state_dir)
             self.assertEqual(state["last_job_status"], "stopped")
+
+    def test_job_result_is_compacted_in_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+
+            def heavy_job(_stop: threading.Event) -> dict[str, object]:
+                return {
+                    "id": "run-heavy",
+                    "status": "success",
+                    "timestamp": "2026-07-01T00:00:00Z",
+                    "candidate_count": 2,
+                    "candidates": [{"args": "--a"}, {"args": "--b"}],
+                    "summary": {"items": list(range(100))},
+                }
+
+            runner.start("heavy", heavy_job)
+            state = _wait_for_idle_state(state_dir)
+            lines = (state_dir / "jobs.jsonl").read_text(encoding="utf-8").splitlines()
+            success = [json.loads(line) for line in lines if json.loads(line).get("status") == "success"][0]
+
+            self.assertEqual(state["last_job_status"], "success")
+            self.assertEqual(success["result"]["candidate_count"], 2)
+            self.assertNotIn("candidates", success["result"])
+            self.assertNotIn("summary", success["result"])
 
 
 def _wait_for_idle_state(state_dir: Path) -> dict[str, object]:

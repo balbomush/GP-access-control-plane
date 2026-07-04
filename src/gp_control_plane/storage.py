@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
@@ -16,9 +16,31 @@ SCHEMA_MIGRATIONS = (
     (4, "runtime_observability"),
     (5, "remove_legacy_candidate_storage"),
     (6, "preset_domain_state"),
+    (7, "compact_runtime_payloads"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
+_OMITTED = object()
+_RUN_PAYLOAD_DROP_KEYS = {
+    "summary",
+    "common",
+    "live_summary",
+    "results",
+    "common_results",
+    "direct_available",
+    "not_working",
+    "candidates",
+    "common_candidates",
+    "attempts",
+    "attempt_results",
+    "candidate_events",
+    "candidate_samples",
+    "common_candidate_samples",
+}
+_RUN_PAYLOAD_STRUCTURED_LIST_KEYS = {"domains"}
+_RUN_PAYLOAD_MAX_SCALAR_LIST = 500
+_RUN_PAYLOAD_MAX_STRING = 8192
+_LEGACY_RUNTIME_FILES = ("available.ndjson", "runs.jsonl", "candidates.json")
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -46,6 +68,8 @@ def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Conne
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             _migrate_schema(conn)
+            _cleanup_runtime_state(conn, path.parent)
+            _run_deferred_vacuum(conn)
             _MIGRATED_DB_PATHS.add(migration_key)
             return conn
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -261,6 +285,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if strategy_results_changed or current_schema_version != str(SCHEMA_VERSION):
         _recreate_stats_views(conn)
     _drop_legacy_storage(conn)
+    _compact_run_payloads(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -387,6 +412,153 @@ def _drop_legacy_storage(conn: sqlite3.Connection) -> None:
     set_meta(conn, "legacy_storage_removed", "1")
 
 
+def compact_run_payload(run: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in run.items():
+        cleaned = _compact_payload_value(str(key), value, depth=0)
+        if cleaned is not _OMITTED:
+            compact[str(key)] = cleaned
+    return compact
+
+
+def _compact_payload_value(key: str, value: Any, *, depth: int) -> Any:
+    if key in _RUN_PAYLOAD_DROP_KEYS:
+        return _OMITTED
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        if len(value) <= _RUN_PAYLOAD_MAX_STRING:
+            return value
+        return value[:_RUN_PAYLOAD_MAX_STRING] + "...[truncated]"
+    if isinstance(value, list):
+        if key in _RUN_PAYLOAD_STRUCTURED_LIST_KEYS:
+            return [str(item) for item in value if str(item or "").strip()]
+        if all(item is None or isinstance(item, bool | int | float | str) for item in value):
+            return [
+                _compact_payload_value("", item, depth=depth + 1)
+                for item in value[:_RUN_PAYLOAD_MAX_SCALAR_LIST]
+            ]
+        return {"omitted_count": len(value), "omitted_reason": "large structured list"}
+    if isinstance(value, dict):
+        if depth >= 5:
+            return {"omitted_reason": "nested object too deep"}
+        compact: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            cleaned = _compact_payload_value(str(child_key), child_value, depth=depth + 1)
+            if cleaned is not _OMITTED:
+                compact[str(child_key)] = cleaned
+        return compact
+    return str(value)
+
+
+def _compact_run_payloads(conn: sqlite3.Connection) -> None:
+    if get_meta(conn, "run_payloads_compacted_v7") == "1":
+        return
+    seqs = [int(row["seq"]) for row in conn.execute("SELECT seq FROM runs ORDER BY seq").fetchall()]
+    changed = 0
+    original_bytes = 0
+    compact_bytes = 0
+    for seq in seqs:
+        row = conn.execute("SELECT payload_json FROM runs WHERE seq = ?", (seq,)).fetchone()
+        if not row:
+            continue
+        raw = str(row["payload_json"] or "")
+        original_bytes += len(raw.encode("utf-8"))
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            compact_bytes += len(raw.encode("utf-8"))
+            continue
+        if not isinstance(data, dict):
+            compact_bytes += len(raw.encode("utf-8"))
+            continue
+        compact = compact_run_payload(data)
+        payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        compact_bytes += len(payload.encode("utf-8"))
+        if payload != raw:
+            conn.execute("UPDATE runs SET payload_json = ? WHERE seq = ?", (payload, seq))
+            changed += 1
+    set_meta(conn, "run_payloads_compacted_v7", "1")
+    set_meta(conn, "run_payloads_compacted_count", str(changed))
+    set_meta(conn, "run_payloads_original_bytes", str(original_bytes))
+    set_meta(conn, "run_payloads_compact_bytes", str(compact_bytes))
+    if changed:
+        set_meta(conn, "needs_vacuum", "1")
+
+
+def _cleanup_runtime_state(conn: sqlite3.Connection, root: Path) -> None:
+    if get_meta(conn, "runtime_state_cleaned_v7") == "1":
+        return
+    has_runtime_data = _table_count(conn, "runs") > 0 or _table_count(conn, "strategies") > 0
+    if has_runtime_data:
+        for name in _LEGACY_RUNTIME_FILES:
+            try:
+                (root / name).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+    if _compact_jobs_jsonl(root / "jobs.jsonl"):
+        set_meta(conn, "needs_vacuum", "1")
+    set_meta(conn, "runtime_state_cleaned_v7", "1")
+
+
+def _compact_jobs_jsonl(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    changed = False
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as source, tmp.open("w", encoding="utf-8") as target:
+            for line in source:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    target.write(line if line.endswith("\n") else line + "\n")
+                    continue
+                if isinstance(payload, dict):
+                    compact = _compact_job_record(payload)
+                    changed = changed or compact != payload
+                    target.write(json.dumps(compact, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+                else:
+                    target.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        if changed:
+            tmp.replace(path)
+        else:
+            tmp.unlink(missing_ok=True)
+        return changed
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
+def _compact_job_record(payload: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(payload)
+    result = compact.get("result")
+    if isinstance(result, dict):
+        compact["result"] = compact_run_payload(result)
+    return compact
+
+
+def _run_deferred_vacuum(conn: sqlite3.Connection) -> None:
+    if get_meta(conn, "needs_vacuum") != "1":
+        return
+    conn.commit()
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+    except sqlite3.Error:
+        return
+    set_meta(conn, "needs_vacuum", "0")
+    conn.commit()
+
+
 def _args_hash(args: str) -> str:
     return hashlib.sha256(str(args or "").encode("utf-8")).hexdigest()
 
@@ -497,6 +669,7 @@ def _save_domain_preset_conn(
 
 
 def append_run(state_dir: Path, run: dict[str, Any]) -> None:
+    payload = compact_run_payload(run)
     with connect(state_dir) as conn:
         conn.execute(
             """
@@ -508,7 +681,7 @@ def append_run(state_dir: Path, run: dict[str, Any]) -> None:
                 str(run.get("kind") or ""),
                 str(run.get("status") or ""),
                 str(run.get("timestamp") or ""),
-                json.dumps(run, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
             ),
         )
 
@@ -527,7 +700,7 @@ def read_run_payloads(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(data, dict):
-            result.append(data)
+            result.append(compact_run_payload(data))
     return result
 
 

@@ -576,6 +576,8 @@ def close_stale_running_runs(state_dir: Path) -> int:
             "candidate_id": run.get("candidate_id", ""),
             "status": "stopped",
             "timestamp": run.get("timestamp") or now_iso(),
+            "started_at": run.get("started_at") or run.get("timestamp") or "",
+            "completed_at": now_iso(),
             "domains": run.get("domains") or [],
             "returncode": run.get("returncode"),
             "stdout_log": run.get("stdout_log", ""),
@@ -1526,12 +1528,14 @@ def _run_blockcheck_live(
         enable_ipv6=options.enable_ipv6,
     )
     option_fields = options.to_run_fields()
+    started_at = now_iso()
     started = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
         "status": "running",
-        "timestamp": now_iso(),
+        "timestamp": started_at,
+        "started_at": started_at,
         "domains": clean_domains,
         "returncode": None,
         "stdout_log": str(stdout_log),
@@ -1562,12 +1566,15 @@ def _run_blockcheck_live(
         recorder=recorder,
     )
     parsed = recorder.parsed()
+    completed_at = now_iso()
     run = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
         "status": process_result["status"],
-        "timestamp": now_iso(),
+        "timestamp": started_at,
+        "started_at": started_at,
+        "completed_at": completed_at,
         "domains": clean_domains,
         "returncode": process_result["returncode"],
         "stdout_log": str(stdout_log),
@@ -1691,12 +1698,14 @@ def _run_blockcheck_command_live(
         enable_ipv6=options.enable_ipv6,
     )
     option_fields = options.to_run_fields()
+    started_at = now_iso()
     started = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
         "status": "running",
-        "timestamp": now_iso(),
+        "timestamp": started_at,
+        "started_at": started_at,
         "domains": domains,
         "returncode": None,
         "stdout_log": str(stdout_log),
@@ -1728,12 +1737,15 @@ def _run_blockcheck_command_live(
         recorder=recorder,
     )
     parsed = recorder.parsed()
+    completed_at = now_iso()
     run = {
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
         "status": process_result["status"],
-        "timestamp": now_iso(),
+        "timestamp": started_at,
+        "started_at": started_at,
+        "completed_at": completed_at,
         "domains": domains,
         "returncode": process_result["returncode"],
         "stdout_log": str(stdout_log),
@@ -1859,7 +1871,7 @@ def _progress_from_counts(
             percent = min(99.9, (attempted / effective_attempt_total) * 100.0)
     else:
         percent = (script_index / script_total * 100.0) if script_total else None
-    elapsed = _elapsed_seconds(run.get("timestamp"))
+    elapsed = _elapsed_seconds(run.get("started_at") or run.get("timestamp"))
     eta_parallelism = _eta_parallelism_for_run(run)
     eta_configured_parallelism = eta_parallelism
     estimate_ms_per_attempt = _eta_ms_per_attempt_for_run(run)
