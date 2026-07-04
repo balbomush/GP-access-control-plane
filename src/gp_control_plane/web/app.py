@@ -527,8 +527,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   align-items: start;
 }
 .finder-layout {
-  grid-template-columns: minmax(0, 520px);
-  max-width: 560px;
+  grid-template-columns: minmax(0, 1fr);
 }
 .stack { display: grid; gap: 16px; min-width: 0; }
 .panel {

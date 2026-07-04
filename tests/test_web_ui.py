@@ -242,6 +242,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("title=\"Запускает штатный blockcheck2", html)
         self.assertIn("title=\"Экспериментальный режим", html)
         self.assertIn("grid-template-columns: minmax(0, 460px) minmax(0, 1fr)", html)
+        self.assertIn("grid-template-columns: minmax(0, 1fr)", html)
+        self.assertNotIn(".finder-layout {\n  grid-template-columns: minmax(0, 520px);\n  max-width: 560px;\n}", html)
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))", html)
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(150px, 1fr))", html)
         self.assertIn("class=\"button-row run-actions\"", html)
