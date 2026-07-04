@@ -153,6 +153,10 @@ class StorageTests(unittest.TestCase):
                 json.dumps({"id": "job", "result": heavy_run}, separators=(",", ":")) + "\n",
                 encoding="utf-8",
             )
+            (state_dir / "jobs.jsonl").write_text(
+                json.dumps({"id": "root-job", "result": heavy_run}, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
 
             with connect(state_dir) as conn:
                 raw = str(conn.execute("SELECT payload_json FROM runs WHERE id = 'old-run'").fetchone()["payload_json"])
@@ -161,12 +165,14 @@ class StorageTests(unittest.TestCase):
 
             stored = json.loads(raw)
             job = json.loads((state_dir / "strategy-finder" / "jobs.jsonl").read_text(encoding="utf-8"))
+            root_job = json.loads((state_dir / "jobs.jsonl").read_text(encoding="utf-8"))
 
             self.assertEqual(stored["candidate_count"], 2)
             self.assertNotIn("candidates", stored)
             self.assertNotIn("common_candidates", stored)
             self.assertNotIn("summary", stored)
             self.assertNotIn("candidates", job["result"])
+            self.assertNotIn("candidates", root_job["result"])
             self.assertFalse((state_dir / "strategy-finder" / "available.ndjson").exists())
             self.assertFalse((state_dir / "strategy-finder" / "runs.jsonl").exists())
             self.assertFalse((state_dir / "strategy-finder" / "candidates.json").exists())

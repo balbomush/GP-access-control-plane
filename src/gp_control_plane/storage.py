@@ -487,20 +487,22 @@ def _compact_run_payloads(conn: sqlite3.Connection) -> None:
 
 
 def _cleanup_runtime_state(conn: sqlite3.Connection, root: Path) -> None:
-    if get_meta(conn, "runtime_state_cleaned_v7") == "1":
+    if get_meta(conn, "runtime_state_cleaned_v7") != "1":
+        has_runtime_data = _table_count(conn, "runs") > 0 or _table_count(conn, "strategies") > 0
+        if has_runtime_data:
+            for name in _LEGACY_RUNTIME_FILES:
+                try:
+                    (root / name).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+        set_meta(conn, "runtime_state_cleaned_v7", "1")
+    if get_meta(conn, "jobs_jsonl_compacted_v7") == "1":
         return
-    has_runtime_data = _table_count(conn, "runs") > 0 or _table_count(conn, "strategies") > 0
-    if has_runtime_data:
-        for name in _LEGACY_RUNTIME_FILES:
-            try:
-                (root / name).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                continue
-    if _compact_jobs_jsonl(root / "jobs.jsonl"):
-        set_meta(conn, "needs_vacuum", "1")
-    set_meta(conn, "runtime_state_cleaned_v7", "1")
+    for path in dict.fromkeys((root / "jobs.jsonl", root.parent / "jobs.jsonl")):
+        _compact_jobs_jsonl(path)
+    set_meta(conn, "jobs_jsonl_compacted_v7", "1")
 
 
 def _compact_jobs_jsonl(path: Path) -> bool:
