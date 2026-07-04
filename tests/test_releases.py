@@ -84,6 +84,22 @@ dddd refs/tags/v0.4.0-alpha.2
         self.assertEqual(info["available_version"], "v0.4.0-alpha.2")
         self.assertTrue(info["update_available"])
 
+    def test_release_channel_info_updates_between_alpha_tags(self) -> None:
+        tags = """
+aaaa refs/tags/v0.3.2-alpha.1
+bbbb refs/tags/v0.3.2-alpha.2
+"""
+
+        info = release_channel_info(
+            current_version="0.3.2-alpha.1",
+            channel="prerelease",
+            fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+            tag_fetcher=lambda: tags,
+        )
+
+        self.assertEqual(info["available_version"], "v0.3.2-alpha.2")
+        self.assertTrue(info["update_available"])
+
     def test_parse_github_releases_skips_drafts(self) -> None:
         payload = """
 [

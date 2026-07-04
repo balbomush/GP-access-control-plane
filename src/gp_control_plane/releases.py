@@ -11,7 +11,7 @@ REPO_URL = "https://github.com/balbomush/GP-access-control-plane.git"
 RELEASES_API_URL = "https://api.github.com/repos/balbomush/GP-access-control-plane/releases"
 RELEASES_PAGE_URL = "https://github.com/balbomush/GP-access-control-plane/releases"
 LATEST_RELEASE_URL = "https://github.com/balbomush/GP-access-control-plane/releases/latest"
-_VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+_VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([A-Za-z0-9.-]+))?")
 
 
 def release_channel_info(
@@ -41,7 +41,7 @@ def release_channel_info(
             "url": release_url,
             "checked": True,
             "source": "github",
-            "update_available": _version_tuple(available_version) > _version_tuple(current_version),
+            "update_available": _version_key(available_version) > _version_key(current_version),
             "error": "",
         }
     except Exception as api_exc:  # noqa: BLE001
@@ -61,7 +61,7 @@ def release_channel_info(
                 "url": f"{RELEASES_PAGE_URL}/tag/{selected_tag}",
                 "checked": True,
                 "source": "git-tags",
-                "update_available": _version_tuple(selected_tag) > _version_tuple(current_version),
+                "update_available": _version_key(selected_tag) > _version_key(current_version),
                 "error": str(api_exc),
             }
         except Exception as tag_exc:  # noqa: BLE001
@@ -157,8 +157,8 @@ def _is_prerelease_tag(tag: str) -> bool:
     return "-" in str(tag or "").strip()
 
 
-def _tag_sort_key(tag: str) -> tuple[tuple[int, int, int], str]:
-    return (_version_tuple(tag), str(tag or ""))
+def _tag_sort_key(tag: str) -> tuple[VersionKey, str]:
+    return (_version_key(tag), str(tag or ""))
 
 
 def _release_assets(release: dict[str, Any]) -> list[dict[str, str]]:
@@ -177,8 +177,35 @@ def _release_assets(release: dict[str, Any]) -> list[dict[str, str]]:
     return result
 
 
+VersionKey = tuple[tuple[int, int, int], int, tuple[tuple[int, int | str], ...]]
+
+
 def _version_tuple(value: str) -> tuple[int, int, int]:
     match = _VERSION_RE.match(str(value or "").strip())
     if not match:
         return (0, 0, 0)
-    return tuple(int(part or 0) for part in match.groups())
+    return tuple(int(part or 0) for part in match.groups()[:3])
+
+
+def _version_key(value: str) -> VersionKey:
+    match = _VERSION_RE.match(str(value or "").strip())
+    if not match:
+        return ((0, 0, 0), -1, ())
+    numeric = tuple(int(part or 0) for part in match.groups()[:3])
+    suffix = str(match.group(4) or "")
+    if not suffix:
+        return (numeric, 1, ())
+    return (numeric, 0, _prerelease_key(suffix))
+
+
+def _prerelease_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    parts: list[tuple[int, int | str]] = []
+    for raw_part in re.split(r"[.-]+", value):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part.lower()))
+    return tuple(parts)
