@@ -102,11 +102,12 @@ def preview_v2fly_preset(
     scope: str,
     name: str,
     categories: list[str],
+    domains: list[str] | None = None,
     fetcher: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     clean_scope = _clean_scope(scope)
     clean_name = _clean_name(name)
-    collected = collect_v2fly_domains(categories, fetcher=fetcher)
+    collected = _manual_v2fly_domains(categories, domains) if domains else collect_v2fly_domains(categories, fetcher=fetcher)
     existing = read_custom_presets(state_dir).get(clean_scope, {}).get(clean_name, [])
     existing_set = set(existing)
     incoming_set = set(collected["domains"])
@@ -116,6 +117,7 @@ def preview_v2fly_preset(
         "coverage_note": _COVERAGE_NOTE,
         "categories": collected["categories"],
         "sources": collected["sources"],
+        "skipped": collected.get("skipped", {}),
         "domains": collected["domains"],
         "count": len(collected["domains"]),
         "existing_count": len(existing),
@@ -131,9 +133,17 @@ def import_v2fly_preset(
     scope: str,
     name: str,
     categories: list[str],
+    domains: list[str] | None = None,
     fetcher: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
-    preview = preview_v2fly_preset(state_dir, scope=scope, name=name, categories=categories, fetcher=fetcher)
+    preview = preview_v2fly_preset(
+        state_dir,
+        scope=scope,
+        name=name,
+        categories=categories,
+        domains=domains,
+        fetcher=fetcher,
+    )
     source = {
         "type": "v2fly/domain-list-community",
         "base_url": V2FLY_BASE_URL,
@@ -162,22 +172,39 @@ def collect_v2fly_domains(
     fetch = fetcher or fetch_v2fly_category
     domains: list[str] = []
     seen: set[str] = set()
+    seen_categories: set[str] = set()
     sources: list[dict[str, Any]] = []
-    for category in clean_categories:
+    skipped = {"include": 0, "keyword": 0, "regexp": 0, "geosite": 0, "invalid": 0}
+
+    def visit(category: str, depth: int) -> None:
+        if category in seen_categories:
+            return
+        if depth > 8:
+            skipped["include"] += 1
+            return
+        seen_categories.add(category)
         text = fetch(category)
-        parsed = parse_v2fly_domains(text)
-        for domain in parsed:
+        parsed = parse_v2fly_rules(text)
+        for domain in parsed["domains"]:
             if domain not in seen:
                 seen.add(domain)
                 domains.append(domain)
+        for key, value in parsed["skipped"].items():
+            skipped[key] = skipped.get(key, 0) + int(value)
         sources.append(
             {
                 "category": category,
                 "url": f"{V2FLY_BASE_URL}/{category}",
-                "domains": len(parsed),
+                "domains": len(parsed["domains"]),
+                "includes": len(parsed["includes"]),
             }
         )
-    return {"categories": clean_categories, "domains": domains, "sources": sources}
+        for included in parsed["includes"]:
+            visit(included, depth + 1)
+
+    for category in clean_categories:
+        visit(category, 0)
+    return {"categories": sorted(seen_categories), "domains": domains, "sources": sources, "skipped": skipped}
 
 
 def fetch_v2fly_category(category: str) -> str:
@@ -187,14 +214,65 @@ def fetch_v2fly_category(category: str) -> str:
 
 
 def parse_v2fly_domains(text: str) -> list[str]:
+    return parse_v2fly_rules(text)["domains"]
+
+
+def parse_v2fly_rules(text: str) -> dict[str, Any]:
     result: list[str] = []
+    includes: list[str] = []
+    skipped = {"include": 0, "keyword": 0, "regexp": 0, "geosite": 0, "invalid": 0}
     seen: set[str] = set()
     for raw_line in str(text or "").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        lowered = line.lower()
+        if lowered.startswith("include:"):
+            try:
+                category = _clean_category(line.split(":", 1)[1])
+            except ValueError:
+                skipped["include"] += 1
+                continue
+            if category not in includes:
+                includes.append(category)
+            continue
+        if lowered.startswith("keyword:"):
+            skipped["keyword"] += 1
+            continue
+        if lowered.startswith("regexp:"):
+            skipped["regexp"] += 1
+            continue
+        if lowered.startswith("geosite:"):
+            skipped["geosite"] += 1
+            continue
         domain = _domain_from_v2fly_line(raw_line)
         if domain and domain not in seen:
             seen.add(domain)
             result.append(domain)
-    return result
+        elif line and "." in line and not domain:
+            skipped["invalid"] += 1
+    return {"domains": result, "includes": includes, "skipped": skipped}
+
+
+def _manual_v2fly_domains(categories: list[str], domains: list[str] | None) -> dict[str, Any]:
+    clean_categories = _clean_categories(categories)
+    clean_domains: list[str] = []
+    seen: set[str] = set()
+    skipped = {"include": 0, "keyword": 0, "regexp": 0, "geosite": 0, "invalid": 0}
+    for raw_domain in domains or []:
+        domain = normalize_domain(raw_domain)
+        if not domain:
+            skipped["invalid"] += 1
+            continue
+        if domain not in seen:
+            seen.add(domain)
+            clean_domains.append(domain)
+    if not clean_domains:
+        raise ValueError("preset must contain at least one domain")
+    return {
+        "categories": clean_categories,
+        "domains": clean_domains,
+        "sources": [{"category": "edited-list", "url": "web-ui", "domains": len(clean_domains), "includes": 0}],
+        "skipped": skipped,
+    }
 
 
 def normalize_domain(value: str) -> str:

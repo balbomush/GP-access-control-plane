@@ -65,11 +65,17 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/releases/update", html)
         self.assertIn("releaseUpdate", html)
         self.assertIn("Alpha-обновление поставлено в очередь", html)
-        self.assertIn("Обновить alpha", html)
+        self.assertIn("Установить выбранное обновление", html)
         self.assertIn("debug_stdout", html)
         self.assertIn("/api/settings", html)
         self.assertIn("/api/discovery-profiles", html)
         self.assertIn("discovery-profile-select", html)
+        self.assertIn("settings-preset-select", html)
+        self.assertIn("settings-default-settings-preset", html)
+        self.assertIn("SETTINGS_PRESETS", html)
+        self.assertIn("setSettingsPreset", html)
+        self.assertIn("run-selected-discovery", html)
+        self.assertIn("Все домены на одной стратегии", html)
         self.assertIn("useDiscoveryProfile", html)
         self.assertNotIn("discovery-profile-name", html)
         self.assertNotIn("saveDiscoveryProfile", html)
@@ -80,6 +86,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/domain-sources/v2fly/import", html)
         self.assertIn("v2fly-category-search", html)
         self.assertIn("v2fly-category-list", html)
+        self.assertIn("v2fly-domains", html)
+        self.assertIn("suggestV2flyPresetName", html)
         self.assertIn("data-action=\"v2fly-load-categories\"", html)
         self.assertIn("v2fly-preset-name", html)
         self.assertIn("v2fly-categories", html)
@@ -210,7 +218,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("eta_estimate_ms_per_attempt", html)
         self.assertIn("runCandidateCount(row)", html)
         self.assertIn("runProgressText(row)", html)
-        self.assertIn("data-action=\"multi-domain-discovery\"", html)
+        self.assertIn("data-action=\"run-selected-discovery\"", html)
+        self.assertNotIn("data-action=\"multi-domain-discovery\"", html)
+        self.assertNotIn("data-action=\"standard-discovery\"", html)
         self.assertIn("/api/jobs/zapret-multi-domain-discovery", html)
         self.assertIn("curl-parallelism", html)
         self.assertIn("max=\"10\"", html)
@@ -235,12 +245,12 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("repeat_parallel", html)
         self.assertIn("skip_dnscheck", html)
         self.assertIn("skip_ipblock", html)
-        self.assertIn("Остальные настройки blockcheck2 ниже также применяются", html)
+        self.assertIn("Пресет настроек", html)
         self.assertIn("limit-time-enabled", html)
         self.assertIn("time-limit-field", html)
         self.assertIn("timeoutSecondsOrNull", html)
-        self.assertIn("title=\"Запускает штатный blockcheck2", html)
-        self.assertIn("title=\"Экспериментальный режим", html)
+        self.assertIn("data-tooltip=\"Запускает штатный blockcheck2", html)
+        self.assertIn("data-tooltip=\"Одна стратегия запускается один раз", html)
         self.assertIn("grid-template-columns: minmax(0, 460px) minmax(0, 1fr)", html)
         self.assertIn("grid-template-columns: minmax(0, 1fr)", html)
         self.assertNotIn(".finder-layout {\n  grid-template-columns: minmax(0, 520px);\n  max-width: 560px;\n}", html)
@@ -475,7 +485,7 @@ class WebUiTests(unittest.TestCase):
                     "settings": {
                         "enable_ipv6": True,
                         "debug_stdout": True,
-                        "curl_parallelism_default": 6,
+                        "settings_preset_default": "accelerated",
                         "curl_parallelism_max": 8,
                     }
                 }
@@ -488,7 +498,8 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('"enable_ipv6":true', saved)
             self.assertIn('"debug_stdout":true', saved)
-            self.assertIn('"curl_parallelism_default":6', saved)
+            self.assertIn('"settings_preset_default":"accelerated"', saved)
+            self.assertIn('"curl_parallelism_default":8', saved)
 
     def test_preset_domain_endpoints_page_and_toggle_domains(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -538,7 +549,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"enabled":false', toggled)
             self.assertNotIn('"discord.com","discordcdn.com"', toggled)
 
-    def test_discovery_profiles_endpoint_saves_user_profile(self) -> None:
+    def test_discovery_profiles_endpoint_keeps_fixed_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(
@@ -567,7 +578,7 @@ class WebUiTests(unittest.TestCase):
                             "limit_time_enabled": True,
                             "timeout_hours": 99,
                         },
-                        "balanced": {
+                        "standard": {
                             "title": "Changed built-in",
                             "enable_tls12": False,
                         },
@@ -580,10 +591,10 @@ class WebUiTests(unittest.TestCase):
             connection.close()
 
             self.assertEqual(response.status, 200)
-            self.assertIn('"night-test"', saved)
-            self.assertIn('"curl_parallelism":10', saved)
-            self.assertIn('"repeats":10', saved)
-            self.assertIn('"timeout_hours":24', saved)
+            self.assertIn('"quick"', saved)
+            self.assertIn('"standard"', saved)
+            self.assertIn('"force"', saved)
+            self.assertNotIn('"night-test"', saved)
             self.assertNotIn("Changed built-in", saved)
 
 

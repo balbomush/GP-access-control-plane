@@ -644,6 +644,40 @@ button:disabled { opacity: .55; cursor: default; }
 .run-actions button {
   min-height: 54px;
 }
+.tooltip-button {
+  position: relative;
+}
+.tooltip-button[data-tooltip]:hover::after,
+.tooltip-button[data-tooltip]:focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 40;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  width: min(340px, 90vw);
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-code);
+  color: var(--text);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, .28);
+  white-space: normal;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.tooltip-button[data-tooltip]:hover::before,
+.tooltip-button[data-tooltip]:focus-visible::before {
+  content: "";
+  position: absolute;
+  z-index: 41;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--surface-code);
+}
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .time-limit-field[hidden] { display: none; }
 .preset-panel,
@@ -660,6 +694,14 @@ button:disabled { opacity: .55; cursor: default; }
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 8px;
+}
+.finder-control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.finder-control-grid .field-wide {
+  grid-column: 1 / -1;
 }
 .common-filter-panel .preset-grid {
   grid-template-columns: 1fr;
@@ -747,6 +789,53 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .preset-grid > .setting-note {
   grid-column: 1 / -1;
+}
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.segment-option {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-code);
+  color: var(--blue-strong);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+}
+.segment-option input {
+  width: auto;
+  min-width: 0;
+  accent-color: var(--blue);
+}
+.segment-option:has(input:checked) {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #ffffff;
+}
+.settings-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.settings-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-code);
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+.settings-card-title {
+  color: var(--text);
+  font-weight: 700;
 }
 .release-grid {
   display: grid;
@@ -1401,6 +1490,7 @@ pre {
       <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
       <button class="tab-button" data-tab="backups" type="button">Бекапы</button>
+      <button class="tab-button" data-tab="lists" type="button">Списки и профили</button>
       <button class="tab-button" data-tab="settings" type="button">Настройки</button>
     </nav>
 
@@ -1421,28 +1511,51 @@ pre {
               </div>
             </div>
             <div class="preset-panel">
-              <div class="preset-grid">
-                <div class="field">
-                  <label for="finder-preset-select">Пресет доменов</label>
-                  <select id="finder-preset-select"></select>
-                </div>
-                <div class="field">
-                  <label for="finder-preset-name">Название для сохранения</label>
-                  <input id="finder-preset-name" autocomplete="off" placeholder="мой список">
-                </div>
+              <div class="field">
+                <label for="finder-preset-select">Пресет доменов</label>
+                <select id="finder-preset-select"></select>
               </div>
-              <div class="preset-actions">
-                <button class="secondary" data-preset-save="finder" title="Сохраняет текущий список доменов как пользовательский пресет или перезаписывает выбранный пользовательский пресет." type="button">Сохранить пресет</button>
-                <button class="secondary danger" data-preset-delete="finder" title="Удаляет выбранный пользовательский пресет. Встроенные пресеты не удаляются." type="button">Удалить пресет</button>
-              </div>
+              <div class="helper-text">Пресет применяется сразу при выборе. Если вручную изменить список доменов, выбранное значение станет `Custom` и ручной список не будет перезаписан.</div>
             </div>
             <div class="preset-panel">
-              <div class="preset-grid">
+              <div class="finder-control-grid">
                 <div class="field">
                   <label for="discovery-profile-select">Профиль подбора</label>
                   <select id="discovery-profile-select"></select>
+                  <div class="helper-text">Глубина поиска blockcheck2: quick, standard или force.</div>
+                </div>
+                <div class="field">
+                  <label for="settings-preset-select">Пресет настроек</label>
+                  <select id="settings-preset-select">
+                    <option value="cautious">Осторожный</option>
+                    <option value="normal" selected>Обычный</option>
+                    <option value="accelerated">Ускоренный</option>
+                    <option value="custom">изменено</option>
+                  </select>
+                  <div class="helper-text">Задает параметры запуска: curl, повторы и DNS/IP checks.</div>
+                </div>
+                <div class="field">
+                  <label for="curl-parallelism">Параллельных curl</label>
+                  <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
+                  <div class="helper-text">Сильнее всего влияет на режим `Все домены на одной стратегии`.</div>
                 </div>
               </div>
+            </div>
+            <div class="preset-panel">
+              <div class="field">
+                <label>Режим поиска</label>
+                <div class="segmented-control" id="run-mode-control">
+                  <label class="segment-option tooltip-button" data-tooltip="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта. Хороший режим для базовой совместимости.">
+                    <input type="radio" name="run-mode" value="standard" checked>
+                    Домены по очереди
+                  </label>
+                  <label class="segment-option tooltip-button" data-tooltip="Одна стратегия запускается один раз, затем все выбранные домены проверяются параллельными curl. Удобно быстрее понять, какие домены покрывает одна стратегия.">
+                    <input type="radio" name="run-mode" value="multi">
+                    Все домены на одной стратегии
+                  </label>
+                </div>
+              </div>
+              <div class="helper-text" id="run-mode-note">Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.</div>
             </div>
             <label class="checkbox-row">
               <input id="limit-time-enabled" type="checkbox">
@@ -1452,13 +1565,8 @@ pre {
               <label for="finder-timeout-hours">Лимит поиска, часов</label>
               <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
             </div>
-            <div class="field">
-              <label for="curl-parallelism">Параллельных curl в режиме стратегия -> домены</label>
-              <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
-              <div class="helper-text">Для экспериментального режима: одна стратегия запускается один раз, затем выбранные домены проверяются параллельными curl. Остальные настройки blockcheck2 ниже также применяются. Если включить параллельные повторы, реальное число curl может быть: этот лимит × повторы.</div>
-            </div>
             <div class="preset-panel finder-options-panel">
-              <div class="helper-text">Настройки blockcheck2, которые реально влияют на подбор стратегий.</div>
+              <div class="helper-text">Основные проверки blockcheck2, которые реально влияют на подбор стратегий.</div>
               <div class="protocol-grid">
                 <label class="checkbox-row">
                   <input id="enable-http" type="checkbox">
@@ -1482,7 +1590,7 @@ pre {
                 </label>
               </div>
               <div class="preset-grid">
-                <div class="field">
+                <div class="field field-wide">
                   <label for="scan-level">Уровень поиска</label>
                   <select id="scan-level">
                     <option value="quick">quick</option>
@@ -1490,6 +1598,14 @@ pre {
                     <option value="force">force</option>
                   </select>
                 </div>
+              </div>
+            </div>
+            <details class="preset-panel">
+              <summary class="domain-header">
+                <span class="domain-title">Дополнительно</span>
+                <span class="helper-text">повторы, DNS/IP checks, IPv6</span>
+              </summary>
+              <div class="preset-grid">
                 <div class="field">
                   <label for="repeats">Повторы проверки стратегии</label>
                   <input id="repeats" type="number" min="1" max="10" step="1" value="1">
@@ -1507,11 +1623,10 @@ pre {
                 <input id="skip-ipblock" type="checkbox" checked>
                 <span>Пропустить проверку IP/port-блокировки</span>
               </label>
-            </div>
+            </details>
             <div class="button-row run-actions">
-              <button data-action="standard-discovery" title="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта.">Обычный поиск: домены по очереди</button>
-              <button class="secondary" data-action="multi-domain-discovery" title="Экспериментальный режим: одна стратегия запускается один раз, затем параллельно проверяется на выбранных доменах.">Эксперимент: стратегия сразу по доменам</button>
-              <button class="secondary danger" data-action="stop-current" title="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." disabled>Остановить текущий запуск</button>
+              <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, профилем подбора и пресетом настроек." type="button">Запустить выбранный режим</button>
+              <button class="secondary danger tooltip-button" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
             </div>
             <div class="message" id="message">Готово</div>
           </div>
@@ -1638,111 +1753,15 @@ pre {
       </section>
     </section>
 
-    <section class="tab-page settings-page" data-tab-page="settings">
+    <section class="tab-page lists-page" data-tab-page="lists">
       <section class="panel">
         <div class="panel-header">
-          <h2>Настройки</h2>
+          <h2>Списки и профили</h2>
         </div>
         <div class="settings-stack">
-        <div class="preset-panel settings-discovery-panel">
-          <div class="panel-header">
-            <h2>Параметры подбора</h2>
-          </div>
-          <div class="preset-grid">
-            <label class="checkbox-row">
-              <input id="settings-enable-ipv6" type="checkbox">
-              IPv6-проверки
-            </label>
-            <label class="checkbox-row">
-              <input id="settings-debug-stdout" type="checkbox">
-              Подробный debug-лог stdout
-            </label>
-            <div class="setting-note">Включает расширенную запись stdout blockcheck2 в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
-            <div class="field">
-              <label for="settings-curl-default">Параллельных curl по умолчанию</label>
-              <input id="settings-curl-default" type="number" min="1" max="10" value="4">
-              <div class="setting-note">Стартовое значение для режима “стратегия -> домены”. Его можно менять под возможности платы и сети.</div>
-            </div>
-            <div class="field">
-              <label for="settings-curl-max">Максимум параллельных curl</label>
-              <input id="settings-curl-max" type="number" min="1" max="10" value="10">
-              <div class="setting-note">Верхняя граница, выше которой UI не даст запустить параллельные curl.</div>
-            </div>
-          </div>
-          <div class="button-row">
-            <button data-action="save-settings" type="button">Сохранить настройки</button>
-          </div>
-        </div>
-        <div class="preset-panel settings-release-panel">
-          <div class="panel-header">
-            <h2>Релизы и обновления</h2>
-          </div>
-          <div class="release-grid">
-            <div class="release-card">
-              <span class="helper-text">Текущая версия</span>
-              <strong id="settings-release-current">v-</strong>
-            </div>
-            <div class="release-card">
-              <span class="helper-text">Канал</span>
-              <select id="settings-update-channel">
-                <option value="stable">Стабильные релизы</option>
-                <option value="prerelease">Предрелизы</option>
-              </select>
-            </div>
-            <div class="release-card">
-              <span class="helper-text">Доступно</span>
-              <strong id="settings-release-available">Не проверялось</strong>
-            </div>
-          </div>
-          <div class="button-row">
-            <button class="secondary" data-action="check-releases" type="button">Проверить релизы</button>
-            <button class="secondary" data-action="update-from-release" type="button">Обновить alpha</button>
-            <a class="button-link secondary" id="settings-selected-release-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть страницу релизов</a>
-          </div>
-          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI работает как alpha-сценарий: без активного подбора, с бекапом и проверкой версии.</div>
-        </div>
-        <div class="preset-panel settings-domain-source-panel">
-          <div class="panel-header">
-            <h2>Источники доменов</h2>
-            <span class="badge">v2fly</span>
-          </div>
-          <div class="preset-grid">
-            <div class="field">
-              <label for="v2fly-preset-name">Название пресета</label>
-              <input id="v2fly-preset-name" autocomplete="off" placeholder="v2fly-youtube">
-            </div>
-            <div class="field">
-              <label for="v2fly-scope">Где использовать</label>
-              <select id="v2fly-scope">
-                <option value="finder">Подбор</option>
-                <option value="common">Общие стратегии</option>
-              </select>
-            </div>
-          </div>
-          <div class="field">
-            <label for="v2fly-category-search">Каталог групп v2fly</label>
-            <div class="category-toolbar">
-              <input id="v2fly-category-search" autocomplete="off" placeholder="Найти группу, например youtube или discord">
-              <button class="secondary" data-action="v2fly-load-categories" type="button">Загрузить каталог</button>
-            </div>
-          </div>
-          <div class="v2fly-category-list" id="v2fly-category-list">
-            <div class="empty">Каталог еще не загружался. Можно загрузить список групп из v2fly или ввести категории вручную ниже.</div>
-          </div>
-          <div class="field">
-            <label for="v2fly-categories">Категории v2fly/domain-list-community</label>
-            <textarea id="v2fly-categories" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube&#10;google&#10;discord"></textarea>
-          </div>
-          <div class="button-row">
-            <button class="secondary" data-action="v2fly-preview" type="button">Проверить список</button>
-            <button data-action="v2fly-import" type="button">Сохранить в пресет</button>
-          </div>
-          <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
-          <div class="helper-text">Берутся только доменные правила v2fly: domain/full и явные доменные строки. Это публично известный проверяемый набор доменов, а не гарантия полного покрытия сервиса. keyword/regexp/include не превращаются в домены автоматически.</div>
-        </div>
         <div class="preset-panel settings-preset-manager-panel">
           <div class="panel-header">
-            <h2>Списки доменов</h2>
+            <h2>Доменные пресеты</h2>
             <span class="badge" id="preset-manager-count">0</span>
           </div>
           <div class="preset-grid">
@@ -1782,6 +1801,164 @@ pre {
           </div>
           <div class="source-preview" id="preset-editor-preview">Изменения еще не проверялись.</div>
         </div>
+        <div class="preset-panel profiles-manager-panel">
+          <div class="panel-header">
+            <h2>Профили подбора</h2>
+            <span class="badge">blockcheck2</span>
+          </div>
+          <div class="settings-card-grid" id="discovery-profile-cards">
+            <div class="settings-card">
+              <div class="settings-card-title">Быстрый</div>
+              <div class="helper-text">quick: меньше комбинаций, подходит для первичной проверки.</div>
+            </div>
+            <div class="settings-card">
+              <div class="settings-card-title">Стандартный</div>
+              <div class="helper-text">standard: основной режим для обычного подбора.</div>
+            </div>
+            <div class="settings-card">
+              <div class="settings-card-title">Глубокий</div>
+              <div class="helper-text">force: больше комбинаций, дольше работает.</div>
+            </div>
+          </div>
+        </div>
+        <div class="preset-panel settings-presets-manager-panel">
+          <div class="panel-header">
+            <h2>Пресеты настроек</h2>
+            <span class="badge">curl</span>
+          </div>
+          <div class="settings-card-grid" id="settings-preset-cards">
+            <div class="settings-card">
+              <div class="settings-card-title">Осторожный</div>
+              <div class="helper-text">Меньше параллельных curl и без пропуска DNS/IP checks.</div>
+            </div>
+            <div class="settings-card">
+              <div class="settings-card-title">Обычный</div>
+              <div class="helper-text">Баланс скорости и аккуратной проверки для повседневного запуска.</div>
+            </div>
+            <div class="settings-card">
+              <div class="settings-card-title">Ускоренный</div>
+              <div class="helper-text">Больше параллельных curl; сильнее всего влияет на режим `Все домены на одной стратегии`.</div>
+            </div>
+          </div>
+        </div>
+        <div class="preset-panel settings-domain-source-panel">
+          <div class="panel-header">
+            <h2>Импорт из v2fly</h2>
+            <span class="badge">domain-list-community</span>
+          </div>
+          <div class="preset-grid">
+            <div class="field">
+              <label for="v2fly-preset-name">Название пресета</label>
+              <input id="v2fly-preset-name" autocomplete="off" placeholder="v2fly-youtube">
+            </div>
+            <div class="field">
+              <label for="v2fly-scope">Где использовать</label>
+              <select id="v2fly-scope">
+                <option value="finder">Подбор</option>
+                <option value="common">Общие стратегии</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="v2fly-category-search">Каталог групп v2fly</label>
+            <div class="category-toolbar">
+              <input id="v2fly-category-search" list="v2fly-category-options" autocomplete="off" placeholder="Начните вводить: youtube, google, discord">
+              <datalist id="v2fly-category-options"></datalist>
+              <button class="secondary" data-action="v2fly-load-categories" type="button">Обновить каталог</button>
+            </div>
+          </div>
+          <div class="v2fly-category-list" id="v2fly-category-list">
+            <div class="empty">Каталог загрузится при открытии вкладки. Можно также ввести категории вручную ниже.</div>
+          </div>
+          <div class="field">
+            <label for="v2fly-categories">Категории v2fly/domain-list-community</label>
+            <textarea id="v2fly-categories" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube&#10;google&#10;discord"></textarea>
+          </div>
+          <div class="field">
+            <label for="v2fly-domains">Итоговые домены пресета</label>
+            <div class="code-editor text-editor">
+              <pre class="line-numbers" data-line-numbers-for="v2fly-domains" aria-hidden="true">1</pre>
+              <textarea id="v2fly-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="После проверки здесь появятся домены. Список можно отредактировать перед сохранением."></textarea>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="v2fly-preview" type="button">Проверить и развернуть список</button>
+            <button data-action="v2fly-import" type="button">Сохранить пресет</button>
+          </div>
+          <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
+          <div class="helper-text">Берутся явные доменные правила v2fly: domain/full и доменные строки. include разворачивается backend-ом; keyword/regexp показываются как пропущенные правила и не превращаются в домены автоматически.</div>
+        </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="tab-page settings-page" data-tab-page="settings">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Настройки</h2>
+        </div>
+        <div class="settings-stack">
+        <div class="preset-panel settings-discovery-panel">
+          <div class="panel-header">
+            <h2>Параметры подбора</h2>
+          </div>
+          <div class="preset-grid">
+            <label class="checkbox-row">
+              <input id="settings-enable-ipv6" type="checkbox">
+              IPv6-проверки
+            </label>
+            <label class="checkbox-row">
+              <input id="settings-debug-stdout" type="checkbox">
+              Подробный debug-лог stdout
+            </label>
+            <div class="setting-note">Включает расширенную запись stdout blockcheck2 в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
+            <div class="field">
+              <label for="settings-default-settings-preset">Пресет настроек по умолчанию</label>
+              <select id="settings-default-settings-preset">
+                <option value="cautious">Осторожный</option>
+                <option value="normal" selected>Обычный</option>
+                <option value="accelerated">Ускоренный</option>
+              </select>
+              <div class="setting-note">Выставляет стартовые параметры на вкладке `Подбор`; вручную их можно менять перед запуском.</div>
+            </div>
+            <div class="field">
+              <label for="settings-curl-max">Максимум параллельных curl</label>
+              <input id="settings-curl-max" type="number" min="1" max="10" value="10">
+              <div class="setting-note">Верхняя граница, выше которой UI не даст запустить параллельные curl.</div>
+            </div>
+          </div>
+          <div class="button-row">
+            <button data-action="save-settings" type="button">Сохранить настройки</button>
+          </div>
+        </div>
+        <div class="preset-panel settings-release-panel">
+          <div class="panel-header">
+            <h2>Релизы и обновления</h2>
+          </div>
+          <div class="release-grid">
+            <div class="release-card">
+              <span class="helper-text">Текущая версия</span>
+              <strong id="settings-release-current">v-</strong>
+            </div>
+            <div class="release-card">
+              <span class="helper-text">Канал</span>
+              <select id="settings-update-channel">
+                <option value="stable">Стабильные релизы</option>
+                <option value="prerelease">Предрелизы</option>
+              </select>
+            </div>
+            <div class="release-card">
+              <span class="helper-text">Доступно</span>
+              <strong id="settings-release-available">Не проверялось</strong>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="check-releases" type="button">Проверить релизы</button>
+            <button class="secondary tooltip-button" data-action="update-from-release" data-tooltip="Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап." type="button">Установить выбранное обновление</button>
+            <a class="button-link secondary" id="settings-selected-release-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть страницу релизов</a>
+          </div>
+          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI работает как alpha-сценарий: без активного подбора, с бекапом и проверкой версии.</div>
+        </div>
         </div>
       </section>
     </section>
@@ -1793,12 +1970,41 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseUpdate: null, loadingDiscoveryProfile: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseUpdate: null, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
-  'zapret-multi-domain-discovery': 'Стратегия -> домены',
+  'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
   'standard-discovery': 'Поиск стратегий',
-  'multi-domain-discovery': 'Стратегия -> домены'
+  'multi-domain-discovery': 'Все домены на одной стратегии'
+};
+const SETTINGS_PRESETS = {
+  cautious: {
+    title: 'Осторожный',
+    note: 'Меньше параллельных curl, DNS/IP checks не пропускаются. Медленнее, но аккуратнее для диагностики.',
+    curl_parallelism: 2,
+    repeats: 1,
+    repeat_parallel: false,
+    skip_dnscheck: false,
+    skip_ipblock: false
+  },
+  normal: {
+    title: 'Обычный',
+    note: 'Баланс скорости и проверки: curl 4, DNS/IP checks пропускаются, как в текущем рабочем сценарии.',
+    curl_parallelism: 4,
+    repeats: 1,
+    repeat_parallel: false,
+    skip_dnscheck: true,
+    skip_ipblock: true
+  },
+  accelerated: {
+    title: 'Ускоренный',
+    note: 'Больше параллельных curl. Сильнее всего ускоряет режим “Все домены на одной стратегии”.',
+    curl_parallelism: 10,
+    repeats: 1,
+    repeat_parallel: false,
+    skip_dnscheck: true,
+    skip_ipblock: true
+  }
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 let toastTimer = null;
@@ -1908,6 +2114,7 @@ function setActiveTab(tabName){
   if (tabName === 'terminal') scrollLogToBottom();
   if (tabName === 'candidates') ensureCandidateViewLoaded();
   if (tabName === 'backups' && !state.backupsLoaded) refreshBackups();
+  if (tabName === 'lists' && !state.v2flyCategories) loadV2flyCategories();
 }
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
@@ -1976,18 +2183,13 @@ function discoveryOptions(){
     skip_ipblock: el('skip-ipblock').checked
   };
 }
-const DISCOVERY_PROFILE_CONTROL_IDS = new Set([
-  'enable-http',
-  'enable-tls12',
-  'enable-tls13',
-  'include-quic',
-  'enable-ipv6',
-  'scan-level',
+const DISCOVERY_PROFILE_CONTROL_IDS = new Set(['scan-level']);
+const SETTINGS_PRESET_CONTROL_IDS = new Set([
+  'curl-parallelism',
   'repeats',
   'repeat-parallel',
   'skip-dnscheck',
   'skip-ipblock',
-  'curl-parallelism',
   'limit-time-enabled',
   'finder-timeout-hours'
 ]);
@@ -2000,24 +2202,64 @@ function useDiscoveryProfile(profile){
   if (!profile) return;
   state.loadingDiscoveryProfile = true;
   try {
-    el('enable-http').checked = Boolean(profile.enable_http);
-    el('enable-tls12').checked = Boolean(profile.enable_tls12);
-    el('enable-tls13').checked = Boolean(profile.enable_tls13);
-    el('include-quic').checked = Boolean(profile.include_quic);
-    el('enable-ipv6').checked = Boolean(profile.enable_ipv6);
     el('scan-level').value = profile.scan_level || 'standard';
-    el('repeats').value = String(profile.repeats || 1);
-    el('repeat-parallel').checked = Boolean(profile.repeat_parallel);
-    el('skip-dnscheck').checked = Boolean(profile.skip_dnscheck);
-    el('skip-ipblock').checked = Boolean(profile.skip_ipblock);
-    el('curl-parallelism').value = String(profile.curl_parallelism || 4);
-    el('limit-time-enabled').checked = Boolean(profile.limit_time_enabled);
-    el('finder-timeout-hours').value = String(profile.timeout_hours || 6);
-    el('time-limit-field').hidden = !el('limit-time-enabled').checked;
-    state.settingsTouched = true;
   } finally {
     state.loadingDiscoveryProfile = false;
   }
+}
+function selectedSettingsPreset(){
+  return el('settings-preset-select')?.value || 'normal';
+}
+function settingPresetTitle(value){
+  if (value === CUSTOM_SELECT_VALUE) return 'изменено';
+  return (SETTINGS_PRESETS[value] || SETTINGS_PRESETS.normal).title;
+}
+function markSettingsPresetCustom(){
+  if (state.loadingSettingsPreset) return;
+  const select = el('settings-preset-select');
+  if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
+  state.settingsTouched = true;
+}
+function setSettingsPreset(value, options){
+  const presetKey = SETTINGS_PRESETS[value] ? value : 'normal';
+  const preset = SETTINGS_PRESETS[presetKey];
+  const opts = options || {};
+  const max = Number((state.settings || {}).curl_parallelism_max || 10);
+  state.loadingSettingsPreset = true;
+  try {
+    const select = el('settings-preset-select');
+    if (select) select.value = presetKey;
+    const curl = el('curl-parallelism');
+    if (curl) {
+      curl.max = String(max);
+      curl.value = String(Math.max(1, Math.min(max, Number(preset.curl_parallelism || 4))));
+    }
+    el('repeats').value = String(preset.repeats || 1);
+    el('repeat-parallel').checked = Boolean(preset.repeat_parallel);
+    el('skip-dnscheck').checked = Boolean(preset.skip_dnscheck);
+    el('skip-ipblock').checked = Boolean(preset.skip_ipblock);
+    renderSettingsPresetNote();
+    if (!opts.fromSettings) state.settingsTouched = true;
+  } finally {
+    state.loadingSettingsPreset = false;
+  }
+}
+function renderSettingsPresetNote(){
+  const preset = SETTINGS_PRESETS[selectedSettingsPreset()];
+  const note = el('run-mode-note');
+  if (!note) return;
+  const mode = selectedRunMode();
+  const modeText = mode === 'multi'
+    ? 'Режим “Все домены на одной стратегии”: одна стратегия запускается один раз, затем домены проверяются параллельно.'
+    : 'Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.';
+  const presetText = preset ? ` Пресет настроек: ${preset.note}` : ' Настройки изменены вручную.';
+  note.textContent = modeText + presetText;
+}
+function selectedRunMode(){
+  return document.querySelector('input[name="run-mode"]:checked')?.value || 'standard';
+}
+function renderRunModeNote(){
+  renderSettingsPresetNote();
 }
 function profileTitle(name, profile){
   return String((profile && profile.title) || name || '-');
@@ -2030,7 +2272,7 @@ function renderDiscoveryProfiles(){
   const names = Object.keys(profiles).sort((a, b) => profileTitle(a, profiles[a]).localeCompare(profileTitle(b, profiles[b])));
   select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>` + names.map((name) => `<option value="${esc(name)}">${esc(profileTitle(name, profiles[name]))}</option>`).join('');
   if (current && profiles[current]) select.value = current;
-  else if (!current && profiles.balanced) select.value = 'balanced';
+  else if (!current && profiles.standard) select.value = 'standard';
   else if (current === CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
 }
 function hasEnabledProtocol(options){
@@ -2372,7 +2614,10 @@ function renderMetrics(){
   const jobBadge = el('job-badge');
   jobBadge.textContent = busy ? 'В работе' : 'Свободна';
   jobBadge.className = busy ? 'badge warn' : 'badge good';
-  document.querySelectorAll('button[data-action="standard-discovery"], button[data-action="multi-domain-discovery"]').forEach((button) => {
+  document.querySelectorAll('button[data-action="run-selected-discovery"]').forEach((button) => {
+    button.disabled = busy;
+  });
+  document.querySelectorAll('button[data-action="update-from-release"]').forEach((button) => {
     button.disabled = busy;
   });
   document.querySelectorAll('button[data-action="stop-current"]').forEach((button) => {
@@ -2947,7 +3192,7 @@ function isDiscoveryRun(row){
   return row.kind === 'standard-discovery' || row.kind === 'multi-domain-discovery';
 }
 function runMode(row){
-  return row.kind === 'multi-domain-discovery' ? 'стратегия -> домены' : 'обычный';
+  return row.kind === 'multi-domain-discovery' ? 'все домены на одной стратегии' : 'обычный';
 }
 function runSummary(row){
   const count = runCandidateCount(row);
@@ -3178,23 +3423,23 @@ function renderSettings(){
   const settings = state.settings || {};
   const ipv6 = el('settings-enable-ipv6');
   const debugStdout = el('settings-debug-stdout');
-  const curlDefault = el('settings-curl-default');
+  const defaultSettingsPreset = el('settings-default-settings-preset');
   const curlMax = el('settings-curl-max');
   const channel = el('settings-update-channel');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
-  if (curlDefault) curlDefault.value = String(settings.curl_parallelism_default || 4);
+  if (defaultSettingsPreset) defaultSettingsPreset.value = SETTINGS_PRESETS[settings.settings_preset_default] ? settings.settings_preset_default : 'normal';
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
   if (channel) channel.value = settings.update_channel || 'stable';
   renderReleaseInfo();
   if (!state.settingsTouched) {
     const curlInput = el('curl-parallelism');
-    if (curlInput) {
-      curlInput.max = String(settings.curl_parallelism_max || 10);
-      curlInput.value = String(settings.curl_parallelism_default || 4);
-    }
+    if (curlInput) curlInput.max = String(settings.curl_parallelism_max || 10);
+    setSettingsPreset(settings.settings_preset_default || 'normal', { fromSettings: true });
     const finderIpv6 = el('enable-ipv6');
     if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
+  } else {
+    renderSettingsPresetNote();
   }
   renderDiscoveryProfiles();
   renderV2flyCategoryCatalog();
@@ -3249,7 +3494,7 @@ function currentSettingsFromForm(){
   return {
     enable_ipv6: Boolean(el('settings-enable-ipv6')?.checked),
     debug_stdout: Boolean(el('settings-debug-stdout')?.checked),
-    curl_parallelism_default: Number(el('settings-curl-default')?.value || 4),
+    settings_preset_default: el('settings-default-settings-preset')?.value || 'normal',
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
     update_channel: el('settings-update-channel')?.value || 'stable'
   };
@@ -3302,11 +3547,21 @@ async function updateFromRelease(){
 function v2flyCategories(){
   return parseDomains(el('v2fly-categories')?.value || '');
 }
+function suggestV2flyPresetName(){
+  const nameInput = el('v2fly-preset-name');
+  if (!nameInput) return;
+  const current = String(nameInput.value || '').trim();
+  if (current && !current.startsWith('v2fly-')) return;
+  const categories = v2flyCategories();
+  if (!categories.length) return;
+  nameInput.value = `v2fly-${categories.slice(0, 3).join('-')}`.slice(0, 80);
+}
 function v2flyPayload(){
   return {
     scope: el('v2fly-scope')?.value || 'finder',
     name: String(el('v2fly-preset-name')?.value || '').trim(),
-    categories: v2flyCategories()
+    categories: v2flyCategories(),
+    domains: parseDomains(el('v2fly-domains')?.value || '')
   };
 }
 function renderV2flyPreview(){
@@ -3320,11 +3575,15 @@ function renderV2flyPreview(){
   const added = Array.isArray(preview.added) ? preview.added.length : 0;
   const removed = Array.isArray(preview.removed) ? preview.removed.length : 0;
   const sources = Array.isArray(preview.sources) ? preview.sources.map((source) => `${source.category}: ${source.domains}`).join(', ') : '-';
+  const skipped = preview.skipped && typeof preview.skipped === 'object'
+    ? Object.entries(preview.skipped).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `${key}: ${value}`).join(', ')
+    : '';
   const coverageNote = preview.coverage_note ? 'Публично известный проверяемый набор, не гарантия полного покрытия сервиса.' : '';
   target.innerHTML = [
     `<div><strong>${esc(preview.preset || '-')}</strong>: ${esc(preview.count || 0)} доменов</div>`,
     `<div>Добавится: ${esc(added)}, уйдет: ${esc(removed)}, без изменений: ${esc(preview.unchanged_count || 0)}</div>`,
     `<div>Категории: ${esc(sources)}</div>`,
+    skipped ? `<div>Пропущенные правила: ${esc(skipped)}</div>` : '',
     coverageNote ? `<div>${esc(coverageNote)}</div>` : ''
   ].join('');
 }
@@ -3332,6 +3591,8 @@ function renderV2flyCategoryCatalog(){
   const target = el('v2fly-category-list');
   if (!target) return;
   const categories = (state.v2flyCategories || {}).categories || [];
+  const options = el('v2fly-category-options');
+  if (options) options.innerHTML = categories.map((category) => `<option value="${esc(category)}"></option>`).join('');
   if (!categories.length) {
     const source = state.v2flyCategorySource === 'loading' ? 'Загрузка каталога...' : 'Каталог еще не загружался. Можно загрузить список групп из v2fly или ввести категории вручную ниже.';
     target.innerHTML = `<div class="empty">${esc(source)}</div>`;
@@ -3596,6 +3857,7 @@ function syncV2flyCategoriesFromCatalog(){
     textarea.value = merged.join('\\n');
     updateEditorLineNumbers('v2fly-categories');
   }
+  suggestV2flyPresetName();
   state.v2flyPreview = null;
   renderV2flyPreview();
 }
@@ -3626,6 +3888,10 @@ async function previewV2flyPreset(){
   try {
     const data = await postJson('/api/domain-sources/v2fly/preview', payload);
     state.v2flyPreview = data;
+    if (Array.isArray(data.domains)) {
+      el('v2fly-domains').value = data.domains.join('\\n');
+      updateEditorLineNumbers('v2fly-domains');
+    }
     renderV2flyPreview();
     setMessage('Список v2fly проверен', 'good');
   } catch (error) {
@@ -3644,6 +3910,10 @@ async function importV2flyPreset(){
     mergePresetResponse(data);
     renderPresetSelects();
     renderPresetManager();
+    if (Array.isArray(data.domains)) {
+      el('v2fly-domains').value = data.domains.join('\\n');
+      updateEditorLineNumbers('v2fly-domains');
+    }
     renderV2flyPreview();
     setMessage(`Пресет сохранен: ${data.count || 0} доменов`, 'good');
   } catch (error) {
@@ -4026,6 +4296,26 @@ async function startJob(url, payload, text){
     await refresh();
   }
 }
+function startSelectedDiscovery(){
+  const options = discoveryOptions();
+  if (!hasEnabledProtocol(options)) {
+    setMessage('Выберите хотя бы один протокол для проверки', 'bad');
+    return;
+  }
+  const mode = selectedRunMode();
+  const payload = {
+    domains: finderDomains(),
+    ...options
+  };
+  const timeout = timeoutSecondsOrNull();
+  if (timeout !== null) payload.timeout_seconds = timeout;
+  if (mode === 'multi') {
+    payload.curl_parallelism = curlParallelism();
+    startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Все домены на одной стратегии');
+    return;
+  }
+  startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
+}
 async function stopCurrentJob(){
   try {
     await postJson('/api/jobs/stop-current', {});
@@ -4181,45 +4471,22 @@ document.addEventListener('click', (event) => {
     }
     return;
   }
-  if (button.dataset.action === 'standard-discovery') {
-    const options = discoveryOptions();
-    if (!hasEnabledProtocol(options)) {
-      setMessage('Выберите хотя бы один протокол для проверки', 'bad');
-      return;
-    }
-    const payload = {
-      domains: finderDomains(),
-      ...options
-    };
-    const timeout = timeoutSecondsOrNull();
-    if (timeout !== null) payload.timeout_seconds = timeout;
-    startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
-  }
-  if (button.dataset.action === 'multi-domain-discovery') {
-    const options = discoveryOptions();
-    if (!hasEnabledProtocol(options)) {
-      setMessage('Выберите хотя бы один протокол для проверки', 'bad');
-      return;
-    }
-    const payload = {
-      domains: finderDomains(),
-      ...options,
-      curl_parallelism: curlParallelism()
-    };
-    const timeout = timeoutSecondsOrNull();
-    if (timeout !== null) payload.timeout_seconds = timeout;
-    startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Стратегия -> домены');
-  }
+  if (button.dataset.action === 'run-selected-discovery') startSelectedDiscovery();
   if (button.dataset.action === 'stop-current') stopCurrentJob();
 });
 document.addEventListener('input', (event) => {
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
     state.settingsTouched = true;
   }
+  if (event.target && SETTINGS_PRESET_CONTROL_IDS.has(event.target.id)) {
+    markSettingsPresetCustom();
+  }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
+    if (event.target.id === 'v2fly-categories') suggestV2flyPresetName();
+    if (event.target.id === 'v2fly-domains') updateEditorLineNumbers('v2fly-domains');
     state.v2flyPreview = null;
     renderV2flyPreview();
   }
@@ -4269,10 +4536,15 @@ document.addEventListener('change', (event) => {
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
     state.settingsTouched = true;
   }
+  if (event.target && SETTINGS_PRESET_CONTROL_IDS.has(event.target.id)) {
+    markSettingsPresetCustom();
+  }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
+    if (event.target.id === 'v2fly-categories') suggestV2flyPresetName();
+    if (event.target.id === 'v2fly-domains') updateEditorLineNumbers('v2fly-domains');
     state.v2flyPreview = null;
     renderV2flyPreview();
   }
@@ -4317,6 +4589,16 @@ document.addEventListener('change', (event) => {
       const profile = (state.discoveryProfiles || {})[event.target.value];
       useDiscoveryProfile(profile);
     }
+  }
+  if (event.target && event.target.id === 'settings-preset-select') {
+    if (event.target.value === CUSTOM_SELECT_VALUE) {
+      markSettingsPresetCustom();
+    } else {
+      setSettingsPreset(event.target.value);
+    }
+  }
+  if (event.target && event.target.name === 'run-mode') {
+    renderRunModeNote();
   }
   if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
     markDiscoveryProfileCustom();
@@ -4380,14 +4662,32 @@ DEFAULT_SETTINGS = {
     "curl_parallelism_max": 10,
     "enable_ipv6": False,
     "debug_stdout": False,
+    "settings_preset_default": "normal",
     "update_channel": "stable",
 }
 
 
 DEFAULT_DISCOVERY_PROFILES = {
-    "balanced": {
-        "name": "balanced",
-        "title": "Balanced",
+    "quick": {
+        "name": "quick",
+        "title": "Быстрый",
+        "enable_http": False,
+        "enable_tls12": True,
+        "enable_tls13": False,
+        "include_quic": True,
+        "enable_ipv6": False,
+        "scan_level": "quick",
+        "repeats": 1,
+        "repeat_parallel": False,
+        "skip_dnscheck": True,
+        "skip_ipblock": True,
+        "curl_parallelism": 4,
+        "limit_time_enabled": False,
+        "timeout_hours": 6,
+    },
+    "standard": {
+        "name": "standard",
+        "title": "Стандартный",
         "enable_http": False,
         "enable_tls12": True,
         "enable_tls13": False,
@@ -4402,9 +4702,9 @@ DEFAULT_DISCOVERY_PROFILES = {
         "limit_time_enabled": False,
         "timeout_hours": 6,
     },
-    "deep": {
-        "name": "deep",
-        "title": "Deep",
+    "force": {
+        "name": "force",
+        "title": "Глубокий",
         "enable_http": True,
         "enable_tls12": True,
         "enable_tls13": True,
@@ -4438,7 +4738,16 @@ def save_settings(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
     max_parallelism = _bounded_int(raw.get("curl_parallelism_max"), default=10, minimum=1, maximum=10)
-    default_parallelism = _bounded_int(raw.get("curl_parallelism_default"), default=4, minimum=1, maximum=max_parallelism)
+    settings_preset_default = str(raw.get("settings_preset_default") or "normal")
+    if settings_preset_default not in {"cautious", "normal", "accelerated"}:
+        settings_preset_default = "normal"
+    preset_defaults = {"cautious": 2, "normal": 4, "accelerated": 10}
+    default_source = (
+        raw.get("curl_parallelism_default")
+        if "settings_preset_default" not in raw and raw.get("curl_parallelism_default") is not None
+        else preset_defaults[settings_preset_default]
+    )
+    default_parallelism = _bounded_int(default_source, default=preset_defaults[settings_preset_default], minimum=1, maximum=max_parallelism)
     channel = str(raw.get("update_channel") or "stable")
     if channel not in {"stable", "prerelease"}:
         channel = "stable"
@@ -4447,6 +4756,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "curl_parallelism_max": max_parallelism,
         "enable_ipv6": bool(raw.get("enable_ipv6")),
         "debug_stdout": bool(raw.get("debug_stdout")),
+        "settings_preset_default": settings_preset_default,
         "update_channel": channel,
         "stable_release_url": "https://github.com/balbomush/GP-access-control-plane/releases/latest",
         "prerelease_url": "https://github.com/balbomush/GP-access-control-plane/releases",
@@ -4454,31 +4764,15 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_discovery_profiles(config: AppConfig) -> dict[str, dict[str, Any]]:
-    state = read_state(config.output.state_dir)
-    stored = state.get("discovery_profiles") if isinstance(state.get("discovery_profiles"), dict) else {}
     merged: dict[str, dict[str, Any]] = {}
     for name, profile in DEFAULT_DISCOVERY_PROFILES.items():
         merged[name] = _normalize_discovery_profile(name, profile)
-    for raw_name, raw_profile in stored.items():
-        name = _profile_name(raw_name)
-        if not name or not isinstance(raw_profile, dict):
-            continue
-        merged[name] = _normalize_discovery_profile(name, raw_profile)
     return dict(sorted(merged.items()))
 
 
 def save_discovery_profiles(config: AppConfig, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    profiles: dict[str, dict[str, Any]] = {}
-    source = payload if isinstance(payload, dict) else {}
-    for raw_name, raw_profile in source.items():
-        name = _profile_name(raw_name)
-        if not name or not isinstance(raw_profile, dict):
-            continue
-        if name in DEFAULT_DISCOVERY_PROFILES:
-            continue
-        profiles[name] = _normalize_discovery_profile(name, raw_profile)
     state = read_state(config.output.state_dir)
-    state["discovery_profiles"] = profiles
+    state["discovery_profiles"] = {}
     write_state(config.output.state_dir, state)
     return read_discovery_profiles(config)
 
@@ -4597,6 +4891,7 @@ def _v2fly_preview_payload(config: AppConfig, payload: dict[str, Any]) -> dict[s
         scope=str(payload.get("scope") or "finder"),
         name=str(payload.get("name") or ""),
         categories=_payload_string_list(payload, "categories"),
+        domains=_payload_string_list(payload, "domains"),
     )
 
 
@@ -4606,6 +4901,7 @@ def _v2fly_import_payload(config: AppConfig, payload: dict[str, Any]) -> dict[st
         scope=str(payload.get("scope") or "finder"),
         name=str(payload.get("name") or ""),
         categories=_payload_string_list(payload, "categories"),
+        domains=_payload_string_list(payload, "domains"),
     )
 
 
