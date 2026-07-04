@@ -73,6 +73,10 @@ run_as_target() {
   fi
 }
 
+repo_git() {
+  run_as_target git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
+}
+
 if [ "$CURRENT_UID" -ne 0 ]; then
   need_command sudo
 fi
@@ -168,15 +172,15 @@ export PATH="$TARGET_BIN_DIR:$PATH"
 log "Installing GP Access Control Plane"
 run_as_target mkdir -p "$(dirname "$INSTALL_DIR")"
 if [ -d "$INSTALL_DIR/.git" ]; then
-  if [ -n "$(run_as_target git -C "$INSTALL_DIR" status --short)" ]; then
+  if [ -n "$(repo_git status --short)" ]; then
     fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."
   fi
-  run_as_target git -C "$INSTALL_DIR" fetch origin "$BRANCH" || run_as_target git -C "$INSTALL_DIR" fetch origin "tag" "$BRANCH"
-  if run_as_target git -C "$INSTALL_DIR" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
-    run_as_target git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
-    run_as_target git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
-  elif run_as_target git -C "$INSTALL_DIR" rev-parse --verify --quiet "refs/tags/$BRANCH" >/dev/null; then
-    run_as_target git -C "$INSTALL_DIR" checkout --detach "$BRANCH"
+  repo_git fetch origin "$BRANCH" || repo_git fetch origin "tag" "$BRANCH"
+  if repo_git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
+    repo_git checkout -B "$BRANCH" "origin/$BRANCH"
+    repo_git pull --ff-only origin "$BRANCH"
+  elif repo_git rev-parse --verify --quiet "refs/tags/$BRANCH" >/dev/null; then
+    repo_git checkout --detach "$BRANCH"
   else
     fail "Cannot find branch or tag: $BRANCH"
   fi

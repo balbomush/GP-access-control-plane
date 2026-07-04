@@ -97,7 +97,9 @@ queue_update() {
   unit="gp-control-plane-update-$stamp"
   script="$log_dir/$unit.sh"
   log_file="$log_dir/$unit.log"
-  repo_url="$(git -C "$install_dir" remote get-url origin 2>/dev/null || printf '%s\n' 'https://github.com/balbomush/GP-access-control-plane.git')"
+  install_user="$(stat -c '%U' "$install_dir" 2>/dev/null || printf '%s\n' '')"
+  [ -n "$install_user" ] && [ "$install_user" != "UNKNOWN" ] || fail "cannot detect install directory owner: $install_dir"
+  repo_url="$(git -c safe.directory="$install_dir" -C "$install_dir" remote get-url origin 2>/dev/null || printf '%s\n' 'https://github.com/balbomush/GP-access-control-plane.git')"
 
   mkdir -p "$log_dir"
   cat > "$script" <<SCRIPT
@@ -109,12 +111,13 @@ echo "gp-control-plane update queued at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "install_dir=$(shell_quote "$install_dir")"
 echo "ref=$(shell_quote "$ref")"
 export GP_INSTALL_DIR=$(shell_quote "$install_dir")
+export GP_INSTALL_USER=$(shell_quote "$install_user")
 export GP_BRANCH=$(shell_quote "$ref")
 export GP_REPO_URL=$(shell_quote "$repo_url")
 export GP_SERVICE_NAME=$(shell_quote "$service_name")
 if bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh"); then
-  installed_ref="$(git -C $(shell_quote "$install_dir") describe --tags --exact-match 2>/dev/null || git -C $(shell_quote "$install_dir") rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  installed_commit="$(git -C $(shell_quote "$install_dir") rev-parse --short HEAD 2>/dev/null || true)"
+  installed_ref="$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") describe --tags --exact-match 2>/dev/null || git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  installed_commit="$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --short HEAD 2>/dev/null || true)"
   installed_version="$($(shell_quote "$install_dir/.venv/bin/gp-control-plane") --version 2>/dev/null | awk '{print $NF}' || true)"
   expected_version="$(printf '%s' $(shell_quote "$ref") | sed 's/^v//')"
   echo "installed_ref=$installed_ref"
