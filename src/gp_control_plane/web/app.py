@@ -1465,23 +1465,48 @@ tr:last-child td { border-bottom: 0; }
   list-style: none;
 }
 .run-diagnostics summary::-webkit-details-marker { display: none; }
-.run-diagnostic-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.run-diagnostic-table-wrap {
   margin-top: 8px;
-}
-.run-diagnostic-chip {
-  max-width: 100%;
-  background: #0d1726;
+  overflow-x: auto;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--text);
-  overflow-wrap: anywhere;
-  padding: 4px 9px;
+  border-radius: 8px;
+  background: var(--surface-code);
 }
-.run-diagnostic-chip.warn { border-color: var(--warn); color: var(--warn); }
-.run-diagnostic-chip.bad { border-color: var(--danger); color: var(--danger); }
+.run-diagnostic-table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.run-diagnostic-table th,
+.run-diagnostic-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.run-diagnostic-table th {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.run-diagnostic-table tr:last-child td { border-bottom: 0; }
+.run-diagnostic-target {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  overflow-wrap: anywhere;
+}
+.run-diagnostic-status {
+  display: inline-block;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.run-diagnostic-status.warn { border-color: var(--warn); color: var(--warn); }
+.run-diagnostic-status.bad { border-color: var(--danger); color: var(--danger); }
 .run-diagnostic-note { margin-top: 8px; }
 code {
   display: block;
@@ -3432,21 +3457,56 @@ function runDiagnostics(row){
   const diagnostics = Array.isArray(row.domain_diagnostics) ? row.domain_diagnostics : [];
   const curlSummary = row.curl_diagnostics_summary || {};
   if (!skipped.length && !diagnostics.length && !Object.keys(curlSummary).length) return '';
-  const skippedItems = skipped.slice(0, 20).map((item) => diagnosticChip(`${item.raw || '-'}: ${item.label || item.status || '-'}`, 'bad')).join('');
-  const domainItems = diagnostics.slice(0, 30).map((item) => {
-    const codes = item.codes && Object.keys(item.codes).length ? `, curl ${Object.keys(item.codes).join('/')}` : '';
+  const skippedItems = skipped.slice(0, 20).map((item) => diagnosticTableRow({
+    type: 'строка',
+    target: item.raw || '-',
+    status: item.label || item.status || '-',
+    codes: '-',
+    tone: 'bad'
+  })).join('');
+  const domainItems = diagnostics.map((item) => {
+    const codes = item.codes && Object.keys(item.codes).length ? Object.entries(item.codes).map(([code, count]) => `${code}: ${count}`).join(', ') : '-';
     const tone = ['dns_error', 'invalid_domain', 'tls_sni_problem'].includes(item.status) ? 'bad' : 'warn';
-    return diagnosticChip(`${item.domain || '-'}: ${item.label || item.status || '-'}${codes}`, tone);
+    return diagnosticTableRow({
+      type: 'домен',
+      target: item.domain || '-',
+      status: item.label || item.status || '-',
+      codes,
+      tone
+    });
   }).join('');
-  const codeItems = Object.entries(curlSummary).map(([code, count]) => diagnosticChip(`curl code=${code}: ${count}`, 'warn')).join('');
+  const codeItems = Object.entries(curlSummary).map(([code, count]) => diagnosticTableRow({
+    type: 'сводка',
+    target: `curl code=${code}`,
+    status: 'всего',
+    codes: count,
+    tone: 'warn'
+  })).join('');
   return `<details class="run-diagnostics">
     <summary>Диагностика доменов</summary>
-    <div class="run-diagnostic-list">${skippedItems}${domainItems}${codeItems}</div>
+    <div class="run-diagnostic-table-wrap">
+      <table class="run-diagnostic-table">
+        <thead>
+          <tr>
+            <th>Тип</th>
+            <th>Домен / строка</th>
+            <th>Причина</th>
+            <th>Curl</th>
+          </tr>
+        </thead>
+        <tbody>${skippedItems}${domainItems}${codeItems}</tbody>
+      </table>
+    </div>
     <div class="run-diagnostic-note">Коды curl показывают причину провала проверки: DNS, timeout, TLS/SNI, QUIC/connect или некорректную строку.</div>
   </details>`;
 }
-function diagnosticChip(text, tone){
-  return `<span class="run-diagnostic-chip ${esc(tone || '')}">${esc(text)}</span>`;
+function diagnosticTableRow(item){
+  return `<tr>
+    <td>${esc(item.type || '-')}</td>
+    <td class="run-diagnostic-target">${esc(item.target || '-')}</td>
+    <td><span class="run-diagnostic-status ${esc(item.tone || '')}">${esc(item.status || '-')}</span></td>
+    <td>${esc(item.codes ?? '-')}</td>
+  </tr>`;
 }
 function isDiscoveryRun(row){
   return row.kind === 'standard-discovery' || row.kind === 'multi-domain-discovery';
