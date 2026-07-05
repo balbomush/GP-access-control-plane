@@ -774,6 +774,43 @@ pktws_check_https_tls12()
             self.assertEqual(tail["progress"]["successful"], 7)
             self.assertNotIn("partial", tail["progress"])
 
+    def test_latest_log_tail_can_return_only_appended_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            logs = root / "logs"
+            logs.mkdir(parents=True)
+            stdout = logs / "run.stdout.log"
+            progress = logs / "run.progress.json"
+            stdout.write_text("line 1\nline 2\n", encoding="utf-8")
+            progress.write_text(json.dumps({"attempted": 2, "successful": 0}), encoding="utf-8")
+            append_run(
+                state_dir,
+                {
+                    "id": "run",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout),
+                    "progress_log": str(progress),
+                },
+            )
+            initial = latest_log_tail(state_dir, max_lines=2)
+
+            with stdout.open("a", encoding="utf-8") as handle:
+                handle.write("line 3\n")
+            appended = latest_log_tail(
+                state_dir,
+                max_lines=2,
+                stdout_from_size=initial["stdout_size"],
+                stdout_log_match=initial["stdout_log"],
+            )
+
+            self.assertEqual(initial["stdout_tail"], "line 1\nline 2")
+            self.assertEqual(appended["stdout_tail"], "")
+            self.assertEqual(appended["stdout_append"].replace("\r\n", "\n"), "line 3\n")
+            self.assertGreater(appended["stdout_size"], initial["stdout_size"])
+            self.assertEqual(appended["progress"]["attempted"], 2)
+
     def test_close_stale_running_runs_appends_stopped_update(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

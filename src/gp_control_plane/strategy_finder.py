@@ -841,20 +841,41 @@ def close_stale_running_runs(state_dir: Path) -> int:
     return closed
 
 
-def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
+def latest_log_tail(
+    state_dir: Path,
+    max_lines: int = 200,
+    *,
+    stdout_from_size: int | None = None,
+    stdout_log_match: str | None = None,
+    stderr_from_size: int | None = None,
+    stderr_log_match: str | None = None,
+) -> dict[str, Any]:
     for run in reversed(read_runs(state_dir, limit=200)):
         stdout_log = Path(str(run.get("stdout_log") or ""))
         if not stdout_log.is_file():
             continue
-        lines = _tail_lines(stdout_log, max_lines)
         stderr_log_raw = str(run.get("stderr_log") or "")
         stderr_log = Path(stderr_log_raw) if stderr_log_raw else None
-        stderr_lines = _tail_lines(stderr_log, max_lines) if stderr_log and stderr_log.is_file() else []
-        stdout_tail = "\n".join(lines)
+        stdout_delta = _log_delta(stdout_log, stdout_log_match, stdout_from_size)
+        stderr_delta = _log_delta(stderr_log, stderr_log_match, stderr_from_size) if stderr_log and stderr_log.is_file() else None
+        if stdout_delta is None:
+            stdout_tail = "\n".join(_tail_lines(stdout_log, max_lines))
+            stdout_append = ""
+        else:
+            stdout_tail = ""
+            stdout_append = stdout_delta
+        if stderr_delta is None:
+            stderr_tail = "\n".join(_tail_lines(stderr_log, max_lines)) if stderr_log and stderr_log.is_file() else ""
+            stderr_append = ""
+        else:
+            stderr_tail = ""
+            stderr_append = stderr_delta
         progress = run.get("progress")
         if not isinstance(progress, dict):
             progress = _read_progress_log(run)
         if not isinstance(progress, dict):
+            if not stdout_tail:
+                stdout_tail = "\n".join(_tail_lines(stdout_log, max_lines))
             progress = progress_from_stdout(stdout_tail, run)
             progress["partial"] = True
         return {
@@ -862,9 +883,13 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
             "kind": run.get("kind"),
             "status": run.get("status"),
             "stdout_tail": stdout_tail,
-            "stderr_tail": "\n".join(stderr_lines),
+            "stdout_append": stdout_append,
+            "stderr_tail": stderr_tail,
+            "stderr_append": stderr_append,
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log) if stderr_log else "",
+            "stdout_size": _file_version(stdout_log)["size"],
+            "stderr_size": _file_version(stderr_log)["size"] if stderr_log and stderr_log.is_file() else 0,
             "progress": progress,
             "metrics": _read_latest_metrics(run),
         }
@@ -873,7 +898,11 @@ def latest_log_tail(state_dir: Path, max_lines: int = 200) -> dict[str, Any]:
         "kind": None,
         "status": None,
         "stdout_tail": "",
+        "stdout_append": "",
         "stderr_tail": "",
+        "stderr_append": "",
+        "stdout_size": 0,
+        "stderr_size": 0,
         "progress": progress_from_stdout("", {}),
         "metrics": {},
     }
@@ -3342,6 +3371,23 @@ def _tail_lines(path: Path, max_lines: int) -> list[str]:
             line_count += block.count(b"\n")
     data = b"".join(reversed(blocks))
     return data.decode("utf-8", errors="replace").splitlines()[-max_lines:]
+
+
+def _log_delta(path: Path | None, expected_path: str | None, from_size: int | None, max_bytes: int = 200_000) -> str | None:
+    if path is None or from_size is None or not expected_path:
+        return None
+    if str(path) != str(expected_path):
+        return None
+    if from_size < 0 or not path.exists():
+        return None
+    current_size = path.stat().st_size
+    if current_size < from_size:
+        return None
+    if current_size - from_size > max_bytes:
+        return None
+    with path.open("rb") as handle:
+        handle.seek(from_size)
+        return handle.read(current_size - from_size).decode("utf-8", errors="replace")
 
 
 def _file_version(path: Path) -> dict[str, int]:

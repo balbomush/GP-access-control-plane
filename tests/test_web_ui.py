@@ -286,6 +286,14 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("runDomainKey(row)", html)
         self.assertIn("root-helper", html)
         self.assertIn("metric-job-card", html)
+        self.assertIn("/api/events", html)
+        self.assertIn("new EventSource('/api/events')", html)
+        self.assertIn("startRealtimeEvents", html)
+        self.assertIn("startRealtimeFallback", html)
+        self.assertIn("stdout_size", html)
+        self.assertIn("mergeLogPayload", html)
+        self.assertIn("30000", html)
+        self.assertNotIn("setInterval(refresh, 5000)", html)
         self.assertIn("statusCheck", html)
         self.assertIn("zapretDiagnostics", html)
         self.assertIn("status-check-message", html)
@@ -472,6 +480,31 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"mtime_ns"', body)
             self.assertIn('"release_update"', body)
             self.assertIn('"status":"success"', body)
+
+    def test_events_endpoint_streams_sse_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/events")
+            response = connection.getresponse()
+            first_line = response.readline().decode("utf-8").strip()
+            second_line = response.readline().decode("utf-8").strip()
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+            self.assertEqual(first_line, "event: status")
+            self.assertTrue(second_line.startswith("data:"))
 
     def test_settings_endpoint_saves_runtime_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

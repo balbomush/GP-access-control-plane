@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -63,6 +65,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._html()
             elif path == "/api/status":
                 self._json(status_payload(config))
+            elif path == "/api/events":
+                self._events()
             elif path == "/api/settings":
                 self._json({"settings": read_settings(config)})
             elif path == "/api/releases":
@@ -82,7 +86,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path == "/api/strategy-finder/runs":
                 self._json({"runs": read_runs(config.output.state_dir)})
             elif path == "/api/strategy-finder/latest-log":
-                self._json(latest_log_tail(config.output.state_dir))
+                self._json(_latest_log_payload(config, query))
             elif path == "/api/backups":
                 self._json(list_snapshots(config.output.state_dir))
             elif path == "/api/backups/restore-preview":
@@ -109,6 +113,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             if path == "/":
                 data = index_html().encode("utf-8")
                 self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
+            elif path == "/api/events":
+                self._head(HTTPStatus.OK, "text/event-stream; charset=utf-8", 0)
             elif path in {
                 "/api/status",
                 "/api/settings",
@@ -295,6 +301,37 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _events(self) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            previous: dict[str, str] = {}
+            heartbeat_at = 0.0
+            while True:
+                try:
+                    for event_name, payload in _event_payloads(config).items():
+                        fingerprint = _event_fingerprint(payload)
+                        if previous.get(event_name) == fingerprint:
+                            continue
+                        previous[event_name] = fingerprint
+                        self._event(event_name, payload)
+                    now = time.monotonic()
+                    if now - heartbeat_at >= 15:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        heartbeat_at = now
+                    time.sleep(1)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+        def _event(self, event_name: str, payload: dict[str, Any]) -> None:
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            self.wfile.write(f"event: {event_name}\n".encode("utf-8"))
+            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+            self.wfile.flush()
 
         def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -2052,6 +2089,10 @@ const SETTINGS_PRESETS = {
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 let toastTimer = null;
 let refreshInFlight = false;
+let realtimeSource = null;
+let realtimeConnected = false;
+let realtimeFallbackTimer = null;
+let logDirty = false;
 let candidateRefreshTimer = null;
 let candidateRequestSeq = 0;
 let domainIndexRequestSeq = 0;
@@ -2154,7 +2195,10 @@ function syncActiveTabUi(){
 function setActiveTab(tabName){
   state.activeTab = tabName;
   syncActiveTabUi();
-  if (tabName === 'terminal') scrollLogToBottom();
+  if (tabName === 'terminal') {
+    if (logDirty) refreshLog();
+    scrollLogToBottom();
+  }
   if (tabName === 'candidates') ensureCandidateViewLoaded();
   if (tabName === 'backups' && !state.backupsLoaded) refreshBackups();
   if (tabName === 'lists' && !state.v2flyCategories) loadV2flyCategories();
@@ -4271,6 +4315,128 @@ function scheduleCandidateRefresh(){
     }
   }, 350);
 }
+function trimTextLines(text, maxLines){
+  const lines = String(text || '').split('\n');
+  if (lines.length <= maxLines) return lines.join('\n');
+  return lines.slice(lines.length - maxLines).join('\n');
+}
+function appendLogText(base, addition){
+  const left = String(base || '');
+  const right = String(addition || '');
+  if (!left || !right || left.endsWith('\n') || right.startsWith('\n')) return left + right;
+  return `${left}\n${right}`;
+}
+function latestLogUrl(incremental){
+  if (!incremental || !state.finderLog || !state.finderLog.stdout_log) {
+    return '/api/strategy-finder/latest-log';
+  }
+  const params = new URLSearchParams();
+  params.set('stdout_log', state.finderLog.stdout_log || '');
+  params.set('stdout_size', String(state.finderLog.stdout_size || 0));
+  params.set('stderr_log', state.finderLog.stderr_log || '');
+  params.set('stderr_size', String(state.finderLog.stderr_size || 0));
+  return `/api/strategy-finder/latest-log?${params.toString()}`;
+}
+function mergeLogPayload(previous, next){
+  if (!previous || !next) return next;
+  const sameRun = previous.run_id && next.run_id && previous.run_id === next.run_id;
+  const sameStdout = sameRun && previous.stdout_log && previous.stdout_log === next.stdout_log;
+  const sameStderr = sameRun && previous.stderr_log && previous.stderr_log === next.stderr_log;
+  if (sameStdout && next.stdout_append) {
+    next.stdout_tail = trimTextLines(appendLogText(previous.stdout_tail, next.stdout_append), 200);
+  }
+  if (sameStderr && next.stderr_append) {
+    next.stderr_tail = trimTextLines(appendLogText(previous.stderr_tail, next.stderr_append), 200);
+  }
+  if (sameStdout && !next.stdout_tail && !next.stdout_append) next.stdout_tail = previous.stdout_tail || '';
+  if (sameStderr && !next.stderr_tail && !next.stderr_append) next.stderr_tail = previous.stderr_tail || '';
+  return next;
+}
+function applyStatusPayload(status){
+  if (!status) return false;
+  const previousSettings = JSON.stringify(state.settings || {});
+  state.status = status;
+  state.releaseUpdate = status.release_update || state.releaseUpdate;
+  if (status.candidate_version) syncCandidateVersion(status.candidate_version);
+  if (status.settings) state.settings = status.settings;
+  renderMetrics();
+  const settingsChanged = previousSettings !== JSON.stringify(state.settings || {});
+  if (settingsChanged) renderSettings();
+  return settingsChanged;
+}
+async function refreshRuns(){
+  try {
+    const finderRuns = await getJson('/api/strategy-finder/runs');
+    state.finderRuns = latestById(finderRuns.runs || []);
+    renderRuns();
+    renderMetrics();
+  } catch (error) {
+    setMessage(`РћС€РёР±РєР° РѕР±РЅРѕРІР»РµРЅРёСЏ РёСЃС‚РѕСЂРёРё: ${error.message}`, 'bad');
+  }
+}
+async function refreshLog(incremental = false){
+  try {
+    const previous = state.finderLog;
+    const payload = await getJson(latestLogUrl(incremental));
+    state.finderLog = incremental ? mergeLogPayload(previous, payload) : payload;
+    logDirty = false;
+    renderLog();
+    renderMetrics();
+  } catch (error) {
+    setMessage(`РћС€РёР±РєР° РѕР±РЅРѕРІР»РµРЅРёСЏ Р»РѕРіР°: ${error.message}`, 'bad');
+  }
+}
+async function refreshPresets(){
+  try {
+    const presets = await getJson('/api/presets');
+    mergeCustomPresets((presets || {}).custom || {}, (presets || {}).metadata || {});
+    renderPresetSelects();
+    renderPresetManager();
+  } catch (error) {
+    setMessage(`РћС€РёР±РєР° РѕР±РЅРѕРІР»РµРЅРёСЏ РїСЂРµСЃРµС‚РѕРІ: ${error.message}`, 'bad');
+  }
+}
+function handleCandidateEvent(payload){
+  const version = payload && payload.version ? payload.version : null;
+  if (version) syncCandidateVersion(version);
+  renderMetrics();
+  if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
+}
+function handleLogEvent(){
+  logDirty = true;
+  if (state.activeTab === 'terminal' || isBusy()) refreshLog(true);
+}
+function handleStatusEvent(payload){
+  applyStatusPayload(payload);
+}
+function startRealtimeEvents(){
+  if (!('EventSource' in window)) {
+    realtimeConnected = false;
+    return;
+  }
+  if (realtimeSource) realtimeSource.close();
+  realtimeSource = new EventSource('/api/events');
+  realtimeSource.addEventListener('open', () => {
+    realtimeConnected = true;
+  });
+  realtimeSource.addEventListener('error', () => {
+    realtimeConnected = false;
+  });
+  realtimeSource.addEventListener('status', (event) => handleStatusEvent(JSON.parse(event.data || '{}')));
+  realtimeSource.addEventListener('runs', () => refreshRuns());
+  realtimeSource.addEventListener('log', () => handleLogEvent());
+  realtimeSource.addEventListener('candidates', (event) => handleCandidateEvent(JSON.parse(event.data || '{}')));
+  realtimeSource.addEventListener('settings', () => {
+    if (state.status) renderSettings();
+  });
+  realtimeSource.addEventListener('presets', () => refreshPresets());
+}
+function startRealtimeFallback(){
+  if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);
+  realtimeFallbackTimer = setInterval(() => {
+    if (!realtimeConnected) refresh();
+  }, 30000);
+}
 async function refresh(){
   if (refreshInFlight) return;
   refreshInFlight = true;
@@ -4285,9 +4451,7 @@ async function refresh(){
       getJson('/api/discovery-profiles'),
       getJson('/api/domain-sources')
     ]);
-    state.status = status;
-    state.releaseUpdate = status.release_update || state.releaseUpdate;
-    syncCandidateVersion(status.candidate_version || null);
+    applyStatusPayload(status);
     state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
@@ -4754,7 +4918,8 @@ document.addEventListener('toggle', (event) => {
   }
 }, true);
 refresh();
-setInterval(refresh, 5000);
+startRealtimeEvents();
+startRealtimeFallback();
 </script>
 </body></html>
 """
@@ -4772,6 +4937,85 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         },
         "zapret2": check_install_cached(),
     }
+
+
+def _event_payloads(config: AppConfig) -> dict[str, dict[str, Any]]:
+    status = status_payload(config)
+    status_event = {
+        key: status[key]
+        for key in ("version", "state", "settings", "release_update", "paths", "zapret2")
+        if key in status
+    }
+    return {
+        "status": status_event,
+        "runs": _runs_event_payload(config.output.state_dir),
+        "log": _log_event_payload(config.output.state_dir),
+        "candidates": {"version": status.get("candidate_version") or {}},
+        "settings": {"version": _event_fingerprint(status.get("settings") or {})},
+        "presets": {"version": _event_fingerprint(read_custom_preset_index(config.output.state_dir))},
+    }
+
+
+def _runs_event_payload(state_dir: Path) -> dict[str, Any]:
+    runs = read_runs(state_dir, limit=20)
+    compact = [
+        {
+            "id": item.get("id"),
+            "status": item.get("status"),
+            "phase": item.get("phase"),
+            "timestamp": item.get("timestamp"),
+            "candidate_count": item.get("candidate_count"),
+            "common_candidate_count": item.get("common_candidate_count"),
+            "progress": item.get("progress"),
+        }
+        for item in runs
+    ]
+    return {"count": len(runs), "version": _event_fingerprint(compact)}
+
+
+def _log_event_payload(state_dir: Path) -> dict[str, Any]:
+    for run in reversed(read_runs(state_dir, limit=20)):
+        stdout_log = Path(str(run.get("stdout_log") or ""))
+        if not stdout_log.is_file():
+            continue
+        stderr_log_raw = str(run.get("stderr_log") or "")
+        stderr_log = Path(stderr_log_raw) if stderr_log_raw else None
+        return {
+            "run_id": run.get("id"),
+            "status": run.get("status"),
+            "stdout": _path_version(stdout_log),
+            "stderr": _path_version(stderr_log) if stderr_log else {"size": 0, "mtime_ns": 0},
+            "progress": _path_version(_optional_path(run.get("progress_log"))),
+            "metrics": _path_version(_optional_path(run.get("metrics_log"))),
+        }
+    return {"run_id": None, "status": None, "stdout": {"size": 0, "mtime_ns": 0}}
+
+
+def _optional_path(value: Any) -> Path | None:
+    text = str(value or "").strip()
+    return Path(text) if text else None
+
+
+def _path_version(path: Path | None) -> dict[str, int]:
+    if path is None or not path.exists():
+        return {"size": 0, "mtime_ns": 0}
+    stat = path.stat()
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def _event_fingerprint(payload: Any) -> str:
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _latest_log_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return latest_log_tail(
+        config.output.state_dir,
+        stdout_from_size=_query_int(query, "stdout_size", -1),
+        stdout_log_match=_query_one(query, "stdout_log"),
+        stderr_from_size=_query_int(query, "stderr_size", -1),
+        stderr_log_match=_query_one(query, "stderr_log"),
+    )
 
 
 DEFAULT_SETTINGS = {
