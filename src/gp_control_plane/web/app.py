@@ -1828,7 +1828,7 @@ pre {
           </div>
           <div class="preset-grid">
             <div class="field">
-              <label for="preset-manager-name">Пользовательский список</label>
+              <label for="preset-manager-name">Список</label>
               <select id="preset-manager-name"></select>
             </div>
           </div>
@@ -2425,6 +2425,10 @@ function customPresetCount(target, name){
   if (meta) return Number(meta.enabled_count || 0);
   return uniqueDomainCount((state.customPresets[scope] || {})[name] || []);
 }
+function hasCustomPreset(target, name){
+  const scope = customPresetSourceScope(target, name);
+  return Boolean((state.customPresetMeta[scope] || {})[name] || (state.customPresets[scope] || {})[name]);
+}
 function mergePresetResponse(data){
   mergeCustomPresets((data || {}).custom || {}, (data || {}).metadata || {});
 }
@@ -2489,6 +2493,28 @@ function presetDomains(target, value){
   }
   return [];
 }
+function managerPresetEntries(){
+  const target = 'finder';
+  const custom = customPresetNames(target).map((name) => ({
+    name,
+    label: name,
+    count: customPresetCount(target, name),
+    kind: 'user'
+  }));
+  const seen = new Set(custom.map((item) => item.name));
+  const builtin = presetGroups(target)
+    .flatMap((group) => group.presets.map((preset) => ({
+      name: preset.key,
+      label: preset.label,
+      count: uniqueDomainCount(preset.domains),
+      kind: 'builtin'
+    })))
+    .filter((item) => item.count > 0 && !seen.has(item.name));
+  return [...custom, ...builtin].sort((a, b) => a.label.localeCompare(b.label));
+}
+function managerPresetEntry(name){
+  return managerPresetEntries().find((item) => item.name === name) || null;
+}
 function renderPresetSelect(target){
   const select = el(`${target}-preset-select`);
   if (!select) return;
@@ -2519,6 +2545,10 @@ function markDomainPresetCustom(target){
   if (nameInput) nameInput.value = 'custom';
 }
 async function fetchAllPresetDomains(target, name){
+  if (!hasCustomPreset(target, name)) {
+    const builtin = builtInPresets(target).find((item) => item.key === name);
+    if (builtin) return uniqueDomains(builtin.domains);
+  }
   const sourceScope = customPresetSourceScope(target, name);
   const cached = (state.customPresets[sourceScope] || {})[name] || [];
   const expected = customPresetCount(sourceScope, name);
@@ -2543,6 +2573,7 @@ async function fetchAllPresetDomains(target, name){
     if (!rows.length) break;
     guard += 1;
   }
+  if (!state.customPresets[sourceScope]) state.customPresets[sourceScope] = {};
   state.customPresets[sourceScope][name] = uniqueDomains(domains);
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
   return state.customPresets[sourceScope][name];
@@ -3853,22 +3884,25 @@ function renderPresetManager(){
   if (!nameSelect || !list) return;
   const manager = state.presetManager;
   const scope = 'finder';
-  const names = customPresetNames(scope);
+  const entries = managerPresetEntries();
+  const names = entries.map((item) => item.name);
   if (!manager.name || !names.includes(manager.name)) manager.name = names[0] || '';
-  const sourceScope = manager.name ? customPresetSourceScope(scope, manager.name) : scope;
+  const entry = manager.name ? managerPresetEntry(manager.name) : null;
+  const isStoredUser = manager.name ? hasCustomPreset(scope, manager.name) : false;
+  const sourceScope = isStoredUser ? customPresetSourceScope(scope, manager.name) : scope;
   manager.scope = sourceScope;
-  nameSelect.innerHTML = names.length
-    ? names.map((name) => `<option value="${esc(name)}">${esc(name)} (${customPresetCount(scope, name)})</option>`).join('')
-    : '<option value="">Нет пользовательских списков</option>';
+  nameSelect.innerHTML = entries.length
+    ? entries.map((item) => `<option value="${esc(item.name)}">${esc(item.label)} (${esc(item.count)})</option>`).join('')
+    : '<option value="">Нет списков</option>';
   nameSelect.value = manager.name || '';
-  const meta = manager.name ? presetManagerMeta(sourceScope)[manager.name] : null;
-  const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : '0';
+  const meta = isStoredUser ? presetManagerMeta(sourceScope)[manager.name] : null;
+  const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : (entry ? `${entry.count}/${entry.count}` : '0');
   setText('preset-manager-count', count);
   const query = el('preset-manager-query');
   if (query && query.value !== manager.query) query.value = manager.query || '';
   const note = el('preset-manager-note');
   if (!manager.name) {
-    note.textContent = 'Пользовательских списков пока нет. Создайте список в подборе или импортируйте его из v2fly.';
+    note.textContent = 'Списков пока нет. Создайте список в подборе или импортируйте его из v2fly.';
     list.innerHTML = '';
     return;
   }
@@ -3876,7 +3910,7 @@ function renderPresetManager(){
   const updated = meta && meta.updated_at ? ` · обновлено ${friendlyDate(meta.updated_at)}` : '';
   note.textContent = manager.loading
     ? 'Загрузка списка...'
-    : `Показано ${loaded.length} из ${manager.total || 0}. Активно ${meta ? meta.enabled_count : 0}${updated}`;
+    : `Показано ${loaded.length} из ${manager.total || 0}. Активно ${meta ? meta.enabled_count : entry?.count || 0}${updated}${isStoredUser ? '' : ' · готовый список, при сохранении станет редактируемым'}`;
   if (!manager.loaded && !manager.loading) {
     list.innerHTML = '<div class="empty">Нажмите “Показать домены”, чтобы загрузить список.</div>';
     return;
@@ -3902,7 +3936,8 @@ async function refreshPresetManager(reset){
   const scope = 'finder';
   const name = el('preset-manager-name')?.value || manager.name || '';
   const query = String(el('preset-manager-query')?.value || '').trim();
-  const sourceScope = name ? customPresetSourceScope(scope, name) : scope;
+  const isStoredUser = name ? hasCustomPreset(scope, name) : false;
+  const sourceScope = isStoredUser ? customPresetSourceScope(scope, name) : scope;
   if (!name) {
     manager.scope = sourceScope;
     manager.name = '';
@@ -3918,6 +3953,23 @@ async function refreshPresetManager(reset){
   Object.assign(manager, { scope: sourceScope, name, query, loading: true });
   renderPresetManager();
   try {
+    if (!isStoredUser) {
+      const domains = await fetchAllPresetDomains(scope, name);
+      const normalizedQuery = query.toLowerCase();
+      const filtered = normalizedQuery ? domains.filter((domain) => domain.toLowerCase().includes(normalizedQuery)) : domains;
+      const rows = filtered.slice(offset, offset + 200).map((domain, index) => ({
+        domain,
+        position: offset + index,
+        enabled: true
+      }));
+      manager.domains = reset ? rows : [...(manager.domains || []), ...rows];
+      manager.total = filtered.length;
+      manager.hasMore = offset + rows.length < filtered.length;
+      manager.loading = false;
+      manager.loaded = true;
+      renderPresetManager();
+      return;
+    }
     const params = new URLSearchParams();
     params.set('scope', sourceScope);
     params.set('name', name);
@@ -3944,6 +3996,19 @@ async function togglePresetDomain(domain, enabled){
   const manager = state.presetManager;
   if (!manager.name || !domain) return;
   try {
+    if (!hasCustomPreset('finder', manager.name)) {
+      const current = await fetchAllPresetDomains('finder', manager.name);
+      const domains = enabled ? uniqueDomains([...current, domain]) : current.filter((item) => item !== domain);
+      const data = await postJson('/api/presets/save', { scope: 'finder', name: manager.name, domains });
+      mergePresetResponse(data);
+      state.customPresets.finder[manager.name] = domains;
+      localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+      Object.assign(manager, { scope: 'finder', domains: [], total: 0, hasMore: false, loaded: false });
+      renderPresetSelects();
+      await refreshPresetManager(true);
+      showToast(enabled ? 'Список сохранен как пользовательский' : 'Список сохранен без домена', 'good');
+      return;
+    }
     const data = await postJson('/api/presets/domain-enabled', {
       scope: manager.scope || 'finder',
       name: manager.name,
@@ -4014,7 +4079,7 @@ async function buildPresetEditorPreview(){
     return null;
   }
   let current = [];
-  if ((state.customPresetMeta[scope] || {})[name]) {
+  if (hasCustomPreset(scope, name) || managerPresetEntry(name)) {
     current = await fetchAllPresetDomains(scope, name);
   }
   const currentSet = new Set(current);
@@ -4141,6 +4206,17 @@ async function importV2flyPreset(){
     const data = await postJson('/api/domain-sources/v2fly/import', payload);
     state.v2flyPreview = data;
     mergePresetResponse(data);
+    if (data.preset) {
+      state.presetManager.scope = 'finder';
+      state.presetManager.name = data.preset;
+      state.presetManager.query = '';
+      state.presetManager.domains = [];
+      state.presetManager.total = 0;
+      state.presetManager.hasMore = false;
+      state.presetManager.loaded = false;
+      const editorName = el('preset-editor-name');
+      if (editorName) editorName.value = data.preset;
+    }
     renderPresetSelects();
     renderPresetManager();
     if (Array.isArray(data.domains)) {
@@ -4148,6 +4224,7 @@ async function importV2flyPreset(){
       updateEditorLineNumbers('v2fly-domains');
     }
     renderV2flyPreview();
+    if (data.preset) await refreshPresetManager(true);
     setMessage(`Пресет сохранен: ${data.count || 0} доменов`, 'good');
   } catch (error) {
     setMessage(`Ошибка сохранения v2fly: ${error.message}`, 'bad');
