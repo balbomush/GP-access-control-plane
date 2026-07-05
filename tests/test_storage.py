@@ -388,6 +388,91 @@ class StorageTests(unittest.TestCase):
             self.assertIn("enabled", columns)
             self.assertIn("idx_preset_domains_preset_enabled_position", indexes)
 
+    def test_repairs_foreign_keys_left_by_table_rename_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            path = db_path(state_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO meta(key, value) VALUES('schema_version', '9');
+                    CREATE TABLE domains (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        service_group TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE strategies (
+                        id TEXT PRIMARY KEY,
+                        protocol TEXT NOT NULL DEFAULT '',
+                        args TEXT NOT NULL DEFAULT '',
+                        args_hash TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'candidate'
+                    );
+                    CREATE TABLE domain_presets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope TEXT NOT NULL DEFAULT '',
+                        name TEXT NOT NULL DEFAULT '',
+                        kind TEXT NOT NULL DEFAULT 'user',
+                        label TEXT NOT NULL DEFAULT '',
+                        source_json TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(scope, name, kind)
+                    );
+                    CREATE TABLE strategy_domain_results (
+                        strategy_id TEXT NOT NULL,
+                        domain_id INTEGER NOT NULL,
+                        protocol TEXT NOT NULL DEFAULT '',
+                        source_mode TEXT NOT NULL DEFAULT 'single_domain',
+                        PRIMARY KEY(strategy_id, domain_id, source_mode),
+                        FOREIGN KEY(strategy_id) REFERENCES strategies_old(id) ON DELETE CASCADE,
+                        FOREIGN KEY(domain_id) REFERENCES domains_old(id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE preset_domains (
+                        preset_id INTEGER NOT NULL,
+                        domain_id INTEGER NOT NULL,
+                        position INTEGER NOT NULL DEFAULT 0,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        PRIMARY KEY(preset_id, domain_id),
+                        FOREIGN KEY(preset_id) REFERENCES domain_presets_old(id) ON DELETE CASCADE,
+                        FOREIGN KEY(domain_id) REFERENCES domains_old(id) ON DELETE CASCADE
+                    );
+                    INSERT INTO domains(id, name) VALUES(1, 'youtube.com');
+                    INSERT INTO strategies(id, protocol, args, args_hash) VALUES('s1', 'tls', '--a', 'hash-a');
+                    INSERT INTO domain_presets(id, scope, name, kind, label) VALUES(1, 'finder', 'mine', 'user', 'mine');
+                    INSERT INTO strategy_domain_results(strategy_id, domain_id, protocol, source_mode)
+                    VALUES('s1', 1, 'tls', 'single_domain');
+                    INSERT INTO preset_domains(preset_id, domain_id, position, enabled)
+                    VALUES(1, 1, 0, 1);
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with connect(state_dir) as conn:
+                strategy_refs = {
+                    str(row["table"]) for row in conn.execute("PRAGMA foreign_key_list(strategy_domain_results)")
+                }
+                preset_refs = {str(row["table"]) for row in conn.execute("PRAGMA foreign_key_list(preset_domains)")}
+                repair_marker = get_meta(conn, "renamed_foreign_key_targets_repaired_v9")
+
+            save_custom_presets(
+                state_dir,
+                {"finder": {"v2fly-smoke": ["codex-smoke.example"]}, "common": {}},
+                "2026-07-01T00:00:00Z",
+            )
+            saved = read_custom_presets(state_dir)
+
+            self.assertEqual(strategy_refs, {"strategies", "domains"})
+            self.assertEqual(preset_refs, {"domain_presets", "domains"})
+            self.assertEqual(repair_marker, "1")
+            self.assertEqual(saved["finder"]["v2fly-smoke"], ["codex-smoke.example"])
+
     def test_preset_domain_page_supports_search_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
