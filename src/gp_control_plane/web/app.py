@@ -2253,7 +2253,7 @@ function collectRunPreferences(){
     timeout_hours: Number.isFinite(timeoutHours) ? timeoutHours : 6
   };
 }
-function applyRunPreferencesOnce(){
+function useRunPreferencesOnce(){
   if (state.runPreferencesApplied || !state.runPreferences) return;
   const prefs = state.runPreferences || {};
   state.loadingRunPreferences = true;
@@ -4265,7 +4265,7 @@ function renderAll(options){
   const opts = options || {};
   renderPresetSelects();
   renderSettings();
-  applyRunPreferencesOnce();
+  useRunPreferencesOnce();
   if (!state.domainsInitialized && !state.domainsTouched && !el('finder-domains').value.trim() && state.domainSets) {
     const domains = [...new Set(defaultDomains('critical'))];
     el('finder-domains').value = domains.join('\\n');
@@ -4524,7 +4524,7 @@ function mergeLogPayload(previous, next){
   if (sameStderr && !next.stderr_tail && !next.stderr_append) next.stderr_tail = previous.stderr_tail || '';
   return next;
 }
-function applyStatusPayload(status){
+function mergeStatusPayload(status){
   if (!status) return false;
   const previousSettings = JSON.stringify(state.settings || {});
   state.status = status;
@@ -4580,7 +4580,7 @@ function handleLogEvent(){
   if (state.activeTab === 'terminal' || isBusy()) refreshLog(true);
 }
 function handleStatusEvent(payload){
-  applyStatusPayload(payload);
+  mergeStatusPayload(payload);
 }
 function startRealtimeEvents(){
   if (!('EventSource' in window)) {
@@ -4624,7 +4624,7 @@ async function refresh(){
       getJson('/api/discovery-profiles'),
       getJson('/api/domain-sources')
     ]);
-    applyStatusPayload(status);
+    mergeStatusPayload(status);
     state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;

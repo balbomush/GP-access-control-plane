@@ -81,7 +81,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("settings-preset-note", html)
         self.assertIn("/api/run-preferences", html)
         self.assertIn("runPreferences", html)
-        self.assertIn("applyRunPreferencesOnce", html)
+        self.assertIn("useRunPreferencesOnce", html)
         self.assertIn("saveRunPreferencesNow", html)
         self.assertIn("scheduleRunPreferencesSave", html)
         self.assertIn("settings-default-settings-preset", html)
