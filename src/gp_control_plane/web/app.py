@@ -2265,13 +2265,13 @@ function useRunPreferencesOnce(){
       presetSelect.value = presetValue;
     }
     if (domains.length) {
-      el('finder-domains').value = domains.join('\n');
+      el('finder-domains').value = domains.join('\\n');
       state.domainsTouched = presetSelect?.value === CUSTOM_SELECT_VALUE;
       state.domainsInitialized = true;
     } else if (presetSelect && presetSelect.value !== CUSTOM_SELECT_VALUE) {
       const presetDomainsList = uniqueDomains(presetDomains('finder', presetSelect.value));
       if (presetDomainsList.length) {
-        el('finder-domains').value = presetDomainsList.join('\n');
+        el('finder-domains').value = presetDomainsList.join('\\n');
         state.domainsTouched = false;
         state.domainsInitialized = true;
       }
@@ -2786,7 +2786,7 @@ function zapretCompactStatus(zapret){
   const tooltip = diagnostics.map((item) => {
     const mark = item.ok ? 'OK' : 'FAIL';
     return `${mark} ${item.label || item.id || '-'}: ${item.message || ''}`;
-  }).join('\n');
+  }).join('\\n');
   return { ok, total, ready, tooltip };
 }
 function testedDomainCount(){
@@ -4488,15 +4488,15 @@ function scheduleCandidateRefresh(){
   }, 350);
 }
 function trimTextLines(text, maxLines){
-  const lines = String(text || '').split('\n');
-  if (lines.length <= maxLines) return lines.join('\n');
-  return lines.slice(lines.length - maxLines).join('\n');
+  const lines = String(text || '').split('\\n');
+  if (lines.length <= maxLines) return lines.join('\\n');
+  return lines.slice(lines.length - maxLines).join('\\n');
 }
 function appendLogText(base, addition){
   const left = String(base || '');
   const right = String(addition || '');
-  if (!left || !right || left.endsWith('\n') || right.startsWith('\n')) return left + right;
-  return `${left}\n${right}`;
+  if (!left || !right || left.endsWith('\\n') || right.startsWith('\\n')) return left + right;
+  return `${left}\\n${right}`;
 }
 function latestLogUrl(incremental){
   if (!incremental || !state.finderLog || !state.finderLog.stdout_log) {

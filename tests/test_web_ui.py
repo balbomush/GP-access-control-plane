@@ -401,6 +401,104 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/jobs/zapret-strategy-check", html)
         self.assertNotIn("/api/jobs/zapret-custom-verification", html)
 
+    def test_index_script_has_no_raw_newlines_inside_quoted_strings(self) -> None:
+        html = index_html()
+        marker_start = "<script>"
+        marker_end = "</script>"
+        start = html.index(marker_start) + len(marker_start)
+        end = html.index(marker_end, start)
+        script = html[start:end]
+
+        errors: list[int] = []
+        line = 1
+        in_string: str | None = None
+        in_template = False
+        in_regex = False
+        in_regex_class = False
+        in_line_comment = False
+        in_block_comment = False
+        escaped = False
+        last_significant: str | None = None
+        index = 0
+        while index < len(script):
+            char = script[index]
+            next_char = script[index + 1] if index + 1 < len(script) else ""
+            if char == "\n":
+                line += 1
+                in_line_comment = False
+            if in_line_comment:
+                index += 1
+                continue
+            if in_block_comment:
+                if char == "*" and next_char == "/":
+                    in_block_comment = False
+                    index += 2
+                    continue
+                index += 1
+                continue
+            if in_regex:
+                if char in "\r\n":
+                    errors.append(line)
+                    in_regex = False
+                    in_regex_class = False
+                elif escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == "[":
+                    in_regex_class = True
+                elif char == "]":
+                    in_regex_class = False
+                elif char == "/" and not in_regex_class:
+                    in_regex = False
+                    last_significant = "/"
+                index += 1
+                continue
+            if in_string:
+                if char in "\r\n":
+                    errors.append(line)
+                    in_string = None
+                elif escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == in_string:
+                    in_string = None
+                index += 1
+                continue
+            if in_template:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == "`":
+                    in_template = False
+                index += 1
+                continue
+            if char == "/" and next_char == "/":
+                in_line_comment = True
+                index += 2
+                continue
+            if char == "/" and next_char == "*":
+                in_block_comment = True
+                index += 2
+                continue
+            if char == "/" and (last_significant is None or last_significant in "([{=,:;!&|?"):
+                in_regex = True
+                escaped = False
+                in_regex_class = False
+                index += 1
+                continue
+            if char in ("'", '"'):
+                in_string = char
+            elif char == "`":
+                in_template = True
+            if not char.isspace():
+                last_significant = char
+            index += 1
+
+        self.assertEqual([], errors[:10], f"Raw newline inside JS string literal near lines: {errors[:10]}")
+
     def test_head_root_returns_ok_for_curl_i(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
