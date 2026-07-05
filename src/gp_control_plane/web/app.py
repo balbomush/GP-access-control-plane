@@ -1630,7 +1630,7 @@ pre {
                     <option value="accelerated">Ускоренный</option>
                     <option value="custom">изменено</option>
                   </select>
-                  <div class="helper-text">Задает параметры запуска: curl, повторы и DNS/IP checks.</div>
+                  <div class="helper-text" id="settings-preset-note">Задает параметры запуска: curl, повторы и DNS/IP checks.</div>
                 </div>
               </div>
             </div>
@@ -1828,13 +1828,6 @@ pre {
           </div>
           <div class="preset-grid">
             <div class="field">
-              <label for="preset-manager-scope">Где используется</label>
-              <select id="preset-manager-scope">
-                <option value="finder">Подбор</option>
-                <option value="common">Общие стратегии</option>
-              </select>
-            </div>
-            <div class="field">
               <label for="preset-manager-name">Пользовательский список</label>
               <select id="preset-manager-name"></select>
             </div>
@@ -1862,46 +1855,6 @@ pre {
             <button class="secondary" data-action="preset-editor-export" type="button">Скачать TXT</button>
           </div>
           <div class="source-preview" id="preset-editor-preview">Изменения еще не проверялись.</div>
-        </div>
-        <div class="preset-panel profiles-manager-panel">
-          <div class="panel-header">
-            <h2>Профили подбора</h2>
-            <span class="badge">blockcheck2</span>
-          </div>
-          <div class="settings-card-grid" id="discovery-profile-cards">
-            <div class="settings-card">
-              <div class="settings-card-title">Быстрый</div>
-              <div class="helper-text">quick: меньше комбинаций, подходит для первичной проверки.</div>
-            </div>
-            <div class="settings-card">
-              <div class="settings-card-title">Стандартный</div>
-              <div class="helper-text">standard: основной режим для обычного подбора.</div>
-            </div>
-            <div class="settings-card">
-              <div class="settings-card-title">Глубокий</div>
-              <div class="helper-text">force: больше комбинаций, дольше работает.</div>
-            </div>
-          </div>
-        </div>
-        <div class="preset-panel settings-presets-manager-panel">
-          <div class="panel-header">
-            <h2>Пресеты настроек</h2>
-            <span class="badge">curl</span>
-          </div>
-          <div class="settings-card-grid" id="settings-preset-cards">
-            <div class="settings-card">
-              <div class="settings-card-title">Осторожный</div>
-              <div class="helper-text">Меньше параллельных curl и без пропуска DNS/IP checks.</div>
-            </div>
-            <div class="settings-card">
-              <div class="settings-card-title">Обычный</div>
-              <div class="helper-text">Баланс скорости и аккуратной проверки для повседневного запуска.</div>
-            </div>
-            <div class="settings-card">
-              <div class="settings-card-title">Ускоренный</div>
-              <div class="helper-text">Больше параллельных curl; сильнее всего влияет на режим `Все домены на одной стратегии`.</div>
-            </div>
-          </div>
         </div>
         <div class="preset-panel settings-domain-source-panel">
           <div class="panel-header">
@@ -2472,6 +2425,7 @@ function markSettingsPresetCustom(){
   const select = el('settings-preset-select');
   if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
   state.settingsTouched = true;
+  renderSettingsPresetNote();
 }
 function setSettingsPreset(value, options){
   const presetKey = SETTINGS_PRESETS[value] ? value : 'normal';
@@ -2499,6 +2453,8 @@ function setSettingsPreset(value, options){
 }
 function renderSettingsPresetNote(){
   const preset = SETTINGS_PRESETS[selectedSettingsPreset()];
+  const presetNote = el('settings-preset-note');
+  if (presetNote) presetNote.textContent = preset ? preset.note : 'Настройки изменены вручную.';
   const note = el('run-mode-note');
   if (!note) return;
   const mode = selectedRunMode();
@@ -2591,15 +2547,26 @@ function normalizeCustomPresetMeta(metadata, presets){
   return result;
 }
 function customPresetNames(target){
+  const scopes = presetScopesForTarget(target);
   return [...new Set([
-    ...Object.keys((state.customPresetMeta && state.customPresetMeta[target]) || {}),
-    ...Object.keys((state.customPresets && state.customPresets[target]) || {})
+    ...scopes.flatMap((scope) => Object.keys((state.customPresetMeta && state.customPresetMeta[scope]) || {})),
+    ...scopes.flatMap((scope) => Object.keys((state.customPresets && state.customPresets[scope]) || {}))
   ])].sort((a, b) => a.localeCompare(b));
 }
+function presetScopesForTarget(target){
+  return target === 'common' ? ['common', 'finder'] : ['finder', 'common'];
+}
+function customPresetSourceScope(target, name){
+  for (const scope of presetScopesForTarget(target)) {
+    if ((state.customPresetMeta[scope] || {})[name] || (state.customPresets[scope] || {})[name]) return scope;
+  }
+  return target || 'finder';
+}
 function customPresetCount(target, name){
-  const meta = (state.customPresetMeta[target] || {})[name];
+  const scope = customPresetSourceScope(target, name);
+  const meta = (state.customPresetMeta[scope] || {})[name];
   if (meta) return Number(meta.enabled_count || 0);
-  return uniqueDomainCount((state.customPresets[target] || {})[name] || []);
+  return uniqueDomainCount((state.customPresets[scope] || {})[name] || []);
 }
 function mergePresetResponse(data){
   mergeCustomPresets((data || {}).custom || {}, (data || {}).metadata || {});
@@ -2659,7 +2626,10 @@ function presetDomains(target, value){
     const preset = builtInPresets(target).find((item) => item.key === key);
     return preset ? preset.domains : [];
   }
-  if (scope === 'custom') return state.customPresets[target]?.[key] || [];
+  if (scope === 'custom') {
+    const sourceScope = customPresetSourceScope(target, key);
+    return state.customPresets[sourceScope]?.[key] || [];
+  }
   return [];
 }
 function renderPresetSelect(target){
@@ -2692,8 +2662,9 @@ function markDomainPresetCustom(target){
   if (nameInput) nameInput.value = 'custom';
 }
 async function fetchAllPresetDomains(target, name){
-  const cached = (state.customPresets[target] || {})[name] || [];
-  const expected = customPresetCount(target, name);
+  const sourceScope = customPresetSourceScope(target, name);
+  const cached = (state.customPresets[sourceScope] || {})[name] || [];
+  const expected = customPresetCount(sourceScope, name);
   if (expected > 0 && cached.length && cached.length >= expected) return uniqueDomains(cached);
   let offset = 0;
   let hasMore = true;
@@ -2701,7 +2672,7 @@ async function fetchAllPresetDomains(target, name){
   let guard = 0;
   while (hasMore && guard < 1000) {
     const params = new URLSearchParams();
-    params.set('scope', target);
+    params.set('scope', sourceScope);
     params.set('name', name);
     params.set('kind', 'user');
     params.set('include_disabled', '0');
@@ -2715,9 +2686,9 @@ async function fetchAllPresetDomains(target, name){
     if (!rows.length) break;
     guard += 1;
   }
-  state.customPresets[target][name] = uniqueDomains(domains);
+  state.customPresets[sourceScope][name] = uniqueDomains(domains);
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
-  return state.customPresets[target][name];
+  return state.customPresets[sourceScope][name];
 }
 async function usePreset(target){
   const selected = el(`${target}-preset-select`).value;
@@ -3971,20 +3942,20 @@ function presetManagerMeta(scope){
   return (state.customPresetMeta && state.customPresetMeta[scope]) || {};
 }
 function renderPresetManager(){
-  const scopeSelect = el('preset-manager-scope');
   const nameSelect = el('preset-manager-name');
   const list = el('preset-manager-list');
-  if (!scopeSelect || !nameSelect || !list) return;
+  if (!nameSelect || !list) return;
   const manager = state.presetManager;
-  const scope = manager.scope || scopeSelect.value || 'finder';
-  if (scopeSelect.value !== scope) scopeSelect.value = scope;
+  const scope = 'finder';
   const names = customPresetNames(scope);
   if (!manager.name || !names.includes(manager.name)) manager.name = names[0] || '';
+  const sourceScope = manager.name ? customPresetSourceScope(scope, manager.name) : scope;
+  manager.scope = sourceScope;
   nameSelect.innerHTML = names.length
     ? names.map((name) => `<option value="${esc(name)}">${esc(name)} (${customPresetCount(scope, name)})</option>`).join('')
     : '<option value="">Нет пользовательских списков</option>';
   nameSelect.value = manager.name || '';
-  const meta = manager.name ? presetManagerMeta(scope)[manager.name] : null;
+  const meta = manager.name ? presetManagerMeta(sourceScope)[manager.name] : null;
   const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : '0';
   setText('preset-manager-count', count);
   const query = el('preset-manager-query');
@@ -4022,11 +3993,12 @@ function renderPresetManager(){
 }
 async function refreshPresetManager(reset){
   const manager = state.presetManager;
-  const scope = el('preset-manager-scope')?.value || manager.scope || 'finder';
+  const scope = 'finder';
   const name = el('preset-manager-name')?.value || manager.name || '';
   const query = String(el('preset-manager-query')?.value || '').trim();
+  const sourceScope = name ? customPresetSourceScope(scope, name) : scope;
   if (!name) {
-    manager.scope = scope;
+    manager.scope = sourceScope;
     manager.name = '';
     manager.query = query;
     manager.domains = [];
@@ -4037,11 +4009,11 @@ async function refreshPresetManager(reset){
     return;
   }
   const offset = reset ? 0 : (manager.domains || []).length;
-  Object.assign(manager, { scope, name, query, loading: true });
+  Object.assign(manager, { scope: sourceScope, name, query, loading: true });
   renderPresetManager();
   try {
     const params = new URLSearchParams();
-    params.set('scope', scope);
+    params.set('scope', sourceScope);
     params.set('name', name);
     params.set('kind', 'user');
     params.set('include_disabled', '1');
@@ -4093,15 +4065,14 @@ function renderPresetEditorPreview(preview){
   }
   target.innerHTML = [
     `<div><strong>${esc(preview.name)}</strong>: ${esc(preview.total)} уникальных доменов</div>`,
-    `<div>Добавится: ${esc(preview.added)}, удалится: ${esc(preview.removed)}, без изменений: ${esc(preview.unchanged)}</div>`,
-    `<div>Область: ${preview.scope === 'common' ? 'Общие стратегии' : 'Подбор'}</div>`
+    `<div>Добавится: ${esc(preview.added)}, удалится: ${esc(preview.removed)}, без изменений: ${esc(preview.unchanged)}</div>`
   ].join('');
 }
 function presetEditorDomains(){
   return uniqueDomains(parseDomains(el('preset-editor-domains')?.value || ''));
 }
 function presetEditorScope(){
-  return el('preset-manager-scope')?.value || state.presetManager.scope || 'finder';
+  return 'finder';
 }
 function presetEditorName(){
   return String(el('preset-editor-name')?.value || el('preset-manager-name')?.value || '').trim();
@@ -5058,15 +5029,6 @@ document.addEventListener('change', (event) => {
     const nameInput = el(`${target}-preset-name`);
     if (nameInput) nameInput.value = value === CUSTOM_SELECT_VALUE ? 'custom' : (value.startsWith('custom:') ? value.slice('custom:'.length) : '');
     if (value !== CUSTOM_SELECT_VALUE) usePreset(target);
-  }
-  if (event.target && event.target.id === 'preset-manager-scope') {
-    state.presetManager.scope = event.target.value || 'finder';
-    state.presetManager.name = '';
-    state.presetManager.domains = [];
-    state.presetManager.total = 0;
-    state.presetManager.hasMore = false;
-    state.presetManager.loaded = false;
-    renderPresetManager();
   }
   if (event.target && event.target.id === 'preset-manager-name') {
     state.presetManager.name = event.target.value || '';
