@@ -1615,11 +1615,6 @@ pre {
             <div class="preset-panel">
               <div class="finder-control-grid">
                 <div class="field">
-                  <label for="discovery-profile-select">Профиль подбора</label>
-                  <select id="discovery-profile-select"></select>
-                  <div class="helper-text" id="discovery-profile-note">Глубина поиска blockcheck2: quick, standard или force.</div>
-                </div>
-                <div class="field">
                   <label for="settings-preset-select">Пресет настроек</label>
                   <select id="settings-preset-select">
                     <option value="cautious">Осторожный</option>
@@ -1683,6 +1678,11 @@ pre {
                   <input id="enable-ipv6" type="checkbox">
                   <span>IPv6</span>
                 </label>
+              </div>
+              <div class="field scan-level-field">
+                <label for="discovery-profile-select">Уровень поиска blockcheck2</label>
+                <select id="discovery-profile-select"></select>
+                <div class="helper-text" id="discovery-profile-note">Настройка самого blockcheck2: quick, standard или force.</div>
               </div>
               <input id="scan-level" type="hidden" value="standard">
             </div>
@@ -2282,7 +2282,7 @@ function useRunPreferencesOnce(){
     const discoverySelect = el('discovery-profile-select');
     if (discoverySelect) {
       const value = String(prefs.discovery_profile || 'standard');
-      discoverySelect.value = [...discoverySelect.options].some((option) => option.value === value) ? value : CUSTOM_SELECT_VALUE;
+      discoverySelect.value = [...discoverySelect.options].some((option) => option.value === value) ? value : 'standard';
     }
     const settingsSelect = el('settings-preset-select');
     if (settingsSelect) {
@@ -2368,8 +2368,6 @@ const SETTINGS_PRESET_CONTROL_IDS = new Set([
 ]);
 function markDiscoveryProfileCustom(){
   if (state.loadingDiscoveryProfile) return;
-  const select = el('discovery-profile-select');
-  if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
   renderDiscoveryProfileNote();
 }
 function useDiscoveryProfile(profile){
@@ -2386,7 +2384,7 @@ function renderDiscoveryProfileNote(){
   const note = el('discovery-profile-note');
   if (!note) return;
   const select = el('discovery-profile-select');
-  const profile = select && select.value !== CUSTOM_SELECT_VALUE ? (state.discoveryProfiles || {})[select.value] : null;
+  const profile = select ? (state.discoveryProfiles || {})[select.value] : null;
   const scanLevel = String(profile?.scan_level || el('scan-level')?.value || 'standard');
   const title = profileTitle(scanLevel, profile);
   const details = {
@@ -2394,7 +2392,7 @@ function renderDiscoveryProfileNote(){
     standard: 'основной режим для обычного подбора.',
     force: 'больше комбинаций, работает дольше.'
   }[scanLevel] || 'настройки изменены вручную.';
-  note.textContent = profile ? `${title}: ${details}` : `Custom: ${details}`;
+  note.textContent = `${title}: ${details}`;
 }
 function selectedSettingsPreset(){
   return el('settings-preset-select')?.value || 'normal';
@@ -2464,10 +2462,10 @@ function renderDiscoveryProfiles(){
   const current = select.value;
   const profiles = state.discoveryProfiles || {};
   const names = Object.keys(profiles).sort((a, b) => profileTitle(a, profiles[a]).localeCompare(profileTitle(b, profiles[b])));
-  select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>` + names.map((name) => `<option value="${esc(name)}">${esc(profileTitle(name, profiles[name]))}</option>`).join('');
+  select.innerHTML = names.map((name) => `<option value="${esc(name)}">${esc(profileTitle(name, profiles[name]))}</option>`).join('');
   if (current && profiles[current]) select.value = current;
-  else if (!current && profiles.standard) select.value = 'standard';
-  else if (current === CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
+  else if (profiles.standard) select.value = 'standard';
+  else if (names.length) select.value = names[0];
   renderDiscoveryProfileNote();
 }
 function hasEnabledProtocol(options){
@@ -5033,12 +5031,8 @@ document.addEventListener('change', (event) => {
     renderPresetManager();
   }
   if (event.target && event.target.id === 'discovery-profile-select') {
-    if (event.target.value === CUSTOM_SELECT_VALUE) {
-      markDiscoveryProfileCustom();
-    } else {
-      const profile = (state.discoveryProfiles || {})[event.target.value];
-      useDiscoveryProfile(profile);
-    }
+    const profile = (state.discoveryProfiles || {})[event.target.value];
+    useDiscoveryProfile(profile);
   }
   if (event.target && event.target.id === 'settings-preset-select') {
     if (event.target.value === CUSTOM_SELECT_VALUE) {

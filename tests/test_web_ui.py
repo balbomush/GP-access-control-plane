@@ -414,6 +414,26 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Все домены на одной стратегии", field_html)
         self.assertIn("curlField.hidden = mode !== 'multi';", html)
 
+    def test_discovery_profile_is_blockcheck_scan_level_control(self) -> None:
+        html = index_html()
+
+        self.assertNotIn("Профиль подбора", html)
+        self.assertIn("Уровень поиска blockcheck2", html)
+        options_start = html.index('<div class="preset-panel finder-options-panel">')
+        options_end = html.index('<details class="preset-panel">', options_start)
+        options_html = html[options_start:options_end]
+
+        self.assertIn('id="discovery-profile-select"', options_html)
+        self.assertIn('id="scan-level"', options_html)
+        self.assertIn('id="enable-http"', options_html)
+        self.assertIn('id="enable-tls12"', options_html)
+        self.assertIn('id="include-quic"', options_html)
+        render_start = html.index("function renderDiscoveryProfiles()")
+        render_end = html.index("function hasEnabledProtocol", render_start)
+        render_html = html[render_start:render_end]
+        self.assertNotIn('<option value="${CUSTOM_SELECT_VALUE}">Custom</option>', render_html)
+        self.assertNotIn("event.target.value === CUSTOM_SELECT_VALUE", html[html.index("if (event.target && event.target.id === 'discovery-profile-select')"):html.index("if (event.target && event.target.id === 'settings-preset-select')")])
+
     def test_index_script_has_no_raw_newlines_inside_quoted_strings(self) -> None:
         html = index_html()
         marker_start = "<script>"
