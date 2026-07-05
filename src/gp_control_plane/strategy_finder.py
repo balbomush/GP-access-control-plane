@@ -257,10 +257,16 @@ class DiscoveryOptions:
     repeat_parallel: bool = False
     skip_dnscheck: bool = True
     skip_ipblock: bool = True
+    curl_max_time: int = 2
+    curl_max_time_quic: int = 2
+    curl_max_time_doh: int = 2
 
     def normalized(self) -> "DiscoveryOptions":
         scan_level = self.scan_level if self.scan_level in {"quick", "standard", "force"} else "standard"
         repeats = _bounded_int(self.repeats, default=1, minimum=1, maximum=10)
+        curl_max_time = _minimum_int(self.curl_max_time, default=2, minimum=1)
+        curl_max_time_quic = _minimum_int(self.curl_max_time_quic, default=2, minimum=1)
+        curl_max_time_doh = _minimum_int(self.curl_max_time_doh, default=2, minimum=1)
         if not any([self.enable_http, self.enable_tls12, self.enable_tls13, self.enable_quic]):
             raise ValueError("at least one protocol check must be enabled")
         return DiscoveryOptions(
@@ -274,6 +280,9 @@ class DiscoveryOptions:
             repeat_parallel=bool(self.repeat_parallel),
             skip_dnscheck=bool(self.skip_dnscheck),
             skip_ipblock=bool(self.skip_ipblock),
+            curl_max_time=curl_max_time,
+            curl_max_time_quic=curl_max_time_quic,
+            curl_max_time_doh=curl_max_time_doh,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -288,6 +297,9 @@ class DiscoveryOptions:
             "repeat_parallel": self.repeat_parallel,
             "skip_dnscheck": self.skip_dnscheck,
             "skip_ipblock": self.skip_ipblock,
+            "curl_max_time": self.curl_max_time,
+            "curl_max_time_quic": self.curl_max_time_quic,
+            "curl_max_time_doh": self.curl_max_time_doh,
         }
 
     def to_blockcheck_env(self) -> dict[str, str]:
@@ -302,6 +314,9 @@ class DiscoveryOptions:
             "SCANLEVEL": options.scan_level,
             "REPEATS": str(options.repeats),
             "PARALLEL": "1" if options.repeat_parallel else "0",
+            "CURL_MAX_TIME": str(options.curl_max_time),
+            "CURL_MAX_TIME_QUIC": str(options.curl_max_time_quic),
+            "CURL_MAX_TIME_DOH": str(options.curl_max_time_doh),
         }
 
     def to_run_fields(self) -> dict[str, Any]:
@@ -501,6 +516,9 @@ def run_standard_discovery(
     repeat_parallel: bool = False,
     skip_dnscheck: bool = True,
     skip_ipblock: bool = True,
+    curl_max_time: int = 2,
+    curl_max_time_quic: int = 2,
+    curl_max_time_doh: int = 2,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
@@ -515,6 +533,9 @@ def run_standard_discovery(
         repeat_parallel=repeat_parallel,
         skip_dnscheck=skip_dnscheck,
         skip_ipblock=skip_ipblock,
+        curl_max_time=curl_max_time,
+        curl_max_time_quic=curl_max_time_quic,
+        curl_max_time_doh=curl_max_time_doh,
     ).normalized()
     domain_validation = validate_domain_inputs(domains, default_to_critical=True)
     if not domain_validation["domains"]:
@@ -546,6 +567,9 @@ def run_multi_domain_discovery(
     repeat_parallel: bool = False,
     skip_dnscheck: bool = True,
     skip_ipblock: bool = True,
+    curl_max_time: int = 2,
+    curl_max_time_quic: int = 2,
+    curl_max_time_doh: int = 2,
     curl_parallelism: int = 4,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
@@ -561,6 +585,9 @@ def run_multi_domain_discovery(
         repeat_parallel=repeat_parallel,
         skip_dnscheck=skip_dnscheck,
         skip_ipblock=skip_ipblock,
+        curl_max_time=curl_max_time,
+        curl_max_time_quic=curl_max_time_quic,
+        curl_max_time_doh=curl_max_time_doh,
     ).normalized()
     domain_validation = validate_domain_inputs(domains, default_to_critical=True)
     if not domain_validation["domains"]:
@@ -2605,6 +2632,14 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(maximum, number))
+
+
+def _minimum_int(value: Any, default: int, minimum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, number)
 
 
 def _summary_sections(stdout: str) -> dict[str, list[str]]:

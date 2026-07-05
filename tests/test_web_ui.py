@@ -527,6 +527,9 @@ class WebUiTests(unittest.TestCase):
                         "debug_stdout": True,
                         "settings_preset_default": "accelerated",
                         "curl_parallelism_max": 8,
+                        "curl_max_time": 1,
+                        "curl_max_time_quic": 3,
+                        "curl_max_time_doh": 4,
                     }
                 }
             )
@@ -539,7 +542,10 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"enable_ipv6":true', saved)
             self.assertIn('"debug_stdout":true', saved)
             self.assertIn('"settings_preset_default":"accelerated"', saved)
-            self.assertIn('"curl_parallelism_default":8', saved)
+            self.assertIn('"curl_parallelism_max":8', saved)
+            self.assertIn('"curl_max_time":1', saved)
+            self.assertIn('"curl_max_time_quic":3', saved)
+            self.assertIn('"curl_max_time_doh":4', saved)
 
     def test_preset_domain_endpoints_page_and_toggle_domains(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

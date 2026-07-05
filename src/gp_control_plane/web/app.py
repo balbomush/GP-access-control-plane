@@ -1998,6 +1998,21 @@ pre {
               <input id="settings-curl-max" type="number" min="1" max="10" value="10">
               <div class="setting-note">Верхняя граница, выше которой UI не даст запустить параллельные curl.</div>
             </div>
+            <div class="field">
+              <label for="settings-curl-max-time">Таймаут HTTP/TLS, сек</label>
+              <input id="settings-curl-max-time" type="number" min="1" step="1" value="2">
+              <div class="setting-note">Дефолт `CURL_MAX_TIME` для новых запусков.</div>
+            </div>
+            <div class="field">
+              <label for="settings-curl-max-time-quic">Таймаут QUIC, сек</label>
+              <input id="settings-curl-max-time-quic" type="number" min="1" step="1" value="2">
+              <div class="setting-note">Дефолт `CURL_MAX_TIME_QUIC` для новых запусков.</div>
+            </div>
+            <div class="field">
+              <label for="settings-curl-max-time-doh">Таймаут DoH, сек</label>
+              <input id="settings-curl-max-time-doh" type="number" min="1" step="1" value="2">
+              <div class="setting-note">Дефолт `CURL_MAX_TIME_DOH` для новых запусков.</div>
+            </div>
           </div>
           <div class="button-row">
             <button data-action="save-settings" type="button">Сохранить настройки</button>
@@ -3547,11 +3562,17 @@ function renderSettings(){
   const debugStdout = el('settings-debug-stdout');
   const defaultSettingsPreset = el('settings-default-settings-preset');
   const curlMax = el('settings-curl-max');
+  const curlMaxTime = el('settings-curl-max-time');
+  const curlMaxTimeQuic = el('settings-curl-max-time-quic');
+  const curlMaxTimeDoh = el('settings-curl-max-time-doh');
   const channel = el('settings-update-channel');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
   if (defaultSettingsPreset) defaultSettingsPreset.value = SETTINGS_PRESETS[settings.settings_preset_default] ? settings.settings_preset_default : 'normal';
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
+  if (curlMaxTime) curlMaxTime.value = String(settings.curl_max_time || 2);
+  if (curlMaxTimeQuic) curlMaxTimeQuic.value = String(settings.curl_max_time_quic || 2);
+  if (curlMaxTimeDoh) curlMaxTimeDoh.value = String(settings.curl_max_time_doh || 2);
   if (channel) channel.value = settings.update_channel || 'stable';
   renderReleaseInfo();
   if (!state.settingsTouched) {
@@ -3633,6 +3654,9 @@ function currentSettingsFromForm(){
     debug_stdout: Boolean(el('settings-debug-stdout')?.checked),
     settings_preset_default: el('settings-default-settings-preset')?.value || 'normal',
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
+    curl_max_time: Number(el('settings-curl-max-time')?.value || 2),
+    curl_max_time_quic: Number(el('settings-curl-max-time-quic')?.value || 2),
+    curl_max_time_doh: Number(el('settings-curl-max-time-doh')?.value || 2),
     update_channel: el('settings-update-channel')?.value || 'stable'
   };
 }
@@ -5021,6 +5045,9 @@ def _latest_log_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[
 DEFAULT_SETTINGS = {
     "curl_parallelism_default": 4,
     "curl_parallelism_max": 10,
+    "curl_max_time": 2,
+    "curl_max_time_quic": 2,
+    "curl_max_time_doh": 2,
     "enable_ipv6": False,
     "debug_stdout": False,
     "settings_preset_default": "normal",
@@ -5115,6 +5142,9 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "curl_parallelism_default": default_parallelism,
         "curl_parallelism_max": max_parallelism,
+        "curl_max_time": _minimum_int(raw.get("curl_max_time"), default=2, minimum=1),
+        "curl_max_time_quic": _minimum_int(raw.get("curl_max_time_quic"), default=2, minimum=1),
+        "curl_max_time_doh": _minimum_int(raw.get("curl_max_time_doh"), default=2, minimum=1),
         "enable_ipv6": bool(raw.get("enable_ipv6")),
         "debug_stdout": bool(raw.get("debug_stdout")),
         "settings_preset_default": settings_preset_default,
@@ -5346,6 +5376,9 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
+        curl_max_time=_minimum_int(settings.get("curl_max_time"), default=2, minimum=1),
+        curl_max_time_quic=_minimum_int(settings.get("curl_max_time_quic"), default=2, minimum=1),
+        curl_max_time_doh=_minimum_int(settings.get("curl_max_time_doh"), default=2, minimum=1),
         debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
     )
@@ -5369,6 +5402,9 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
+        curl_max_time=_minimum_int(settings.get("curl_max_time"), default=2, minimum=1),
+        curl_max_time_quic=_minimum_int(settings.get("curl_max_time_quic"), default=2, minimum=1),
+        curl_max_time_doh=_minimum_int(settings.get("curl_max_time_doh"), default=2, minimum=1),
         curl_parallelism=_bounded_int(payload.get("curl_parallelism"), default=int(settings.get("curl_parallelism_default") or 4), minimum=1, maximum=max_parallelism),
         debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
@@ -5406,6 +5442,14 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(maximum, number))
+
+
+def _minimum_int(value: Any, default: int, minimum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, number)
 
 
 def _payload_bool(payload: dict[str, Any], key: str, default: bool) -> bool:

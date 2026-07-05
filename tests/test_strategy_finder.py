@@ -77,6 +77,9 @@ class StrategyFinderTests(unittest.TestCase):
                 "SCANLEVEL": "force",
                 "REPEATS": "3",
                 "PARALLEL": "1",
+                "CURL_MAX_TIME": "2",
+                "CURL_MAX_TIME_QUIC": "2",
+                "CURL_MAX_TIME_DOH": "2",
             },
         )
         self.assertEqual(options.to_run_fields()["enable_tls"], False)
