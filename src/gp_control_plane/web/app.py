@@ -69,6 +69,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._events()
             elif path == "/api/settings":
                 self._json({"settings": read_settings(config)})
+            elif path == "/api/run-preferences":
+                self._json({"run_preferences": read_run_preferences(config)})
             elif path == "/api/releases":
                 self._json(_release_info_payload(config, query))
             elif path == "/api/releases/update-plan":
@@ -118,6 +120,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path in {
                 "/api/status",
                 "/api/settings",
+                "/api/run-preferences",
                 "/api/releases",
                 "/api/releases/update-plan",
                 "/api/releases/update",
@@ -245,6 +248,9 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 return
             if path == "/api/settings":
                 self._json({"settings": save_settings(config, payload.get("settings") or payload)})
+                return
+            if path == "/api/run-preferences":
+                self._json({"run_preferences": save_run_preferences(config, payload.get("run_preferences") or payload)})
                 return
             if path == "/api/releases/update":
                 try:
@@ -734,7 +740,7 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .finder-control-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 .finder-control-grid .field-wide {
@@ -841,7 +847,8 @@ button:disabled { opacity: .55; cursor: default; }
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--surface-code);
-  color: var(--blue-strong);
+  color: var(--text-soft);
+  opacity: .62;
   font-size: 13px;
   font-weight: 700;
   text-align: center;
@@ -856,6 +863,8 @@ button:disabled { opacity: .55; cursor: default; }
   border-color: var(--blue);
   background: var(--blue);
   color: #ffffff;
+  opacity: 1;
+  box-shadow: 0 0 0 1px rgba(120, 211, 255, .35) inset;
 }
 .settings-card-grid {
   display: grid;
@@ -894,6 +903,18 @@ button:disabled { opacity: .55; cursor: default; }
   width: fit-content;
 }
 .release-version-link:hover strong { color: var(--accent); }
+.compact-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.compact-status-mark {
+  color: var(--green);
+  font-weight: 800;
+}
+.compact-status.bad .compact-status-mark {
+  color: var(--red);
+}
 .release-log {
   white-space: pre-wrap;
   max-height: 220px;
@@ -1600,7 +1621,7 @@ pre {
                 <div class="field">
                   <label for="discovery-profile-select">Профиль подбора</label>
                   <select id="discovery-profile-select"></select>
-                  <div class="helper-text">Глубина поиска blockcheck2: quick, standard или force.</div>
+                  <div class="helper-text" id="discovery-profile-note">Глубина поиска blockcheck2: quick, standard или force.</div>
                 </div>
                 <div class="field">
                   <label for="settings-preset-select">Пресет настроек</label>
@@ -1611,11 +1632,6 @@ pre {
                     <option value="custom">изменено</option>
                   </select>
                   <div class="helper-text">Задает параметры запуска: curl, повторы и DNS/IP checks.</div>
-                </div>
-                <div class="field">
-                  <label for="curl-parallelism">Параллельных curl</label>
-                  <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
-                  <div class="helper-text">Сильнее всего влияет на режим `Все домены на одной стратегии`.</div>
                 </div>
               </div>
             </div>
@@ -1634,6 +1650,11 @@ pre {
                 </div>
               </div>
               <div class="helper-text" id="run-mode-note">Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.</div>
+              <div class="field multi-curl-field" id="multi-curl-field" hidden>
+                <label for="curl-parallelism">Параллельных curl</label>
+                <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
+                <div class="helper-text">Работает только в режиме `Все домены на одной стратегии`: одна стратегия проверяет несколько доменов параллельно.</div>
+              </div>
             </div>
             <label class="checkbox-row">
               <input id="limit-time-enabled" type="checkbox">
@@ -1667,16 +1688,7 @@ pre {
                   <span>IPv6</span>
                 </label>
               </div>
-              <div class="preset-grid">
-                <div class="field field-wide">
-                  <label for="scan-level">Уровень поиска</label>
-                  <select id="scan-level">
-                    <option value="quick">quick</option>
-                    <option value="standard" selected>standard</option>
-                    <option value="force">force</option>
-                  </select>
-                </div>
-              </div>
+              <input id="scan-level" type="hidden" value="standard">
             </div>
             <details class="preset-panel">
               <summary class="domain-header">
@@ -2073,7 +2085,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, runPreferencesTimer: null, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2294,6 +2306,122 @@ function discoveryOptions(){
     skip_ipblock: el('skip-ipblock').checked
   };
 }
+function collectRunPreferences(){
+  const timeoutHours = Number(el('finder-timeout-hours')?.value || 6);
+  return {
+    domains: selectedFinderDomains(),
+    domain_preset: el('finder-preset-select')?.value || CUSTOM_SELECT_VALUE,
+    discovery_profile: el('discovery-profile-select')?.value || CUSTOM_SELECT_VALUE,
+    settings_preset: el('settings-preset-select')?.value || CUSTOM_SELECT_VALUE,
+    run_mode: selectedRunMode(),
+    curl_parallelism: curlParallelism(),
+    ...discoveryOptions(),
+    limit_time_enabled: Boolean(el('limit-time-enabled')?.checked),
+    timeout_hours: Number.isFinite(timeoutHours) ? timeoutHours : 6
+  };
+}
+function applyRunPreferencesOnce(){
+  if (state.runPreferencesApplied || !state.runPreferences) return;
+  const prefs = state.runPreferences || {};
+  state.loadingRunPreferences = true;
+  try {
+    const domains = Array.isArray(prefs.domains) ? uniqueDomains(prefs.domains) : [];
+    const presetSelect = el('finder-preset-select');
+    const presetValue = String(prefs.domain_preset || 'builtin:critical');
+    if (presetSelect && [...presetSelect.options].some((option) => option.value === presetValue)) {
+      presetSelect.value = presetValue;
+    }
+    if (domains.length) {
+      el('finder-domains').value = domains.join('\n');
+      state.domainsTouched = presetSelect?.value === CUSTOM_SELECT_VALUE;
+      state.domainsInitialized = true;
+    } else if (presetSelect && presetSelect.value !== CUSTOM_SELECT_VALUE) {
+      const presetDomainsList = uniqueDomains(presetDomains('finder', presetSelect.value));
+      if (presetDomainsList.length) {
+        el('finder-domains').value = presetDomainsList.join('\n');
+        state.domainsTouched = false;
+        state.domainsInitialized = true;
+      }
+    }
+    updateEditorLineNumbers('finder-domains');
+
+    const discoverySelect = el('discovery-profile-select');
+    if (discoverySelect) {
+      const value = String(prefs.discovery_profile || 'standard');
+      discoverySelect.value = [...discoverySelect.options].some((option) => option.value === value) ? value : CUSTOM_SELECT_VALUE;
+    }
+    const settingsSelect = el('settings-preset-select');
+    if (settingsSelect) {
+      const value = String(prefs.settings_preset || 'normal');
+      settingsSelect.value = [...settingsSelect.options].some((option) => option.value === value) ? value : CUSTOM_SELECT_VALUE;
+    }
+    const runMode = String(prefs.run_mode || 'standard') === 'multi' ? 'multi' : 'standard';
+    const runModeInput = document.querySelector(`input[name="run-mode"][value="${runMode}"]`);
+    if (runModeInput) runModeInput.checked = true;
+    el('curl-parallelism').value = String(prefs.curl_parallelism || 4);
+    el('enable-http').checked = Boolean(prefs.enable_http);
+    el('enable-tls12').checked = Boolean(prefs.enable_tls12 ?? true);
+    el('enable-tls13').checked = Boolean(prefs.enable_tls13);
+    el('include-quic').checked = Boolean(prefs.include_quic ?? true);
+    el('enable-ipv6').checked = Boolean(prefs.enable_ipv6);
+    el('scan-level').value = prefs.scan_level || 'standard';
+    el('repeats').value = String(prefs.repeats || 1);
+    el('repeat-parallel').checked = Boolean(prefs.repeat_parallel);
+    el('skip-dnscheck').checked = Boolean(prefs.skip_dnscheck ?? true);
+    el('skip-ipblock').checked = Boolean(prefs.skip_ipblock ?? true);
+    el('limit-time-enabled').checked = Boolean(prefs.limit_time_enabled);
+    el('finder-timeout-hours').value = String(prefs.timeout_hours || 6);
+    el('time-limit-field').hidden = !el('limit-time-enabled').checked;
+    renderDiscoveryProfileNote();
+    renderSettingsPresetNote();
+  } finally {
+    state.loadingRunPreferences = false;
+    state.runPreferencesApplied = true;
+  }
+}
+function scheduleRunPreferencesSave(){
+  if (!state.runPreferencesApplied || state.loadingRunPreferences) return;
+  if (state.runPreferencesTimer) clearTimeout(state.runPreferencesTimer);
+  state.runPreferencesTimer = setTimeout(() => {
+    saveRunPreferencesNow();
+  }, 350);
+}
+async function saveRunPreferencesNow(){
+  if (!state.runPreferencesApplied || state.loadingRunPreferences || state.savingRunPreferences) return;
+  state.savingRunPreferences = true;
+  const payload = collectRunPreferences();
+  try {
+    const data = await postJson('/api/run-preferences', { run_preferences: payload });
+    state.runPreferences = (data || {}).run_preferences || payload;
+  } catch (_error) {
+    // Best-effort persistence: the run itself must not fail because UI state was not saved.
+  } finally {
+    state.savingRunPreferences = false;
+  }
+}
+function isRunPreferenceControl(target){
+  if (!target) return false;
+  if (target.name === 'run-mode') return true;
+  return [
+    'finder-domains',
+    'finder-preset-select',
+    'discovery-profile-select',
+    'settings-preset-select',
+    'curl-parallelism',
+    'enable-http',
+    'enable-tls12',
+    'enable-tls13',
+    'include-quic',
+    'enable-ipv6',
+    'scan-level',
+    'repeats',
+    'repeat-parallel',
+    'skip-dnscheck',
+    'skip-ipblock',
+    'limit-time-enabled',
+    'finder-timeout-hours'
+  ].includes(target.id);
+}
 const DISCOVERY_PROFILE_CONTROL_IDS = new Set(['scan-level']);
 const SETTINGS_PRESET_CONTROL_IDS = new Set([
   'curl-parallelism',
@@ -2308,15 +2436,31 @@ function markDiscoveryProfileCustom(){
   if (state.loadingDiscoveryProfile) return;
   const select = el('discovery-profile-select');
   if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
+  renderDiscoveryProfileNote();
 }
 function useDiscoveryProfile(profile){
   if (!profile) return;
   state.loadingDiscoveryProfile = true;
   try {
     el('scan-level').value = profile.scan_level || 'standard';
+    renderDiscoveryProfileNote();
   } finally {
     state.loadingDiscoveryProfile = false;
   }
+}
+function renderDiscoveryProfileNote(){
+  const note = el('discovery-profile-note');
+  if (!note) return;
+  const select = el('discovery-profile-select');
+  const profile = select && select.value !== CUSTOM_SELECT_VALUE ? (state.discoveryProfiles || {})[select.value] : null;
+  const scanLevel = String(profile?.scan_level || el('scan-level')?.value || 'standard');
+  const title = profileTitle(scanLevel, profile);
+  const details = {
+    quick: 'меньше комбинаций, быстрее первичная проверка.',
+    standard: 'основной режим для обычного подбора.',
+    force: 'больше комбинаций, работает дольше.'
+  }[scanLevel] || 'настройки изменены вручную.';
+  note.textContent = profile ? `${title}: ${details}` : `Custom: ${details}`;
 }
 function selectedSettingsPreset(){
   return el('settings-preset-select')?.value || 'normal';
@@ -2360,6 +2504,8 @@ function renderSettingsPresetNote(){
   const note = el('run-mode-note');
   if (!note) return;
   const mode = selectedRunMode();
+  const curlField = el('multi-curl-field');
+  if (curlField) curlField.hidden = mode !== 'multi';
   const modeText = mode === 'multi'
     ? 'Режим “Все домены на одной стратегии”: одна стратегия запускается один раз, затем домены проверяются параллельно.'
     : 'Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.';
@@ -2385,6 +2531,7 @@ function renderDiscoveryProfiles(){
   if (current && profiles[current]) select.value = current;
   else if (!current && profiles.standard) select.value = 'standard';
   else if (current === CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
+  renderDiscoveryProfileNote();
 }
 function hasEnabledProtocol(options){
   return Boolean(options.enable_http || options.enable_tls12 || options.enable_tls13 || options.include_quic);
@@ -2496,12 +2643,6 @@ function presetGroups(target){
       { key: 'all', label: 'Все встроенные', domains: defaultDomains('all') }
     ].filter((preset) => preset.domains.length)
   });
-  groups.push({
-    label: 'Диагностика',
-    presets: [
-      make('diagnostic', 'Диагностика')
-    ].filter((preset) => preset.domains.length)
-  });
   const known = new Set(groups.flatMap((group) => group.presets.map((preset) => preset.key)));
   const other = Object.keys(sets)
     .filter((key) => !known.has(key))
@@ -2605,6 +2746,7 @@ async function usePreset(target){
       if (selectedCommonDomains().length >= 2) refreshCandidates(true);
     }
     else renderCandidates();
+    if (target === 'finder') scheduleRunPreferencesSave();
   } finally {
     state.loadingDomainPreset = false;
   }
@@ -2673,6 +2815,9 @@ function statusCheck(label, ok, message){
   </div>`;
 }
 function zapretDiagnostics(zapret){
+  return zapretDiagnosticItems(zapret).map((item) => statusCheck(item.label || item.id || '-', Boolean(item.ok), item.message || '')).join('');
+}
+function zapretDiagnosticItems(zapret){
   const diagnostics = Array.isArray(zapret.diagnostics) && zapret.diagnostics.length
     ? zapret.diagnostics
     : [
@@ -2680,7 +2825,18 @@ function zapretDiagnostics(zapret){
         {label: 'blockcheck2', ok: Boolean(zapret.blockcheck_found), message: zapret.blockcheck_found ? 'найден' : 'не найден'},
         {label: 'root-helper', ok: Boolean(zapret.root_helper_ready), message: zapret.root_helper_ready ? 'готов' : (zapret.root_helper_error || 'не готов')}
       ];
-  return diagnostics.map((item) => statusCheck(item.label || item.id || '-', Boolean(item.ok), item.message || '')).join('');
+  return diagnostics;
+}
+function zapretCompactStatus(zapret){
+  const diagnostics = zapretDiagnosticItems(zapret);
+  const total = diagnostics.length || 0;
+  const ok = diagnostics.filter((item) => Boolean(item.ok)).length;
+  const ready = total > 0 && ok === total;
+  const tooltip = diagnostics.map((item) => {
+    const mark = item.ok ? 'OK' : 'FAIL';
+    return `${mark} ${item.label || item.id || '-'}: ${item.message || ''}`;
+  }).join('\n');
+  return { ok, total, ready, tooltip };
 }
 function testedDomainCount(){
   const domains = new Set(Array.isArray(state.testedDomains) ? state.testedDomains : []);
@@ -2698,16 +2854,24 @@ function renderMetrics(){
   const status = state.status || {};
   const board = status.state || {};
   const zapret = status.zapret2 || {};
-  const ready = Boolean(zapret.nfqws2_found && zapret.blockcheck_found);
-  const rootReady = Boolean(zapret.root_helper_ready);
+  const zapretCompact = zapretCompactStatus(zapret);
+  const ready = zapretCompact.ready;
   const busy = isBusy();
   const jobStatus = board.current_job_status || (busy ? 'running' : '');
   const progress = (state.finderLog && state.finderLog.progress) || {};
   const phase = progress.phase_label || phaseLabel(progress.phase || '');
   const version = (state.status || {}).version || '-';
   setText('app-version-badge', `v${version}`);
-  setText('metric-zapret', ready ? 'Готов' : 'Не готов');
-  el('metric-zapret-note').innerHTML = `<div class="status-checks">${zapretDiagnostics(zapret)}</div>`;
+  const zapretValue = el('metric-zapret');
+  if (zapretValue) {
+    zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${zapretCompact.ok}/${zapretCompact.total || 5}</span></span>`;
+    zapretValue.title = zapretCompact.tooltip;
+  }
+  const zapretNote = el('metric-zapret-note');
+  if (zapretNote) {
+    zapretNote.textContent = ready ? 'готово' : 'есть проблема';
+    zapretNote.title = zapretCompact.tooltip;
+  }
   setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободна');
   const jobCard = el('metric-job-card');
   if (jobCard) jobCard.className = jobStatusClass(jobStatus, busy);
@@ -3584,7 +3748,7 @@ function renderSettings(){
   if (curlMaxTimeDoh) curlMaxTimeDoh.value = String(settings.curl_max_time_doh || 2);
   if (channel) channel.value = settings.update_channel || 'stable';
   renderReleaseInfo();
-  if (!state.settingsTouched) {
+  if (!state.settingsTouched && !state.runPreferencesApplied) {
     const curlInput = el('curl-parallelism');
     if (curlInput) curlInput.max = String(settings.curl_parallelism_max || 10);
     setSettingsPreset(settings.settings_preset_default || 'normal', { fromSettings: true });
@@ -4137,18 +4301,19 @@ function scrollLogToBottom(){
 }
 function renderAll(options){
   const opts = options || {};
+  renderPresetSelects();
+  renderSettings();
+  applyRunPreferencesOnce();
   if (!state.domainsInitialized && !state.domainsTouched && !el('finder-domains').value.trim() && state.domainSets) {
     const domains = [...new Set(defaultDomains('critical'))];
     el('finder-domains').value = domains.join('\\n');
     state.domainsInitialized = true;
   }
-  renderPresetSelects();
   renderMetrics();
   if (!opts.skipCandidates) renderCandidates();
   renderRuns();
   renderLog();
   renderBackups();
-  renderSettings();
   updateAllEditorLineNumbers();
   syncActiveTabUi();
 }
@@ -4404,6 +4569,7 @@ function applyStatusPayload(status){
   state.releaseUpdate = status.release_update || state.releaseUpdate;
   if (status.candidate_version) syncCandidateVersion(status.candidate_version);
   if (status.settings) state.settings = status.settings;
+  if (status.run_preferences) state.runPreferences = status.run_preferences;
   renderMetrics();
   const settingsChanged = previousSettings !== JSON.stringify(state.settings || {});
   if (settingsChanged) renderSettings();
@@ -4615,7 +4781,7 @@ async function startJob(url, payload, text){
     await refresh();
   }
 }
-function startSelectedDiscovery(){
+async function startSelectedDiscovery(){
   const options = discoveryOptions();
   if (!hasEnabledProtocol(options)) {
     setMessage('Выберите хотя бы один протокол для проверки', 'bad');
@@ -4628,12 +4794,13 @@ function startSelectedDiscovery(){
   };
   const timeout = timeoutSecondsOrNull();
   if (timeout !== null) payload.timeout_seconds = timeout;
+  await saveRunPreferencesNow();
   if (mode === 'multi') {
     payload.curl_parallelism = curlParallelism();
-    startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Все домены на одной стратегии');
+    await startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Все домены на одной стратегии');
     return;
   }
-  startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
+  await startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
 }
 async function stopCurrentJob(){
   try {
@@ -4847,6 +5014,9 @@ document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'common-domain-add') {
     renderCommonDomainSuggestions();
   }
+  if (isRunPreferenceControl(event.target)) {
+    scheduleRunPreferencesSave();
+  }
 });
 document.addEventListener('scroll', (event) => {
   if (event.target && event.target.matches && event.target.matches('.strategy-code, .line-numbered-textarea')) {
@@ -4929,6 +5099,9 @@ document.addEventListener('change', (event) => {
   if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
     markDiscoveryProfileCustom();
   }
+  if (isRunPreferenceControl(event.target)) {
+    scheduleRunPreferencesSave();
+  }
 });
 document.addEventListener('keydown', (event) => {
   if (event.target && event.target.id === 'common-domain-add' && event.key === 'Enter') {
@@ -4975,6 +5148,7 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         "version": __version__,
         "state": read_state(config.output.state_dir),
         "settings": read_settings(config),
+        "run_preferences": read_run_preferences(config),
         "release_update": release_update_status(config.output.state_dir, current_version=__version__),
         "candidate_version": candidate_storage_version(config.output.state_dir),
         "paths": {
@@ -4988,7 +5162,7 @@ def _event_payloads(config: AppConfig) -> dict[str, dict[str, Any]]:
     status = status_payload(config)
     status_event = {
         key: status[key]
-        for key in ("version", "state", "settings", "release_update", "paths", "zapret2")
+        for key in ("version", "state", "settings", "run_preferences", "release_update", "paths", "zapret2")
         if key in status
     }
     return {
@@ -5076,6 +5250,28 @@ DEFAULT_SETTINGS = {
 }
 
 
+DEFAULT_RUN_PREFERENCES = {
+    "domains": [],
+    "domain_preset": "builtin:critical",
+    "discovery_profile": "standard",
+    "settings_preset": "normal",
+    "run_mode": "standard",
+    "curl_parallelism": 4,
+    "enable_http": False,
+    "enable_tls12": True,
+    "enable_tls13": False,
+    "include_quic": True,
+    "enable_ipv6": False,
+    "scan_level": "standard",
+    "repeats": 1,
+    "repeat_parallel": False,
+    "skip_dnscheck": True,
+    "skip_ipblock": True,
+    "limit_time_enabled": False,
+    "timeout_hours": 6,
+}
+
+
 DEFAULT_DISCOVERY_PROFILES = {
     "quick": {
         "name": "quick",
@@ -5143,6 +5339,78 @@ def save_settings(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
     state["settings"] = settings
     write_state(config.output.state_dir, state)
     return settings
+
+
+def read_run_preferences(config: AppConfig) -> dict[str, Any]:
+    state = read_state(config.output.state_dir)
+    stored = state.get("run_preferences") if isinstance(state.get("run_preferences"), dict) else {}
+    return _normalize_run_preferences({**DEFAULT_RUN_PREFERENCES, **stored})
+
+
+def save_run_preferences(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    preferences = _normalize_run_preferences(
+        {**read_run_preferences(config), **(payload if isinstance(payload, dict) else {})}
+    )
+    state = read_state(config.output.state_dir)
+    state["run_preferences"] = preferences
+    write_state(config.output.state_dir, state)
+    return preferences
+
+
+def _normalize_run_preferences(raw: dict[str, Any]) -> dict[str, Any]:
+    run_mode = str(raw.get("run_mode") or "standard")
+    if run_mode not in {"standard", "multi"}:
+        run_mode = "standard"
+    scan_level = str(raw.get("scan_level") or "standard")
+    if scan_level not in {"quick", "standard", "force"}:
+        scan_level = "standard"
+    discovery_profile = str(raw.get("discovery_profile") or scan_level)
+    if discovery_profile not in {"quick", "standard", "force", "custom"}:
+        discovery_profile = scan_level if scan_level in {"quick", "standard", "force"} else "custom"
+    settings_preset = str(raw.get("settings_preset") or "normal")
+    if settings_preset not in {"cautious", "normal", "accelerated", "custom"}:
+        settings_preset = "normal"
+    timeout_hours_raw = raw.get("timeout_hours")
+    try:
+        timeout_hours = float(timeout_hours_raw)
+    except (TypeError, ValueError):
+        timeout_hours = 6.0
+    timeout_hours = max(0.1, min(24.0, timeout_hours))
+    return {
+        "domains": _clean_domain_list(raw.get("domains") or []),
+        "domain_preset": str(raw.get("domain_preset") or "builtin:critical")[:160],
+        "discovery_profile": discovery_profile,
+        "settings_preset": settings_preset,
+        "run_mode": run_mode,
+        "curl_parallelism": _bounded_int(raw.get("curl_parallelism"), default=4, minimum=1, maximum=10),
+        "enable_http": bool(raw.get("enable_http")),
+        "enable_tls12": bool(raw.get("enable_tls12", True)),
+        "enable_tls13": bool(raw.get("enable_tls13")),
+        "include_quic": bool(raw.get("include_quic", True)),
+        "enable_ipv6": bool(raw.get("enable_ipv6")),
+        "scan_level": scan_level,
+        "repeats": _bounded_int(raw.get("repeats"), default=1, minimum=1, maximum=10),
+        "repeat_parallel": bool(raw.get("repeat_parallel")),
+        "skip_dnscheck": bool(raw.get("skip_dnscheck", True)),
+        "skip_ipblock": bool(raw.get("skip_ipblock", True)),
+        "limit_time_enabled": bool(raw.get("limit_time_enabled")),
+        "timeout_hours": timeout_hours,
+    }
+
+
+def _clean_domain_list(value: Any) -> list[str]:
+    items = value if isinstance(value, list) else str(value or "").replace(",", "\n").splitlines()
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        domain = str(item or "").strip().lower()
+        if not domain or domain in seen:
+            continue
+        seen.add(domain)
+        result.append(domain)
+        if len(result) >= 5000:
+            break
+    return result
 
 
 def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:

@@ -77,6 +77,11 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/discovery-profiles", html)
         self.assertIn("discovery-profile-select", html)
         self.assertIn("settings-preset-select", html)
+        self.assertIn("/api/run-preferences", html)
+        self.assertIn("runPreferences", html)
+        self.assertIn("applyRunPreferencesOnce", html)
+        self.assertIn("saveRunPreferencesNow", html)
+        self.assertIn("scheduleRunPreferencesSave", html)
         self.assertIn("settings-default-settings-preset", html)
         self.assertIn("SETTINGS_PRESETS", html)
         self.assertIn("setSettingsPreset", html)
@@ -195,11 +200,15 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("CUSTOM_SELECT_VALUE", html)
         self.assertIn("markDomainPresetCustom", html)
         self.assertIn("markDiscoveryProfileCustom", html)
+        self.assertIn("discovery-profile-note", html)
+        self.assertIn("multi-curl-field", html)
+        self.assertIn("zapretCompactStatus", html)
+        self.assertIn("compact-status", html)
         self.assertIn("optgroup label=\"Персональные\"", html)
         self.assertIn("label: 'Обязательные'", html)
         self.assertIn("label: 'Сервисы'", html)
         self.assertIn("label: 'Готовые наборы'", html)
-        self.assertIn("label: 'Диагностика'", html)
+        self.assertNotIn("label: 'Диагностика'", html)
         self.assertIn("label: 'Протестированные'", html)
         self.assertNotIn("data-preset-use=\"finder\"", html)
         self.assertNotIn("data-preset-use=\"common\"", html)
@@ -549,6 +558,66 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"curl_max_time":1', saved)
             self.assertIn('"curl_max_time_quic":3', saved)
             self.assertIn('"curl_max_time_doh":4', saved)
+
+    def test_run_preferences_endpoint_saves_last_finder_form(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps(
+                {
+                    "run_preferences": {
+                        "domains": ["youtube.com", "discord.com"],
+                        "domain_preset": "custom",
+                        "discovery_profile": "custom",
+                        "settings_preset": "accelerated",
+                        "run_mode": "multi",
+                        "curl_parallelism": 9,
+                        "enable_http": True,
+                        "enable_tls12": True,
+                        "enable_tls13": False,
+                        "include_quic": True,
+                        "enable_ipv6": False,
+                        "scan_level": "force",
+                        "repeats": 2,
+                        "repeat_parallel": True,
+                        "skip_dnscheck": False,
+                        "skip_ipblock": True,
+                        "limit_time_enabled": True,
+                        "timeout_hours": 3.5,
+                    }
+                }
+            )
+            connection.request("POST", "/api/run-preferences", body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            saved = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"run_mode":"multi"', saved)
+            self.assertIn('"curl_parallelism":9', saved)
+            self.assertIn('"scan_level":"force"', saved)
+            self.assertIn('"timeout_hours":3.5', saved)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/status")
+            response = connection.getresponse()
+            status = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"run_preferences"', status)
+            self.assertIn('"youtube.com"', status)
+            self.assertIn('"discord.com"', status)
 
     def test_preset_domain_endpoints_page_and_toggle_domains(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

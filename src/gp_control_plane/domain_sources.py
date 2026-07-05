@@ -32,7 +32,6 @@ def builtin_preset_sources() -> dict[str, dict[str, str]]:
     return {
         "critical": _manual_source("critical"),
         "coverage": _manual_source("coverage"),
-        "diagnostic": _manual_source("diagnostic"),
         "google-youtube": _manual_source("google-youtube"),
         "discord": _manual_source("discord"),
         "cloudflare": _manual_source("cloudflare"),
