@@ -14,8 +14,8 @@ from .storage import connect, db_path
 
 
 SNAPSHOT_KEEP = 5
-BACKUP_SCHEMA_VERSION = "3"
-SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"2", BACKUP_SCHEMA_VERSION}
+BACKUP_SCHEMA_VERSION = "4"
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"2", "3", BACKUP_SCHEMA_VERSION}
 
 
 def backups_dir(state_dir: Path) -> Path:
@@ -103,6 +103,9 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
     backup_domain_count = _int_value(manifest.get("domain_count"))
     backup_strategy_count = _int_value(manifest.get("strategy_count"))
     backup_link_count = _int_value(manifest.get("link_count"))
+    backup_preset_count = _int_value(manifest.get("preset_count"))
+    backup_preset_link_count = _int_value(manifest.get("preset_link_count"))
+    replaces_presets = _snapshot_replaces_presets(path, manifest)
     with connect(state_dir) as conn:
         current_domain_count = _linked_domain_count(conn)
         current_strategy_count = _table_count(conn, "strategies")
@@ -110,6 +113,7 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
         current_preset_count = int(
             conn.execute("SELECT COUNT(*) AS count FROM domain_presets WHERE kind = 'user'").fetchone()["count"]
         )
+        current_preset_link_count = _table_count(conn, "preset_domains")
     settings = read_state(state_dir).get("settings")
     current_settings_count = 1 if isinstance(settings, dict) and settings else 0
     return {
@@ -142,8 +146,15 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
                 "key": "user_presets",
                 "label": "Пользовательские списки",
                 "current_count": current_preset_count,
-                "backup_count": 0,
-                "will_replace": False,
+                "backup_count": backup_preset_count,
+                "will_replace": replaces_presets,
+            },
+            {
+                "key": "preset_domain_links",
+                "label": "Связи список-домен",
+                "current_count": current_preset_link_count,
+                "backup_count": backup_preset_link_count,
+                "will_replace": replaces_presets,
             },
             {
                 "key": "settings",
@@ -208,10 +219,17 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     pre_restore = create_snapshot(state_dir, protect_ids={snapshot_id})
     strategies = _read_ndjson(path / "strategies" / "strategies.ndjson")
     links = _read_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
+    manifest = _read_simple_manifest(path / "manifest.yaml")
+    restore_presets = _snapshot_replaces_presets(path, manifest)
+    presets = _read_ndjson(path / "presets" / "domain-presets.ndjson") if restore_presets else []
+    preset_links = _read_ndjson(path / "presets" / "preset-domains.ndjson") if restore_presets else []
     restored_at = now_iso()
     with connect(state_dir) as conn:
         conn.execute("DELETE FROM strategy_domain_results")
         conn.execute("DELETE FROM strategies")
+        if restore_presets:
+            conn.execute("DELETE FROM preset_domains")
+            conn.execute("DELETE FROM domain_presets")
         for item in _read_ndjson(path / "domains" / "domains.ndjson"):
             domain = str(item.get("domain") or item.get("name") or "").strip()
             if not domain:
@@ -259,6 +277,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     source_mode,
                 ),
             )
+        if restore_presets:
+            _restore_domain_presets(conn, presets, preset_links)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_snapshot", snapshot_id),
@@ -388,8 +408,10 @@ def snapshot_archive_path(state_dir: Path, snapshot_id: str) -> Path:
 def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None:
     (root / "domains").mkdir()
     (root / "strategies").mkdir()
+    (root / "presets").mkdir()
     domain_count = _export_domains(state_dir, root)
     strategy_count, link_count = _export_strategies(state_dir, root)
+    preset_count, preset_link_count = _export_domain_presets(state_dir, root)
     manifest = {
         "schema_version": BACKUP_SCHEMA_VERSION,
         "created_at": now_iso(),
@@ -400,7 +422,8 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
         "domain_count": str(domain_count),
         "strategy_count": str(strategy_count),
         "link_count": str(link_count),
-        "preset_count": "0",
+        "preset_count": str(preset_count),
+        "preset_link_count": str(preset_link_count),
         "completed": "true",
     }
     _write_text(root / "manifest.yaml", _yaml_mapping(manifest))
@@ -415,9 +438,8 @@ def _export_domains(state_dir: Path, root: Path) -> int:
                 """
                 SELECT d.name AS domain, d.service_group
                 FROM domains d
-                WHERE EXISTS (
-                    SELECT 1 FROM strategy_domain_results r WHERE r.domain_id = d.id
-                )
+                WHERE EXISTS (SELECT 1 FROM strategy_domain_results r WHERE r.domain_id = d.id)
+                   OR EXISTS (SELECT 1 FROM preset_domains pd WHERE pd.domain_id = d.id)
                 ORDER BY d.name ASC
                 """
             ):
@@ -455,6 +477,47 @@ def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
                 payload["scope"] = "common" if payload.pop("source_mode", "") == "multi_domain" else "domain"
                 handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
     return strategy_count, link_count
+
+
+def _export_domain_presets(state_dir: Path, root: Path) -> tuple[int, int]:
+    preset_count = 0
+    link_count = 0
+    with connect(state_dir) as conn:
+        with (root / "presets" / "domain-presets.ndjson").open("w", encoding="utf-8") as handle:
+            for row in conn.execute(
+                """
+                SELECT scope, name, kind, label, source_json
+                FROM domain_presets
+                ORDER BY scope, kind, name
+                """
+            ):
+                preset_count += 1
+                source_json = str(row["source_json"] or "{}")
+                try:
+                    source = json.loads(source_json)
+                except json.JSONDecodeError:
+                    source = {}
+                payload = {
+                    "scope": row["scope"],
+                    "name": row["name"],
+                    "kind": row["kind"],
+                    "label": row["label"],
+                    "source": source if isinstance(source, dict) else {},
+                }
+                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+        with (root / "presets" / "preset-domains.ndjson").open("w", encoding="utf-8") as handle:
+            for row in conn.execute(
+                """
+                SELECT p.scope, p.name, p.kind, d.name AS domain, pd.position, pd.enabled
+                FROM domain_presets p
+                JOIN preset_domains pd ON pd.preset_id = p.id
+                JOIN domains d ON d.id = pd.domain_id
+                ORDER BY p.scope, p.kind, p.name, pd.position, d.name
+                """
+            ):
+                link_count += 1
+                handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    return preset_count, link_count
 
 
 def _write_checksums(root: Path) -> None:
@@ -545,6 +608,61 @@ def _restore_domain_preset(conn: Any, scope: str, name: str, domains: list[str],
             "INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position) VALUES(?, ?, ?)",
             (preset_id, domain_id, position),
         )
+
+
+def _restore_domain_presets(conn: Any, presets: list[dict[str, Any]], links: list[dict[str, Any]]) -> None:
+    for item in presets:
+        scope = str(item.get("scope") or "").strip()
+        name = str(item.get("name") or "").strip()
+        kind = str(item.get("kind") or "user").strip() or "user"
+        if not scope or not name:
+            continue
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO domain_presets(scope, name, kind, label, source_json)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            (
+                scope,
+                name,
+                kind,
+                str(item.get("label") or name),
+                json.dumps(source, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+    preset_ids: dict[tuple[str, str, str], int] = {}
+    for row in conn.execute("SELECT id, scope, name, kind FROM domain_presets").fetchall():
+        preset_ids[(str(row["scope"]), str(row["name"]), str(row["kind"]))] = int(row["id"])
+    for item in links:
+        scope = str(item.get("scope") or "").strip()
+        name = str(item.get("name") or "").strip()
+        kind = str(item.get("kind") or "user").strip() or "user"
+        domain = str(item.get("domain") or "").strip()
+        preset_id = preset_ids.get((scope, name, kind))
+        if not preset_id or not domain:
+            continue
+        domain_id = _restore_domain_id(conn, domain)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position, enabled)
+            VALUES(?, ?, ?, ?)
+            """,
+            (
+                preset_id,
+                domain_id,
+                _int_value(item.get("position")),
+                1 if _int_value(item.get("enabled")) else 0,
+            ),
+        )
+
+
+def _snapshot_replaces_presets(path: Path, manifest: dict[str, str]) -> bool:
+    return (
+        str(manifest.get("schema_version") or "") == BACKUP_SCHEMA_VERSION
+        and (path / "presets" / "domain-presets.ndjson").is_file()
+        and (path / "presets" / "preset-domains.ndjson").is_file()
+    )
 
 
 def _unique_nonempty(values: list[str]) -> list[str]:

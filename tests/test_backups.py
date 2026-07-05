@@ -104,12 +104,12 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertTrue(result["queued"])
             self.assertEqual(list_snapshots(state_dir)["snapshots"][0]["id"], snapshot_id)
 
-    def test_custom_presets_are_not_exported_to_minimal_backup(self) -> None:
+    def test_custom_presets_are_exported_to_backup(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
             saved = save_custom_presets(
                 state_dir,
-                {"finder": {"mine": ["youtube.com", "discord.com"]}, "common": {}},
+                {"finder": {"mine": ["youtube.com", "discord.com"]}, "common": {"shared": ["youtube.com"]}},
                 "2026-06-25T00:00:00Z",
             )
 
@@ -120,10 +120,17 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_id = result["snapshot"]["id"]
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
 
-            self.assertFalse((snapshot_path / "presets").exists())
             self.assertTrue((snapshot_path / "domains" / "domains.ndjson").exists())
+            preset_file = snapshot_path / "presets" / "domain-presets.ndjson"
+            preset_link_file = snapshot_path / "presets" / "preset-domains.ndjson"
+            self.assertTrue(preset_file.exists())
+            self.assertTrue(preset_link_file.exists())
+            presets = [json.loads(line) for line in preset_file.read_text(encoding="utf-8").splitlines()]
+            preset_links = [json.loads(line) for line in preset_link_file.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual({item["name"] for item in presets}, {"mine", "shared"})
+            self.assertEqual({item["domain"] for item in preset_links}, {"youtube.com", "discord.com"})
 
-    def test_restore_snapshot_replaces_strategies_and_preserves_presets(self) -> None:
+    def test_restore_snapshot_replaces_strategies_and_presets(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
             first = parse_blockcheck_stdout(
@@ -161,7 +168,8 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             self.assertIsNotNone(result["pre_restore_snapshot"])
             self.assertEqual(page["total"], 1)
             self.assertEqual(discord_page["total"], 0)
-            self.assertEqual(presets["finder"], {"new": ["discord.com"]})
+            self.assertEqual(presets["finder"], {"old": ["youtube.com"]})
+            self.assertEqual(presets["common"], {})
             pre_restore = result["pre_restore_snapshot"]["id"]
             pre_restore_strategy_file = state_dir.parent / "backups" / "snapshots" / pre_restore / "domains" / "domains.ndjson"
             pre_restore_domains = pre_restore_strategy_file.read_text(encoding="utf-8")
@@ -203,7 +211,9 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             self.assertEqual(entities["strategies"]["current_count"], 2)
             self.assertEqual(entities["strategies"]["backup_count"], 1)
             self.assertTrue(entities["strategy_domain_links"]["will_replace"])
-            self.assertFalse(entities["user_presets"]["will_replace"])
+            self.assertTrue(entities["user_presets"]["will_replace"])
+            self.assertIn("preset_domain_links", entities)
+            self.assertTrue(entities["preset_domain_links"]["will_replace"])
             self.assertFalse(entities["settings"]["will_replace"])
 
     def test_snapshot_excludes_derived_strategy_stats(self) -> None:
@@ -261,7 +271,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
             manifest_path = snapshot_path / "manifest.yaml"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('schema_version: "3"', 'schema_version: "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('schema_version: "4"', 'schema_version: "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
@@ -283,7 +293,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
             manifest_path = snapshot_path / "manifest.yaml"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('schema_version: "3"', 'schema_version: "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('schema_version: "4"', 'schema_version: "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
