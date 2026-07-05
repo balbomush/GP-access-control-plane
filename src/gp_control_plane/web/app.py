@@ -22,7 +22,7 @@ from ..backups import (
 )
 from ..config import AppConfig
 from ..diagnostics import diagnostics_payload
-from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v2fly_categories, preview_v2fly_preset
+from ..domain_sources import builtin_preset_sources, import_v2fly_preset, list_v2fly_categories_cached, preview_v2fly_preset
 from ..jobs import JobRunner
 from ..release_update import queue_release_update, release_update_plan, release_update_status
 from ..releases import release_channel_info
@@ -104,7 +104,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path == "/api/domain-sources":
                 self._json({"builtin": builtin_preset_sources()})
             elif path == "/api/domain-sources/v2fly/categories":
-                self._json(_v2fly_categories_payload(query))
+                self._json(_v2fly_categories_payload(config, query))
             elif path == "/api/backups/download":
                 self._download_backup(config, query)
             else:
@@ -926,19 +926,15 @@ button:disabled { opacity: .55; cursor: default; }
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
-.v2fly-category-list {
+.v2fly-catalog-status {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   background: var(--surface-code);
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 6px 10px;
-  max-height: 210px;
-  overflow: auto;
-}
-.v2fly-category-list .empty {
-  grid-column: 1 / -1;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
 }
 .preset-domain-list {
   display: grid;
@@ -1866,29 +1862,16 @@ pre {
               <label for="v2fly-preset-name">Название пресета</label>
               <input id="v2fly-preset-name" autocomplete="off" placeholder="v2fly-youtube">
             </div>
-            <div class="field">
-              <label for="v2fly-scope">Где использовать</label>
-              <select id="v2fly-scope">
-                <option value="finder">Подбор</option>
-                <option value="common">Общие стратегии</option>
-              </select>
-            </div>
           </div>
           <div class="field">
             <label for="v2fly-category-search">Каталог групп v2fly</label>
             <div class="category-toolbar">
-              <input id="v2fly-category-search" list="v2fly-category-options" autocomplete="off" placeholder="Начните вводить: youtube, google, discord">
+              <input id="v2fly-category-search" list="v2fly-category-options" autocomplete="off" placeholder="Начните вводить название группы: youtube, google, discord">
               <datalist id="v2fly-category-options"></datalist>
-              <button class="secondary" data-action="v2fly-load-categories" type="button">Обновить каталог</button>
+              <button class="secondary" data-action="v2fly-load-categories" type="button" title="Скачивает свежий каталог групп v2fly только если в источнике появился новый commit.">Обновить каталог</button>
             </div>
           </div>
-          <div class="v2fly-category-list" id="v2fly-category-list">
-            <div class="empty">Каталог загрузится при открытии вкладки. Можно также ввести категории вручную ниже.</div>
-          </div>
-          <div class="field">
-            <label for="v2fly-categories">Категории v2fly/domain-list-community</label>
-            <textarea id="v2fly-categories" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube&#10;google&#10;discord"></textarea>
-          </div>
+          <div class="v2fly-catalog-status" id="v2fly-category-status">Каталог групп загрузится автоматически при открытии вкладки.</div>
           <div class="field">
             <label for="v2fly-domains">Итоговые домены пресета</label>
             <div class="code-editor text-editor">
@@ -1901,7 +1884,6 @@ pre {
             <button data-action="v2fly-import" type="button">Сохранить пресет</button>
           </div>
           <div class="source-preview" id="v2fly-preview-result">Список не проверялся.</div>
-          <div class="helper-text">Берутся явные доменные правила v2fly: domain/full и доменные строки. include разворачивается backend-ом; keyword/regexp показываются как пропущенные правила и не превращаются в домены автоматически.</div>
         </div>
         </div>
       </section>
@@ -3877,7 +3859,8 @@ function toggleUpdateLog(){
   log.hidden = !log.hidden;
 }
 function v2flyCategories(){
-  return parseDomains(el('v2fly-categories')?.value || '');
+  const category = String(el('v2fly-category-search')?.value || '').trim().toLowerCase();
+  return category ? [category] : [];
 }
 function suggestV2flyPresetName(){
   const nameInput = el('v2fly-preset-name');
@@ -3890,7 +3873,7 @@ function suggestV2flyPresetName(){
 }
 function v2flyPayload(){
   return {
-    scope: el('v2fly-scope')?.value || 'finder',
+    scope: 'finder',
     name: String(el('v2fly-preset-name')?.value || '').trim(),
     categories: v2flyCategories(),
     domains: parseDomains(el('v2fly-domains')?.value || '')
@@ -3904,39 +3887,54 @@ function renderV2flyPreview(){
     target.textContent = 'Список не проверялся.';
     return;
   }
+  if (preview.loading) {
+    target.textContent = preview.message || 'Загружаю домены выбранной группы...';
+    return;
+  }
   const added = Array.isArray(preview.added) ? preview.added.length : 0;
   const removed = Array.isArray(preview.removed) ? preview.removed.length : 0;
-  const sources = Array.isArray(preview.sources) ? preview.sources.map((source) => `${source.category}: ${source.domains}`).join(', ') : '-';
   const skipped = preview.skipped && typeof preview.skipped === 'object'
-    ? Object.entries(preview.skipped).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `${key}: ${value}`).join(', ')
-    : '';
+    ? Object.values(preview.skipped).reduce((sum, value) => sum + Number(value || 0), 0)
+    : 0;
   const coverageNote = preview.coverage_note ? 'Публично известный проверяемый набор, не гарантия полного покрытия сервиса.' : '';
   target.innerHTML = [
     `<div><strong>${esc(preview.preset || '-')}</strong>: ${esc(preview.count || 0)} доменов</div>`,
     `<div>Добавится: ${esc(added)}, уйдет: ${esc(removed)}, без изменений: ${esc(preview.unchanged_count || 0)}</div>`,
-    `<div>Категории: ${esc(sources)}</div>`,
-    skipped ? `<div>Пропущенные правила: ${esc(skipped)}</div>` : '',
+    skipped ? `<div>Часть правил не добавлена автоматически: ${esc(skipped)}</div>` : '',
     coverageNote ? `<div>${esc(coverageNote)}</div>` : ''
   ].join('');
 }
 function renderV2flyCategoryCatalog(){
-  const target = el('v2fly-category-list');
-  if (!target) return;
-  const categories = (state.v2flyCategories || {}).categories || [];
+  const target = el('v2fly-category-status');
+  const data = state.v2flyCategories || {};
+  const categories = data.categories || [];
+  const query = String(el('v2fly-category-search')?.value || '').trim().toLowerCase();
+  const visible = query ? categories.filter((category) => category.includes(query)) : categories;
   const options = el('v2fly-category-options');
-  if (options) options.innerHTML = categories.map((category) => `<option value="${esc(category)}"></option>`).join('');
-  if (!categories.length) {
-    const source = state.v2flyCategorySource === 'loading' ? 'Загрузка каталога...' : 'Каталог еще не загружался. Можно загрузить список групп из v2fly или ввести категории вручную ниже.';
-    target.innerHTML = `<div class="empty">${esc(source)}</div>`;
+  if (options) options.innerHTML = visible.slice(0, 500).map((category) => `<option value="${esc(category)}"></option>`).join('');
+  const button = document.querySelector('[data-action="v2fly-load-categories"]');
+  const loading = state.v2flyCategorySource === 'loading';
+  if (button) {
+    const canRefresh = Boolean(data.can_refresh || data.update_available);
+    button.disabled = loading || !canRefresh;
+    button.textContent = loading ? 'Проверяю каталог' : (data.update_available ? 'Обновить каталог' : 'Каталог актуален');
+    button.title = data.update_available
+      ? 'Скачивает свежий каталог групп v2fly: в источнике найден новый commit.'
+      : 'Кнопка станет активной, когда backend найдет новый commit в v2fly/domain-list-community.';
+  }
+  if (!target) return;
+  if (loading) {
+    target.textContent = 'Проверяю локальный каталог и доступные обновления...';
     return;
   }
-  const selected = new Set(v2flyCategories());
-  target.innerHTML = categories.map((category) => `
-    <label class="checkbox-row">
-      <input type="checkbox" data-v2fly-category="${esc(category)}" ${selected.has(category) ? 'checked' : ''}>
-      ${esc(category)}
-    </label>
-  `).join('');
+  if (!categories.length) {
+    target.textContent = data.revision_error ? `Каталог пока недоступен: ${data.revision_error}` : 'Каталог пока не загружен.';
+    return;
+  }
+  const selected = v2flyCategories()[0] || '';
+  const updateText = data.update_available ? ' Доступно обновление каталога.' : '';
+  const queryText = query ? ` Найдено по вводу: ${visible.length}.` : '';
+  target.textContent = `Каталог готов: ${data.all_count || categories.length} групп.${queryText}${selected ? ` Выбрано: ${selected}.` : ''}${updateText}`;
 }
 function presetManagerMeta(scope){
   return (state.customPresetMeta && state.customPresetMeta[scope]) || {};
@@ -4180,30 +4178,21 @@ async function exportPresetEditor(){
     setMessage(`Ошибка экспорта списка: ${error.message}`, 'bad');
   }
 }
-function syncV2flyCategoriesFromCatalog(){
-  const checked = Array.from(document.querySelectorAll('[data-v2fly-category]:checked')).map((input) => input.dataset.v2flyCategory);
-  const manual = v2flyCategories().filter((category) => !((state.v2flyCategories || {}).categories || []).includes(category));
-  const merged = uniqueDomains([...manual, ...checked]);
-  const textarea = el('v2fly-categories');
-  if (textarea) {
-    textarea.value = merged.join('\\n');
-    updateEditorLineNumbers('v2fly-categories');
-  }
-  suggestV2flyPresetName();
-  state.v2flyPreview = null;
-  renderV2flyPreview();
-}
-async function loadV2flyCategories(){
-  const query = String(el('v2fly-category-search')?.value || '').trim();
+async function loadV2flyCategories(refreshCatalog){
   state.v2flyCategorySource = 'loading';
   renderV2flyCategoryCatalog();
   try {
-    const data = await getJson(`/api/domain-sources/v2fly/categories?limit=120&query=${encodeURIComponent(query)}`);
+    const params = new URLSearchParams();
+    params.set('limit', '5000');
+    params.set('check', '1');
+    if (refreshCatalog) params.set('refresh', '1');
+    const data = await getJson(`/api/domain-sources/v2fly/categories?${params.toString()}`);
     state.v2flyCategories = data;
     state.v2flyCategorySource = data.source || '';
     renderV2flyCategoryCatalog();
-    const more = data.has_more ? ', показана первая часть' : '';
-    setMessage(`Каталог v2fly загружен: ${data.total || 0} групп${more}`, data.source === 'fallback' ? 'warn' : 'good');
+    const tone = data.source === 'fallback' || data.revision_error ? 'warn' : 'good';
+    const suffix = data.update_available ? ', есть обновление' : '';
+    setMessage(`Каталог v2fly готов: ${data.all_count || data.total || 0} групп${suffix}`, tone);
   } catch (error) {
     state.v2flyCategories = { categories: [] };
     state.v2flyCategorySource = '';
@@ -4217,6 +4206,8 @@ async function previewV2flyPreset(){
     setMessage('Укажите название пресета и хотя бы одну категорию v2fly', 'warn');
     return;
   }
+  state.v2flyPreview = { loading: true, message: 'Загружаю домены выбранной группы...' };
+  renderV2flyPreview();
   try {
     const data = await postJson('/api/domain-sources/v2fly/preview', payload);
     state.v2flyPreview = data;
@@ -4236,6 +4227,8 @@ async function importV2flyPreset(){
     setMessage('Укажите название пресета и хотя бы одну категорию v2fly', 'warn');
     return;
   }
+  state.v2flyPreview = { loading: true, message: 'Сохраняю доменный пресет...' };
+  renderV2flyPreview();
   try {
     const data = await postJson('/api/domain-sources/v2fly/import', payload);
     state.v2flyPreview = data;
@@ -4850,7 +4843,7 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (button.dataset.action === 'v2fly-load-categories') {
-    loadV2flyCategories();
+    loadV2flyCategories(true);
     return;
   }
   if (button.dataset.action === 'v2fly-preview') {
@@ -4947,7 +4940,10 @@ document.addEventListener('input', (event) => {
     renderReleaseInfo();
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
-    if (event.target.id === 'v2fly-categories') suggestV2flyPresetName();
+    if (event.target.id === 'v2fly-category-search') {
+      suggestV2flyPresetName();
+      renderV2flyCategoryCatalog();
+    }
     if (event.target.id === 'v2fly-domains') updateEditorLineNumbers('v2fly-domains');
     state.v2flyPreview = null;
     renderV2flyPreview();
@@ -4961,9 +4957,6 @@ document.addEventListener('input', (event) => {
   }
   if (event.target && event.target.id === 'preset-editor-name') {
     renderPresetEditorPreview(null);
-  }
-  if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
-    syncV2flyCategoriesFromCatalog();
   }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
@@ -5008,13 +5001,13 @@ document.addEventListener('change', (event) => {
     state.settingsTouched = true;
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
-    if (event.target.id === 'v2fly-categories') suggestV2flyPresetName();
+    if (event.target.id === 'v2fly-category-search') {
+      suggestV2flyPresetName();
+      renderV2flyCategoryCatalog();
+    }
     if (event.target.id === 'v2fly-domains') updateEditorLineNumbers('v2fly-domains');
     state.v2flyPreview = null;
     renderV2flyPreview();
-  }
-  if (event.target && event.target.dataset && event.target.dataset.v2flyCategory) {
-    syncV2flyCategoriesFromCatalog();
   }
   if (event.target && event.target.dataset && event.target.dataset.presetDomainToggle) {
     togglePresetDomain(event.target.dataset.presetDomainToggle, Boolean(event.target.checked));
@@ -5521,10 +5514,13 @@ def _preset_domains_payload(config: AppConfig, query: dict[str, list[str]]) -> d
     )
 
 
-def _v2fly_categories_payload(query: dict[str, list[str]]) -> dict[str, Any]:
-    return list_v2fly_categories(
+def _v2fly_categories_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return list_v2fly_categories_cached(
+        config.output.state_dir,
         query=_query_str(query, "query", ""),
-        limit=_query_int(query, "limit", 80),
+        limit=_query_int(query, "limit", 2000),
+        refresh=_query_bool(query, "refresh", False),
+        check_update=_query_bool(query, "check", True),
     )
 
 

@@ -12,6 +12,7 @@ from .storage import read_custom_presets, save_custom_preset
 
 V2FLY_BASE_URL = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data"
 V2FLY_CONTENTS_URL = "https://api.github.com/repos/v2fly/domain-list-community/contents/data?ref=master"
+V2FLY_REVISION_URL = "https://api.github.com/repos/v2fly/domain-list-community/commits/master"
 _COVERAGE_NOTE = "publicly known verifiable domain set; not a guarantee of full service coverage"
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 _DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
@@ -64,6 +65,145 @@ def list_v2fly_categories(
         "has_more": len(categories) > clean_limit,
         "limit": clean_limit,
     }
+
+
+def list_v2fly_categories_cached(
+    state_dir: Path,
+    query: str = "",
+    *,
+    limit: int = 2000,
+    refresh: bool = False,
+    check_update: bool = True,
+    index_fetcher: Callable[[], str] | None = None,
+    revision_fetcher: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    cache = read_v2fly_catalog_cache(state_dir)
+    remote_revision = ""
+    revision_error = ""
+    checked_at = _utc_now()
+    if check_update or refresh or not cache:
+        try:
+            remote_revision = parse_v2fly_revision(revision_fetcher() if revision_fetcher else fetch_v2fly_revision())
+        except Exception as exc:  # noqa: BLE001
+            revision_error = str(exc)
+
+    local_revision = str((cache or {}).get("revision") or "")
+    update_available = bool(cache and remote_revision and local_revision and remote_revision != local_revision)
+    should_refresh = not cache or (refresh and (update_available or not local_revision))
+    if should_refresh:
+        try:
+            text = index_fetcher() if index_fetcher else fetch_v2fly_category_index()
+            categories = parse_v2fly_category_index(text)
+            cache = {
+                "source": "github",
+                "revision": remote_revision or local_revision,
+                "checked_at": checked_at,
+                "categories": categories,
+            }
+            write_v2fly_catalog_cache(state_dir, cache)
+            local_revision = str(cache.get("revision") or "")
+            update_available = False
+        except Exception as exc:  # noqa: BLE001
+            revision_error = str(exc)
+            if not cache:
+                cache = {
+                    "source": "fallback",
+                    "revision": "",
+                    "checked_at": checked_at,
+                    "categories": list(_FALLBACK_V2FLY_CATEGORIES),
+                }
+
+    categories = list((cache or {}).get("categories") or [])
+    source = str((cache or {}).get("source") or "cache")
+    if remote_revision and cache and local_revision == remote_revision:
+        cache = {**cache, "checked_at": checked_at}
+        write_v2fly_catalog_cache(state_dir, cache)
+    needle = str(query or "").strip().lower()
+    filtered = [category for category in categories if needle in category] if needle else categories
+    clean_limit = max(1, min(int(limit or 2000), 5000))
+    return {
+        "source": source,
+        "query": needle,
+        "total": len(filtered),
+        "all_count": len(categories),
+        "categories": filtered[:clean_limit],
+        "has_more": len(filtered) > clean_limit,
+        "limit": clean_limit,
+        "cached": bool(cache and source != "fallback"),
+        "revision": local_revision,
+        "remote_revision": remote_revision,
+        "checked_at": str((cache or {}).get("checked_at") or checked_at),
+        "update_available": update_available,
+        "can_refresh": (not cache) or source == "fallback" or update_available,
+        "revision_error": revision_error,
+    }
+
+
+def read_v2fly_catalog_cache(state_dir: Path) -> dict[str, Any] | None:
+    path = v2fly_catalog_cache_path(state_dir)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    categories: list[str] = []
+    seen: set[str] = set()
+    for raw in payload.get("categories") or []:
+        try:
+            clean = _clean_category(str(raw))
+        except ValueError:
+            continue
+        if clean not in seen:
+            seen.add(clean)
+            categories.append(clean)
+    if not categories:
+        return None
+    return {
+        "source": str(payload.get("source") or "cache"),
+        "revision": str(payload.get("revision") or ""),
+        "checked_at": str(payload.get("checked_at") or ""),
+        "categories": sorted(categories),
+    }
+
+
+def write_v2fly_catalog_cache(state_dir: Path, payload: dict[str, Any]) -> None:
+    path = v2fly_catalog_cache_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def v2fly_catalog_cache_path(state_dir: Path) -> Path:
+    return state_dir / "domain-sources" / "v2fly-catalog.json"
+
+
+def fetch_v2fly_revision() -> str:
+    with urlopen(V2FLY_REVISION_URL, timeout=15) as response:  # noqa: S310
+        return response.read().decode("utf-8", errors="replace")
+
+
+def parse_v2fly_revision(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw[:80]
+    if isinstance(payload, dict):
+        value = payload.get("sha")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        commit = payload.get("commit")
+        if isinstance(commit, dict):
+            tree = commit.get("tree")
+            if isinstance(tree, dict) and isinstance(tree.get("sha"), str):
+                return tree["sha"].strip()
+    return ""
 
 
 def fetch_v2fly_category_index() -> str:

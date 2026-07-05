@@ -11,8 +11,10 @@ from gp_control_plane.domain_sources import (
     builtin_preset_sources,
     import_v2fly_preset,
     list_v2fly_categories,
+    list_v2fly_categories_cached,
     parse_v2fly_category_index,
     parse_v2fly_domains,
+    parse_v2fly_revision,
     preview_v2fly_preset,
 )
 from gp_control_plane.storage import read_custom_presets
@@ -99,6 +101,74 @@ domain:youtube.com
 
         self.assertEqual(result["source"], "github")
         self.assertEqual(result["categories"], ["google"])
+
+    def test_parse_v2fly_revision_reads_github_commit_sha(self) -> None:
+        self.assertEqual(parse_v2fly_revision('{"sha": "abc123"}'), "abc123")
+        self.assertEqual(parse_v2fly_revision("plain-revision"), "plain-revision")
+
+    def test_cached_v2fly_catalog_uses_local_copy_until_revision_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            index_v1 = """
+[
+  {"name": "discord", "type": "file"},
+  {"name": "google", "type": "file"}
+]
+"""
+
+            first = list_v2fly_categories_cached(
+                state_dir,
+                limit=100,
+                index_fetcher=lambda: index_v1,
+                revision_fetcher=lambda: '{"sha": "rev1"}',
+            )
+
+            self.assertTrue(first["cached"])
+            self.assertEqual(first["revision"], "rev1")
+            self.assertEqual(first["categories"], ["discord", "google"])
+            self.assertFalse(first["update_available"])
+
+            second = list_v2fly_categories_cached(
+                state_dir,
+                query="goo",
+                limit=100,
+                revision_fetcher=lambda: '{"sha": "rev1"}',
+            )
+
+            self.assertEqual(second["categories"], ["google"])
+            self.assertFalse(second["update_available"])
+
+            changed = list_v2fly_categories_cached(
+                state_dir,
+                limit=100,
+                revision_fetcher=lambda: '{"sha": "rev2"}',
+            )
+
+            self.assertTrue(changed["update_available"])
+            self.assertTrue(changed["can_refresh"])
+            self.assertEqual(changed["categories"], ["discord", "google"])
+
+    def test_refresh_v2fly_catalog_downloads_when_revision_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            list_v2fly_categories_cached(
+                state_dir,
+                limit=100,
+                index_fetcher=lambda: '[{"name": "google", "type": "file"}]',
+                revision_fetcher=lambda: '{"sha": "rev1"}',
+            )
+
+            refreshed = list_v2fly_categories_cached(
+                state_dir,
+                limit=100,
+                refresh=True,
+                index_fetcher=lambda: '[{"name": "youtube", "type": "file"}]',
+                revision_fetcher=lambda: '{"sha": "rev2"}',
+            )
+
+            self.assertEqual(refreshed["revision"], "rev2")
+            self.assertEqual(refreshed["categories"], ["youtube"])
+            self.assertFalse(refreshed["update_available"])
 
 
 if __name__ == "__main__":
