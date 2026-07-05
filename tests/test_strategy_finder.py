@@ -896,6 +896,37 @@ pktws_check_https_tls12()
             self.assertTrue(progress_log.exists())
             self.assertTrue(metrics_log.exists())
 
+    def test_live_stdout_recorder_persists_multidomain_success_event(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            progress_log = state_dir / "strategy-finder" / "logs" / "run.progress.json"
+            run = {
+                "id": "run-live",
+                "kind": "multi-domain-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(progress_log),
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            recorder.record_line(
+                "- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake"
+            )
+            recorder.record_line(
+                "!!!!! curl_test_https_tls12: working strategy found for ipv4 youtube.com : "
+                "nfqws2 --payload=tls_client_hello --lua-desync=fake !!!!!"
+            )
+
+            parsed = recorder.parsed()
+            progress = recorder.progress(run)
+            candidates = read_candidates(state_dir)
+
+            self.assertEqual(len(parsed["candidates"]), 1)
+            self.assertEqual(parsed["candidates"][0]["domain"], "youtube.com")
+            self.assertEqual(progress["successful"], 1)
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["seen"][0]["domain"], "youtube.com")
+
     def test_compact_stdout_writer_keeps_success_and_skips_failed_attempt_noise(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "compact.log"
@@ -1076,6 +1107,7 @@ pktws_check_https_tls12()
             self.assertIn('gp_md_run_domain_curl "$idx" "$testf" "$gp_domain" &', text)
             self.assertIn("gp_md_collect_record", text)
             self.assertIn('curl_test "$testf" "$gp_domain"', text)
+            self.assertIn("working strategy found for ipv$IPV $gp_domain", text)
             self.assertNotIn("echo stock main", text)
 
     def test_resolve_blockcheck_script_follows_exec_wrapper(self) -> None:

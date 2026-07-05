@@ -3075,6 +3075,7 @@ gp_md_collect_record()
 	[ -f "$out" ] && cat "$out"
 	rm -f "$out" "$codefile"
 	if [ "$code" = 0 ]; then
+		echo "!!!!! $testf: working strategy found for ipv$IPV $gp_domain : nfqws2 ${WF:+$WF }$strategy_text !!!!!"
 		report_append "$gp_domain" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy_text"
 		return 0
 	fi
