@@ -759,6 +759,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"run_preferences"', status)
             self.assertIn('"youtube.com"', status)
             self.assertIn('"discord.com"', status)
+            self.assertNotIn('"settings_preset"', status)
 
     def test_preset_domain_endpoints_page_and_toggle_domains(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

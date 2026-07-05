@@ -4985,11 +4985,16 @@ startRealtimeFallback();
 
 
 def status_payload(config: AppConfig) -> dict[str, Any]:
+    settings = read_settings(config)
+    run_preferences = read_run_preferences(config)
+    state = read_state(config.output.state_dir)
+    if isinstance(state, dict):
+        state = {**state, "settings": settings, "run_preferences": run_preferences}
     return {
         "version": __version__,
-        "state": read_state(config.output.state_dir),
-        "settings": read_settings(config),
-        "run_preferences": read_run_preferences(config),
+        "state": state,
+        "settings": settings,
+        "run_preferences": run_preferences,
         "release_update": release_update_status(config.output.state_dir, current_version=__version__),
         "candidate_version": candidate_storage_version(config.output.state_dir),
         "paths": {
