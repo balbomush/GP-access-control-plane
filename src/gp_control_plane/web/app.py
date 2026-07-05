@@ -590,6 +590,7 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
 h2 { font-size: 16px; line-height: 1.3; margin: 0; letter-spacing: 0; }
 .form-grid { display: grid; gap: 10px; }
 .field { display: grid; gap: 6px; min-width: 0; }
+[hidden] { display: none !important; }
 label { color: var(--text-soft); font-size: 12px; font-weight: 600; }
 input, textarea, select {
   width: 100%;

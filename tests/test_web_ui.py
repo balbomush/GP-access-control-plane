@@ -401,6 +401,19 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/jobs/zapret-strategy-check", html)
         self.assertNotIn("/api/jobs/zapret-custom-verification", html)
 
+    def test_curl_parallelism_field_is_scoped_to_multi_domain_mode(self) -> None:
+        html = index_html()
+
+        self.assertIn("[hidden] { display: none !important; }", html)
+        self.assertIn('<div class="field multi-curl-field" id="multi-curl-field" hidden>', html)
+        field_start = html.index('id="multi-curl-field" hidden')
+        field_end = html.index("</div>", html.index("Работает только в режиме", field_start))
+        field_html = html[field_start:field_end]
+
+        self.assertIn('id="curl-parallelism"', field_html)
+        self.assertIn("Все домены на одной стратегии", field_html)
+        self.assertIn("curlField.hidden = mode !== 'multi';", html)
+
     def test_index_script_has_no_raw_newlines_inside_quoted_strings(self) -> None:
         html = index_html()
         marker_start = "<script>"
