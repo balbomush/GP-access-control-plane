@@ -261,7 +261,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
             manifest_path = snapshot_path / "manifest.yaml"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('schema_version: "2"', 'schema_version: "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('schema_version: "3"', 'schema_version: "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
@@ -283,7 +283,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
             manifest_path = snapshot_path / "manifest.yaml"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('schema_version: "2"', 'schema_version: "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('schema_version: "3"', 'schema_version: "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)

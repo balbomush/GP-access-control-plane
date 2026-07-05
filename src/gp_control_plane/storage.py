@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
@@ -18,6 +18,7 @@ SCHEMA_MIGRATIONS = (
     (6, "preset_domain_state"),
     (7, "compact_runtime_payloads"),
     (8, "trim_strategy_attempt_diagnostics"),
+    (9, "minimal_sqlite_working_model"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
@@ -77,7 +78,7 @@ def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Conne
             conn.execute("PRAGMA foreign_keys=ON")
             _migrate_schema(conn)
             _cleanup_runtime_state(conn, path.parent)
-            _run_deferred_vacuum(conn)
+            _run_deferred_vacuum(conn, state_dir)
             _MIGRATED_DB_PATHS.add(migration_key)
             return conn
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -119,7 +120,6 @@ _STORAGE_STATUS_TABLES = (
     "domains",
     "strategies",
     "strategy_domain_results",
-    "strategy_attempts",
     "domain_presets",
     "preset_domains",
 )
@@ -167,9 +167,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS domains (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            service_group TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT ''
+            service_group TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_domains_name ON domains(name);
         CREATE INDEX IF NOT EXISTS idx_domains_service_group ON domains(service_group);
@@ -179,11 +177,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             protocol TEXT NOT NULL DEFAULT '',
             args TEXT NOT NULL DEFAULT '',
             args_hash TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'candidate',
-            first_seen_at TEXT NOT NULL DEFAULT '',
-            last_seen_at TEXT NOT NULL DEFAULT ''
+            status TEXT NOT NULL DEFAULT 'candidate'
         );
-        CREATE INDEX IF NOT EXISTS idx_strategies_last_seen ON strategies(last_seen_at DESC, id ASC);
         CREATE INDEX IF NOT EXISTS idx_strategies_protocol ON strategies(protocol);
         CREATE INDEX IF NOT EXISTS idx_strategies_args_hash ON strategies(args_hash);
 
@@ -192,8 +187,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             domain_id INTEGER NOT NULL,
             protocol TEXT NOT NULL DEFAULT '',
             source_mode TEXT NOT NULL DEFAULT 'single_domain',
-            first_seen_at TEXT NOT NULL DEFAULT '',
-            last_seen_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(strategy_id, domain_id, source_mode),
             FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
             FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
@@ -203,26 +196,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_strategy_domain ON strategy_domain_results(strategy_id, domain_id);
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_source ON strategy_domain_results(source_mode);
 
-        CREATE TABLE IF NOT EXISTS strategy_attempts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id TEXT NOT NULL DEFAULT '',
-            strategy_id TEXT NOT NULL,
-            domain_id INTEGER NOT NULL,
-            protocol TEXT NOT NULL DEFAULT '',
-            source_mode TEXT NOT NULL DEFAULT 'single_domain',
-            test_name TEXT NOT NULL DEFAULT '',
-            ip_version TEXT NOT NULL DEFAULT '',
-            result TEXT NOT NULL DEFAULT '',
-            error_code TEXT NOT NULL DEFAULT '',
-            duration_ms INTEGER NOT NULL DEFAULT 0,
-            checked_at TEXT NOT NULL DEFAULT '',
-            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
-            FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_strategy_attempts_strategy ON strategy_attempts(strategy_id, id);
-        CREATE INDEX IF NOT EXISTS idx_strategy_attempts_domain ON strategy_attempts(domain_id, id);
-        CREATE INDEX IF NOT EXISTS idx_strategy_attempts_run ON strategy_attempts(run_id, id);
-
         CREATE TABLE IF NOT EXISTS domain_presets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scope TEXT NOT NULL DEFAULT '',
@@ -230,8 +203,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             kind TEXT NOT NULL DEFAULT 'user',
             label TEXT NOT NULL DEFAULT '',
             source_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
             UNIQUE(scope, name, kind)
         );
         CREATE INDEX IF NOT EXISTS idx_domain_presets_scope_name ON domain_presets(scope, name);
@@ -252,10 +223,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                d.name AS domain,
                COUNT(DISTINCT r.strategy_id) AS strategy_count,
                COUNT(DISTINCT CASE WHEN r.protocol = 'tls' THEN r.strategy_id END) AS tls_strategy_count,
-               COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count,
-               COUNT(r.strategy_id) AS success_count,
-               0 AS fail_count,
-               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
+               COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count
         FROM domains d
         LEFT JOIN strategy_domain_results r ON r.domain_id = d.id
         GROUP BY d.id, d.name;
@@ -265,28 +233,23 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                s.protocol,
                COUNT(DISTINCT r.domain_id) AS domain_count,
                COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS single_domain_count,
-               COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count,
-               COUNT(r.domain_id) AS success_count,
-               0 AS fail_count,
-               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
+               COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count
         FROM strategies s
         LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
         GROUP BY s.id, s.protocol;
         """
     )
-    current_schema_version = get_meta(conn, "schema_version")
     _ensure_column(conn, "domain_presets", "source_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "preset_domains", "enabled", "INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_enabled_position ON preset_domains(preset_id, enabled, position)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_position ON preset_domains(preset_id, position)")
-    strategy_results_changed = _migrate_strategy_domain_results_schema(conn)
-    if strategy_results_changed or current_schema_version != str(SCHEMA_VERSION):
-        _recreate_stats_views(conn)
+    _migrate_minimal_working_model_schema(conn)
+    _recreate_stats_views(conn)
     _drop_legacy_storage(conn)
     _compact_run_payloads(conn)
-    _trim_strategy_attempts(conn)
+    _drop_strategy_attempts(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -318,15 +281,107 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> bool:
-    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(strategy_domain_results)").fetchall()}
-    legacy_columns = {"success_count", "fail_count", "last_success_run_id", "last_fail_run_id"}
-    if not (columns & legacy_columns):
+def _migrate_minimal_working_model_schema(conn: sqlite3.Connection) -> bool:
+    changed = False
+    conn.executescript("DROP VIEW IF EXISTS domain_stats; DROP VIEW IF EXISTS strategy_stats;")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        changed = _migrate_domains_schema(conn) or changed
+        changed = _migrate_strategies_schema(conn) or changed
+        changed = _migrate_strategy_domain_results_schema(conn) or changed
+        changed = _migrate_domain_presets_schema(conn) or changed
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+    if changed:
+        problems = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if problems:
+            raise sqlite3.IntegrityError("foreign key check failed after SQLite model migration")
+    return changed
+
+
+def _migrate_domains_schema(conn: sqlite3.Connection) -> bool:
+    columns = _table_columns(conn, "domains")
+    if {"created_at", "updated_at"}.isdisjoint(columns):
         return False
     conn.executescript(
         """
-        DROP VIEW IF EXISTS domain_stats;
-        DROP VIEW IF EXISTS strategy_stats;
+        DROP INDEX IF EXISTS idx_domains_name;
+        DROP INDEX IF EXISTS idx_domains_service_group;
+        ALTER TABLE domains RENAME TO domains_old;
+        CREATE TABLE domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            service_group TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO domains(id, name, service_group)
+        SELECT id, name, COALESCE(service_group, '')
+        FROM domains_old
+        WHERE COALESCE(name, '') != '';
+        DROP TABLE domains_old;
+        CREATE INDEX IF NOT EXISTS idx_domains_name ON domains(name);
+        CREATE INDEX IF NOT EXISTS idx_domains_service_group ON domains(service_group);
+        """
+    )
+    set_meta(conn, "minimal_domains_schema_v9", "1")
+    return True
+
+
+def _migrate_strategies_schema(conn: sqlite3.Connection) -> bool:
+    columns = _table_columns(conn, "strategies")
+    if {"first_seen_at", "last_seen_at"}.isdisjoint(columns):
+        return False
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_strategies_last_seen;
+        DROP INDEX IF EXISTS idx_strategies_protocol;
+        DROP INDEX IF EXISTS idx_strategies_args_hash;
+        ALTER TABLE strategies RENAME TO strategies_old;
+        CREATE TABLE strategies (
+            id TEXT PRIMARY KEY,
+            protocol TEXT NOT NULL DEFAULT '',
+            args TEXT NOT NULL DEFAULT '',
+            args_hash TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'candidate'
+        );
+        INSERT OR IGNORE INTO strategies(id, protocol, args, args_hash, status)
+        SELECT id, COALESCE(protocol, ''), COALESCE(args, ''), COALESCE(args_hash, ''), COALESCE(status, 'candidate')
+        FROM strategies_old
+        WHERE COALESCE(id, '') != '';
+        DROP TABLE strategies_old;
+        CREATE INDEX IF NOT EXISTS idx_strategies_protocol ON strategies(protocol);
+        CREATE INDEX IF NOT EXISTS idx_strategies_args_hash ON strategies(args_hash);
+        """
+    )
+    conn.execute(
+        """
+        UPDATE strategies
+        SET args_hash = ?
+        WHERE COALESCE(args_hash, '') = '' AND COALESCE(args, '') = ''
+        """,
+        (_args_hash(""),),
+    )
+    set_meta(conn, "minimal_strategies_schema_v9", "1")
+    return True
+
+
+def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> bool:
+    columns = _table_columns(conn, "strategy_domain_results")
+    legacy_columns = {
+        "success_count",
+        "fail_count",
+        "last_success_run_id",
+        "last_fail_run_id",
+        "first_seen_at",
+        "last_seen_at",
+    }
+    if legacy_columns.isdisjoint(columns):
+        return False
+    protocol_expr = "COALESCE(protocol, '')" if "protocol" in columns else "''"
+    source_mode_expr = (
+        "COALESCE(NULLIF(source_mode, ''), 'single_domain')" if "source_mode" in columns else "'single_domain'"
+    )
+    conn.executescript(
+        """
         DROP INDEX IF EXISTS idx_strategy_domain_results_domain_protocol;
         DROP INDEX IF EXISTS idx_strategy_domain_results_domain_strategy;
         DROP INDEX IF EXISTS idx_strategy_domain_results_strategy_domain;
@@ -337,17 +392,22 @@ def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> bool:
             domain_id INTEGER NOT NULL,
             protocol TEXT NOT NULL DEFAULT '',
             source_mode TEXT NOT NULL DEFAULT 'single_domain',
-            first_seen_at TEXT NOT NULL DEFAULT '',
-            last_seen_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(strategy_id, domain_id, source_mode),
             FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
             FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
         );
-        INSERT OR IGNORE INTO strategy_domain_results(
-            strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at
-        )
-        SELECT strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at
-        FROM strategy_domain_results_old;
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO strategy_domain_results(strategy_id, domain_id, protocol, source_mode)
+        SELECT strategy_id, domain_id, {protocol_expr}, {source_mode_expr}
+        FROM strategy_domain_results_old
+        WHERE COALESCE(strategy_id, '') != '' AND domain_id IS NOT NULL
+        """
+    )
+    conn.executescript(
+        """
         DROP TABLE strategy_domain_results_old;
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_domain_protocol ON strategy_domain_results(domain_id, protocol);
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_domain_strategy ON strategy_domain_results(domain_id, strategy_id);
@@ -355,7 +415,41 @@ def _migrate_strategy_domain_results_schema(conn: sqlite3.Connection) -> bool:
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_source ON strategy_domain_results(source_mode);
         """
     )
+    set_meta(conn, "minimal_strategy_domain_results_schema_v9", "1")
     return True
+
+
+def _migrate_domain_presets_schema(conn: sqlite3.Connection) -> bool:
+    columns = _table_columns(conn, "domain_presets")
+    if {"created_at", "updated_at"}.isdisjoint(columns):
+        return False
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_domain_presets_scope_name;
+        ALTER TABLE domain_presets RENAME TO domain_presets_old;
+        CREATE TABLE domain_presets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'user',
+            label TEXT NOT NULL DEFAULT '',
+            source_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(scope, name, kind)
+        );
+        INSERT OR IGNORE INTO domain_presets(id, scope, name, kind, label, source_json)
+        SELECT id, COALESCE(scope, ''), COALESCE(name, ''), COALESCE(kind, 'user'), COALESCE(label, ''), COALESCE(source_json, '{}')
+        FROM domain_presets_old
+        WHERE COALESCE(scope, '') != '' AND COALESCE(name, '') != '';
+        DROP TABLE domain_presets_old;
+        CREATE INDEX IF NOT EXISTS idx_domain_presets_scope_name ON domain_presets(scope, name);
+        """
+    )
+    set_meta(conn, "minimal_domain_presets_schema_v9", "1")
+    return True
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def _recreate_stats_views(conn: sqlite3.Connection) -> None:
@@ -368,10 +462,7 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
                d.name AS domain,
                COUNT(DISTINCT r.strategy_id) AS strategy_count,
                COUNT(DISTINCT CASE WHEN r.protocol = 'tls' THEN r.strategy_id END) AS tls_strategy_count,
-               COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count,
-               COUNT(r.strategy_id) AS success_count,
-               0 AS fail_count,
-               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
+               COUNT(DISTINCT CASE WHEN r.protocol = 'quic' THEN r.strategy_id END) AS quic_strategy_count
         FROM domains d
         LEFT JOIN strategy_domain_results r ON r.domain_id = d.id
         GROUP BY d.id, d.name;
@@ -381,10 +472,7 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
                s.protocol,
                COUNT(DISTINCT r.domain_id) AS domain_count,
                COUNT(DISTINCT CASE WHEN r.source_mode = 'single_domain' THEN r.domain_id END) AS single_domain_count,
-               COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count,
-               COUNT(r.domain_id) AS success_count,
-               0 AS fail_count,
-               MAX(COALESCE(r.last_seen_at, '')) AS last_success_at
+               COUNT(DISTINCT CASE WHEN r.source_mode = 'multi_domain' THEN r.domain_id END) AS multi_domain_count
         FROM strategies s
         LEFT JOIN strategy_domain_results r ON r.strategy_id = s.id
         GROUP BY s.id, s.protocol;
@@ -405,15 +493,30 @@ def _drop_legacy_storage(conn: sqlite3.Connection) -> None:
     set_meta(conn, "legacy_storage_removed", "1")
 
 
-def _trim_strategy_attempts(conn: sqlite3.Connection) -> None:
-    if get_meta(conn, "strategy_attempts_trimmed_v8") == "1":
+def _drop_strategy_attempts(conn: sqlite3.Connection) -> None:
+    if get_meta(conn, "strategy_attempts_removed_v9") == "1":
         return
-    count = _table_count(conn, "strategy_attempts")
+    count = _table_count(conn, "strategy_attempts") if _table_exists(conn, "strategy_attempts") else 0
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_strategy_attempts_strategy;
+        DROP INDEX IF EXISTS idx_strategy_attempts_domain;
+        DROP INDEX IF EXISTS idx_strategy_attempts_run;
+        DROP TABLE IF EXISTS strategy_attempts;
+        """
+    )
     if count:
-        conn.execute("DELETE FROM strategy_attempts")
         set_meta(conn, "needs_vacuum", "1")
-    set_meta(conn, "strategy_attempts_trimmed_v8", "1")
-    set_meta(conn, "strategy_attempts_trimmed_count", str(count))
+    set_meta(conn, "strategy_attempts_removed_v9", "1")
+    set_meta(conn, "strategy_attempts_removed_count", str(count))
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def compact_run_payload(run: dict[str, Any]) -> dict[str, Any]:
@@ -557,8 +660,10 @@ def _compact_job_record(payload: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _run_deferred_vacuum(conn: sqlite3.Connection) -> None:
+def _run_deferred_vacuum(conn: sqlite3.Connection, state_dir: Path) -> None:
     if get_meta(conn, "needs_vacuum") != "1":
+        return
+    if _state_has_active_job(state_dir):
         return
     conn.commit()
     try:
@@ -568,6 +673,17 @@ def _run_deferred_vacuum(conn: sqlite3.Connection) -> None:
         return
     set_meta(conn, "needs_vacuum", "0")
     conn.commit()
+
+
+def _state_has_active_job(state_dir: Path) -> bool:
+    path = state_dir / "state.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return isinstance(payload, dict) and bool(payload.get("current_job"))
 
 
 def _args_hash(args: str) -> str:
@@ -588,16 +704,19 @@ def _upsert_strategy_conn(
         return
     conn.execute(
         """
-        INSERT INTO strategies(id, protocol, args, args_hash, status, first_seen_at, last_seen_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO strategies(id, protocol, args, args_hash, status)
+        VALUES(?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             protocol = excluded.protocol,
             args = excluded.args,
             args_hash = excluded.args_hash,
-            status = excluded.status,
-            last_seen_at = excluded.last_seen_at
+            status = excluded.status
+        WHERE strategies.protocol != excluded.protocol
+           OR strategies.args != excluded.args
+           OR strategies.args_hash != excluded.args_hash
+           OR strategies.status != excluded.status
         """,
-        (strategy_id, protocol, args, _args_hash(args), status or "candidate", seen_at, seen_at),
+        (strategy_id, protocol, args, _args_hash(args), status or "candidate"),
     )
 
 
@@ -614,19 +733,13 @@ def _upsert_domain_conn(
         return None
     conn.execute(
         """
-        INSERT INTO domains(name, service_group, created_at, updated_at)
-        VALUES(?, ?, ?, ?)
+        INSERT INTO domains(name, service_group)
+        VALUES(?, ?)
         ON CONFLICT(name) DO UPDATE SET
-            service_group = CASE
-                WHEN domains.service_group = '' THEN excluded.service_group
-                ELSE domains.service_group
-            END,
-            updated_at = CASE
-                WHEN excluded.updated_at != '' THEN excluded.updated_at
-                ELSE domains.updated_at
-            END
+            service_group = excluded.service_group
+        WHERE domains.service_group = '' AND excluded.service_group != ''
         """,
-        (domain, service_group, created_at, updated_at or created_at),
+        (domain, service_group),
     )
     row = conn.execute("SELECT id FROM domains WHERE name = ?", (domain,)).fetchone()
     return int(row["id"]) if row else None
@@ -649,14 +762,15 @@ def _save_domain_preset_conn(
         return
     conn.execute(
         """
-        INSERT INTO domain_presets(scope, name, kind, label, source_json, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO domain_presets(scope, name, kind, label, source_json)
+        VALUES(?, ?, ?, ?, ?)
         ON CONFLICT(scope, name, kind) DO UPDATE SET
             label = excluded.label,
-            source_json = excluded.source_json,
-            updated_at = excluded.updated_at
+            source_json = excluded.source_json
+        WHERE domain_presets.label != excluded.label
+           OR domain_presets.source_json != excluded.source_json
         """,
-        (clean_scope, clean_name, clean_kind, clean_name, source_json or "{}", updated_at, updated_at),
+        (clean_scope, clean_name, clean_kind, clean_name, source_json or "{}"),
     )
     preset = conn.execute(
         "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = ?",
@@ -667,7 +781,7 @@ def _save_domain_preset_conn(
     preset_id = int(preset["id"])
     conn.execute("DELETE FROM preset_domains WHERE preset_id = ?", (preset_id,))
     for position, domain in enumerate(_unique_nonempty(domains)):
-        domain_id = _upsert_domain_conn(conn, domain, updated_at=updated_at)
+        domain_id = _upsert_domain_conn(conn, domain)
         if domain_id is None:
             continue
         conn.execute(
@@ -807,13 +921,13 @@ def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, A
     with connect(state_dir) as conn:
         rows = conn.execute(
             """
-            SELECT p.scope, p.name, p.label, p.updated_at,
+            SELECT p.scope, p.name, p.label,
                    COUNT(pd.domain_id) AS total_count,
                    COUNT(CASE WHEN COALESCE(pd.enabled, 1) = 1 THEN 1 END) AS enabled_count
             FROM domain_presets p
             LEFT JOIN preset_domains pd ON pd.preset_id = p.id
             WHERE p.kind = 'user'
-            GROUP BY p.id, p.scope, p.name, p.label, p.updated_at
+            GROUP BY p.id, p.scope, p.name, p.label
             ORDER BY p.scope, p.name
             """
         ).fetchall()
@@ -828,7 +942,7 @@ def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, A
             "label": str(row["label"] or name),
             "enabled_count": int(row["enabled_count"] or 0),
             "total_count": int(row["total_count"] or 0),
-            "updated_at": str(row["updated_at"] or ""),
+            "updated_at": "",
         }
     return result
 
@@ -1020,10 +1134,6 @@ def set_preset_domain_enabled(
             "UPDATE preset_domains SET enabled = ? WHERE preset_id = ? AND domain_id = ?",
             (1 if enabled else 0, int(row["preset_id"]), int(row["domain_id"])),
         )
-        conn.execute(
-            "UPDATE domain_presets SET updated_at = ? WHERE id = ?",
-            (updated_at, int(row["preset_id"])),
-        )
     return {
         "scope": clean_scope,
         "name": clean_name,
@@ -1117,14 +1227,14 @@ def _upsert_strategy_domain_result_conn(
         conn.execute(
             """
             INSERT INTO strategy_domain_results(
-                strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at
+                strategy_id, domain_id, protocol, source_mode
             )
-            VALUES(?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?)
             ON CONFLICT(strategy_id, domain_id, source_mode) DO UPDATE SET
-                protocol = excluded.protocol,
-                last_seen_at = excluded.last_seen_at
+                protocol = excluded.protocol
+            WHERE strategy_domain_results.protocol != excluded.protocol
             """,
-            (strategy_id, domain_id, protocol, source_mode, seen_at, seen_at),
+            (strategy_id, domain_id, protocol, source_mode),
         )
 
 

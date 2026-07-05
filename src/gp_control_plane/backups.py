@@ -14,8 +14,8 @@ from .storage import connect, db_path
 
 
 SNAPSHOT_KEEP = 5
-BACKUP_SCHEMA_VERSION = "2"
-SUPPORTED_BACKUP_SCHEMA_VERSIONS = {BACKUP_SCHEMA_VERSION}
+BACKUP_SCHEMA_VERSION = "3"
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"2", BACKUP_SCHEMA_VERSION}
 
 
 def backups_dir(state_dir: Path) -> Path:
@@ -210,27 +210,21 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     links = _read_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
     restored_at = now_iso()
     with connect(state_dir) as conn:
-        conn.execute("DELETE FROM strategy_attempts")
         conn.execute("DELETE FROM strategy_domain_results")
         conn.execute("DELETE FROM strategies")
         for item in _read_ndjson(path / "domains" / "domains.ndjson"):
             domain = str(item.get("domain") or item.get("name") or "").strip()
             if not domain:
                 continue
-            _restore_domain_id(
-                conn,
-                domain,
-                str(item.get("created_at") or restored_at),
-                str(item.get("updated_at") or restored_at),
-            )
+            _restore_domain_id(conn, domain)
         for item in strategies:
             candidate_id = str(item.get("id") or "").strip()
             if not candidate_id:
                 continue
             conn.execute(
                 """
-                INSERT INTO strategies(id, protocol, args, args_hash, status, first_seen_at, last_seen_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO strategies(id, protocol, args, args_hash, status)
+                VALUES(?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
@@ -238,8 +232,6 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
                     str(item.get("args") or ""),
                     _sha256_text(str(item.get("args") or "")),
                     str(item.get("status") or "candidate"),
-                    str(item.get("first_seen_at") or ""),
-                    str(item.get("last_seen_at") or ""),
                 ),
             )
         known_ids = {
@@ -251,22 +243,20 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             domain = str(item.get("domain") or "").strip()
             if not candidate_id or not domain or candidate_id not in known_ids:
                 continue
-            domain_id = _restore_domain_id(conn, domain, str(item.get("first_seen_at") or ""), str(item.get("last_seen_at") or ""))
+            domain_id = _restore_domain_id(conn, domain)
             source_mode = "multi_domain" if str(item.get("scope") or "") == "common" else "single_domain"
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strategy_domain_results(
-                    strategy_id, domain_id, protocol, source_mode, first_seen_at, last_seen_at
+                    strategy_id, domain_id, protocol, source_mode
                 )
-                VALUES(?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
                     domain_id,
                     str(item.get("protocol") or ""),
                     source_mode,
-                    str(item.get("first_seen_at") or ""),
-                    str(item.get("last_seen_at") or ""),
                 ),
             )
         conn.execute(
@@ -423,7 +413,7 @@ def _export_domains(state_dir: Path, root: Path) -> int:
         with (root / "domains" / "domains.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT d.name AS domain, d.service_group, d.created_at, d.updated_at
+                SELECT d.name AS domain, d.service_group
                 FROM domains d
                 WHERE EXISTS (
                     SELECT 1 FROM strategy_domain_results r WHERE r.domain_id = d.id
@@ -443,9 +433,9 @@ def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
         with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT s.id, s.protocol, s.args, s.status, s.first_seen_at, s.last_seen_at
+                SELECT s.id, s.protocol, s.args, s.status
                 FROM strategies s
-                ORDER BY s.last_seen_at DESC, s.id ASC
+                ORDER BY s.id ASC
                 """
             ):
                 strategy_count += 1
@@ -453,8 +443,7 @@ def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
         with (root / "strategies" / "strategy-domain-links.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT r.strategy_id AS strategy_id, d.name AS domain, r.protocol, r.first_seen_at,
-                       r.last_seen_at, r.source_mode
+                SELECT r.strategy_id AS strategy_id, d.name AS domain, r.protocol, r.source_mode
                 FROM strategy_domain_results r
                 JOIN domains d ON d.id = r.domain_id
                 ORDER BY d.name, r.strategy_id
@@ -520,14 +509,14 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _restore_domain_id(conn: Any, domain: str, created_at: str, updated_at: str) -> int:
+def _restore_domain_id(conn: Any, domain: str) -> int:
     conn.execute(
         """
-        INSERT INTO domains(name, service_group, created_at, updated_at)
-        VALUES(?, '', ?, ?)
-        ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at
+        INSERT INTO domains(name, service_group)
+        VALUES(?, '')
+        ON CONFLICT(name) DO NOTHING
         """,
-        (domain, created_at, updated_at or created_at),
+        (domain,),
     )
     row = conn.execute("SELECT id FROM domains WHERE name = ?", (domain,)).fetchone()
     return int(row["id"])
@@ -536,11 +525,11 @@ def _restore_domain_id(conn: Any, domain: str, created_at: str, updated_at: str)
 def _restore_domain_preset(conn: Any, scope: str, name: str, domains: list[str], updated_at: str) -> None:
     conn.execute(
         """
-        INSERT INTO domain_presets(scope, name, kind, label, created_at, updated_at)
-        VALUES(?, ?, 'user', ?, ?, ?)
-        ON CONFLICT(scope, name, kind) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
+        INSERT INTO domain_presets(scope, name, kind, label)
+        VALUES(?, ?, 'user', ?)
+        ON CONFLICT(scope, name, kind) DO UPDATE SET label = excluded.label
         """,
-        (scope, name, name, updated_at, updated_at),
+        (scope, name, name),
     )
     row = conn.execute(
         "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'user'",
@@ -551,7 +540,7 @@ def _restore_domain_preset(conn: Any, scope: str, name: str, domains: list[str],
     preset_id = int(row["id"])
     conn.execute("DELETE FROM preset_domains WHERE preset_id = ?", (preset_id,))
     for position, domain in enumerate(_unique_nonempty([str(item or "") for item in domains])):
-        domain_id = _restore_domain_id(conn, domain, updated_at, updated_at)
+        domain_id = _restore_domain_id(conn, domain)
         conn.execute(
             "INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position) VALUES(?, ?, ?)",
             (preset_id, domain_id, position),

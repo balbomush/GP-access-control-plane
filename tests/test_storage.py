@@ -47,7 +47,6 @@ class StorageTests(unittest.TestCase):
                     "idx_runs_seq",
                     "idx_runs_id_seq",
                     "idx_domains_name",
-                    "idx_strategies_last_seen",
                     "idx_strategy_domain_results_domain_protocol",
                     "idx_strategy_domain_results_domain_strategy",
                     "idx_strategy_domain_results_strategy_domain",
@@ -194,7 +193,7 @@ class StorageTests(unittest.TestCase):
 
             with connect(state_dir) as conn:
                 raw = str(conn.execute("SELECT payload_json FROM runs WHERE id = 'old-run'").fetchone()["payload_json"])
-                self.assertEqual(get_meta(conn, "schema_version"), "8")
+                self.assertEqual(get_meta(conn, "schema_version"), "9")
                 self.assertEqual(get_meta(conn, "run_payloads_compacted_v7"), "1")
 
             stored = json.loads(raw)
@@ -211,7 +210,7 @@ class StorageTests(unittest.TestCase):
             self.assertFalse((state_dir / "strategy-finder" / "runs.jsonl").exists())
             self.assertFalse((state_dir / "strategy-finder" / "candidates.json").exists())
 
-    def test_migration_trims_strategy_attempts(self) -> None:
+    def test_migration_removes_strategy_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
             path = db_path(state_dir)
@@ -247,13 +246,19 @@ class StorageTests(unittest.TestCase):
                 conn.close()
 
             with connect(state_dir) as conn:
-                attempts = conn.execute("SELECT COUNT(*) FROM strategy_attempts").fetchone()[0]
                 schema = get_meta(conn, "schema_version")
-                trimmed = get_meta(conn, "strategy_attempts_trimmed_count")
+                removed_count = get_meta(conn, "strategy_attempts_removed_count")
+                has_attempts_table = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'strategy_attempts'
+                    """
+                ).fetchone()[0]
 
-            self.assertEqual(schema, "8")
-            self.assertEqual(int(attempts), 0)
-            self.assertEqual(trimmed, "1")
+            self.assertEqual(schema, "9")
+            self.assertEqual(int(has_attempts_table), 0)
+            self.assertEqual(removed_count, "1")
 
     def test_new_schema_does_not_create_legacy_candidate_tables(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -279,6 +284,35 @@ class StorageTests(unittest.TestCase):
                 }
                 & table_names
             )
+
+    def test_new_schema_uses_minimal_strategy_model(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            with connect(state_dir) as conn:
+                strategy_columns = {
+                    str(row["name"]) for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+                }
+                domain_columns = {
+                    str(row["name"]) for row in conn.execute("PRAGMA table_info(domains)").fetchall()
+                }
+                link_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(strategy_domain_results)").fetchall()
+                }
+                preset_columns = {
+                    str(row["name"]) for row in conn.execute("PRAGMA table_info(domain_presets)").fetchall()
+                }
+                table_names = {
+                    str(row["name"])
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                }
+
+            self.assertEqual(strategy_columns, {"id", "protocol", "args", "args_hash", "status"})
+            self.assertEqual(domain_columns, {"id", "name", "service_group"})
+            self.assertEqual(link_columns, {"strategy_id", "domain_id", "protocol", "source_mode"})
+            self.assertEqual(preset_columns, {"id", "scope", "name", "kind", "label", "source_json"})
+            self.assertNotIn("strategy_attempts", table_names)
 
     def test_concurrent_connects_do_not_race_stats_views(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

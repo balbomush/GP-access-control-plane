@@ -272,9 +272,14 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
                     conn.execute("SELECT COUNT(*) AS count FROM strategy_domain_results").fetchone()["count"],
                     3,
                 )
-                self.assertEqual(
-                    conn.execute("SELECT COUNT(*) AS count FROM strategy_attempts").fetchone()["count"],
-                    0,
+                self.assertFalse(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM sqlite_master
+                        WHERE type = 'table' AND name = 'strategy_attempts'
+                        """
+                    ).fetchone()["count"],
                 )
                 self.assertEqual(
                     conn.execute("SELECT strategy_count FROM domain_stats WHERE domain = 'youtube.com'").fetchone()[0],
@@ -309,8 +314,8 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             upsert_candidates(state_dir, parsed, {"id": "run1"})
             status = storage_status(state_dir)
 
-            self.assertEqual(status["schema_version"], "8")
-            self.assertEqual(status["expected_schema_version"], "8")
+            self.assertEqual(status["schema_version"], "9")
+            self.assertEqual(status["expected_schema_version"], "9")
             self.assertEqual(status["integrity_check"], "ok")
             self.assertGreater(status["db_size_bytes"], 0)
             self.assertEqual(status["tables"]["domains"], 1)
@@ -341,7 +346,7 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
                 self.assertNotIn("success_count", columns)
                 self.assertNotIn("fail_count", columns)
                 self.assertEqual(
-                    conn.execute("SELECT success_count FROM domain_stats WHERE domain = 'youtube.com'").fetchone()[0],
+                    conn.execute("SELECT strategy_count FROM domain_stats WHERE domain = 'youtube.com'").fetchone()[0],
                     1,
                 )
 

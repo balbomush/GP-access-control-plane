@@ -581,9 +581,9 @@ def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
     with connect(state_dir) as conn:
         rows = conn.execute(
             """
-            SELECT id, protocol, args, status, first_seen_at, last_seen_at
+            SELECT id, protocol, args, status
             FROM strategies
-            ORDER BY last_seen_at DESC, id ASC
+            ORDER BY id ASC
             """
         ).fetchall()
         return [_candidate_from_db(conn, row, include_events=True) for row in rows]
@@ -697,9 +697,9 @@ def _read_candidate_page_sql(
     )
     rows = conn.execute(
         f"""
-        SELECT s.id, s.protocol, s.args, s.status, s.first_seen_at, s.last_seen_at
+        SELECT s.id, s.protocol, s.args, s.status
         {base}
-        ORDER BY s.last_seen_at DESC, s.id ASC
+        ORDER BY s.id ASC
         LIMIT ? OFFSET ?
         """,
         [*params, limit, offset],
@@ -3225,9 +3225,9 @@ def _cleanup_old_strategy_logs(logs: Path) -> dict[str, int]:
 def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT id, protocol, args, status, first_seen_at, last_seen_at
+        SELECT id, protocol, args, status
         FROM strategies
-        ORDER BY last_seen_at DESC, id ASC
+        ORDER BY id ASC
         """
     ).fetchall()
     for row in rows:
@@ -3235,22 +3235,23 @@ def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
 
 
 def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str, Any]:
+    row_keys = set(row.keys()) if hasattr(row, "keys") else set()
     candidate = {
         "id": row["id"],
         "protocol": row["protocol"],
         "args": row["args"],
         "status": row["status"],
-        "first_seen_at": row["first_seen_at"],
-        "last_seen_at": row["last_seen_at"],
+        "first_seen_at": row["first_seen_at"] if "first_seen_at" in row_keys else "",
+        "last_seen_at": row["last_seen_at"] if "last_seen_at" in row_keys else "",
     }
     if include_events:
         seen_rows = conn.execute(
             """
-            SELECT d.name AS domain, r.first_seen_at AS seen_at
+            SELECT d.name AS domain
             FROM strategy_domain_results r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.strategy_id = ? AND r.source_mode = 'single_domain'
-            ORDER BY r.first_seen_at ASC, d.name ASC
+            ORDER BY d.name ASC
             """,
             (row["id"],),
         ).fetchall()
@@ -3260,7 +3261,7 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
             FROM strategy_domain_results r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.strategy_id = ? AND r.source_mode = 'multi_domain'
-            ORDER BY r.first_seen_at ASC, d.name ASC
+            ORDER BY d.name ASC
             """,
             (row["id"],),
         ).fetchall()
@@ -3270,7 +3271,7 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
                 "domain": item["domain"],
                 "test": "",
                 "ip_version": "",
-                "seen_at": item["seen_at"],
+                "seen_at": "",
             }
             for item in seen_rows
         ]
