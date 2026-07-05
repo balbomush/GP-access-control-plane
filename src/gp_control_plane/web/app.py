@@ -1588,7 +1588,6 @@ pre {
       <button class="tab-button" data-tab="history" type="button">История</button>
       <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
       <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
-      <button class="tab-button" data-tab="backups" type="button">Бекапы</button>
       <button class="tab-button" data-tab="lists" type="button">Списки и профили</button>
       <button class="tab-button" data-tab="settings" type="button">Настройки</button>
     </nav>
@@ -1813,33 +1812,6 @@ pre {
           <div class="progress-note" id="progress-metrics">Метрики появятся после старта подбора.</div>
         </div>
         <pre id="finder-log">Лога пока нет</pre>
-      </section>
-    </section>
-
-    <section class="tab-page backups-page" data-tab-page="backups">
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Бекапы</h2>
-          <span class="badge" id="backups-count">0</span>
-        </div>
-        <div class="button-row">
-          <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
-          <button data-action="create-backup" type="button">Создать бекап сейчас</button>
-        </div>
-        <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
-        <div class="helper-text" id="backups-updated-at"></div>
-        <div class="preset-panel backup-upload-panel">
-          <div class="panel-header">
-            <h2>Загрузка ZIP-бекапа</h2>
-          </div>
-          <div class="button-row">
-            <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
-            <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
-            <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
-          </div>
-          <div class="helper-text">Загруженный архив появится в списке ниже. Восстановление выполняется только из карточки конкретного бекапа.</div>
-        </div>
-        <div id="backups-table" class="backup-list"></div>
       </section>
     </section>
 
@@ -2074,6 +2046,30 @@ pre {
           <div class="source-preview" id="settings-release-result" hidden></div>
           <pre class="source-preview release-log" id="settings-release-log" hidden></pre>
         </div>
+        <div class="preset-panel settings-backups-panel">
+          <div class="panel-header">
+            <h2>Бекапы</h2>
+            <span class="badge" id="backups-count">0</span>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
+            <button data-action="create-backup" type="button">Создать бекап сейчас</button>
+          </div>
+          <div class="helper-text">Бекап создается только когда подбор не запущен. Хранятся последние 5 успешных копий.</div>
+          <div class="helper-text" id="backups-updated-at"></div>
+          <div class="preset-panel backup-upload-panel">
+            <div class="panel-header">
+              <h2>Загрузка ZIP-бекапа</h2>
+            </div>
+            <div class="button-row">
+              <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
+              <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
+              <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
+            </div>
+            <div class="helper-text">Загруженный архив появится в списке ниже. Восстановление выполняется только из карточки конкретного бекапа.</div>
+          </div>
+          <div id="backups-table" class="backup-list"></div>
+        </div>
         </div>
       </section>
     </section>
@@ -2235,9 +2231,11 @@ function setActiveTab(tabName){
     scrollLogToBottom();
   }
   if (tabName === 'candidates') ensureCandidateViewLoaded();
-  if (tabName === 'backups' && !state.backupsLoaded) refreshBackups();
   if (tabName === 'lists' && !state.v2flyCategories) loadV2flyCategories();
-  if (tabName === 'settings' && !state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
+  if (tabName === 'settings') {
+    if (!state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
+    if (!state.backupsLoaded) refreshBackups();
+  }
 }
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
