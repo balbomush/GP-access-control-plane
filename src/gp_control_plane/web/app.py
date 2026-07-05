@@ -739,14 +739,6 @@ button:disabled { opacity: .55; cursor: default; }
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 8px;
 }
-.finder-control-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-.finder-control-grid .field-wide {
-  grid-column: 1 / -1;
-}
 .common-filter-panel .preset-grid {
   grid-template-columns: 1fr;
 }
@@ -1638,20 +1630,6 @@ pre {
               <div class="helper-text">Пресет применяется сразу при выборе. Если вручную изменить список доменов, выбранное значение станет `Custom` и ручной список не будет перезаписан.</div>
             </div>
             <div class="preset-panel">
-              <div class="finder-control-grid">
-                <div class="field">
-                  <label for="settings-preset-select">Пресет настроек</label>
-                  <select id="settings-preset-select">
-                    <option value="cautious">Осторожный</option>
-                    <option value="normal" selected>Обычный</option>
-                    <option value="accelerated">Ускоренный</option>
-                    <option value="custom">изменено</option>
-                  </select>
-                  <div class="helper-text" id="settings-preset-note">Задает параметры запуска: curl, повторы и DNS/IP checks.</div>
-                </div>
-              </div>
-            </div>
-            <div class="preset-panel">
               <div class="field">
                 <label>Режим поиска</label>
                 <div class="segmented-control" id="run-mode-control">
@@ -1843,7 +1821,7 @@ pre {
           <h2>Списки и профили</h2>
         </div>
         <div class="settings-stack">
-        <div class="preset-panel settings-preset-manager-panel">
+        <div class="preset-panel domain-preset-manager-panel">
           <div class="panel-header">
             <h2>Доменные пресеты</h2>
             <span class="badge" id="preset-manager-count">0</span>
@@ -1935,15 +1913,6 @@ pre {
               Подробный debug-лог stdout
             </label>
             <div class="setting-note">Включает расширенную запись stdout blockcheck2 в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
-            <div class="field">
-              <label for="settings-default-settings-preset">Пресет настроек по умолчанию</label>
-              <select id="settings-default-settings-preset">
-                <option value="cautious">Осторожный</option>
-                <option value="normal" selected>Обычный</option>
-                <option value="accelerated">Ускоренный</option>
-              </select>
-              <div class="setting-note">Выставляет стартовые параметры на вкладке `Подбор`; вручную их можно менять перед запуском.</div>
-            </div>
             <div class="field">
               <label for="settings-curl-max">Максимум параллельных curl</label>
               <input id="settings-curl-max" type="number" min="1" max="10" value="10">
@@ -2042,41 +2011,12 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, runPreferencesTimer: null, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
   'standard-discovery': 'Поиск стратегий',
   'multi-domain-discovery': 'Все домены на одной стратегии'
-};
-const SETTINGS_PRESETS = {
-  cautious: {
-    title: 'Осторожный',
-    note: 'Меньше параллельных curl, DNS/IP checks не пропускаются. Медленнее, но аккуратнее для диагностики.',
-    curl_parallelism: 2,
-    repeats: 1,
-    repeat_parallel: false,
-    skip_dnscheck: false,
-    skip_ipblock: false
-  },
-  normal: {
-    title: 'Обычный',
-    note: 'Баланс скорости и проверки: curl 4, DNS/IP checks пропускаются, как в текущем рабочем сценарии.',
-    curl_parallelism: 4,
-    repeats: 1,
-    repeat_parallel: false,
-    skip_dnscheck: true,
-    skip_ipblock: true
-  },
-  accelerated: {
-    title: 'Ускоренный',
-    note: 'Больше параллельных curl. Сильнее всего ускоряет режим “Все домены на одной стратегии”.',
-    curl_parallelism: 10,
-    repeats: 1,
-    repeat_parallel: false,
-    skip_dnscheck: true,
-    skip_ipblock: true
-  }
 };
 const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 let toastTimer = null;
@@ -2271,7 +2211,6 @@ function collectRunPreferences(){
     domains: selectedFinderDomains(),
     domain_preset: el('finder-preset-select')?.value || CUSTOM_SELECT_VALUE,
     discovery_profile: el('discovery-profile-select')?.value || CUSTOM_SELECT_VALUE,
-    settings_preset: el('settings-preset-select')?.value || CUSTOM_SELECT_VALUE,
     run_mode: selectedRunMode(),
     curl_parallelism: curlParallelism(),
     ...discoveryOptions(),
@@ -2309,11 +2248,6 @@ function useRunPreferencesOnce(){
       const value = String(prefs.discovery_profile || 'standard');
       discoverySelect.value = [...discoverySelect.options].some((option) => option.value === value) ? value : 'standard';
     }
-    const settingsSelect = el('settings-preset-select');
-    if (settingsSelect) {
-      const value = String(prefs.settings_preset || 'normal');
-      settingsSelect.value = [...settingsSelect.options].some((option) => option.value === value) ? value : CUSTOM_SELECT_VALUE;
-    }
     const runMode = String(prefs.run_mode || 'standard') === 'multi' ? 'multi' : 'standard';
     const runModeInput = document.querySelector(`input[name="run-mode"][value="${runMode}"]`);
     if (runModeInput) runModeInput.checked = true;
@@ -2332,18 +2266,11 @@ function useRunPreferencesOnce(){
     el('finder-timeout-hours').value = String(prefs.timeout_hours || 6);
     el('time-limit-field').hidden = !el('limit-time-enabled').checked;
     renderDiscoveryProfileNote();
-    renderSettingsPresetNote();
+    renderRunModeNote();
   } finally {
     state.loadingRunPreferences = false;
     state.runPreferencesApplied = true;
   }
-}
-function scheduleRunPreferencesSave(){
-  if (!state.runPreferencesApplied || state.loadingRunPreferences) return;
-  if (state.runPreferencesTimer) clearTimeout(state.runPreferencesTimer);
-  state.runPreferencesTimer = setTimeout(() => {
-    saveRunPreferencesNow();
-  }, 350);
 }
 async function saveRunPreferencesNow(){
   if (!state.runPreferencesApplied || state.loadingRunPreferences || state.savingRunPreferences) return;
@@ -2358,39 +2285,7 @@ async function saveRunPreferencesNow(){
     state.savingRunPreferences = false;
   }
 }
-function isRunPreferenceControl(target){
-  if (!target) return false;
-  if (target.name === 'run-mode') return true;
-  return [
-    'finder-domains',
-    'finder-preset-select',
-    'discovery-profile-select',
-    'settings-preset-select',
-    'curl-parallelism',
-    'enable-http',
-    'enable-tls12',
-    'enable-tls13',
-    'include-quic',
-    'enable-ipv6',
-    'scan-level',
-    'repeats',
-    'repeat-parallel',
-    'skip-dnscheck',
-    'skip-ipblock',
-    'limit-time-enabled',
-    'finder-timeout-hours'
-  ].includes(target.id);
-}
 const DISCOVERY_PROFILE_CONTROL_IDS = new Set(['scan-level']);
-const SETTINGS_PRESET_CONTROL_IDS = new Set([
-  'curl-parallelism',
-  'repeats',
-  'repeat-parallel',
-  'skip-dnscheck',
-  'skip-ipblock',
-  'limit-time-enabled',
-  'finder-timeout-hours'
-]);
 function markDiscoveryProfileCustom(){
   if (state.loadingDiscoveryProfile) return;
   renderDiscoveryProfileNote();
@@ -2419,64 +2314,20 @@ function renderDiscoveryProfileNote(){
   }[scanLevel] || 'настройки изменены вручную.';
   note.textContent = `${title}: ${details}`;
 }
-function selectedSettingsPreset(){
-  return el('settings-preset-select')?.value || 'normal';
+function selectedRunMode(){
+  return document.querySelector('input[name="run-mode"]:checked')?.value || 'standard';
 }
-function settingPresetTitle(value){
-  if (value === CUSTOM_SELECT_VALUE) return 'изменено';
-  return (SETTINGS_PRESETS[value] || SETTINGS_PRESETS.normal).title;
-}
-function markSettingsPresetCustom(){
-  if (state.loadingSettingsPreset) return;
-  const select = el('settings-preset-select');
-  if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
-  state.settingsTouched = true;
-  renderSettingsPresetNote();
-}
-function setSettingsPreset(value, options){
-  const presetKey = SETTINGS_PRESETS[value] ? value : 'normal';
-  const preset = SETTINGS_PRESETS[presetKey];
-  const opts = options || {};
-  const max = Number((state.settings || {}).curl_parallelism_max || 10);
-  state.loadingSettingsPreset = true;
-  try {
-    const select = el('settings-preset-select');
-    if (select) select.value = presetKey;
-    const curl = el('curl-parallelism');
-    if (curl) {
-      curl.max = String(max);
-      curl.value = String(Math.max(1, Math.min(max, Number(preset.curl_parallelism || 4))));
-    }
-    el('repeats').value = String(preset.repeats || 1);
-    el('repeat-parallel').checked = Boolean(preset.repeat_parallel);
-    el('skip-dnscheck').checked = Boolean(preset.skip_dnscheck);
-    el('skip-ipblock').checked = Boolean(preset.skip_ipblock);
-    renderSettingsPresetNote();
-    if (!opts.fromSettings) state.settingsTouched = true;
-  } finally {
-    state.loadingSettingsPreset = false;
-  }
-}
-function renderSettingsPresetNote(){
-  const preset = SETTINGS_PRESETS[selectedSettingsPreset()];
-  const presetNote = el('settings-preset-note');
-  if (presetNote) presetNote.textContent = preset ? preset.note : 'Настройки изменены вручную.';
+function renderRunModeNote(){
   const note = el('run-mode-note');
   if (!note) return;
   const mode = selectedRunMode();
   const curlField = el('multi-curl-field');
   if (curlField) curlField.hidden = mode !== 'multi';
-  const modeText = mode === 'multi'
-    ? 'Режим “Все домены на одной стратегии”: одна стратегия запускается один раз, затем домены проверяются параллельно.'
-    : 'Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.';
-  const presetText = preset ? ` Пресет настроек: ${preset.note}` : ' Настройки изменены вручную.';
-  note.textContent = modeText + presetText;
-}
-function selectedRunMode(){
-  return document.querySelector('input[name="run-mode"]:checked')?.value || 'standard';
-}
-function renderRunModeNote(){
-  renderSettingsPresetNote();
+  if (mode === 'multi') {
+    note.textContent = 'Режим “Все домены на одной стратегии”: одна стратегия запускается один раз, затем домены проверяются параллельно.';
+    return;
+  }
+  note.textContent = 'Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.';
 }
 function profileTitle(name, profile){
   return String((profile && profile.title) || name || '-');
@@ -2721,7 +2572,6 @@ async function usePreset(target){
       if (selectedCommonDomains().length >= 2) refreshCandidates(true);
     }
     else renderCandidates();
-    if (target === 'finder') scheduleRunPreferencesSave();
   } finally {
     state.loadingDomainPreset = false;
   }
@@ -3743,7 +3593,6 @@ function renderSettings(){
   const settings = state.settings || {};
   const ipv6 = el('settings-enable-ipv6');
   const debugStdout = el('settings-debug-stdout');
-  const defaultSettingsPreset = el('settings-default-settings-preset');
   const curlMax = el('settings-curl-max');
   const curlMaxTime = el('settings-curl-max-time');
   const curlMaxTimeQuic = el('settings-curl-max-time-quic');
@@ -3751,7 +3600,6 @@ function renderSettings(){
   const channel = el('settings-update-channel');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
-  if (defaultSettingsPreset) defaultSettingsPreset.value = SETTINGS_PRESETS[settings.settings_preset_default] ? settings.settings_preset_default : 'normal';
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
   if (curlMaxTime) curlMaxTime.value = String(settings.curl_max_time || 2);
   if (curlMaxTimeQuic) curlMaxTimeQuic.value = String(settings.curl_max_time_quic || 2);
@@ -3760,12 +3608,14 @@ function renderSettings(){
   renderReleaseInfo();
   if (!state.settingsTouched && !state.runPreferencesApplied) {
     const curlInput = el('curl-parallelism');
-    if (curlInput) curlInput.max = String(settings.curl_parallelism_max || 10);
-    setSettingsPreset(settings.settings_preset_default || 'normal', { fromSettings: true });
+    if (curlInput) {
+      curlInput.max = String(settings.curl_parallelism_max || 10);
+      curlInput.value = String(settings.curl_parallelism_default || 4);
+    }
     const finderIpv6 = el('enable-ipv6');
     if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
   } else {
-    renderSettingsPresetNote();
+    renderRunModeNote();
   }
   renderDiscoveryProfiles();
   renderV2flyCategoryCatalog();
@@ -3840,7 +3690,6 @@ function currentSettingsFromForm(){
   return {
     enable_ipv6: Boolean(el('settings-enable-ipv6')?.checked),
     debug_stdout: Boolean(el('settings-debug-stdout')?.checked),
-    settings_preset_default: el('settings-default-settings-preset')?.value || 'normal',
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
     curl_max_time: Number(el('settings-curl-max-time')?.value || 2),
     curl_max_time_quic: Number(el('settings-curl-max-time-quic')?.value || 2),
@@ -4797,9 +4646,11 @@ async function startJob(url, payload, text){
     const response = await postJson(url, payload || {});
     setMessage(`Задание ${response.job.id} добавлено`, 'good');
     await refresh();
+    return response;
   } catch (error) {
     setMessage(error.message, 'bad');
     await refresh();
+    return null;
   }
 }
 async function startSelectedDiscovery(){
@@ -4815,13 +4666,14 @@ async function startSelectedDiscovery(){
   };
   const timeout = timeoutSecondsOrNull();
   if (timeout !== null) payload.timeout_seconds = timeout;
-  await saveRunPreferencesNow();
+  let response = null;
   if (mode === 'multi') {
     payload.curl_parallelism = curlParallelism();
-    await startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Все домены на одной стратегии');
-    return;
+    response = await startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Все домены на одной стратегии');
+  } else {
+    response = await startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
   }
-  await startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
+  if (response) await saveRunPreferencesNow();
 }
 async function stopCurrentJob(){
   try {
@@ -4989,9 +4841,6 @@ document.addEventListener('input', (event) => {
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
     state.settingsTouched = true;
   }
-  if (event.target && SETTINGS_PRESET_CONTROL_IDS.has(event.target.id)) {
-    markSettingsPresetCustom();
-  }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
   }
@@ -5035,9 +4884,6 @@ document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'common-domain-add') {
     renderCommonDomainSuggestions();
   }
-  if (isRunPreferenceControl(event.target)) {
-    scheduleRunPreferencesSave();
-  }
 });
 document.addEventListener('scroll', (event) => {
   if (event.target && event.target.matches && event.target.matches('.strategy-code, .line-numbered-textarea')) {
@@ -5052,9 +4898,6 @@ document.addEventListener('scroll', (event) => {
 document.addEventListener('change', (event) => {
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
     state.settingsTouched = true;
-  }
-  if (event.target && SETTINGS_PRESET_CONTROL_IDS.has(event.target.id)) {
-    markSettingsPresetCustom();
   }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
@@ -5094,21 +4937,11 @@ document.addEventListener('change', (event) => {
     const profile = (state.discoveryProfiles || {})[event.target.value];
     useDiscoveryProfile(profile);
   }
-  if (event.target && event.target.id === 'settings-preset-select') {
-    if (event.target.value === CUSTOM_SELECT_VALUE) {
-      markSettingsPresetCustom();
-    } else {
-      setSettingsPreset(event.target.value);
-    }
-  }
   if (event.target && event.target.name === 'run-mode') {
     renderRunModeNote();
   }
   if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
     markDiscoveryProfileCustom();
-  }
-  if (isRunPreferenceControl(event.target)) {
-    scheduleRunPreferencesSave();
   }
 });
 document.addEventListener('keydown', (event) => {
@@ -5253,7 +5086,6 @@ DEFAULT_SETTINGS = {
     "curl_max_time_doh": 2,
     "enable_ipv6": False,
     "debug_stdout": False,
-    "settings_preset_default": "normal",
     "update_channel": "stable",
 }
 
@@ -5262,7 +5094,6 @@ DEFAULT_RUN_PREFERENCES = {
     "domains": [],
     "domain_preset": "builtin:critical",
     "discovery_profile": "standard",
-    "settings_preset": "normal",
     "run_mode": "standard",
     "curl_parallelism": 4,
     "enable_http": False,
@@ -5375,9 +5206,6 @@ def _normalize_run_preferences(raw: dict[str, Any]) -> dict[str, Any]:
     discovery_profile = str(raw.get("discovery_profile") or scan_level)
     if discovery_profile not in {"quick", "standard", "force", "custom"}:
         discovery_profile = scan_level if scan_level in {"quick", "standard", "force"} else "custom"
-    settings_preset = str(raw.get("settings_preset") or "normal")
-    if settings_preset not in {"cautious", "normal", "accelerated", "custom"}:
-        settings_preset = "normal"
     timeout_hours_raw = raw.get("timeout_hours")
     try:
         timeout_hours = float(timeout_hours_raw)
@@ -5388,7 +5216,6 @@ def _normalize_run_preferences(raw: dict[str, Any]) -> dict[str, Any]:
         "domains": _clean_domain_list(raw.get("domains") or []),
         "domain_preset": str(raw.get("domain_preset") or "builtin:critical")[:160],
         "discovery_profile": discovery_profile,
-        "settings_preset": settings_preset,
         "run_mode": run_mode,
         "curl_parallelism": _bounded_int(raw.get("curl_parallelism"), default=4, minimum=1, maximum=10),
         "enable_http": bool(raw.get("enable_http")),
@@ -5423,16 +5250,7 @@ def _clean_domain_list(value: Any) -> list[str]:
 
 def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
     max_parallelism = _bounded_int(raw.get("curl_parallelism_max"), default=10, minimum=1, maximum=10)
-    settings_preset_default = str(raw.get("settings_preset_default") or "normal")
-    if settings_preset_default not in {"cautious", "normal", "accelerated"}:
-        settings_preset_default = "normal"
-    preset_defaults = {"cautious": 2, "normal": 4, "accelerated": 10}
-    default_source = (
-        raw.get("curl_parallelism_default")
-        if "settings_preset_default" not in raw and raw.get("curl_parallelism_default") is not None
-        else preset_defaults[settings_preset_default]
-    )
-    default_parallelism = _bounded_int(default_source, default=preset_defaults[settings_preset_default], minimum=1, maximum=max_parallelism)
+    default_parallelism = _bounded_int(raw.get("curl_parallelism_default"), default=4, minimum=1, maximum=max_parallelism)
     channel = str(raw.get("update_channel") or "stable")
     if channel not in {"stable", "prerelease"}:
         channel = "stable"
@@ -5444,7 +5262,6 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "curl_max_time_doh": _minimum_int(raw.get("curl_max_time_doh"), default=2, minimum=1),
         "enable_ipv6": bool(raw.get("enable_ipv6")),
         "debug_stdout": bool(raw.get("debug_stdout")),
-        "settings_preset_default": settings_preset_default,
         "update_channel": channel,
         "stable_release_url": "https://github.com/balbomush/GP-access-control-plane/releases/latest",
         "prerelease_url": "https://github.com/balbomush/GP-access-control-plane/releases",

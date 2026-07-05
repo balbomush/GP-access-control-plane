@@ -77,16 +77,16 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/settings", html)
         self.assertIn("/api/discovery-profiles", html)
         self.assertIn("discovery-profile-select", html)
-        self.assertIn("settings-preset-select", html)
-        self.assertIn("settings-preset-note", html)
+        self.assertNotIn("settings-preset-select", html)
+        self.assertNotIn("settings-preset-note", html)
         self.assertIn("/api/run-preferences", html)
         self.assertIn("runPreferences", html)
         self.assertIn("useRunPreferencesOnce", html)
         self.assertIn("saveRunPreferencesNow", html)
-        self.assertIn("scheduleRunPreferencesSave", html)
-        self.assertIn("settings-default-settings-preset", html)
-        self.assertIn("SETTINGS_PRESETS", html)
-        self.assertIn("setSettingsPreset", html)
+        self.assertNotIn("scheduleRunPreferencesSave", html)
+        self.assertNotIn("settings-default-settings-preset", html)
+        self.assertNotIn("SETTINGS_PRESETS", html)
+        self.assertNotIn("setSettingsPreset", html)
         self.assertIn("run-selected-discovery", html)
         self.assertIn("Все домены на одной стратегии", html)
         self.assertIn("useDiscoveryProfile", html)
@@ -132,7 +132,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/presets/delete", html)
         self.assertIn("/api/presets/domains", html)
         self.assertIn("/api/presets/domain-enabled", html)
-        self.assertIn("settings-preset-manager-panel", html)
+        self.assertIn("domain-preset-manager-panel", html)
         self.assertNotIn("profiles-manager-panel", html)
         self.assertNotIn("settings-presets-manager-panel", html)
         self.assertNotIn("preset-manager-scope", html)
@@ -268,7 +268,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("repeat_parallel", html)
         self.assertIn("skip_dnscheck", html)
         self.assertIn("skip_ipblock", html)
-        self.assertIn("Пресет настроек", html)
+        self.assertNotIn("Пресет настроек", html)
         self.assertIn("limit-time-enabled", html)
         self.assertIn("time-limit-field", html)
         self.assertIn("timeoutSecondsOrNull", html)
@@ -434,7 +434,7 @@ class WebUiTests(unittest.TestCase):
         render_end = html.index("function hasEnabledProtocol", render_start)
         render_html = html[render_start:render_end]
         self.assertNotIn('<option value="${CUSTOM_SELECT_VALUE}">Custom</option>', render_html)
-        self.assertNotIn("event.target.value === CUSTOM_SELECT_VALUE", html[html.index("if (event.target && event.target.id === 'discovery-profile-select')"):html.index("if (event.target && event.target.id === 'settings-preset-select')")])
+        self.assertNotIn("event.target.value === CUSTOM_SELECT_VALUE", html[html.index("if (event.target && event.target.id === 'discovery-profile-select')"):html.index("if (event.target && event.target.name === 'run-mode')")])
 
     def test_index_script_has_no_raw_newlines_inside_quoted_strings(self) -> None:
         html = index_html()
@@ -678,7 +678,6 @@ class WebUiTests(unittest.TestCase):
                     "settings": {
                         "enable_ipv6": True,
                         "debug_stdout": True,
-                        "settings_preset_default": "accelerated",
                         "curl_parallelism_max": 8,
                         "curl_max_time": 1,
                         "curl_max_time_quic": 3,
@@ -694,7 +693,7 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('"enable_ipv6":true', saved)
             self.assertIn('"debug_stdout":true', saved)
-            self.assertIn('"settings_preset_default":"accelerated"', saved)
+            self.assertNotIn('"settings_preset_default"', saved)
             self.assertIn('"curl_parallelism_max":8', saved)
             self.assertIn('"curl_max_time":1', saved)
             self.assertIn('"curl_max_time_quic":3', saved)
@@ -748,6 +747,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"curl_parallelism":9', saved)
             self.assertIn('"scan_level":"force"', saved)
             self.assertIn('"timeout_hours":3.5', saved)
+            self.assertNotIn('"settings_preset"', saved)
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             connection.request("GET", "/api/status")
