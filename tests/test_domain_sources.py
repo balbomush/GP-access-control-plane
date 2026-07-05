@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import io
+import tarfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.domain_sources import (
     builtin_preset_sources,
     import_v2fly_preset,
+    fetch_v2fly_category_index_from_archive,
     list_v2fly_categories,
     list_v2fly_categories_cached,
     parse_v2fly_category_index,
@@ -87,6 +91,33 @@ domain:youtube.com
 """
 
         self.assertEqual(parse_v2fly_category_index(text), ["google", "youtube"])
+
+    def test_fetch_v2fly_category_index_from_archive_lists_data_files(self) -> None:
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            for name in ("domain-list-community-master/data/google", "domain-list-community-master/data/youtube"):
+                payload = b"domain:example.com\n"
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+            info = tarfile.TarInfo("domain-list-community-master/docs/readme.md")
+            info.size = 0
+            tar.addfile(info, io.BytesIO())
+
+        class Response:
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return archive.getvalue()
+
+        with patch("gp_control_plane.domain_sources.urlopen", return_value=Response()):
+            result = fetch_v2fly_category_index_from_archive()
+
+        self.assertEqual(parse_v2fly_category_index(result), ["google", "youtube"])
 
     def test_list_v2fly_categories_filters_index(self) -> None:
         text = """

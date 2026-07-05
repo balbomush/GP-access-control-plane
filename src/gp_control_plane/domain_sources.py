@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import re
 import json
+import io
+import subprocess
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +16,8 @@ from .storage import read_custom_presets, save_custom_preset
 V2FLY_BASE_URL = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data"
 V2FLY_CONTENTS_URL = "https://api.github.com/repos/v2fly/domain-list-community/contents/data?ref=master"
 V2FLY_REVISION_URL = "https://api.github.com/repos/v2fly/domain-list-community/commits/master"
+V2FLY_GIT_URL = "https://github.com/v2fly/domain-list-community.git"
+V2FLY_ARCHIVE_URL = "https://codeload.github.com/v2fly/domain-list-community/tar.gz/refs/heads/master"
 _COVERAGE_NOTE = "publicly known verifiable domain set; not a guarantee of full service coverage"
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 _DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
@@ -182,6 +187,19 @@ def v2fly_catalog_cache_path(state_dir: Path) -> Path:
 
 
 def fetch_v2fly_revision() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "ls-remote", V2FLY_GIT_URL, "refs/heads/master"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        revision = completed.stdout.strip().split()[0]
+        if revision:
+            return revision
+    except Exception:  # noqa: BLE001
+        pass
     with urlopen(V2FLY_REVISION_URL, timeout=15) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
 
@@ -207,8 +225,31 @@ def parse_v2fly_revision(text: str) -> str:
 
 
 def fetch_v2fly_category_index() -> str:
+    try:
+        return fetch_v2fly_category_index_from_archive()
+    except Exception:  # noqa: BLE001
+        pass
     with urlopen(V2FLY_CONTENTS_URL, timeout=30) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
+
+
+def fetch_v2fly_category_index_from_archive() -> str:
+    with urlopen(V2FLY_ARCHIVE_URL, timeout=60) as response:  # noqa: S310
+        archive = response.read()
+    items: list[dict[str, str]] = []
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            parts = member.name.split("/")
+            if len(parts) != 3 or parts[1] != "data":
+                continue
+            try:
+                name = _clean_category(parts[2])
+            except ValueError:
+                continue
+            items.append({"name": name, "type": "file"})
+    return json.dumps(items)
 
 
 def parse_v2fly_category_index(text: str) -> list[str]:
