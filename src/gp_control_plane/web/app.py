@@ -888,6 +888,12 @@ button:disabled { opacity: .55; cursor: default; }
   gap: 6px;
 }
 .release-card strong { font-size: 16px; }
+.release-version-link {
+  color: var(--text);
+  text-decoration: none;
+  width: fit-content;
+}
+.release-version-link:hover strong { color: var(--accent); }
 .release-log {
   white-space: pre-wrap;
   max-height: 220px;
@@ -2029,13 +2035,15 @@ pre {
             </div>
             <div class="release-card">
               <span class="helper-text">Стабильный релиз</span>
-              <strong id="settings-release-stable">Не проверялось</strong>
-              <a id="settings-release-stable-link" href="https://github.com/balbomush/GP-access-control-plane/releases/latest" target="_blank" rel="noreferrer">Открыть</a>
+              <a id="settings-release-stable-link" class="release-version-link" href="https://github.com/balbomush/GP-access-control-plane/releases/latest" target="_blank" rel="noreferrer">
+                <strong id="settings-release-stable">Не проверялось</strong>
+              </a>
             </div>
             <div class="release-card">
               <span class="helper-text">Alpha / prerelease</span>
-              <strong id="settings-release-prerelease">Не проверялось</strong>
-              <a id="settings-release-prerelease-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">Открыть</a>
+              <a id="settings-release-prerelease-link" class="release-version-link" href="https://github.com/balbomush/GP-access-control-plane/releases" target="_blank" rel="noreferrer">
+                <strong id="settings-release-prerelease">Не проверялось</strong>
+              </a>
             </div>
           </div>
           <div class="release-card">
@@ -2051,7 +2059,7 @@ pre {
             <button class="secondary tooltip-button" data-action="update-from-release" data-tooltip="Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап." type="button">Установить выбранное обновление</button>
             <button class="secondary" data-action="toggle-update-log" type="button">Показать лог обновления</button>
           </div>
-          <div class="source-preview" id="settings-release-result">Релизы еще не проверялись. Обновление из UI работает только без активного подбора, с бекапом и проверкой версии.</div>
+          <div class="source-preview" id="settings-release-result" hidden></div>
           <pre class="source-preview release-log" id="settings-release-log" hidden></pre>
         </div>
         </div>
@@ -2065,7 +2073,7 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingSettingsPreset: false, loadingDomainPreset: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2217,6 +2225,7 @@ function setActiveTab(tabName){
   if (tabName === 'candidates') ensureCandidateViewLoaded();
   if (tabName === 'backups' && !state.backupsLoaded) refreshBackups();
   if (tabName === 'lists' && !state.v2flyCategories) loadV2flyCategories();
+  if (tabName === 'settings' && !state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
 }
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
@@ -3610,10 +3619,14 @@ function renderReleaseInfo(){
     log.textContent = tail || 'Лог обновления пока пуст. Он появится после постановки обновления в очередь и работы helper-скрипта.';
   }
   if (!selectedRelease) {
-    if (result) result.textContent = 'Релизы еще не проверялись. Обновление из UI работает только без активного подбора, с бекапом и проверкой версии.';
+    if (result) {
+      result.hidden = true;
+      result.textContent = '';
+    }
     return;
   }
   if (result) {
+    result.hidden = false;
     if (state.releaseUpdate) {
       const queued = state.releaseUpdate;
       const snapshot = queued.snapshot && queued.snapshot.id ? queued.snapshot.id : (queued.snapshot || {});
@@ -3643,6 +3656,7 @@ function renderReleaseInfo(){
   }
 }
 function releaseVersionLabel(release){
+  if (state.releaseChecking && !release) return 'Проверяется...';
   if (!release) return 'Не проверялось';
   if (!release.checked) return 'Ошибка проверки';
   const suffix = release.update_available ? ' доступно' : ' актуально';
@@ -3671,15 +3685,22 @@ async function saveSettings(){
     setMessage(`Ошибка сохранения настроек: ${error.message}`, 'bad');
   }
 }
-async function checkReleases(){
+async function checkReleases(options = {}){
+  const silent = Boolean(options.silent);
   const channel = el('settings-update-channel')?.value || 'stable';
+  state.releaseChecking = true;
+  renderReleaseInfo();
   try {
     const data = await getJson(`/api/releases?channel=${encodeURIComponent(channel)}`);
     rememberReleasePayload(data || {});
+    state.releaseChecked = true;
     renderReleaseInfo();
-    setMessage('Обновления проверены', 'good');
+    if (!silent) setMessage('Обновления проверены', 'good');
   } catch (error) {
-    setMessage(`Ошибка проверки релизов: ${error.message}`, 'bad');
+    if (!silent) setMessage(`Ошибка проверки релизов: ${error.message}`, 'bad');
+  } finally {
+    state.releaseChecking = false;
+    renderReleaseInfo();
   }
 }
 function rememberReleasePayload(data){
