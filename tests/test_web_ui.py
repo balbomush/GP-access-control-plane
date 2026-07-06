@@ -113,6 +113,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("previewV2flyPreset", html)
         self.assertIn("importV2flyPreset", html)
         self.assertIn("setV2flyLocalError", html)
+        self.assertIn("function clearV2flyDomains", html)
+        self.assertIn("clearV2flyDomains();", html)
         self.assertIn("Локальный каталог v2fly", html)
         self.assertNotIn("params.set('check'", html)
         self.assertNotIn("params.set('refresh'", html)

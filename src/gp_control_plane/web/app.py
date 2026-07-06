@@ -3916,6 +3916,12 @@ function v2flyCategories(){
   const category = v2flyExactCategory();
   return category ? [category] : [];
 }
+function clearV2flyDomains(){
+  const domains = el('v2fly-domains');
+  if (!domains) return;
+  domains.value = '';
+  updateEditorLineNumbers('v2fly-domains');
+}
 function suggestV2flyPresetName(){
   const nameInput = el('v2fly-preset-name');
   if (!nameInput) return;
@@ -4881,6 +4887,7 @@ document.addEventListener('click', (event) => {
     const input = el('v2fly-category-search');
     if (input) input.value = category;
     state.v2flyPreview = null;
+    clearV2flyDomains();
     suggestV2flyPresetName();
     renderV2flyCategoryCatalog();
     renderV2flyPreview();
@@ -4966,6 +4973,7 @@ document.addEventListener('input', (event) => {
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-category-search') {
+      clearV2flyDomains();
       suggestV2flyPresetName();
       renderV2flyCategoryCatalog();
     }
@@ -5019,6 +5027,7 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-category-search') {
+      clearV2flyDomains();
       suggestV2flyPresetName();
       renderV2flyCategoryCatalog();
     }
