@@ -1037,6 +1037,7 @@ pktws_check_https_tls12()
 
             self.assertEqual(result["status"], "stopped")
             self.assertTrue(result["stopped"])
+            self.assertIsNotNone(result["returncode"])
 
     def test_live_recorder_can_close_connection_from_controller_thread(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

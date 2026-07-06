@@ -1777,7 +1777,7 @@ def _run_process_with_live_stdout(
                     _cleanup_blockcheck_processes()
                     _cleanup_nft_blockcheck_tables()
                     recorder.mark_phase(PHASE_SAVING)
-                    returncode = process.returncode
+                    returncode = _wait_process_after_stop(process)
                     break
                 wait_timeout = 1.0
                 if deadline is not None:
@@ -1789,7 +1789,7 @@ def _run_process_with_live_stdout(
                         _cleanup_blockcheck_processes()
                         _cleanup_nft_blockcheck_tables()
                         recorder.mark_phase(PHASE_SAVING)
-                        returncode = process.returncode
+                        returncode = _wait_process_after_stop(process)
                         break
                     wait_timeout = min(1.0, remaining)
                 try:
@@ -1819,6 +1819,19 @@ def _run_process_with_live_stdout(
         "timed_out": timed_out,
         "stopped": stopped,
     }
+
+
+def _wait_process_after_stop(process: subprocess.Popen[str], timeout_seconds: float = 5.0) -> int | None:
+    if process.returncode is not None:
+        return process.returncode
+    try:
+        return process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _stop_process_group(process)
+        try:
+            return process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            return process.returncode
 
 
 def _run_blockcheck_live(

@@ -131,12 +131,18 @@ domain:youtube.com
         result = list_v2fly_categories("goo", fetcher=lambda: text)
 
         self.assertEqual(result["source"], "github")
+        self.assertEqual(result["data_status"], "remote")
+        self.assertEqual(result["problem_status"], "")
+        self.assertEqual(result["status"], "remote")
         self.assertEqual(result["categories"], ["google"])
 
     def test_list_v2fly_categories_reports_format_fallback(self) -> None:
         result = list_v2fly_categories(fetcher=lambda: "{not-json")
 
         self.assertEqual(result["source"], "fallback")
+        self.assertEqual(result["data_status"], "cache")
+        self.assertEqual(result["problem_status"], "config")
+        self.assertEqual(result["status"], "config")
         self.assertEqual(result["error_kind"], "format")
         self.assertIn("catalog", result["error_message"])
         self.assertIn("google", result["categories"])
@@ -170,6 +176,9 @@ domain:youtube.com
             )
 
             self.assertTrue(first["cached"])
+            self.assertEqual(first["data_status"], "remote")
+            self.assertEqual(first["problem_status"], "")
+            self.assertEqual(first["status"], "remote")
             self.assertEqual(first["revision"], "rev1")
             self.assertEqual(first["categories"], ["discord", "google"])
             self.assertFalse(first["update_available"])
@@ -182,6 +191,7 @@ domain:youtube.com
             )
 
             self.assertEqual(second["categories"], ["google"])
+            self.assertEqual(second["data_status"], "remote")
             self.assertFalse(second["update_available"])
 
             changed = list_v2fly_categories_cached(
@@ -231,6 +241,9 @@ domain:youtube.com
             )
 
             self.assertEqual(result["categories"], ["google"])
+            self.assertEqual(result["data_status"], "remote")
+            self.assertEqual(result["problem_status"], "cache")
+            self.assertEqual(result["status"], "cache")
             self.assertEqual(result["error_kind"], "cache")
             self.assertIn("cache_read", result["cache_error"])
 

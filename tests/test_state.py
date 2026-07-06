@@ -51,6 +51,13 @@ class StateTests(unittest.TestCase):
             self.assertEqual(state["settings"], {"enable_ipv6": True})
             self.assertEqual(state["discovery_profiles"], {"night-test": {"title": "Night test"}})
 
+    def test_read_state_returns_defaults_for_corrupt_json(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            (state_dir / "state.json").write_text("{broken", encoding="utf-8")
+
+            self.assertEqual(read_state(state_dir), {"current_job": None, "last_error": None})
+
 
 if __name__ == "__main__":
     unittest.main()

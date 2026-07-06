@@ -19,6 +19,7 @@ from gp_control_plane.backups import (
     restore_snapshot_if_idle,
     restore_snapshot_preview,
     snapshot_archive_path,
+    snapshot_file_path,
     _write_checksums,
 )
 from gp_control_plane.state import write_state
@@ -238,6 +239,27 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertNotIn("seen_count", link)
             self.assertFalse((snapshot_path / "strategies" / "strategy-stats.ndjson").exists())
 
+    def test_snapshot_file_path_allows_only_snapshot_export_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+
+            self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "archive").is_file())
+            self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "domains/domains.ndjson").is_file())
+            with self.assertRaises(FileNotFoundError):
+                snapshot_file_path(state_dir, snapshot_id, "../manifest.yaml")
+            with self.assertRaises(FileNotFoundError):
+                snapshot_file_path(state_dir, snapshot_id, "domains/../manifest.yaml")
+            with self.assertRaises(FileNotFoundError):
+                snapshot_file_path(state_dir, snapshot_id, "strategies/strategy-stats.ndjson")
+
     def test_import_snapshot_archive_restores_uploaded_zip(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
@@ -278,6 +300,60 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
 
             with self.assertRaisesRegex(ValueError, "unsupported backup schema_version"):
                 restore_snapshot(state_dir, snapshot_id)
+
+    def test_restore_validates_snapshot_before_creating_pre_restore_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+            (snapshot_path / "strategies" / "strategies.ndjson").write_text("not-json\n", encoding="utf-8")
+            _write_checksums(snapshot_path)
+            count_before = len(list_snapshots(state_dir)["snapshots"])
+
+            with self.assertRaisesRegex(ValueError, "invalid ndjson"):
+                restore_snapshot(state_dir, snapshot_id)
+
+            self.assertEqual(len(list_snapshots(state_dir)["snapshots"]), count_before)
+
+    def test_restore_preserves_current_presets_when_backup_preset_files_are_broken(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            save_custom_presets(
+                state_dir,
+                {"finder": {"backup-list": ["youtube.com"]}, "common": {}},
+                "2026-06-25T00:00:00Z",
+            )
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+            (snapshot_path / "presets" / "domain-presets.ndjson").write_text("not-json\n", encoding="utf-8")
+            _write_checksums(snapshot_path)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"current-list": ["discord.com"]}, "common": {}},
+                "2026-06-25T01:00:00Z",
+            )
+
+            preview = restore_snapshot_preview(state_dir, snapshot_id)
+            result = restore_snapshot(state_dir, snapshot_id)
+            presets = read_custom_presets(state_dir)
+
+            self.assertFalse({item["key"]: item for item in preview["entities"]}["user_presets"]["will_replace"])
+            self.assertTrue(result["restored"])
+            self.assertEqual(presets["finder"], {"current-list": ["discord.com"]})
 
     def test_import_rejects_unsupported_backup_schema(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

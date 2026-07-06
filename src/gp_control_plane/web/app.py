@@ -51,6 +51,9 @@ from ..strategy_finder import (
 from ..zapret2 import check_install_cached
 
 
+MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
+
+
 def serve(config: AppConfig, host: str, port: int) -> None:
     _clear_stale_current_job(config)
     close_stale_running_runs(config.output.state_dir)
@@ -75,8 +78,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._json(_release_info_payload(config, query))
             elif path == "/api/releases/update-plan":
                 self._json(_release_update_plan_payload(config, query))
-            elif path == "/api/discovery-profiles":
-                self._json({"profiles": read_discovery_profiles(config)})
             elif path == "/api/diagnostics":
                 self._json(diagnostics_payload(config.output.state_dir))
             elif path == "/api/strategy-finder/domains":
@@ -124,7 +125,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/releases",
                 "/api/releases/update-plan",
                 "/api/releases/update",
-                "/api/discovery-profiles",
                 "/api/diagnostics",
                 "/api/strategy-finder/domains",
                 "/api/strategy-finder/candidate-domains",
@@ -207,7 +207,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                     )
                     self._json(
                         {
-                            "custom": {scope: {name: domains}, "finder" if scope == "common" else "common": {}},
+                            "custom": read_custom_presets(config.output.state_dir),
                             "metadata": read_custom_preset_index(config.output.state_dir),
                         }
                     )
@@ -257,9 +257,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                     self._json(_queue_release_update_payload(config, payload), status=HTTPStatus.ACCEPTED)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                return
-            if path == "/api/discovery-profiles":
-                self._json({"profiles": save_discovery_profiles(config, payload.get("profiles") or payload)})
                 return
             if path == "/api/domain-sources/v2fly/preview":
                 try:
@@ -319,11 +316,21 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             while True:
                 try:
                     for event_name, payload in _event_payloads(config).items():
-                        fingerprint = _event_fingerprint(payload)
-                        if previous.get(event_name) == fingerprint:
-                            continue
-                        previous[event_name] = fingerprint
-                        self._event(event_name, payload)
+                        try:
+                            fingerprint = _event_fingerprint(payload)
+                            if previous.get(event_name) == fingerprint:
+                                continue
+                            previous[event_name] = fingerprint
+                            self._event(event_name, payload)
+                        except (TypeError, ValueError) as exc:
+                            self._event(
+                                "event-error",
+                                {
+                                    "event": event_name,
+                                    "error": "serialization",
+                                    "message": str(exc),
+                                },
+                            )
                     now = time.monotonic()
                     if now - heartbeat_at >= 15:
                         self.wfile.write(b": keepalive\n\n")
@@ -332,6 +339,12 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                     time.sleep(1)
                 except (BrokenPipeError, ConnectionResetError):
                     return
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        self._event("event-error", {"error": "event-loop", "message": str(exc)})
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    time.sleep(1)
 
         def _event(self, event_name: str, payload: dict[str, Any]) -> None:
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -348,9 +361,18 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             self.wfile.write(data)
 
         def _request_upload_bytes(self) -> bytes:
-            length = int(self.headers.get("Content-Length") or "0")
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError as exc:
+                raise ValueError("invalid upload size") from exc
+            if length <= 0:
+                raise ValueError("empty backup upload")
+            if length > MAX_BACKUP_UPLOAD_BYTES:
+                raise ValueError("backup upload is too large")
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(length)
+            if len(body) != length:
+                raise ValueError("incomplete backup upload")
             if content_type.startswith("application/zip") or content_type.startswith("application/octet-stream"):
                 return body
             if content_type.startswith("multipart/form-data"):
@@ -2006,7 +2028,12 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: {}, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const DISCOVERY_PROFILES = {
+  quick: { name: 'quick', title: 'Быстрый', scan_level: 'quick' },
+  standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
+  force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
+};
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -3388,7 +3415,6 @@ function runDiagnostics(row){
   const skippedItems = skipped.slice(0, 20).map((item) => diagnosticTableRow({
     type: 'строка',
     target: item.raw || '-',
-    status: diagnosticShortLabel(item.status, item.label),
     details: item.message || 'Строка пропущена до запуска проверки.',
     tech: item.status || '-',
     tone: 'bad'
@@ -3398,16 +3424,14 @@ function runDiagnostics(row){
     return diagnosticTableRow({
       type: 'домен',
       target: item.domain || '-',
-      status: diagnosticShortLabel(item.status, item.label),
       details: diagnosticExplanation(item, row),
-      tech: curlCodeDetails(item.codes),
+      tech: [diagnosticShortLabel(item.status, item.label), curlCodeDetails(item.codes)].filter(Boolean).join('; '),
       tone
     });
   }).join('');
   const codeItems = Object.entries(curlSummary).map(([code, count]) => diagnosticTableRow({
     type: 'сводка',
     target: 'все проверки',
-    status: curlCodeLabel(code),
     details: `Всего таких ошибок в запуске: ${count}.`,
     tech: `curl ${code}: ${count} раз`,
     tone: 'warn'
@@ -3420,7 +3444,6 @@ function runDiagnostics(row){
           <tr>
             <th>Тип</th>
             <th>Домен / строка</th>
-            <th>Причина</th>
             <th>Пояснение</th>
           </tr>
         </thead>
@@ -3437,7 +3460,6 @@ function diagnosticTableRow(item){
   return `<tr>
     <td>${esc(item.type || '-')}</td>
     <td class="run-diagnostic-target">${esc(item.target || '-')}</td>
-    <td><span class="run-diagnostic-status ${esc(item.tone || '')}">${esc(item.status || '-')}</span></td>
     <td><div class="run-diagnostic-details">${esc(item.details || '-')}</div>${tech}</td>
   </tr>`;
 }
@@ -4555,14 +4577,13 @@ async function refresh(){
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const [status, finderRuns, finderLog, domainSets, presets, settings, discoveryProfiles, domainSources] = await Promise.all([
+    const [status, finderRuns, finderLog, domainSets, presets, settings, domainSources] = await Promise.all([
       getJson('/api/status'),
       getJson('/api/strategy-finder/runs'),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains'),
       getJson('/api/presets'),
       getJson('/api/settings'),
-      getJson('/api/discovery-profiles'),
       getJson('/api/domain-sources')
     ]);
     mergeStatusPayload(status);
@@ -4570,7 +4591,6 @@ async function refresh(){
     state.finderRuns = latestById(finderRuns.runs || []);
     state.finderLog = finderLog;
     state.domainSets = domainSets;
-    state.discoveryProfiles = (discoveryProfiles || {}).profiles || {};
     state.domainSources = domainSources;
     mergeCustomPresets((presets || {}).custom || {}, (presets || {}).metadata || {});
     renderAll({ skipCandidates: true });
@@ -5443,7 +5463,7 @@ def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
     raw = _query_str(query, key, str(default))
     try:
         return int(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return default
 
 

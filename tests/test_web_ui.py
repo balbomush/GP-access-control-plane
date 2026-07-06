@@ -75,8 +75,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Установить выбранное обновление", html)
         self.assertIn("debug_stdout", html)
         self.assertIn("/api/settings", html)
-        self.assertIn("/api/discovery-profiles", html)
+        self.assertNotIn("/api/discovery-profiles", html)
         self.assertIn("discovery-profile-select", html)
+        self.assertIn("DISCOVERY_PROFILES", html)
         self.assertNotIn("settings-preset-select", html)
         self.assertNotIn("settings-preset-note", html)
         self.assertIn("/api/run-preferences", html)
@@ -830,7 +831,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"enabled":false', toggled)
             self.assertNotIn('"discord.com","discordcdn.com"', toggled)
 
-    def test_discovery_profiles_endpoint_keeps_fixed_profiles(self) -> None:
+    def test_discovery_profiles_endpoint_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(
@@ -871,10 +872,7 @@ class WebUiTests(unittest.TestCase):
             saved = response.read().decode("utf-8")
             connection.close()
 
-            self.assertEqual(response.status, 200)
-            self.assertIn('"quick"', saved)
-            self.assertIn('"standard"', saved)
-            self.assertIn('"force"', saved)
+            self.assertIn(response.status, {404, 405})
             self.assertNotIn('"night-test"', saved)
             self.assertNotIn("Changed built-in", saved)
 

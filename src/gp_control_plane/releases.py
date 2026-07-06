@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 from typing import Any, Callable
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
@@ -22,6 +23,7 @@ def release_channel_info(
     tag_fetcher: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     clean_channel = channel if channel in {"stable", "prerelease"} else "stable"
+    errors: list[dict[str, str]] = []
     try:
         raw = fetcher() if fetcher else fetch_github_releases()
         releases = parse_github_releases(raw)
@@ -43,8 +45,12 @@ def release_channel_info(
             "source": "github",
             "update_available": _version_key(available_version) > _version_key(current_version),
             "error": "",
+            "error_kind": "",
+            "error_stage": "",
+            "errors": [],
         }
     except Exception as api_exc:  # noqa: BLE001
+        errors.append(_release_error("github_api", api_exc))
         try:
             raw_tags = tag_fetcher() if tag_fetcher else fetch_git_tags()
             selected_tag = _select_git_tag(parse_git_tags(raw_tags), clean_channel)
@@ -63,8 +69,12 @@ def release_channel_info(
                 "source": "git-tags",
                 "update_available": _version_key(selected_tag) > _version_key(current_version),
                 "error": str(api_exc),
+                "error_kind": errors[0]["kind"],
+                "error_stage": errors[0]["stage"],
+                "errors": errors,
             }
         except Exception as tag_exc:  # noqa: BLE001
+            errors.append(_release_error("git_tags", tag_exc))
             return {
                 "channel": clean_channel,
                 "current_version": current_version,
@@ -78,6 +88,9 @@ def release_channel_info(
                 "source": "fallback",
                 "update_available": False,
                 "error": f"{api_exc}; git tag fallback failed: {tag_exc}",
+                "error_kind": errors[0]["kind"],
+                "error_stage": errors[0]["stage"],
+                "errors": errors,
             }
 
 
@@ -175,6 +188,24 @@ def _release_assets(release: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return result
+
+
+def _release_error(stage: str, exc: BaseException) -> dict[str, str]:
+    return {
+        "stage": stage,
+        "kind": _release_error_kind(exc),
+        "message": str(exc) or exc.__class__.__name__,
+    }
+
+
+def _release_error_kind(exc: BaseException) -> str:
+    if isinstance(exc, (json.JSONDecodeError, ValueError)):
+        return "format"
+    if isinstance(exc, subprocess.SubprocessError):
+        return "git"
+    if isinstance(exc, (OSError, TimeoutError, URLError)):
+        return "network"
+    return "unexpected"
 
 
 VersionKey = tuple[tuple[int, int, int], int, tuple[tuple[int, int | str], ...]]

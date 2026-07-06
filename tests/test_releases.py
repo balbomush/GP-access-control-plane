@@ -84,6 +84,23 @@ dddd refs/tags/v0.4.0-alpha.2
         self.assertEqual(info["available_version"], "v0.4.0-alpha.2")
         self.assertTrue(info["update_available"])
 
+    def test_release_channel_info_reports_structured_errors(self) -> None:
+        def broken_tags() -> str:
+            raise subprocess.TimeoutExpired("git ls-remote", 1)
+
+        info = release_channel_info(
+            current_version="0.3.0",
+            channel="stable",
+            fetcher=lambda: "{broken-json",
+            tag_fetcher=broken_tags,
+        )
+
+        self.assertFalse(info["checked"])
+        self.assertEqual(info["error_kind"], "format")
+        self.assertEqual(info["error_stage"], "github_api")
+        self.assertEqual([item["stage"] for item in info["errors"]], ["github_api", "git_tags"])
+        self.assertEqual([item["kind"] for item in info["errors"]], ["format", "git"])
+
     def test_release_channel_info_updates_between_alpha_tags(self) -> None:
         tags = """
 aaaa refs/tags/v0.3.2-alpha.1
@@ -134,6 +151,56 @@ bbbb refs/tags/v0.3.2-alpha.2
             self.assertFalse(plan["can_update"])
             self.assertEqual(plan["blocked_reason"], "job is running")
 
+    def test_release_update_plan_blocks_active_update(self) -> None:
+        payload = """
+[
+  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
+]
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "status": "queued",
+                        "queued_at": "2999-01-01T00:00:00Z",
+                        "target_ref": "v0.3.1",
+                    }
+                },
+            )
+
+            plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=lambda: payload)
+
+            self.assertFalse(plan["can_update"])
+            self.assertEqual(plan["blocked_reason"], "release update is already queued")
+
+    def test_release_update_plan_expires_stale_update_before_planning(self) -> None:
+        payload = """
+[
+  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
+]
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "status": "queued",
+                        "queued_at": "2026-01-01T00:00:00Z",
+                        "target_ref": "v0.3.1",
+                    }
+                },
+            )
+
+            plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=lambda: payload)
+            state = read_state(state_dir)
+
+            self.assertTrue(plan["can_update"])
+            self.assertEqual(state["release_update"]["status"], "failed")
+            self.assertEqual(state["release_update"]["error"], "release update queue timeout")
+
     def test_queue_release_update_creates_backup_and_calls_helper(self) -> None:
         payload = """
 [
@@ -168,6 +235,35 @@ bbbb refs/tags/v0.3.2-alpha.2
             self.assertEqual(result["target_ref"], "v0.3.1")
             self.assertIn("pre-update", result["rollback_instruction"])
             self.assertTrue(any("restore" in step for step in result["steps"]))
+
+    def test_queue_release_update_deduplicates_active_update(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "queued": True,
+                        "status": "queued",
+                        "queued_at": "2999-01-01T00:00:00Z",
+                        "target_ref": "v0.3.1",
+                    }
+                },
+            )
+
+            def unexpected_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
+                raise AssertionError("helper must not be called for active update")
+
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=lambda: "[]",
+                helper_runner=unexpected_helper,
+            )
+
+            self.assertTrue(result["deduplicated"])
+            self.assertEqual(result["target_ref"], "v0.3.1")
 
     def test_queue_release_update_can_use_git_tag_fallback(self) -> None:
         tags = """
@@ -295,6 +391,27 @@ bbbb refs/tags/v0.3.1
             self.assertTrue(status["verified"])
             self.assertEqual(status["log_path"], str(log_path))
             self.assertEqual(status["installed_ref"], "v0.3.1")
+
+    def test_release_update_status_marks_stale_update_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "status": "queued",
+                        "queued_at": "2026-01-01T00:00:00Z",
+                        "target_ref": "v0.3.1",
+                    }
+                },
+            )
+
+            status = release_update_status(state_dir, current_version="0.3.0")
+            state = read_state(state_dir)
+
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["error"], "release update queue timeout")
+            self.assertEqual(state["release_update"]["status"], "failed")
 
 
 if __name__ == "__main__":

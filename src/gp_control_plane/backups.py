@@ -16,6 +16,15 @@ from .storage import connect, db_path
 SNAPSHOT_KEEP = 5
 BACKUP_SCHEMA_VERSION = "4"
 SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"2", "3", BACKUP_SCHEMA_VERSION}
+SNAPSHOT_DOWNLOAD_FILES = {
+    "manifest.yaml",
+    "checksums.sha256",
+    "domains/domains.ndjson",
+    "strategies/strategies.ndjson",
+    "strategies/strategy-domain-links.ndjson",
+    "presets/domain-presets.ndjson",
+    "presets/preset-domains.ndjson",
+}
 
 
 def backups_dir(state_dir: Path) -> Path:
@@ -215,14 +224,14 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         raise FileNotFoundError(snapshot_id)
     if not verify_snapshot(state_dir, snapshot_id):
         raise ValueError("backup checksum verification failed")
-    _ensure_snapshot_compatible(path)
+    restore_plan = _load_restore_plan(path)
     pre_restore = create_snapshot(state_dir, protect_ids={snapshot_id})
-    strategies = _read_ndjson(path / "strategies" / "strategies.ndjson")
-    links = _read_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
-    manifest = _read_simple_manifest(path / "manifest.yaml")
-    restore_presets = _snapshot_replaces_presets(path, manifest)
-    presets = _read_ndjson(path / "presets" / "domain-presets.ndjson") if restore_presets else []
-    preset_links = _read_ndjson(path / "presets" / "preset-domains.ndjson") if restore_presets else []
+    strategies = restore_plan["strategies"]
+    links = restore_plan["links"]
+    domains = restore_plan["domains"]
+    restore_presets = bool(restore_plan["restore_presets"])
+    presets = restore_plan["presets"]
+    preset_links = restore_plan["preset_links"]
     restored_at = now_iso()
     with connect(state_dir) as conn:
         conn.execute("DELETE FROM strategy_domain_results")
@@ -230,7 +239,7 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         if restore_presets:
             conn.execute("DELETE FROM preset_domains")
             conn.execute("DELETE FROM domain_presets")
-        for item in _read_ndjson(path / "domains" / "domains.ndjson"):
+        for item in domains:
             domain = str(item.get("domain") or item.get("name") or "").strip()
             if not domain:
                 continue
@@ -368,8 +377,10 @@ def _safe_extract_target(root: Path, name: str) -> Path:
     if not parts:
         raise ValueError("invalid empty zip member")
     target = (root / Path(*parts)).resolve()
-    if not str(target).startswith(str(root.resolve())):
-        raise ValueError("invalid zip path")
+    try:
+        target.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError("invalid zip path") from exc
     return target
 
 
@@ -379,8 +390,14 @@ def snapshot_file_path(state_dir: Path, snapshot_id: str, file_name: str) -> Pat
         raise FileNotFoundError(snapshot_id)
     if file_name == "archive":
         return snapshot_archive_path(state_dir, snapshot_id)
+    if file_name not in SNAPSHOT_DOWNLOAD_FILES:
+        raise FileNotFoundError(file_name)
     candidate = (path / file_name).resolve()
-    if not str(candidate).startswith(str(path.resolve())) or not candidate.is_file():
+    try:
+        candidate.relative_to(path.resolve())
+    except ValueError as exc:
+        raise FileNotFoundError(file_name) from exc
+    if not candidate.is_file():
         raise FileNotFoundError(file_name)
     return candidate
 
@@ -546,6 +563,51 @@ def _read_ndjson(path: Path) -> list[dict[str, Any]]:
     return result
 
 
+def _read_required_ndjson(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise ValueError(f"backup file not found: {path.name}")
+    return _read_ndjson(path)
+
+
+def _load_restore_plan(path: Path) -> dict[str, Any]:
+    _ensure_snapshot_compatible(path)
+    manifest = _read_simple_manifest(path / "manifest.yaml")
+    domains = _read_required_ndjson(path / "domains" / "domains.ndjson")
+    strategies = _read_required_ndjson(path / "strategies" / "strategies.ndjson")
+    links = _read_required_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
+    for item in domains:
+        if not str(item.get("domain") or item.get("name") or "").strip():
+            raise ValueError("backup contains domain row without domain")
+    for item in strategies:
+        if not str(item.get("id") or "").strip():
+            raise ValueError("backup contains strategy row without id")
+    for item in links:
+        if not str(item.get("strategy_id") or item.get("candidate_id") or "").strip():
+            raise ValueError("backup contains strategy-domain link without strategy id")
+        if not str(item.get("domain") or "").strip():
+            raise ValueError("backup contains strategy-domain link without domain")
+    restore_presets = _snapshot_replaces_presets(path, manifest)
+    presets = _read_ndjson(path / "presets" / "domain-presets.ndjson") if restore_presets else []
+    preset_links = _read_ndjson(path / "presets" / "preset-domains.ndjson") if restore_presets else []
+    for item in presets:
+        if not str(item.get("scope") or "").strip() or not str(item.get("name") or "").strip():
+            raise ValueError("backup contains preset row without scope/name")
+    for item in preset_links:
+        if not str(item.get("scope") or "").strip() or not str(item.get("name") or "").strip():
+            raise ValueError("backup contains preset-domain link without scope/name")
+        if not str(item.get("domain") or "").strip():
+            raise ValueError("backup contains preset-domain link without domain")
+    return {
+        "manifest": manifest,
+        "domains": domains,
+        "strategies": strategies,
+        "links": links,
+        "restore_presets": restore_presets,
+        "presets": presets,
+        "preset_links": preset_links,
+    }
+
+
 def _int_value(value: Any) -> int:
     try:
         return int(value or 0)
@@ -658,11 +720,18 @@ def _restore_domain_presets(conn: Any, presets: list[dict[str, Any]], links: lis
 
 
 def _snapshot_replaces_presets(path: Path, manifest: dict[str, str]) -> bool:
-    return (
-        str(manifest.get("schema_version") or "") == BACKUP_SCHEMA_VERSION
-        and (path / "presets" / "domain-presets.ndjson").is_file()
-        and (path / "presets" / "preset-domains.ndjson").is_file()
-    )
+    if str(manifest.get("schema_version") or "") != BACKUP_SCHEMA_VERSION:
+        return False
+    preset_file = path / "presets" / "domain-presets.ndjson"
+    preset_link_file = path / "presets" / "preset-domains.ndjson"
+    if not preset_file.is_file() or not preset_link_file.is_file():
+        return False
+    try:
+        _read_ndjson(preset_file)
+        _read_ndjson(preset_link_file)
+    except ValueError:
+        return False
+    return True
 
 
 def _unique_nonempty(values: list[str]) -> list[str]:
@@ -703,8 +772,16 @@ def _snapshot_paths(state_dir: Path) -> list[Path]:
 
 
 def _snapshot_path(state_dir: Path, snapshot_id: str) -> Path:
-    safe = snapshot_id.replace("/", "").replace("\\", "")
-    return snapshots_dir(state_dir) / safe
+    safe = str(snapshot_id or "").strip()
+    if not safe or safe.startswith(".") or ".." in safe or "/" in safe or "\\" in safe:
+        raise FileNotFoundError(snapshot_id)
+    root = snapshots_dir(state_dir).resolve()
+    path = (root / safe).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise FileNotFoundError(snapshot_id) from exc
+    return path
 
 
 def _snapshot_files(path: Path) -> list[dict[str, Any]]:

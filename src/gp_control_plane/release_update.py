@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,8 @@ from .zapret2 import run_root_helper_command
 HelperRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 UPDATE_LOG_TAIL_LINES = 80
 UPDATE_LOG_TAIL_BYTES = 32_000
+UPDATE_QUEUE_STALE_SECONDS = 30 * 60
+ACTIVE_UPDATE_STATUSES = {"queueing", "queued", "running"}
 
 
 def release_update_plan(
@@ -26,10 +29,14 @@ def release_update_plan(
 ) -> dict[str, Any]:
     release = release_channel_info(current_version=current_version, channel=channel, fetcher=fetcher, tag_fetcher=tag_fetcher)
     state = read_state(state_dir)
+    _expire_stale_release_update(state_dir, state)
     active_job = str(state.get("current_job") or "")
+    active_update = _active_release_update_payload(state, current_version=current_version)
     reason = ""
     if active_job:
         reason = "job is running"
+    elif active_update:
+        reason = "release update is already queued"
     elif not release.get("checked"):
         reason = str(release.get("error") or "release check failed")
     elif not release.get("update_available"):
@@ -60,6 +67,12 @@ def queue_release_update(
     tag_fetcher: Callable[[], str] | None = None,
     helper_runner: HelperRunner | None = None,
 ) -> dict[str, Any]:
+    state = read_state(state_dir)
+    _expire_stale_release_update(state_dir, state)
+    active_update = _active_release_update_payload(state, current_version=current_version)
+    if active_update:
+        active_update = {**active_update, "deduplicated": True}
+        return active_update
     plan = release_update_plan(
         state_dir,
         channel=channel,
@@ -130,6 +143,13 @@ def release_update_status(
     if not isinstance(raw, dict):
         return {}
     payload = dict(raw)
+    if _is_stale_release_update(payload):
+        payload["status"] = "failed"
+        payload["error"] = payload.get("error") or "release update queue timeout"
+        state["release_update"] = payload
+        write_state(state_dir, state)
+        append_jsonl(state_dir / "release-updates.jsonl", payload)
+        return payload
     helper = payload.get("helper") if isinstance(payload.get("helper"), dict) else {}
     log_path = str(payload.get("log_path") or helper.get("log") or "")
     log_tail = ""
@@ -167,6 +187,53 @@ def release_update_status(
     payload["verified"] = bool(status == "success" and (installed_ref or installed_version))
     payload["error"] = str(log_values.get("error") or payload.get("error") or "")
     return payload
+
+
+def _active_release_update_payload(state: dict[str, Any], *, current_version: str) -> dict[str, Any] | None:
+    raw = state.get("release_update")
+    if not isinstance(raw, dict):
+        return None
+    status = str(raw.get("status") or "").lower()
+    if status not in ACTIVE_UPDATE_STATUSES:
+        return None
+    if _is_stale_release_update(raw):
+        return None
+    target = str(raw.get("target_ref") or "")
+    if target and _version_matches(target, current_version):
+        return None
+    return dict(raw)
+
+
+def _expire_stale_release_update(state_dir: Path, state: dict[str, Any]) -> None:
+    raw = state.get("release_update")
+    if not isinstance(raw, dict) or not _is_stale_release_update(raw):
+        return
+    payload = dict(raw)
+    payload["status"] = "failed"
+    payload["error"] = payload.get("error") or "release update queue timeout"
+    state["release_update"] = payload
+    write_state(state_dir, state)
+    append_jsonl(state_dir / "release-updates.jsonl", payload)
+
+
+def _is_stale_release_update(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("status") or "").lower()
+    if status not in ACTIVE_UPDATE_STATUSES:
+        return False
+    timestamp = str(payload.get("started_at") or payload.get("queued_at") or "").strip()
+    if not timestamp:
+        return False
+    started_at = _parse_iso(timestamp)
+    if not started_at:
+        return False
+    return (datetime.now(UTC) - started_at).total_seconds() > UPDATE_QUEUE_STALE_SECONDS
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _parse_key_value_lines(text: str) -> dict[str, str]:

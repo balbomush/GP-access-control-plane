@@ -84,8 +84,14 @@ def list_v2fly_categories(
     if needle:
         categories = [category for category in categories if needle in category]
     clean_limit = max(1, min(int(limit or 80), 500))
+    data_status = "remote" if source == "github" else "cache"
+    problem_status = _v2fly_problem_status(errors)
     return {
         "source": source,
+        "data_status": data_status,
+        "problem_status": problem_status,
+        "status": problem_status or data_status,
+        "status_label": _v2fly_status_label(data_status, problem_status),
         "query": needle,
         "total": len(categories),
         "categories": categories[:clean_limit],
@@ -160,8 +166,14 @@ def list_v2fly_categories_cached(
     filtered = [category for category in categories if needle in category] if needle else categories
     clean_limit = max(1, min(int(limit or 2000), 5000))
     error_message = _format_v2fly_errors(errors)
+    data_status = "remote" if source == "github" else "cache"
+    problem_status = _v2fly_problem_status(errors)
     return {
         "source": source,
+        "data_status": data_status,
+        "problem_status": problem_status,
+        "status": problem_status or data_status,
+        "status_label": _v2fly_status_label(data_status, problem_status),
         "query": needle,
         "total": len(filtered),
         "all_count": len(categories),
@@ -248,6 +260,33 @@ def _v2fly_error_kind(stage: str, exc: BaseException) -> str:
 def _v2fly_error_message(exc: BaseException) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     return " ".join(text.split())
+
+
+def _v2fly_problem_status(errors: list[dict[str, str]]) -> str:
+    if not errors:
+        return ""
+    kinds = {str(error.get("kind") or "") for error in errors}
+    if "network" in kinds:
+        return "network"
+    if "cache" in kinds:
+        return "cache"
+    if "format" in kinds:
+        return "config"
+    return "unexpected"
+
+
+def _v2fly_status_label(data_status: str, problem_status: str) -> str:
+    if problem_status == "network":
+        return "сетевой источник недоступен, используется локальный каталог"
+    if problem_status == "cache":
+        return "проблема локального кэша каталога"
+    if problem_status == "config":
+        return "источник вернул неожиданный формат данных"
+    if problem_status:
+        return "ошибка загрузки каталога"
+    if data_status == "remote":
+        return "каталог загружен из v2fly/domain-list-community"
+    return "каталог взят из локального кэша"
 
 
 def _format_v2fly_errors(errors: list[dict[str, str]]) -> str:

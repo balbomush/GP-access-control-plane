@@ -28,7 +28,10 @@ def read_state(state_dir: Path) -> dict[str, Any]:
     }
     if not path.exists():
         return defaults
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
     if not isinstance(raw, dict):
         return defaults
     state = {**defaults, **raw}
