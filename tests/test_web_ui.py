@@ -110,7 +110,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("previewV2flyPreset", html)
         self.assertIn("importV2flyPreset", html)
         self.assertIn("state.presetManager.name = data.preset;", html)
-        self.assertIn("if (data.preset) await refreshPresetManager(true);", html)
+        self.assertIn("if (data.preset) await loadPresetEditorFromSelection({ silent: true });", html)
         self.assertNotIn("v2fly-scope", html)
         self.assertNotIn("v2fly-categories", html)
         self.assertNotIn("v2fly-category-list", html)
@@ -133,32 +133,37 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/presets/save", html)
         self.assertIn("/api/presets/delete", html)
         self.assertIn("/api/presets/domains", html)
-        self.assertIn("/api/presets/domain-enabled", html)
         self.assertIn("domain-preset-manager-panel", html)
         self.assertNotIn("profiles-manager-panel", html)
         self.assertNotIn("settings-presets-manager-panel", html)
         self.assertNotIn("preset-manager-scope", html)
         self.assertIn("preset-manager-name", html)
-        self.assertIn("preset-manager-query", html)
-        self.assertIn("preset-domain-list", html)
-        self.assertIn("preset-editor-name", html)
+        self.assertNotIn("preset-manager-query", html)
+        self.assertNotIn("preset-domain-list", html)
+        self.assertNotIn("preset-domain-row", html)
+        self.assertNotIn("preset-editor-name", html)
         self.assertIn("preset-editor-domains", html)
         self.assertIn("preset-editor-preview", html)
+        self.assertIn("preset-new-name", html)
+        self.assertIn("preset-new-domains", html)
+        self.assertIn("data-action=\"preset-new-save\"", html)
+        self.assertIn("savePresetNew", html)
+        self.assertIn("Создать новый список", html)
         self.assertIn("fetchAllPresetDomains", html)
         self.assertIn("function hasCustomPreset(target, name)", html)
         self.assertIn("function managerPresetEntries()", html)
         self.assertIn("function managerPresetEntry(name)", html)
         self.assertIn("const builtin = builtInPresets(target).find((item) => item.key === name);", html)
         self.assertIn("if (builtin) return uniqueDomains(builtin.domains);", html)
-        self.assertIn("refreshPresetManager", html)
-        self.assertIn("togglePresetDomain", html)
+        self.assertNotIn("refreshPresetManager", html)
+        self.assertNotIn("togglePresetDomain", html)
         self.assertIn("loadPresetEditorFromSelection", html)
-        self.assertIn("previewPresetEditor", html)
+        self.assertNotIn("previewPresetEditor", html)
         self.assertIn("savePresetEditor", html)
         self.assertIn("exportPresetEditor", html)
         self.assertIn("customPresetMeta", html)
-        self.assertIn("Показать домены", html)
-        self.assertIn("Показать изменения", html)
+        self.assertNotIn("Показать домены", html)
+        self.assertNotIn("Показать изменения", html)
         self.assertIn("Скачать TXT", html)
         self.assertIn("candidateGroups(rows)", html)
         self.assertIn("data-candidate-view=\"domain\"", html)
@@ -253,7 +258,8 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("data-action=\"standard-discovery\"", html)
         self.assertIn("/api/jobs/zapret-multi-domain-discovery", html)
         self.assertIn("curl-parallelism", html)
-        self.assertIn("max=\"10\"", html)
+        self.assertNotIn("id=\"settings-curl-max\" type=\"number\" min=\"1\" max=\"10\"", html)
+        self.assertIn("Можно ставить любое число от 1", html)
         self.assertIn("value=\"4\"", html)
         self.assertIn("curlParallelism()", html)
         self.assertIn("curl_parallelism", html)
@@ -349,7 +355,15 @@ class WebUiTests(unittest.TestCase):
         self.assertIn(".run-diagnostics", html)
         self.assertIn(".run-diagnostic-table", html)
         self.assertIn("diagnosticTableRow", html)
+        self.assertIn("diagnosticShortLabel", html)
+        self.assertIn("diagnosticExplanation", html)
+        self.assertIn("curlCodeLabel", html)
+        self.assertIn("curlCodeDetails", html)
+        self.assertIn(".run-diagnostic-tech", html)
+        self.assertIn("технически", html)
+        self.assertIn("Это не отменяет найденные стратегии", html)
         self.assertNotIn(".run-diagnostic-chip", html)
+        self.assertNotIn("Коды curl показывают", html)
         self.assertIn("details.run-domains[data-run-domains]", html)
         self.assertIn("white-space: nowrap", html)
         self.assertIn("isDiscoveryRun(row)", html)
@@ -685,7 +699,7 @@ class WebUiTests(unittest.TestCase):
                     "settings": {
                         "enable_ipv6": True,
                         "debug_stdout": True,
-                        "curl_parallelism_max": 8,
+                        "curl_parallelism_max": 25,
                         "curl_max_time": 1,
                         "curl_max_time_quic": 3,
                         "curl_max_time_doh": 4,
@@ -701,7 +715,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"enable_ipv6":true', saved)
             self.assertIn('"debug_stdout":true', saved)
             self.assertNotIn('"settings_preset_default"', saved)
-            self.assertIn('"curl_parallelism_max":8', saved)
+            self.assertIn('"curl_parallelism_max":25', saved)
             self.assertIn('"curl_max_time":1', saved)
             self.assertIn('"curl_max_time_quic":3', saved)
             self.assertIn('"curl_max_time_doh":4', saved)
@@ -728,7 +742,7 @@ class WebUiTests(unittest.TestCase):
                         "discovery_profile": "custom",
                         "settings_preset": "accelerated",
                         "run_mode": "multi",
-                        "curl_parallelism": 9,
+                        "curl_parallelism": 19,
                         "enable_http": True,
                         "enable_tls12": True,
                         "enable_tls13": False,
@@ -751,7 +765,7 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertIn('"run_mode":"multi"', saved)
-            self.assertIn('"curl_parallelism":9', saved)
+            self.assertIn('"curl_parallelism":19', saved)
             self.assertIn('"scan_level":"force"', saved)
             self.assertIn('"timeout_hours":3.5', saved)
             self.assertNotIn('"settings_preset"', saved)

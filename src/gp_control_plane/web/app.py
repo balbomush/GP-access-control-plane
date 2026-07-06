@@ -929,32 +929,6 @@ button:disabled { opacity: .55; cursor: default; }
   align-items: center;
   color: var(--muted);
 }
-.preset-domain-list {
-  display: grid;
-  gap: 6px;
-}
-.preset-domain-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 8px 10px;
-  background: var(--surface-code);
-  font-family: var(--mono);
-  font-size: 13px;
-}
-.preset-domain-row.disabled {
-  opacity: .58;
-}
-.preset-domain-row input {
-  width: 18px;
-  min-height: 18px;
-}
-.preset-domain-name {
-  overflow-wrap: anywhere;
-}
 .helper-text {
   color: var(--text-soft);
   font-size: 12px;
@@ -1499,6 +1473,23 @@ tr:last-child td { border-bottom: 0; }
 }
 .run-diagnostic-status.warn { border-color: var(--warn); color: var(--warn); }
 .run-diagnostic-status.bad { border-color: var(--danger); color: var(--danger); }
+.run-diagnostic-details {
+  color: var(--text);
+  line-height: 1.35;
+}
+.run-diagnostic-tech {
+  margin-top: 4px;
+  color: var(--text-soft);
+}
+.run-diagnostic-tech summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.run-diagnostic-tech div {
+  margin-top: 4px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  overflow-wrap: anywhere;
+}
 .run-diagnostic-note { margin-top: 8px; }
 code {
   display: block;
@@ -1826,22 +1817,11 @@ pre {
             <h2>Доменные пресеты</h2>
             <span class="badge" id="preset-manager-count">0</span>
           </div>
-          <div class="preset-grid">
-            <div class="field">
-              <label for="preset-manager-name">Список</label>
-              <select id="preset-manager-name"></select>
-            </div>
-          </div>
-          <div class="domain-picker-row">
-            <input id="preset-manager-query" autocomplete="off" placeholder="Найти домен в списке">
-            <button class="secondary" data-action="preset-manager-refresh" type="button">Показать домены</button>
-          </div>
-          <div class="helper-text" id="preset-manager-note">Выберите пользовательский список, чтобы посмотреть домены. Большие списки загружаются порциями.</div>
-          <div id="preset-manager-list" class="preset-domain-list"></div>
           <div class="field">
-            <label for="preset-editor-name">Редактор списка</label>
-            <input id="preset-editor-name" autocomplete="off" placeholder="Название списка">
+            <label for="preset-manager-name">Список</label>
+            <select id="preset-manager-name"></select>
           </div>
+          <div class="helper-text" id="preset-manager-note">Выберите список, отредактируйте домены и сохраните изменения.</div>
           <div class="field">
             <div class="code-editor text-editor">
               <pre class="line-numbers" data-line-numbers-for="preset-editor-domains" aria-hidden="true">1</pre>
@@ -1849,12 +1829,27 @@ pre {
             </div>
           </div>
           <div class="button-row">
-            <button class="secondary" data-action="preset-editor-load" type="button">Загрузить выбранный список</button>
-            <button class="secondary" data-action="preset-editor-preview" type="button">Показать изменения</button>
             <button data-action="preset-editor-save" type="button">Сохранить список</button>
             <button class="secondary" data-action="preset-editor-export" type="button">Скачать TXT</button>
           </div>
           <div class="source-preview" id="preset-editor-preview">Изменения еще не проверялись.</div>
+          <details class="preset-create-panel">
+            <summary>Создать новый список</summary>
+            <div class="field">
+              <label for="preset-new-name">Название списка</label>
+              <input id="preset-new-name" autocomplete="off" placeholder="my-domains">
+            </div>
+            <div class="field">
+              <div class="code-editor text-editor">
+                <pre class="line-numbers" data-line-numbers-for="preset-new-domains" aria-hidden="true">1</pre>
+                <textarea id="preset-new-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube.com&#10;discord.com"></textarea>
+              </div>
+            </div>
+            <div class="button-row">
+              <button data-action="preset-new-save" type="button">Сохранить новый список</button>
+            </div>
+            <div class="source-preview" id="preset-new-preview">Новый список еще не сохранялся.</div>
+          </details>
         </div>
         <div class="preset-panel settings-domain-source-panel">
           <div class="panel-header">
@@ -1915,8 +1910,8 @@ pre {
             <div class="setting-note">Включает расширенную запись stdout blockcheck2 в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
             <div class="field">
               <label for="settings-curl-max">Максимум параллельных curl</label>
-              <input id="settings-curl-max" type="number" min="1" max="10" value="10">
-              <div class="setting-note">Верхняя граница, выше которой UI не даст запустить параллельные curl.</div>
+              <input id="settings-curl-max" type="number" min="1" value="10">
+              <div class="setting-note">Верхняя граница для запуска параллельных curl. Можно ставить любое число от 1, если плата и сеть справляются.</div>
             </div>
             <div class="field">
               <label for="settings-curl-max-time">Таймаут HTTP/TLS, сек</label>
@@ -2132,7 +2127,10 @@ function setActiveTab(tabName){
     scrollLogToBottom();
   }
   if (tabName === 'candidates') ensureCandidateViewLoaded();
-  if (tabName === 'lists' && !state.v2flyCategories) loadV2flyCategories();
+  if (tabName === 'lists') {
+    if (!state.v2flyCategories) loadV2flyCategories();
+    loadPresetEditorFromSelection({ silent: true });
+  }
   if (tabName === 'settings') {
     if (!state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
     if (!state.backupsLoaded) refreshBackups();
@@ -3324,13 +3322,62 @@ function runDomainChips(domains){
   if (!domains.length) return '<span class="run-domain-chip">-</span>';
   return domains.map((domain) => `<span class="run-domain-chip">${esc(domain)}</span>`).join('');
 }
+function diagnosticShortLabel(status, fallback){
+  const labels = {
+    invalid_domain: 'некорректная строка',
+    dns_error: 'DNS не дал адрес',
+    tls_sni_problem: 'TLS/SNI не совпал',
+    ssl_connect_error: 'TLS-соединение сорвалось',
+    quic_connect_error: 'QUIC/connect не установился',
+    timeout: 'проверка не дождалась ответа',
+    needs_discovery: 'нужен подбор стратегии',
+    curl_error: 'curl вернул ошибку',
+    direct_available: 'прямой доступ есть'
+  };
+  return labels[status] || fallback || status || '-';
+}
+function diagnosticExplanation(item, row){
+  const status = item.status || '';
+  const found = runCandidateCount(row) > 0;
+  const explanations = {
+    invalid_domain: 'Строка не похожа на домен, поэтому blockcheck2 не может проверить ее как сайт.',
+    dns_error: 'DNS не вернул адрес. Это проблема разрешения имени до проверки стратегии.',
+    tls_sni_problem: 'curl получил сертификат не для этого домена. Такое бывает при SNI/TLS-проверках, DPI или особенностях service-доменов.',
+    ssl_connect_error: 'TLS-соединение оборвалось до нормального ответа сервера.',
+    quic_connect_error: 'QUIC или connect-проверка не смогла установить соединение.',
+    timeout: found
+      ? 'Часть проверок не успела ответить за таймаут. Это не отменяет найденные стратегии: успешные проверки уже сохранены отдельно.'
+      : 'Домен не ответил за заданный таймаут. Увеличьте таймаут или проверьте доступность домена отдельно.',
+    needs_discovery: 'Для домена не найден прямой рабочий вариант, нужен подбор стратегии.',
+    curl_error: 'curl вернул ошибку, которую нужно смотреть в технических деталях.',
+    direct_available: 'Домен открывался напрямую, стратегия для него может быть не нужна.'
+  };
+  return explanations[status] || item.message || 'Подробности доступны в технических деталях.';
+}
+function curlCodeLabel(code){
+  const labels = {
+    '3': 'некорректная строка',
+    '6': 'DNS не дал адрес',
+    '7': 'соединение не установилось',
+    '28': 'таймаут',
+    '35': 'TLS/SSL сбой',
+    '60': 'TLS/SNI не совпал'
+  };
+  return labels[String(code)] || 'curl вернул ошибку';
+}
+function curlCodeDetails(codes){
+  if (!codes || !Object.keys(codes).length) return '';
+  return Object.entries(codes)
+    .map(([code, count]) => `curl ${code}: ${curlCodeLabel(code)}, ${count} раз`)
+    .join('; ');
+}
 function runDiagnosticsSummary(row){
   const skipped = Number(row.domain_skipped_count || 0);
   const dominant = row.dominant_failure || {};
-  if (dominant.label) return `${dominant.label}: ${dominant.count || 0}`;
+  if (dominant.status || dominant.label) return `${diagnosticShortLabel(dominant.status, dominant.label)}: ${dominant.count || 0}`;
   if (skipped) return `пропущено строк: ${skipped}`;
   const diagnostics = Array.isArray(row.domain_diagnostics) ? row.domain_diagnostics : [];
-  if (diagnostics.length) return diagnostics.map((item) => item.label || item.status).filter(Boolean).slice(0, 2).join(', ');
+  if (diagnostics.length) return diagnostics.map((item) => diagnosticShortLabel(item.status, item.label)).filter(Boolean).slice(0, 2).join(', ');
   return '-';
 }
 function runDiagnostics(row){
@@ -3341,26 +3388,28 @@ function runDiagnostics(row){
   const skippedItems = skipped.slice(0, 20).map((item) => diagnosticTableRow({
     type: 'строка',
     target: item.raw || '-',
-    status: item.label || item.status || '-',
-    codes: '-',
+    status: diagnosticShortLabel(item.status, item.label),
+    details: item.message || 'Строка пропущена до запуска проверки.',
+    tech: item.status || '-',
     tone: 'bad'
   })).join('');
   const domainItems = diagnostics.map((item) => {
-    const codes = item.codes && Object.keys(item.codes).length ? Object.entries(item.codes).map(([code, count]) => `${code}: ${count}`).join(', ') : '-';
     const tone = ['dns_error', 'invalid_domain', 'tls_sni_problem'].includes(item.status) ? 'bad' : 'warn';
     return diagnosticTableRow({
       type: 'домен',
       target: item.domain || '-',
-      status: item.label || item.status || '-',
-      codes,
+      status: diagnosticShortLabel(item.status, item.label),
+      details: diagnosticExplanation(item, row),
+      tech: curlCodeDetails(item.codes),
       tone
     });
   }).join('');
   const codeItems = Object.entries(curlSummary).map(([code, count]) => diagnosticTableRow({
     type: 'сводка',
-    target: `curl code=${code}`,
-    status: 'всего',
-    codes: count,
+    target: 'все проверки',
+    status: curlCodeLabel(code),
+    details: `Всего таких ошибок в запуске: ${count}.`,
+    tech: `curl ${code}: ${count} раз`,
     tone: 'warn'
   })).join('');
   return `<details class="run-diagnostics">
@@ -3372,21 +3421,24 @@ function runDiagnostics(row){
             <th>Тип</th>
             <th>Домен / строка</th>
             <th>Причина</th>
-            <th>Curl</th>
+            <th>Пояснение</th>
           </tr>
         </thead>
         <tbody>${skippedItems}${domainItems}${codeItems}</tbody>
       </table>
     </div>
-    <div class="run-diagnostic-note">Коды curl показывают причину провала проверки: DNS, timeout, TLS/SNI, QUIC/connect или некорректную строку.</div>
+    <div class="run-diagnostic-note">Если стратегия найдена, отдельные ошибки в диагностике означают провал части проверок, а не отмену сохраненных успешных стратегий.</div>
   </details>`;
 }
 function diagnosticTableRow(item){
+  const tech = item.tech
+    ? `<details class="run-diagnostic-tech"><summary>технически</summary><div>${esc(item.tech)}</div></details>`
+    : '';
   return `<tr>
     <td>${esc(item.type || '-')}</td>
     <td class="run-diagnostic-target">${esc(item.target || '-')}</td>
     <td><span class="run-diagnostic-status ${esc(item.tone || '')}">${esc(item.status || '-')}</span></td>
-    <td>${esc(item.codes ?? '-')}</td>
+    <td><div class="run-diagnostic-details">${esc(item.details || '-')}</div>${tech}</td>
   </tr>`;
 }
 function isDiscoveryRun(row){
@@ -3880,8 +3932,7 @@ function presetManagerMeta(scope){
 }
 function renderPresetManager(){
   const nameSelect = el('preset-manager-name');
-  const list = el('preset-manager-list');
-  if (!nameSelect || !list) return;
+  if (!nameSelect) return;
   const manager = state.presetManager;
   const scope = 'finder';
   const entries = managerPresetEntries();
@@ -3898,134 +3949,13 @@ function renderPresetManager(){
   const meta = isStoredUser ? presetManagerMeta(sourceScope)[manager.name] : null;
   const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : (entry ? `${entry.count}/${entry.count}` : '0');
   setText('preset-manager-count', count);
-  const query = el('preset-manager-query');
-  if (query && query.value !== manager.query) query.value = manager.query || '';
   const note = el('preset-manager-note');
   if (!manager.name) {
     note.textContent = 'Списков пока нет. Создайте список в подборе или импортируйте его из v2fly.';
-    list.innerHTML = '';
     return;
   }
-  const loaded = Array.isArray(manager.domains) ? manager.domains : [];
   const updated = meta && meta.updated_at ? ` · обновлено ${friendlyDate(meta.updated_at)}` : '';
-  note.textContent = manager.loading
-    ? 'Загрузка списка...'
-    : `Показано ${loaded.length} из ${manager.total || 0}. Активно ${meta ? meta.enabled_count : entry?.count || 0}${updated}${isStoredUser ? '' : ' · готовый список, при сохранении станет редактируемым'}`;
-  if (!manager.loaded && !manager.loading) {
-    list.innerHTML = '<div class="empty">Нажмите “Показать домены”, чтобы загрузить список.</div>';
-    return;
-  }
-  if (manager.loading && !loaded.length) {
-    list.innerHTML = '<div class="loading-skeleton" aria-label="Загрузка списка доменов"></div>';
-    return;
-  }
-  const rows = loaded.map((item) => `
-    <label class="preset-domain-row ${item.enabled ? '' : 'disabled'}">
-      <input type="checkbox" data-preset-domain-toggle="${esc(item.domain)}" ${item.enabled ? 'checked' : ''}>
-      <span class="preset-domain-name">${esc(item.domain)}</span>
-    </label>
-  `).join('');
-  const more = manager.hasMore
-    ? `<button class="secondary" data-action="preset-manager-load-more" type="button">Показать еще 200</button>`
-    : '';
-  list.innerHTML = rows || '<div class="empty">По этому фильтру домены не найдены.</div>';
-  if (more) list.insertAdjacentHTML('beforeend', `<div class="button-row">${more}</div>`);
-}
-async function refreshPresetManager(reset){
-  const manager = state.presetManager;
-  const scope = 'finder';
-  const name = el('preset-manager-name')?.value || manager.name || '';
-  const query = String(el('preset-manager-query')?.value || '').trim();
-  const isStoredUser = name ? hasCustomPreset(scope, name) : false;
-  const sourceScope = isStoredUser ? customPresetSourceScope(scope, name) : scope;
-  if (!name) {
-    manager.scope = sourceScope;
-    manager.name = '';
-    manager.query = query;
-    manager.domains = [];
-    manager.total = 0;
-    manager.hasMore = false;
-    manager.loaded = false;
-    renderPresetManager();
-    return;
-  }
-  const offset = reset ? 0 : (manager.domains || []).length;
-  Object.assign(manager, { scope: sourceScope, name, query, loading: true });
-  renderPresetManager();
-  try {
-    if (!isStoredUser) {
-      const domains = await fetchAllPresetDomains(scope, name);
-      const normalizedQuery = query.toLowerCase();
-      const filtered = normalizedQuery ? domains.filter((domain) => domain.toLowerCase().includes(normalizedQuery)) : domains;
-      const rows = filtered.slice(offset, offset + 200).map((domain, index) => ({
-        domain,
-        position: offset + index,
-        enabled: true
-      }));
-      manager.domains = reset ? rows : [...(manager.domains || []), ...rows];
-      manager.total = filtered.length;
-      manager.hasMore = offset + rows.length < filtered.length;
-      manager.loading = false;
-      manager.loaded = true;
-      renderPresetManager();
-      return;
-    }
-    const params = new URLSearchParams();
-    params.set('scope', sourceScope);
-    params.set('name', name);
-    params.set('kind', 'user');
-    params.set('include_disabled', '1');
-    params.set('limit', '200');
-    params.set('offset', String(offset));
-    if (query) params.set('query', query);
-    const data = await getJson(`/api/presets/domains?${params.toString()}`);
-    const rows = Array.isArray(data.domains) ? data.domains : [];
-    manager.domains = reset ? rows : [...(manager.domains || []), ...rows];
-    manager.total = Number(data.total || 0);
-    manager.hasMore = Boolean(data.has_more);
-    manager.loading = false;
-    manager.loaded = true;
-    renderPresetManager();
-  } catch (error) {
-    manager.loading = false;
-    renderPresetManager();
-    setMessage(`Ошибка загрузки списка доменов: ${error.message}`, 'bad');
-  }
-}
-async function togglePresetDomain(domain, enabled){
-  const manager = state.presetManager;
-  if (!manager.name || !domain) return;
-  try {
-    if (!hasCustomPreset('finder', manager.name)) {
-      const current = await fetchAllPresetDomains('finder', manager.name);
-      const domains = enabled ? uniqueDomains([...current, domain]) : current.filter((item) => item !== domain);
-      const data = await postJson('/api/presets/save', { scope: 'finder', name: manager.name, domains });
-      mergePresetResponse(data);
-      state.customPresets.finder[manager.name] = domains;
-      localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
-      Object.assign(manager, { scope: 'finder', domains: [], total: 0, hasMore: false, loaded: false });
-      renderPresetSelects();
-      await refreshPresetManager(true);
-      showToast(enabled ? 'Список сохранен как пользовательский' : 'Список сохранен без домена', 'good');
-      return;
-    }
-    const data = await postJson('/api/presets/domain-enabled', {
-      scope: manager.scope || 'finder',
-      name: manager.name,
-      domain,
-      enabled
-    });
-    mergePresetResponse(data);
-    manager.domains = (manager.domains || []).map((item) => item.domain === domain ? { ...item, enabled } : item);
-    if (state.customPresets[manager.scope || 'finder']) delete state.customPresets[manager.scope || 'finder'][manager.name];
-    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
-    renderPresetSelects();
-    renderPresetManager();
-    showToast(enabled ? 'Домен включен' : 'Домен выключен', 'good');
-  } catch (error) {
-    showToast(`Ошибка изменения домена: ${error.message}`, 'bad');
-    refreshPresetManager(true);
-  }
+  note.textContent = `Редактируется список "${manager.name}". Доменов: ${meta ? meta.enabled_count : entry?.count || 0}${updated}${isStoredUser ? '' : ' · готовый список станет редактируемым после сохранения'}.`;
 }
 function renderPresetEditorPreview(preview){
   const target = el('preset-editor-preview');
@@ -4046,28 +3976,27 @@ function presetEditorScope(){
   return 'finder';
 }
 function presetEditorName(){
-  return String(el('preset-editor-name')?.value || el('preset-manager-name')?.value || '').trim();
+  return String(el('preset-manager-name')?.value || '').trim();
 }
-async function loadPresetEditorFromSelection(){
+async function loadPresetEditorFromSelection(options){
+  const opts = options || {};
   const scope = presetEditorScope();
   const name = el('preset-manager-name')?.value || state.presetManager.name || '';
   if (!name) {
-    setMessage('Выберите пользовательский список', 'warn');
+    if (!opts.silent) setMessage('Выберите список', 'warn');
     return;
   }
   try {
     const domains = await fetchAllPresetDomains(scope, name);
-    const nameInput = el('preset-editor-name');
     const domainsInput = el('preset-editor-domains');
-    if (nameInput) nameInput.value = name;
     if (domainsInput) {
       domainsInput.value = domains.join('\\n');
       updateEditorLineNumbers('preset-editor-domains');
     }
-    renderPresetEditorPreview(null);
-    setMessage('Список загружен в редактор', 'good');
+    renderPresetEditorPreview({ name, total: domains.length, added: 0, removed: 0, unchanged: domains.length });
+    if (!opts.silent) setMessage('Список загружен в редактор', 'good');
   } catch (error) {
-    setMessage(`Ошибка загрузки списка в редактор: ${error.message}`, 'bad');
+    if (!opts.silent) setMessage(`Ошибка загрузки списка в редактор: ${error.message}`, 'bad');
   }
 }
 async function buildPresetEditorPreview(){
@@ -4075,7 +4004,7 @@ async function buildPresetEditorPreview(){
   const name = presetEditorName();
   const domains = presetEditorDomains();
   if (!name || !domains.length) {
-    setMessage('Укажите название списка и хотя бы один домен', 'warn');
+    setMessage('Выберите список и оставьте хотя бы один домен', 'warn');
     return null;
   }
   let current = [];
@@ -4097,14 +4026,6 @@ async function buildPresetEditorPreview(){
   renderPresetEditorPreview(preview);
   return preview;
 }
-async function previewPresetEditor(){
-  try {
-    await buildPresetEditorPreview();
-    setMessage('Изменения списка посчитаны', 'good');
-  } catch (error) {
-    setMessage(`Ошибка проверки списка: ${error.message}`, 'bad');
-  }
-}
 async function savePresetEditor(){
   try {
     const preview = await buildPresetEditorPreview();
@@ -4112,20 +4033,62 @@ async function savePresetEditor(){
     const domains = presetEditorDomains();
     const data = await postJson('/api/presets/save', { scope: preview.scope, name: preview.name, domains });
     mergePresetResponse(data);
+    if (!state.customPresets[preview.scope]) state.customPresets[preview.scope] = {};
     state.customPresets[preview.scope][preview.name] = domains;
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
     state.presetManager.scope = preview.scope;
     state.presetManager.name = preview.name;
-    state.presetManager.domains = [];
-    state.presetManager.total = 0;
-    state.presetManager.hasMore = false;
-    state.presetManager.loaded = false;
     renderPresetSelects();
     renderPresetManager();
-    await refreshPresetManager(true);
     setMessage('Список сохранен', 'good');
   } catch (error) {
     setMessage(`Ошибка сохранения списка: ${error.message}`, 'bad');
+  }
+}
+function presetNewName(){
+  return String(el('preset-new-name')?.value || '').trim();
+}
+function presetNewDomains(){
+  return uniqueDomains(parseDomains(el('preset-new-domains')?.value || ''));
+}
+function renderPresetNewPreview(message, tone){
+  const target = el('preset-new-preview');
+  if (!target) return;
+  target.textContent = message || 'Новый список еще не сохранялся.';
+  target.classList.toggle('bad', tone === 'bad');
+}
+async function savePresetNew(){
+  const scope = 'finder';
+  const name = presetNewName();
+  const domains = presetNewDomains();
+  if (!name || !domains.length) {
+    renderPresetNewPreview('Укажите название нового списка и хотя бы один домен.', 'bad');
+    setMessage('Укажите название нового списка и хотя бы один домен', 'warn');
+    return;
+  }
+  try {
+    const data = await postJson('/api/presets/save', { scope, name, domains });
+    mergePresetResponse(data);
+    if (!state.customPresets[scope]) state.customPresets[scope] = {};
+    state.customPresets[scope][name] = domains;
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    state.presetManager.scope = scope;
+    state.presetManager.name = name;
+    const nameInput = el('preset-new-name');
+    const domainsInput = el('preset-new-domains');
+    if (nameInput) nameInput.value = '';
+    if (domainsInput) {
+      domainsInput.value = '';
+      updateEditorLineNumbers('preset-new-domains');
+    }
+    renderPresetSelects();
+    renderPresetManager();
+    await loadPresetEditorFromSelection({ silent: true });
+    renderPresetNewPreview(`Список сохранен: ${name}, доменов ${domains.length}.`, 'good');
+    setMessage('Новый список сохранен', 'good');
+  } catch (error) {
+    renderPresetNewPreview(`Ошибка сохранения: ${error.message}`, 'bad');
+    setMessage(`Ошибка сохранения нового списка: ${error.message}`, 'bad');
   }
 }
 async function exportPresetEditor(){
@@ -4209,13 +4172,6 @@ async function importV2flyPreset(){
     if (data.preset) {
       state.presetManager.scope = 'finder';
       state.presetManager.name = data.preset;
-      state.presetManager.query = '';
-      state.presetManager.domains = [];
-      state.presetManager.total = 0;
-      state.presetManager.hasMore = false;
-      state.presetManager.loaded = false;
-      const editorName = el('preset-editor-name');
-      if (editorName) editorName.value = data.preset;
     }
     renderPresetSelects();
     renderPresetManager();
@@ -4224,7 +4180,7 @@ async function importV2flyPreset(){
       updateEditorLineNumbers('v2fly-domains');
     }
     renderV2flyPreview();
-    if (data.preset) await refreshPresetManager(true);
+    if (data.preset) await loadPresetEditorFromSelection({ silent: true });
     setMessage(`Пресет сохранен: ${data.count || 0} доменов`, 'good');
   } catch (error) {
     setMessage(`Ошибка сохранения v2fly: ${error.message}`, 'bad');
@@ -4842,28 +4798,16 @@ document.addEventListener('click', (event) => {
     importV2flyPreset();
     return;
   }
-  if (button.dataset.action === 'preset-manager-refresh') {
-    refreshPresetManager(true);
-    return;
-  }
-  if (button.dataset.action === 'preset-manager-load-more') {
-    refreshPresetManager(false);
-    return;
-  }
-  if (button.dataset.action === 'preset-editor-load') {
-    loadPresetEditorFromSelection();
-    return;
-  }
-  if (button.dataset.action === 'preset-editor-preview') {
-    previewPresetEditor();
-    return;
-  }
   if (button.dataset.action === 'preset-editor-save') {
     savePresetEditor();
     return;
   }
   if (button.dataset.action === 'preset-editor-export') {
     exportPresetEditor();
+    return;
+  }
+  if (button.dataset.action === 'preset-new-save') {
+    savePresetNew();
     return;
   }
   if (button.dataset.backupRestore) {
@@ -4933,15 +4877,13 @@ document.addEventListener('input', (event) => {
     state.v2flyPreview = null;
     renderV2flyPreview();
   }
-  if (event.target && event.target.id === 'preset-manager-query') {
-    state.presetManager.query = String(event.target.value || '').trim();
-  }
   if (event.target && event.target.id === 'preset-editor-domains') {
     updateEditorLineNumbers('preset-editor-domains');
     renderPresetEditorPreview(null);
   }
-  if (event.target && event.target.id === 'preset-editor-name') {
-    renderPresetEditorPreview(null);
+  if (event.target && event.target.id === 'preset-new-domains') {
+    updateEditorLineNumbers('preset-new-domains');
+    renderPresetNewPreview(null);
   }
   if (event.target && event.target.id === 'finder-domains') {
     updateEditorLineNumbers('finder-domains');
@@ -4988,9 +4930,6 @@ document.addEventListener('change', (event) => {
     state.v2flyPreview = null;
     renderV2flyPreview();
   }
-  if (event.target && event.target.dataset && event.target.dataset.presetDomainToggle) {
-    togglePresetDomain(event.target.dataset.presetDomainToggle, Boolean(event.target.checked));
-  }
   if (event.target && event.target.id === 'limit-time-enabled') {
     el('time-limit-field').hidden = !event.target.checked;
     markDiscoveryProfileCustom();
@@ -5004,11 +4943,8 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && event.target.id === 'preset-manager-name') {
     state.presetManager.name = event.target.value || '';
-    state.presetManager.domains = [];
-    state.presetManager.total = 0;
-    state.presetManager.hasMore = false;
-    state.presetManager.loaded = false;
     renderPresetManager();
+    loadPresetEditorFromSelection({ silent: true });
   }
   if (event.target && event.target.id === 'discovery-profile-select') {
     const profile = (state.discoveryProfiles || {})[event.target.value];
@@ -5299,7 +5235,7 @@ def _normalize_run_preferences(raw: dict[str, Any]) -> dict[str, Any]:
         "domain_preset": str(raw.get("domain_preset") or "builtin:critical")[:160],
         "discovery_profile": discovery_profile,
         "run_mode": run_mode,
-        "curl_parallelism": _bounded_int(raw.get("curl_parallelism"), default=4, minimum=1, maximum=10),
+        "curl_parallelism": _minimum_int(raw.get("curl_parallelism"), default=4, minimum=1),
         "enable_http": bool(raw.get("enable_http")),
         "enable_tls12": bool(raw.get("enable_tls12", True)),
         "enable_tls13": bool(raw.get("enable_tls13")),
@@ -5331,7 +5267,7 @@ def _clean_domain_list(value: Any) -> list[str]:
 
 
 def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
-    max_parallelism = _bounded_int(raw.get("curl_parallelism_max"), default=10, minimum=1, maximum=10)
+    max_parallelism = _minimum_int(raw.get("curl_parallelism_max"), default=10, minimum=1)
     default_parallelism = _bounded_int(raw.get("curl_parallelism_default"), default=4, minimum=1, maximum=max_parallelism)
     channel = str(raw.get("update_channel") or "stable")
     if channel not in {"stable", "prerelease"}:
@@ -5586,7 +5522,7 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
 def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
     domains = _payload_domains(payload)
     settings = read_settings(config)
-    max_parallelism = _bounded_int(settings.get("curl_parallelism_max"), default=10, minimum=1, maximum=10)
+    max_parallelism = _minimum_int(settings.get("curl_parallelism_max"), default=10, minimum=1)
     return run_multi_domain_discovery(
         domains,
         config.output.state_dir,
