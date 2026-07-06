@@ -49,7 +49,15 @@ _RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS = {
 _RUN_PAYLOAD_MAX_SCALAR_LIST = 500
 _RUN_PAYLOAD_MAX_OBJECT_LIST = 100
 _RUN_PAYLOAD_MAX_STRING = 8192
+_RUN_PAYLOAD_COMPACT_BATCH_SIZE = 100
 _LEGACY_RUNTIME_FILES = ("available.ndjson", "runs.jsonl", "candidates.json")
+_LEGACY_STORAGE_TABLES = (
+    "candidate_seen_events",
+    "candidate_common_domains",
+    "candidate_domains",
+    "candidates",
+    "presets",
+)
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -589,16 +597,17 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
 
 
 def _drop_legacy_storage(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        DROP TABLE IF EXISTS candidate_seen_events;
-        DROP TABLE IF EXISTS candidate_common_domains;
-        DROP TABLE IF EXISTS candidate_domains;
-        DROP TABLE IF EXISTS candidates;
-        DROP TABLE IF EXISTS presets;
-        """
-    )
+    if get_meta(conn, "legacy_storage_removed_v9") == "1":
+        return
+    removed = sum(1 for table in _LEGACY_STORAGE_TABLES if _table_exists(conn, table))
+    set_meta(conn, "legacy_storage_removed_started_v9", "1")
+    for table in _LEGACY_STORAGE_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    if removed:
+        set_meta(conn, "needs_vacuum", "1")
     set_meta(conn, "legacy_storage_removed", "1")
+    set_meta(conn, "legacy_storage_removed_v9", "1")
+    set_meta(conn, "legacy_storage_removed_tables", str(removed))
 
 
 def _drop_strategy_attempts(conn: sqlite3.Connection) -> None:
@@ -674,36 +683,70 @@ def _compact_payload_value(key: str, value: Any, *, depth: int) -> Any:
 def _compact_run_payloads(conn: sqlite3.Connection) -> None:
     if get_meta(conn, "run_payloads_compacted_v7") == "1":
         return
-    seqs = [int(row["seq"]) for row in conn.execute("SELECT seq FROM runs ORDER BY seq").fetchall()]
-    changed = 0
-    original_bytes = 0
-    compact_bytes = 0
-    for seq in seqs:
-        row = conn.execute("SELECT payload_json FROM runs WHERE seq = ?", (seq,)).fetchone()
-        if not row:
-            continue
-        raw = str(row["payload_json"] or "")
-        original_bytes += len(raw.encode("utf-8"))
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            compact_bytes += len(raw.encode("utf-8"))
-            continue
-        if not isinstance(data, dict):
-            compact_bytes += len(raw.encode("utf-8"))
-            continue
-        compact = compact_run_payload(data)
-        payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        compact_bytes += len(payload.encode("utf-8"))
-        if payload != raw:
-            conn.execute("UPDATE runs SET payload_json = ? WHERE seq = ?", (payload, seq))
-            changed += 1
+    last_seq = _meta_int(conn, "run_payloads_compaction_last_seq_v7")
+    changed = _meta_int(conn, "run_payloads_compacted_count")
+    original_bytes = _meta_int(conn, "run_payloads_original_bytes")
+    compact_bytes = _meta_int(conn, "run_payloads_compact_bytes")
+    set_meta(conn, "run_payloads_compaction_started_v7", "1")
+    while True:
+        rows = conn.execute(
+            """
+            SELECT seq, payload_json
+            FROM runs
+            WHERE seq > ?
+            ORDER BY seq
+            LIMIT ?
+            """,
+            (last_seq, _RUN_PAYLOAD_COMPACT_BATCH_SIZE),
+        ).fetchall()
+        if not rows:
+            break
+        batch_changed = 0
+        for row in rows:
+            seq = int(row["seq"])
+            raw = str(row["payload_json"] or "")
+            raw_bytes = len(raw.encode("utf-8"))
+            original_bytes += raw_bytes
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                compact_bytes += raw_bytes
+                last_seq = seq
+                continue
+            if not isinstance(data, dict):
+                compact_bytes += raw_bytes
+                last_seq = seq
+                continue
+            compact = compact_run_payload(data)
+            payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            compact_bytes += len(payload.encode("utf-8"))
+            if payload != raw:
+                conn.execute("UPDATE runs SET payload_json = ? WHERE seq = ?", (payload, seq))
+                changed += 1
+                batch_changed += 1
+            last_seq = seq
+        set_meta(conn, "run_payloads_compaction_last_seq_v7", str(last_seq))
+        set_meta(conn, "run_payloads_compacted_count", str(changed))
+        set_meta(conn, "run_payloads_original_bytes", str(original_bytes))
+        set_meta(conn, "run_payloads_compact_bytes", str(compact_bytes))
+        if batch_changed:
+            set_meta(conn, "needs_vacuum", "1")
+        conn.commit()
     set_meta(conn, "run_payloads_compacted_v7", "1")
     set_meta(conn, "run_payloads_compacted_count", str(changed))
     set_meta(conn, "run_payloads_original_bytes", str(original_bytes))
     set_meta(conn, "run_payloads_compact_bytes", str(compact_bytes))
+    set_meta(conn, "run_payloads_compaction_completed_v7", "1")
     if changed:
         set_meta(conn, "needs_vacuum", "1")
+    conn.commit()
+
+
+def _meta_int(conn: sqlite3.Connection, key: str, default: int = 0) -> int:
+    try:
+        return int(get_meta(conn, key) or default)
+    except ValueError:
+        return default
 
 
 def _cleanup_runtime_state(conn: sqlite3.Connection, root: Path) -> None:

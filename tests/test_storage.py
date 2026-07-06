@@ -260,6 +260,141 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(int(has_attempts_table), 0)
             self.assertEqual(removed_count, "1")
 
+    def test_migration_resumes_run_payload_compaction_from_progress_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            path = db_path(state_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            first_compact = {
+                "id": "old-run-1",
+                "kind": "multi-domain-discovery",
+                "status": "success",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "candidate_count": 1,
+            }
+            second_heavy = {
+                "id": "old-run-2",
+                "kind": "multi-domain-discovery",
+                "status": "success",
+                "timestamp": "2026-07-01T00:01:00Z",
+                "candidate_count": 2,
+                "candidates": [{"args": "--a"}, {"args": "--b"}],
+                "summary": {"items": list(range(100))},
+            }
+            first_payload = json.dumps(first_compact, separators=(",", ":"), sort_keys=True)
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO meta(key, value) VALUES('schema_version', '6');
+                    CREATE TABLE runs (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id TEXT NOT NULL,
+                        kind TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT '',
+                        timestamp TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO runs(id, kind, status, timestamp, payload_json) VALUES(?, ?, ?, ?, ?)",
+                    ("old-run-1", "multi-domain-discovery", "success", "2026-07-01T00:00:00Z", first_payload),
+                )
+                conn.execute(
+                    "INSERT INTO runs(id, kind, status, timestamp, payload_json) VALUES(?, ?, ?, ?, ?)",
+                    (
+                        "old-run-2",
+                        "multi-domain-discovery",
+                        "success",
+                        "2026-07-01T00:01:00Z",
+                        json.dumps(second_heavy, separators=(",", ":")),
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES('run_payloads_compaction_started_v7', '1')"
+                )
+                conn.execute("INSERT INTO meta(key, value) VALUES('run_payloads_compaction_last_seq_v7', '1')")
+                conn.execute("INSERT INTO meta(key, value) VALUES('run_payloads_compacted_count', '1')")
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES('run_payloads_original_bytes', ?)",
+                    (str(len(first_payload.encode("utf-8"))),),
+                )
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES('run_payloads_compact_bytes', ?)",
+                    (str(len(first_payload.encode("utf-8"))),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with connect(state_dir) as conn:
+                rows = conn.execute("SELECT id, payload_json FROM runs ORDER BY seq").fetchall()
+                meta_done = get_meta(conn, "run_payloads_compacted_v7")
+                meta_last_seq = get_meta(conn, "run_payloads_compaction_last_seq_v7")
+                meta_count = get_meta(conn, "run_payloads_compacted_count")
+
+            first = json.loads(str(rows[0]["payload_json"]))
+            second = json.loads(str(rows[1]["payload_json"]))
+            self.assertEqual(first, first_compact)
+            self.assertNotIn("candidates", second)
+            self.assertNotIn("summary", second)
+            self.assertEqual(meta_done, "1")
+            self.assertEqual(meta_last_seq, "2")
+            self.assertEqual(meta_count, "2")
+
+    def test_legacy_storage_drop_recovers_from_started_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            path = db_path(state_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO meta(key, value) VALUES('schema_version', '4');
+                    INSERT INTO meta(key, value) VALUES('legacy_storage_removed_started_v9', '1');
+                    CREATE TABLE candidates(id TEXT PRIMARY KEY);
+                    CREATE TABLE candidate_domains(candidate_id TEXT, domain TEXT);
+                    CREATE TABLE candidate_common_domains(candidate_id TEXT, domain TEXT);
+                    CREATE TABLE candidate_seen_events(id INTEGER PRIMARY KEY);
+                    CREATE TABLE presets(scope TEXT, name TEXT);
+                    INSERT INTO candidates(id) VALUES('c1');
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with connect(state_dir) as conn:
+                table_names = {
+                    str(row["name"])
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                }
+                done = get_meta(conn, "legacy_storage_removed_v9")
+                removed = get_meta(conn, "legacy_storage_removed_tables")
+
+            self.assertFalse(
+                {
+                    "candidates",
+                    "candidate_domains",
+                    "candidate_common_domains",
+                    "candidate_seen_events",
+                    "presets",
+                }
+                & table_names
+            )
+            self.assertEqual(done, "1")
+            self.assertEqual(removed, "5")
+
     def test_new_schema_does_not_create_legacy_candidate_tables(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
