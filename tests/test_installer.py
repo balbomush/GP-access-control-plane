@@ -35,6 +35,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("status=failed", helper)
         self.assertIn("nft-delete-blockcheck-table", helper)
         self.assertIn("unsupported run target", helper)
+        self.assertIn("Preparing local v2fly domain catalog", installer)
+        self.assertIn("domain-sources prepare-v2fly", installer)
 
 
 if __name__ == "__main__":

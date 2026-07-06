@@ -37,6 +37,10 @@ class CliSafetyTests(unittest.TestCase):
             4,
         )
         self.assertEqual(parser.parse_args(["storage", "status"]).storage_command, "status")
+        self.assertEqual(
+            parser.parse_args(["domain-sources", "prepare-v2fly"]).domain_sources_command,
+            "prepare-v2fly",
+        )
         standard_args = parser.parse_args(
             [
                 "strategy-finder",

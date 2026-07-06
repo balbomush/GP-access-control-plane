@@ -195,6 +195,11 @@ run_as_target python3 -m venv "$INSTALL_DIR/.venv"
 run_as_target "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 run_as_target "$INSTALL_DIR/.venv/bin/python" -m pip install -e "$INSTALL_DIR"
 
+log "Preparing local v2fly domain catalog"
+if ! run_as_target "$INSTALL_DIR/.venv/bin/gp-control-plane" --config "$INSTALL_DIR/configs/orchestrator.example.yaml" domain-sources prepare-v2fly; then
+  log "v2fly local catalog was not prepared; v2fly import will become available after the next successful install or update"
+fi
+
 log "Installing GP root helper"
 as_root install -d -m 0755 "$(dirname "$ROOT_HELPER_PATH")"
 as_root install -m 0755 -o root -g root "$INSTALL_DIR/scripts/gp-root-helper.sh" "$ROOT_HELPER_PATH"

@@ -8,6 +8,7 @@ from typing import Any
 
 from . import __version__
 from .config import load_config
+from .domain_sources import prepare_v2fly_local_storage
 from .strategy_finder import (
     domain_sets,
     read_candidates,
@@ -67,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     storage_parser = subparsers.add_parser("storage", help="Inspect local SQLite data")
     storage_subparsers = storage_parser.add_subparsers(dest="storage_command", required=True)
     storage_subparsers.add_parser("status", help="Print local SQLite status")
+    sources_parser = subparsers.add_parser("domain-sources", help="Prepare local domain source caches")
+    sources_subparsers = sources_parser.add_subparsers(dest="domain_sources_command", required=True)
+    sources_subparsers.add_parser("prepare-v2fly", help="Download and prepare local v2fly domain-list storage")
     web_parser = subparsers.add_parser("web", help="Run local Raspberry Pi web UI")
     web_parser.add_argument("--host", default="0.0.0.0")
     web_parser.add_argument("--port", type=int, default=8080)
@@ -144,6 +148,12 @@ def _main(args: argparse.Namespace) -> int:
             _print_json(storage_status(config.output.state_dir))
             return 0
         raise ValueError("unsupported storage command")
+
+    if args.command == "domain-sources":
+        if args.domain_sources_command == "prepare-v2fly":
+            _print_json(prepare_v2fly_local_storage(config.output.state_dir))
+            return 0
+        raise ValueError("unsupported domain-sources command")
 
     if args.command == "web":
         serve(config, host=args.host, port=args.port)

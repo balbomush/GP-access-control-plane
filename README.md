@@ -18,6 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/m
 - скачает этот проект в `~/gp/GP-access-control-plane`;
 - создаст Python-окружение;
 - установит команду `gp-control-plane`;
+- подготовит локальный каталог групп `v2fly/domain-list-community` для импорта доменных списков без live-запросов из web UI;
 - установит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
 - создаст и включит systemd-сервис;
 - запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi.
