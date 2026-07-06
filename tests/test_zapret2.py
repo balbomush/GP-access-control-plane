@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -23,6 +24,15 @@ from gp_control_plane.zapret2 import (
 
 
 class Zapret2Tests(unittest.TestCase):
+    def test_root_helper_env_whitelist_matches_backend_keys(self) -> None:
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        text = helper.read_text(encoding="utf-8")
+        match = re.search(r"case \"\$key\" in\s+([^)]+)\)", text)
+        self.assertIsNotNone(match)
+        helper_keys = set(match.group(1).strip().split("|"))
+
+        self.assertEqual(helper_keys, set(BLOCKCHECK_ENV_KEYS))
+
     def test_check_install_reports_available_paths(self) -> None:
         def fake_which(name: str) -> str | None:
             return {"nfqws2": "/usr/bin/nfqws2", "blockcheck2.sh": "/usr/bin/blockcheck2.sh"}.get(name)
