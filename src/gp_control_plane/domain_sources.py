@@ -8,6 +8,7 @@ import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import URLError
 from urllib.request import urlopen
 
 from .storage import read_custom_presets, save_custom_preset
@@ -32,6 +33,25 @@ _FALLBACK_V2FLY_CATEGORIES = [
     "telegram",
     "youtube",
 ]
+_EXPECTED_V2FLY_SOURCE_ERRORS = (
+    OSError,
+    TimeoutError,
+    URLError,
+    subprocess.SubprocessError,
+    tarfile.TarError,
+    ValueError,
+)
+_EXPECTED_V2FLY_REVISION_FALLBACK_ERRORS = (
+    OSError,
+    TimeoutError,
+    subprocess.SubprocessError,
+)
+_EXPECTED_V2FLY_ARCHIVE_FALLBACK_ERRORS = (
+    OSError,
+    TimeoutError,
+    URLError,
+    tarfile.TarError,
+)
 
 
 def builtin_preset_sources() -> dict[str, dict[str, str]]:
@@ -52,11 +72,13 @@ def list_v2fly_categories(
     fetcher: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     source = "github"
+    errors: list[dict[str, str]] = []
     try:
         text = fetcher() if fetcher else fetch_v2fly_category_index()
         categories = parse_v2fly_category_index(text)
-    except Exception:  # noqa: BLE001
+    except _EXPECTED_V2FLY_SOURCE_ERRORS as exc:
         source = "fallback"
+        errors.append(_v2fly_error("catalog", exc))
         categories = list(_FALLBACK_V2FLY_CATEGORIES)
     needle = str(query or "").strip().lower()
     if needle:
@@ -69,6 +91,9 @@ def list_v2fly_categories(
         "categories": categories[:clean_limit],
         "has_more": len(categories) > clean_limit,
         "limit": clean_limit,
+        "errors": errors,
+        "error_kind": errors[0]["kind"] if errors else "",
+        "error_message": _format_v2fly_errors(errors),
     }
 
 
@@ -82,15 +107,17 @@ def list_v2fly_categories_cached(
     index_fetcher: Callable[[], str] | None = None,
     revision_fetcher: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
-    cache = read_v2fly_catalog_cache(state_dir)
+    cache, cache_error = _read_v2fly_catalog_cache(state_dir)
+    errors: list[dict[str, str]] = []
+    if cache_error:
+        errors.append(cache_error)
     remote_revision = ""
-    revision_error = ""
     checked_at = _utc_now()
     if check_update or refresh or not cache:
         try:
             remote_revision = parse_v2fly_revision(revision_fetcher() if revision_fetcher else fetch_v2fly_revision())
-        except Exception as exc:  # noqa: BLE001
-            revision_error = str(exc)
+        except _EXPECTED_V2FLY_SOURCE_ERRORS as exc:
+            errors.append(_v2fly_error("revision", exc))
 
     local_revision = str((cache or {}).get("revision") or "")
     update_available = bool(cache and remote_revision and local_revision and remote_revision != local_revision)
@@ -105,11 +132,14 @@ def list_v2fly_categories_cached(
                 "checked_at": checked_at,
                 "categories": categories,
             }
-            write_v2fly_catalog_cache(state_dir, cache)
+            try:
+                write_v2fly_catalog_cache(state_dir, cache)
+            except OSError as exc:
+                errors.append(_v2fly_error("cache_write", exc))
             local_revision = str(cache.get("revision") or "")
             update_available = False
-        except Exception as exc:  # noqa: BLE001
-            revision_error = str(exc)
+        except _EXPECTED_V2FLY_SOURCE_ERRORS as exc:
+            errors.append(_v2fly_error("catalog_refresh", exc))
             if not cache:
                 cache = {
                     "source": "fallback",
@@ -122,10 +152,14 @@ def list_v2fly_categories_cached(
     source = str((cache or {}).get("source") or "cache")
     if remote_revision and cache and local_revision == remote_revision:
         cache = {**cache, "checked_at": checked_at}
-        write_v2fly_catalog_cache(state_dir, cache)
+        try:
+            write_v2fly_catalog_cache(state_dir, cache)
+        except OSError as exc:
+            errors.append(_v2fly_error("cache_write", exc))
     needle = str(query or "").strip().lower()
     filtered = [category for category in categories if needle in category] if needle else categories
     clean_limit = max(1, min(int(limit or 2000), 5000))
+    error_message = _format_v2fly_errors(errors)
     return {
         "source": source,
         "query": needle,
@@ -140,20 +174,31 @@ def list_v2fly_categories_cached(
         "checked_at": str((cache or {}).get("checked_at") or checked_at),
         "update_available": update_available,
         "can_refresh": (not cache) or source == "fallback" or update_available,
-        "revision_error": revision_error,
+        "revision_error": error_message,
+        "cache_error": _format_v2fly_errors([error for error in errors if error["kind"] == "cache"]),
+        "error_kind": errors[0]["kind"] if errors else "",
+        "error_message": error_message,
+        "errors": errors,
     }
 
 
 def read_v2fly_catalog_cache(state_dir: Path) -> dict[str, Any] | None:
+    cache, _ = _read_v2fly_catalog_cache(state_dir)
+    return cache
+
+
+def _read_v2fly_catalog_cache(state_dir: Path) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     path = v2fly_catalog_cache_path(state_dir)
     if not path.exists():
-        return None
+        return None, None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    except OSError as exc:
+        return None, _v2fly_error("cache_read", exc)
+    except json.JSONDecodeError as exc:
+        return None, _v2fly_error("cache_read", exc)
     if not isinstance(payload, dict):
-        return None
+        return None, _v2fly_error("cache_read", ValueError("invalid v2fly catalog cache"))
     categories: list[str] = []
     seen: set[str] = set()
     for raw in payload.get("categories") or []:
@@ -165,13 +210,13 @@ def read_v2fly_catalog_cache(state_dir: Path) -> dict[str, Any] | None:
             seen.add(clean)
             categories.append(clean)
     if not categories:
-        return None
+        return None, _v2fly_error("cache_read", ValueError("empty v2fly catalog cache"))
     return {
         "source": str(payload.get("source") or "cache"),
         "revision": str(payload.get("revision") or ""),
         "checked_at": str(payload.get("checked_at") or ""),
         "categories": sorted(categories),
-    }
+    }, None
 
 
 def write_v2fly_catalog_cache(state_dir: Path, payload: dict[str, Any]) -> None:
@@ -180,6 +225,35 @@ def write_v2fly_catalog_cache(state_dir: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _v2fly_error(stage: str, exc: BaseException) -> dict[str, str]:
+    return {
+        "stage": stage,
+        "kind": _v2fly_error_kind(stage, exc),
+        "message": _v2fly_error_message(exc),
+    }
+
+
+def _v2fly_error_kind(stage: str, exc: BaseException) -> str:
+    if stage.startswith("cache"):
+        return "cache"
+    if isinstance(exc, (json.JSONDecodeError, ValueError, tarfile.TarError)):
+        return "format"
+    if isinstance(exc, (OSError, TimeoutError, URLError, subprocess.SubprocessError)):
+        return "network"
+    return "unexpected"
+
+
+def _v2fly_error_message(exc: BaseException) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return " ".join(text.split())
+
+
+def _format_v2fly_errors(errors: list[dict[str, str]]) -> str:
+    if not errors:
+        return ""
+    return "; ".join(f"{error['stage']}: {error['message']}" for error in errors)
 
 
 def v2fly_catalog_cache_path(state_dir: Path) -> Path:
@@ -195,10 +269,11 @@ def fetch_v2fly_revision() -> str:
             text=True,
             timeout=20,
         )
-        revision = completed.stdout.strip().split()[0]
+        parts = completed.stdout.strip().split()
+        revision = parts[0] if parts else ""
         if revision:
             return revision
-    except Exception:  # noqa: BLE001
+    except _EXPECTED_V2FLY_REVISION_FALLBACK_ERRORS:
         pass
     with urlopen(V2FLY_REVISION_URL, timeout=15) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
@@ -227,7 +302,7 @@ def parse_v2fly_revision(text: str) -> str:
 def fetch_v2fly_category_index() -> str:
     try:
         return fetch_v2fly_category_index_from_archive()
-    except Exception:  # noqa: BLE001
+    except _EXPECTED_V2FLY_ARCHIVE_FALLBACK_ERRORS:
         pass
     with urlopen(V2FLY_CONTENTS_URL, timeout=30) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")

@@ -133,6 +133,21 @@ domain:youtube.com
         self.assertEqual(result["source"], "github")
         self.assertEqual(result["categories"], ["google"])
 
+    def test_list_v2fly_categories_reports_format_fallback(self) -> None:
+        result = list_v2fly_categories(fetcher=lambda: "{not-json")
+
+        self.assertEqual(result["source"], "fallback")
+        self.assertEqual(result["error_kind"], "format")
+        self.assertIn("catalog", result["error_message"])
+        self.assertIn("google", result["categories"])
+
+    def test_list_v2fly_categories_does_not_hide_unexpected_errors(self) -> None:
+        def broken_fetcher() -> str:
+            raise RuntimeError("programming bug")
+
+        with self.assertRaises(RuntimeError):
+            list_v2fly_categories(fetcher=broken_fetcher)
+
     def test_parse_v2fly_revision_reads_github_commit_sha(self) -> None:
         self.assertEqual(parse_v2fly_revision('{"sha": "abc123"}'), "abc123")
         self.assertEqual(parse_v2fly_revision("plain-revision"), "plain-revision")
@@ -200,6 +215,40 @@ domain:youtube.com
             self.assertEqual(refreshed["revision"], "rev2")
             self.assertEqual(refreshed["categories"], ["youtube"])
             self.assertFalse(refreshed["update_available"])
+
+    def test_cached_v2fly_catalog_reports_bad_cache_and_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            cache_path = state_dir / "domain-sources" / "v2fly-catalog.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text("{bad-json", encoding="utf-8")
+
+            result = list_v2fly_categories_cached(
+                state_dir,
+                limit=100,
+                index_fetcher=lambda: '[{"name": "google", "type": "file"}]',
+                revision_fetcher=lambda: '{"sha": "rev1"}',
+            )
+
+            self.assertEqual(result["categories"], ["google"])
+            self.assertEqual(result["error_kind"], "cache")
+            self.assertIn("cache_read", result["cache_error"])
+
+    def test_cached_v2fly_catalog_reports_cache_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            with patch("gp_control_plane.domain_sources.write_v2fly_catalog_cache", side_effect=OSError("disk full")):
+                result = list_v2fly_categories_cached(
+                    state_dir,
+                    limit=100,
+                    index_fetcher=lambda: '[{"name": "discord", "type": "file"}]',
+                    revision_fetcher=lambda: '{"sha": "rev1"}',
+                )
+
+            self.assertEqual(result["categories"], ["discord"])
+            self.assertTrue(any(error["stage"] == "cache_write" for error in result["errors"]))
+            self.assertIn("disk full", result["cache_error"])
 
 
 if __name__ == "__main__":
