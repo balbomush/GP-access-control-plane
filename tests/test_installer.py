@@ -37,6 +37,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("unsupported run target", helper)
         self.assertIn("Preparing local v2fly domain catalog", installer)
         self.assertIn("domain-sources prepare-v2fly", installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.2}"', installer)
 
 
 if __name__ == "__main__":
