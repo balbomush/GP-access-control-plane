@@ -41,10 +41,8 @@ class InstallerTests(unittest.TestCase):
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
         self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)
         self.assertNotIn('BRANCH="${GP_BRANCH:-main}"', self.installer)
-        self.assertIn(
-            'repo_git fetch origin "$BRANCH" || repo_git fetch origin "refs/tags/$BRANCH:refs/tags/$BRANCH"',
-            self.installer,
-        )
+        self.assertIn('repo_git fetch origin "$BRANCH" || true', self.installer)
+        self.assertIn('repo_git fetch origin "+refs/tags/$BRANCH:refs/tags/$BRANCH" || true', self.installer)
         self.assertIn('repo_git checkout -B "$BRANCH" "origin/$BRANCH"', self.installer)
         self.assertIn('repo_git checkout --detach "$BRANCH"', self.installer)
         self.assertIn('fail "Cannot find branch or tag: $BRANCH"', self.installer)

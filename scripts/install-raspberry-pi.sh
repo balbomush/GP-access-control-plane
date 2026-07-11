@@ -281,14 +281,16 @@ if step_log app "Installing GP Access Control Plane"; then
     if [ -n "$(repo_git status --short)" ]; then
       fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."
     fi
-    repo_git fetch origin "$BRANCH" || repo_git fetch origin "refs/tags/$BRANCH:refs/tags/$BRANCH"
+    repo_git fetch origin "$BRANCH" || true
     if repo_git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
       repo_git checkout -B "$BRANCH" "origin/$BRANCH"
       repo_git pull --ff-only origin "$BRANCH"
-    elif repo_git rev-parse --verify --quiet "refs/tags/$BRANCH" >/dev/null; then
-      repo_git checkout --detach "$BRANCH"
     else
-      fail "Cannot find branch or tag: $BRANCH"
+      repo_git fetch origin "+refs/tags/$BRANCH:refs/tags/$BRANCH" || true
+      if ! repo_git rev-parse --verify --quiet "refs/tags/$BRANCH" >/dev/null; then
+        fail "Cannot find branch or tag: $BRANCH"
+      fi
+      repo_git checkout --detach "$BRANCH"
     fi
   elif [ -e "$INSTALL_DIR" ]; then
     fail "Install path exists but is not a git repository: $INSTALL_DIR"
