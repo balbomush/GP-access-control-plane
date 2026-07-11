@@ -281,7 +281,7 @@ if step_log app "Installing GP Access Control Plane"; then
     if [ -n "$(repo_git status --short)" ]; then
       fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."
     fi
-    repo_git fetch origin "$BRANCH" || repo_git fetch origin "tag" "$BRANCH"
+    repo_git fetch origin "$BRANCH" || repo_git fetch origin "refs/tags/$BRANCH:refs/tags/$BRANCH"
     if repo_git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
       repo_git checkout -B "$BRANCH" "origin/$BRANCH"
       repo_git pull --ff-only origin "$BRANCH"
