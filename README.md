@@ -7,7 +7,7 @@
 Самый простой вариант для Raspberry Pi OS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.2/scripts/install-raspberry-pi.sh | bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.3/scripts/install-raspberry-pi.sh | bash
 ```
 
 Что сделает скрипт:
@@ -36,13 +36,13 @@ http://<ip-raspberry-pi>:8080/
 Если запустить через `sudo`, установщик возьмет исходного пользователя из `SUDO_USER` и поставит проект ему, а не в `/root`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.2/scripts/install-raspberry-pi.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.3/scripts/install-raspberry-pi.sh | sudo bash
 ```
 
 Если нужно явно выбрать пользователя:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.2/scripts/install-raspberry-pi.sh | sudo env GP_INSTALL_USER=pi bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.3/scripts/install-raspberry-pi.sh | sudo env GP_INSTALL_USER=pi bash
 ```
 
 Путь установки можно поменять через `GP_INSTALL_DIR`, но выбранный пользователь должен иметь право записи в этот каталог. Для обычной установки лучше оставить путь по умолчанию: `~/gp/GP-access-control-plane`.
@@ -57,7 +57,7 @@ MemoryMax=1G
 Если для вашей платы нужны другие значения, задайте их при установке:
 
 ```bash
-GP_SERVICE_MEMORY_HIGH=768M GP_SERVICE_MEMORY_MAX=1500M curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.2/scripts/install-raspberry-pi.sh | bash
+GP_SERVICE_MEMORY_HIGH=768M GP_SERVICE_MEMORY_MAX=1500M curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.3/scripts/install-raspberry-pi.sh | bash
 ```
 
 Если репозиторий приватный, сначала настройте SSH-доступ к GitHub. Затем запустите установку через `git clone`:
@@ -183,10 +183,10 @@ journalctl -u gp-control-plane-web.service -f
 Повторно запустите установщик:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.2/scripts/install-raspberry-pi.sh | bash
+curl -fsSL https://raw.githubusercontent.com/balbomush/GP-access-control-plane/v0.3.3/scripts/install-raspberry-pi.sh | bash
 ```
 
-Он установит текущий стабильный релиз `v0.3.2`, обновит Python-окружение и перезапустит сервис. Если нужно явно поставить другую ветку или тег, задайте `GP_BRANCH`, например `GP_BRANCH=main`.
+Он установит текущий стабильный релиз `v0.3.3`, обновит Python-окружение и перезапустит сервис. Если нужно явно поставить другую ветку или тег, задайте `GP_BRANCH`, например `GP_BRANCH=main`.
 
 Тестовые alpha/prerelease-сборки не ставятся этой командой. Для них используйте вкладку `Настройки` в web UI:
 

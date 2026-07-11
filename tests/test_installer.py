@@ -36,10 +36,10 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertNotIn("/var/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertIn("write_multidomain_runner", self.helper)
-        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.2}"', self.installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)
 
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
-        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.2}"', self.installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)
         self.assertNotIn('BRANCH="${GP_BRANCH:-main}"', self.installer)
         self.assertIn('repo_git fetch origin "$BRANCH" || repo_git fetch origin "tag" "$BRANCH"', self.installer)
         self.assertIn('repo_git checkout -B "$BRANCH" "origin/$BRANCH"', self.installer)

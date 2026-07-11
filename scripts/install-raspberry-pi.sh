@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPO_URL="${GP_REPO_URL:-https://github.com/balbomush/GP-access-control-plane.git}"
-BRANCH="${GP_BRANCH:-v0.3.2}"
+BRANCH="${GP_BRANCH:-v0.3.3}"
 SERVICE_NAME="${GP_SERVICE_NAME:-gp-control-plane-web.service}"
 WEB_HOST="${GP_WEB_HOST:-0.0.0.0}"
 WEB_PORT="${GP_WEB_PORT:-8080}"
