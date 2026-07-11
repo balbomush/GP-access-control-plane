@@ -23,6 +23,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("systemd-run", self.helper)
         self.assertIn("GP_BRANCH", self.helper)
         self.assertIn("GP_INSTALL_USER", self.helper)
+        self.assertIn("GP_INSTALL_FORCE_CLEAN", self.helper)
         self.assertIn("safe.directory", self.helper)
         self.assertIn("repo_git", self.installer)
         self.assertIn('installed_ref="\\$(git', self.helper)
@@ -37,6 +38,19 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("/var/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertIn("write_multidomain_runner", self.helper)
         self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)
+
+    def test_release_update_forces_clean_checkout_but_manual_install_keeps_dirty_guard(self) -> None:
+        self.assertIn('INSTALL_FORCE_CLEAN="${GP_INSTALL_FORCE_CLEAN:-off}"', self.installer)
+        self.assertIn("force_clean_enabled()", self.installer)
+        self.assertIn("Repository has local changes; release update will discard worktree changes before checkout", self.installer)
+        self.assertIn("repo_git reset --hard", self.installer)
+        self.assertIn("repo_git clean -fd", self.installer)
+        self.assertIn('fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."', self.installer)
+        self.assertIn("export GP_INSTALL_FORCE_CLEAN=on", self.helper)
+
+        force_pos = self.helper.index("export GP_INSTALL_FORCE_CLEAN=on")
+        installer_pos = self.helper.index("if bash", force_pos)
+        self.assertLess(force_pos, installer_pos)
 
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
         self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)

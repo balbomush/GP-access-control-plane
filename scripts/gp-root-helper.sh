@@ -351,6 +351,7 @@ export GP_INSTALL_USER=$(shell_quote "$install_user")
 export GP_BRANCH=$(shell_quote "$ref")
 export GP_REPO_URL=$(shell_quote "$repo_url")
 export GP_SERVICE_NAME=$(shell_quote "$service_name")
+export GP_INSTALL_FORCE_CLEAN=on
 if bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh"); then
   installed_ref="\$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") describe --tags --exact-match 2>/dev/null || git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   installed_commit="\$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --short HEAD 2>/dev/null || true)"

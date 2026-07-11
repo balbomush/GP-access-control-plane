@@ -17,6 +17,7 @@ SUDOERS_PATH="${GP_SUDOERS_PATH:-/etc/sudoers.d/gp-control-plane-root-helper}"
 SERVICE_MEMORY_HIGH="${GP_SERVICE_MEMORY_HIGH:-512M}"
 SERVICE_MEMORY_MAX="${GP_SERVICE_MEMORY_MAX:-1G}"
 REQUESTED_STEPS="${GP_INSTALL_STEPS:-all}"
+INSTALL_FORCE_CLEAN="${GP_INSTALL_FORCE_CLEAN:-off}"
 
 usage() {
   cat <<USAGE
@@ -94,6 +95,13 @@ step_log() {
   fi
   log "[$1] skipped"
   return 1
+}
+
+force_clean_enabled() {
+  case "$INSTALL_FORCE_CLEAN" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 CURRENT_UID="$(id -u)"
@@ -279,18 +287,31 @@ if step_log app "Installing GP Access Control Plane"; then
   run_as_target mkdir -p "$(dirname "$INSTALL_DIR")"
   if [ -d "$INSTALL_DIR/.git" ]; then
     if [ -n "$(repo_git status --short)" ]; then
-      fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."
+      if force_clean_enabled; then
+        log "Repository has local changes; release update will discard worktree changes before checkout"
+        repo_git reset --hard
+        repo_git clean -fd
+      else
+        fail "Repository has local changes: $INSTALL_DIR. Commit or remove them, then run installer again."
+      fi
     fi
     repo_git fetch origin "$BRANCH" || true
     if repo_git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
       repo_git checkout -B "$BRANCH" "origin/$BRANCH"
-      repo_git pull --ff-only origin "$BRANCH"
+      if force_clean_enabled; then
+        repo_git reset --hard "origin/$BRANCH"
+      else
+        repo_git pull --ff-only origin "$BRANCH"
+      fi
     else
       repo_git fetch origin "+refs/tags/$BRANCH:refs/tags/$BRANCH" || true
       if ! repo_git rev-parse --verify --quiet "refs/tags/$BRANCH" >/dev/null; then
         fail "Cannot find branch or tag: $BRANCH"
       fi
       repo_git checkout --detach "$BRANCH"
+      if force_clean_enabled; then
+        repo_git reset --hard "$BRANCH"
+      fi
     fi
   elif [ -e "$INSTALL_DIR" ]; then
     fail "Install path exists but is not a git repository: $INSTALL_DIR"
