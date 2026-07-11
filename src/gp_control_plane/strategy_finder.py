@@ -155,6 +155,9 @@ ETA_SAMPLE_MIN_ATTEMPTS = 3
 ETA_SAMPLE_MAX_POINTS = 201
 ETA_SAMPLE_WINSORIZE_MIN_INTERVALS = 20
 ETA_SAMPLE_WINSORIZE_RATIO = 0.1
+ETA_RECALC_SMALL_STEP = 10
+ETA_RECALC_LARGE_STEP = 100
+ETA_RECALC_LARGE_AFTER = 1000
 LIVE_CANDIDATE_FLUSH_SIZE = 50
 LIVE_CANDIDATE_QUEUE_MAX_BATCHES = 128
 LIVE_CANDIDATE_SAMPLE_LIMIT = 200
@@ -919,6 +922,7 @@ def latest_log_tail(
             "stderr_size": _file_version(stderr_log)["size"] if stderr_log and stderr_log.is_file() else 0,
             "progress": progress,
             "metrics": _read_latest_metrics(run),
+            "run_settings": _run_settings_for_progress(run),
         }
     return {
         "run_id": None,
@@ -932,6 +936,43 @@ def latest_log_tail(
         "stderr_size": 0,
         "progress": progress_from_stdout("", {}),
         "metrics": {},
+        "run_settings": {},
+    }
+
+
+def _run_settings_for_progress(run: dict[str, Any]) -> dict[str, Any]:
+    options = run.get("discovery_options") if isinstance(run.get("discovery_options"), dict) else {}
+
+    def option_value(key: str, fallback_keys: tuple[str, ...] = (), default: Any = None) -> Any:
+        if key in options:
+            return options[key]
+        for fallback_key in fallback_keys:
+            if fallback_key in run:
+                return run[fallback_key]
+        if key in run:
+            return run[key]
+        return default
+
+    return {
+        "domain_count": len(run.get("domains") or []),
+        "kind": run.get("kind") or "",
+        "enable_http": bool(option_value("enable_http", default=False)),
+        "enable_tls12": bool(option_value("enable_tls12", ("enable_tls",), True)),
+        "enable_tls13": bool(option_value("enable_tls13", default=False)),
+        "enable_quic": bool(option_value("enable_quic", ("include_quic",), True)),
+        "enable_ipv6": bool(option_value("enable_ipv6", default=False)),
+        "scan_level": str(option_value("scan_level", default="standard") or "standard"),
+        "repeats": _bounded_int(option_value("repeats", default=1), default=1, minimum=1, maximum=10),
+        "repeat_parallel": bool(option_value("repeat_parallel", default=False)),
+        "skip_dnscheck": bool(option_value("skip_dnscheck", default=True)),
+        "skip_ipblock": bool(option_value("skip_ipblock", default=True)),
+        "curl_parallelism": _minimum_int(run.get("curl_parallelism"), default=4, minimum=1)
+        if str(run.get("kind") or "") == "multi-domain-discovery"
+        else None,
+        "timeout_seconds": _minimum_int(run.get("timeout_seconds"), default=0, minimum=0),
+        "curl_max_time": _minimum_int(option_value("curl_max_time", default=2), default=2, minimum=1),
+        "curl_max_time_quic": _minimum_int(option_value("curl_max_time_quic", default=2), default=2, minimum=1),
+        "curl_max_time_doh": _minimum_int(option_value("curl_max_time_doh", default=2), default=2, minimum=1),
     }
 
 
@@ -1056,6 +1097,8 @@ class _LiveStdoutRecorder:
         self._metrics = _RuntimeMetricsSampler(state_dir, run)
         self._last_progress_attempted = -1
         self._last_progress_written_at = 0.0
+        self._eta_baseline_attempted = 0
+        self._eta_baseline_elapsed_seconds: int | None = None
         self._section = ""
         self._current_script = ""
         self._phase = PHASE_CHECK_VPN
@@ -1184,6 +1227,7 @@ class _LiveStdoutRecorder:
             self._phase = PHASE_DISCOVERY
             self._attempt_times.append(time.monotonic())
             self._attempts_by_script[self._current_script] = self._attempts_by_script.get(self._current_script, 0) + 1
+            self._maybe_update_eta_baseline_locked()
         attempt = _live_attempt_line(line)
         if attempt:
             self._pending_attempt = attempt
@@ -1228,6 +1272,13 @@ class _LiveStdoutRecorder:
             candidate = _candidate_from_result_line(line, scope=self._section)
             if candidate:
                 self._record_summary_candidate_locked(candidate, common=self._section == "common")
+
+    def _maybe_update_eta_baseline_locked(self) -> None:
+        baseline_attempted = _eta_recalculation_attempts(self._attempted)
+        if baseline_attempted <= 0 or baseline_attempted == self._eta_baseline_attempted:
+            return
+        self._eta_baseline_attempted = baseline_attempted
+        self._eta_baseline_elapsed_seconds = _elapsed_seconds(self._run.get("started_at") or self._run.get("timestamp"))
 
     def _record_unavailable_locked(self, line: str) -> None:
         if not self._pending_attempt:
@@ -1353,6 +1404,8 @@ class _LiveStdoutRecorder:
             runtime_sample_count=len(self._attempt_times),
             summary_verified=self._summary_verified,
             summary_fallbacks=self._summary_fallbacks,
+            eta_recalculation_attempts_override=self._eta_baseline_attempted,
+            eta_elapsed_seconds_override=self._eta_baseline_elapsed_seconds,
         )
 
     def _write_progress_locked(self, force: bool = False, run: dict[str, Any] | None = None) -> None:
@@ -1360,7 +1413,7 @@ class _LiveStdoutRecorder:
             return
         now = time.monotonic()
         attempt_delta = self._attempted - self._last_progress_attempted
-        if not force and attempt_delta < 20 and now - self._last_progress_written_at < 2.0:
+        if not force and attempt_delta < _eta_recalculation_step(self._attempted) and now - self._last_progress_written_at < 2.0:
             return
         progress = self._progress_locked(run or self._run)
         tmp = self._progress_log.with_suffix(".json.tmp")
@@ -2000,39 +2053,41 @@ def _run_multidomain_blockcheck_live(
         raise ValueError("no valid domains to check")
     blockcheck_path = _resolve_blockcheck_script(Path(blockcheck))
     zapret_base = blockcheck_path.parent
-    normalized_parallelism = _bounded_int(curl_parallelism, default=4, minimum=1, maximum=10)
+    normalized_parallelism = _minimum_int(curl_parallelism, default=4, minimum=1)
 
-    with tempfile.TemporaryDirectory() as raw:
-        tmp = Path(raw)
-        runner = _write_multidomain_runner(tmp, blockcheck_path)
-        full_env = os.environ.copy()
-        full_env.update(
-            {
+    full_env = os.environ.copy()
+    full_env.update(
+        {
             "BATCH": "1",
             "DOMAINS": " ".join(clean_domains),
             "IPVS": _ipvs_value(options),
             "TEST": "standard",
-                **options.to_blockcheck_env(),
-                "GP_MD_CURL_PARALLELISM": str(normalized_parallelism),
-                "ZAPRET_BASE": str(zapret_base),
-                "ZAPRET_RW": str(zapret_base),
-            }
-        )
-        _set_debug_stdout_env(full_env, debug_stdout)
-        return _run_blockcheck_command_live(
-            command=root_command([str(runner)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS),
+            **options.to_blockcheck_env(),
+            "GP_MD_CURL_PARALLELISM": str(normalized_parallelism),
+            "ZAPRET_BASE": str(zapret_base),
+            "ZAPRET_RW": str(zapret_base),
+        }
+    )
+    _set_debug_stdout_env(full_env, debug_stdout)
+    return _run_blockcheck_command_live(
+        command=root_command(
+            [str(blockcheck_path)],
             env=full_env,
-            state_dir=state_dir,
-            kind="multi-domain-discovery",
-            domains=clean_domains,
-            timeout_seconds=timeout_seconds,
-            test="standard",
-            options=options,
-            curl_parallelism=normalized_parallelism,
-            domain_validation=domain_validation,
-            debug_stdout=debug_stdout,
-            stop_event=stop_event,
-        )
+            pass_env_keys=BLOCKCHECK_ENV_KEYS,
+            helper_command="run-multidomain",
+        ),
+        env=full_env,
+        state_dir=state_dir,
+        kind="multi-domain-discovery",
+        domains=clean_domains,
+        timeout_seconds=timeout_seconds,
+        test="standard",
+        options=options,
+        curl_parallelism=normalized_parallelism,
+        domain_validation=domain_validation,
+        debug_stdout=debug_stdout,
+        stop_event=stop_event,
+    )
 
 
 def _run_blockcheck_command_live(
@@ -2205,11 +2260,15 @@ def _progress_from_counts(
     runtime_sample_count: int | None = None,
     summary_verified: int = 0,
     summary_fallbacks: int = 0,
+    elapsed_seconds_override: int | None = None,
+    eta_recalculation_attempts_override: int | None = None,
+    eta_elapsed_seconds_override: int | None = None,
 ) -> dict[str, Any]:
     attempt_plan = _attempt_plan_for_run(run, current_script)
     script_order = [str(item) for item in attempt_plan.get("script_order") or []]
     script_attempt_totals = attempt_plan.get("scripts") if isinstance(attempt_plan.get("scripts"), dict) else {}
     attempt_total = int(attempt_plan.get("total") or 0)
+    strategy_progress = _strategy_progress_from_attempts(attempt_plan, attempts_by_script, current_script)
     current_script_attempted = attempts_by_script.get(current_script, 0)
     current_script_attempt_total = int(script_attempt_totals.get(current_script) or 0)
     script_total = len(script_order) if script_order else (_standard_script_total() if current_script.startswith("standard/") else 0)
@@ -2260,29 +2319,24 @@ def _progress_from_counts(
             percent = min(99.9, (attempted / effective_attempt_total) * 100.0)
     else:
         percent = (script_index / script_total * 100.0) if script_total else None
-    elapsed = _elapsed_seconds(run.get("started_at") or run.get("timestamp"))
-    eta_parallelism = _eta_parallelism_for_run(run)
-    eta_configured_parallelism = eta_parallelism
-    estimate_ms_per_attempt = _eta_ms_per_attempt_for_run(run)
-    eta_ms_per_attempt = estimate_ms_per_attempt
-    eta_status = "estimated"
-    eta_method = "timeout_estimate"
-    if runtime_sample_count is not None:
-        if completed:
-            eta_status = "complete"
-            eta_method = "complete"
-        elif runtime_sample_count < ETA_SAMPLE_MIN_ATTEMPTS or runtime_ms_per_attempt is None:
-            eta_status = "calculating"
-            eta_method = "waiting_for_sample"
-            eta_ms_per_attempt = 0
-        else:
-            eta_status = "sample"
-            eta_method = "live_smoothed"
-            eta_ms_per_attempt = runtime_ms_per_attempt
-            # Live intervals are already the observed throughput of the active
-            # curl queue. Dividing them by curl_parallelism again makes long
-            # multi-domain runs look much shorter than they are.
-            eta_parallelism = 1
+    elapsed = (
+        elapsed_seconds_override
+        if elapsed_seconds_override is not None
+        else _elapsed_seconds(run.get("started_at") or run.get("timestamp"))
+    )
+    eta_parallelism = 1
+    eta_configured_parallelism = _eta_parallelism_for_run(run)
+    eta_recalculation_step = _eta_recalculation_step(attempted)
+    eta_recalculation_attempts = (
+        eta_recalculation_attempts_override
+        if eta_recalculation_attempts_override is not None
+        else attempted
+    )
+    eta_elapsed = eta_elapsed_seconds_override if eta_elapsed_seconds_override is not None else elapsed
+    eta_ms_per_attempt = _elapsed_average_ms_per_attempt(eta_elapsed, eta_recalculation_attempts)
+    estimate_ms_per_attempt = eta_ms_per_attempt or 0
+    eta_status = "elapsed_average" if eta_ms_per_attempt else "calculating"
+    eta_method = "elapsed_average" if eta_ms_per_attempt else "waiting_for_attempts"
     if finished and not completed:
         eta = None
         eta_status = status or "finished"
@@ -2291,16 +2345,24 @@ def _progress_from_counts(
         eta = None
         if progress_status == "underestimated":
             eta_status = "underestimated"
+    elif completed:
+        eta = 0
+        eta_status = "complete"
+        eta_method = "complete"
     elif eta_status == "calculating":
         eta = None
     else:
-        eta = _eta_from_remaining_attempts(remaining_attempts, completed, eta_parallelism, eta_ms_per_attempt or estimate_ms_per_attempt)
+        eta = _eta_from_remaining_attempts(remaining_attempts, completed, eta_parallelism, eta_ms_per_attempt)
     return {
         "attempted": attempted,
         "attempt_total": attempt_total,
         "effective_attempt_total": effective_attempt_total,
         "remaining_attempts": remaining_attempts,
         "successful": successful,
+        "strategy_checked": strategy_progress["checked"],
+        "strategy_total": strategy_progress["total"],
+        "current_script_strategy_checked": strategy_progress["current_script_checked"],
+        "current_script_strategy_total": strategy_progress["current_script_total"],
         "current_script": current_script,
         "current_script_attempted": current_script_attempted,
         "current_script_attempt_total": current_script_attempt_total,
@@ -2317,6 +2379,9 @@ def _progress_from_counts(
         "eta_method": eta_method,
         "eta_sample_count": runtime_sample_count or 0,
         "eta_sample_window": ETA_SAMPLE_MAX_POINTS - 1,
+        "eta_recalculation_step": eta_recalculation_step,
+        "eta_recalculation_attempts": eta_recalculation_attempts,
+        "eta_elapsed_seconds": eta_elapsed,
         "repeats": _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10),
         "repeat_parallel": _truthy(run.get("repeat_parallel"), default=False),
         "attempt_plan_source": attempt_plan.get("source") or "",
@@ -2325,6 +2390,45 @@ def _progress_from_counts(
         "phase_label": _phase_label(phase),
         "summary_verified": summary_verified,
         "summary_fallbacks": summary_fallbacks,
+    }
+
+
+def _strategy_progress_from_attempts(
+    attempt_plan: dict[str, Any],
+    attempts_by_script: dict[str, int],
+    current_script: str,
+) -> dict[str, int]:
+    script_order = [str(item) for item in attempt_plan.get("script_order") or []]
+    script_attempt_totals = attempt_plan.get("scripts") if isinstance(attempt_plan.get("scripts"), dict) else {}
+    raw_strategy_scripts = attempt_plan.get("strategy_scripts") if isinstance(attempt_plan.get("strategy_scripts"), dict) else {}
+    domain_count = max(1, int(attempt_plan.get("domain_count") or 0))
+    ip_version_count = max(1, int(attempt_plan.get("ip_version_count") or 1))
+    default_attempts_per_strategy = max(1, domain_count * ip_version_count)
+    strategy_scripts: dict[str, int] = {}
+    for script in script_order:
+        raw_total = int(raw_strategy_scripts.get(script) or 0)
+        if raw_total <= 0:
+            raw_total = int(script_attempt_totals.get(script) or 0) // default_attempts_per_strategy
+        strategy_scripts[script] = max(0, raw_total)
+    strategy_total = int(attempt_plan.get("strategy_total") or sum(strategy_scripts.values()))
+    checked = 0
+    current_checked = 0
+    current_total = strategy_scripts.get(current_script, 0)
+    for script in script_order:
+        script_strategy_total = strategy_scripts.get(script, 0)
+        if script_strategy_total <= 0:
+            continue
+        script_attempt_total = int(script_attempt_totals.get(script) or 0)
+        attempts_per_strategy = max(1, script_attempt_total // script_strategy_total) if script_attempt_total else default_attempts_per_strategy
+        script_checked = min(script_strategy_total, int(attempts_by_script.get(script, 0)) // attempts_per_strategy)
+        if script == current_script:
+            current_checked = script_checked
+        checked += script_checked
+    return {
+        "checked": min(strategy_total, checked),
+        "total": strategy_total,
+        "current_script_checked": current_checked,
+        "current_script_total": current_total,
     }
 
 
@@ -2459,6 +2563,7 @@ def _standard_attempt_plan(
         enabled_functions.append("pktws_check_http3")
 
     script_totals: dict[str, int] = {}
+    strategy_script_totals: dict[str, int] = {}
     script_order: list[str] = []
     source = "shell"
     for script in scripts:
@@ -2473,12 +2578,16 @@ def _standard_attempt_plan(
                 break
             per_domain += counted
         script_totals[name] = per_domain * domain_count * ip_version_count
+        strategy_script_totals[name] = per_domain
 
     total = sum(script_totals.values())
+    strategy_total = sum(strategy_script_totals.values())
     plan = {
         "test": test,
         "total": total,
         "scripts": script_totals,
+        "strategy_total": strategy_total,
+        "strategy_scripts": strategy_script_totals,
         "script_order": script_order,
         "domain_count": domain_count,
         "ip_version_count": ip_version_count,
@@ -2489,7 +2598,17 @@ def _standard_attempt_plan(
 
 
 def _empty_attempt_plan(test: str) -> dict[str, Any]:
-    return {"test": test, "total": 0, "scripts": {}, "script_order": [], "domain_count": 0, "source": ""}
+    return {
+        "test": test,
+        "total": 0,
+        "scripts": {},
+        "strategy_total": 0,
+        "strategy_scripts": {},
+        "script_order": [],
+        "domain_count": 0,
+        "ip_version_count": 1,
+        "source": "",
+    }
 
 
 def _blockcheck_test_dir(test: str) -> Path:
@@ -2598,7 +2717,7 @@ def _shell_word_count(value: str) -> int:
 def _eta_parallelism_for_run(run: dict[str, Any]) -> int:
     if str(run.get("kind") or "") != "multi-domain-discovery":
         return 1
-    return _bounded_int(run.get("curl_parallelism"), default=4, minimum=1, maximum=10)
+    return _minimum_int(run.get("curl_parallelism"), default=4, minimum=1)
 
 
 def _eta_ms_per_attempt_for_run(run: dict[str, Any]) -> int:
@@ -2606,6 +2725,25 @@ def _eta_ms_per_attempt_for_run(run: dict[str, Any]) -> int:
     if _truthy(run.get("repeat_parallel"), default=False):
         repeats = 1
     return ATTEMPT_TIMEOUT_ESTIMATE_MS * repeats
+
+
+def _eta_recalculation_step(attempted: int) -> int:
+    return ETA_RECALC_LARGE_STEP if attempted >= ETA_RECALC_LARGE_AFTER else ETA_RECALC_SMALL_STEP
+
+
+def _eta_recalculation_attempts(attempted: int) -> int:
+    if attempted <= 0:
+        return 0
+    if attempted < ETA_RECALC_SMALL_STEP:
+        return attempted
+    step = _eta_recalculation_step(attempted)
+    return max(step, (attempted // step) * step)
+
+
+def _elapsed_average_ms_per_attempt(elapsed_seconds: int | None, attempted: int) -> int | None:
+    if elapsed_seconds is None or attempted <= 0:
+        return None
+    return max(1, int((max(0, elapsed_seconds) * 1000) / attempted))
 
 
 def _eta_from_remaining_attempts(
@@ -3066,6 +3204,15 @@ gp_md_resolve_all_ips()
 	echo "$all_ips" | tr ' ' '\n' | sort -u | tr '\n' ' '
 }
 
+gp_md_normalize_ip_list()
+{
+	local ip result
+	for ip in $1; do
+		result="${result:+$result }$ip"
+	done
+	echo "$result"
+}
+
 gp_md_parallel_limit()
 {
 	local n="${GP_MD_CURL_PARALLELISM:-4}"
@@ -3074,7 +3221,6 @@ gp_md_parallel_limit()
 	esac
 	n=$((n + 0))
 	[ "$n" -lt 1 ] && n=1
-	[ "$n" -gt 16 ] && n=16
 	echo "$n"
 }
 
@@ -3189,6 +3335,7 @@ gp_md_run_protocol()
 	primary="$(gp_md_primary_domain)"
 	[ -n "$primary" ] || return 1
 	ips="$(gp_md_resolve_all_ips)"
+	ips="$(gp_md_normalize_ip_list "$ips")"
 	[ -n "$ips" ] || {
 		echo "GP-MULTIDOMAIN no resolved ip addresses for $proto/$port"
 		return 1

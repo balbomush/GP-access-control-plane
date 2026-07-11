@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import mimetypes
+import os
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,22 +60,81 @@ from ..zapret2 import check_install_cached
 
 
 MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
+AUTH_OFF_VALUES = {"0", "false", "no", "off", "disabled"}
+AUTH_ON_VALUES = {"1", "true", "yes", "on", "enabled", "required"}
+AUTH_TOKEN_HEADER = "X-GP-Token"
+AUTH_QUERY_PARAM = "gp_token"
+SENSITIVE_GET_PATHS = {
+    "/api/backups/download",
+    "/api/backups/restore-preview",
+    "/api/releases/update-plan",
+}
+
+
+def web_auth_config() -> dict[str, Any]:
+    token = str(os.environ.get("GP_WEB_TOKEN") or "").strip()
+    raw_mode = str(os.environ.get("GP_WEB_AUTH") or "auto").strip().lower()
+    if raw_mode in AUTH_OFF_VALUES:
+        enabled = False
+        mode = "off"
+    elif raw_mode in AUTH_ON_VALUES:
+        enabled = True
+        mode = "on"
+    else:
+        enabled = bool(token)
+        mode = "auto"
+    configured = bool(token)
+    if not enabled:
+        status = "disabled"
+    elif configured:
+        status = "enabled"
+    else:
+        status = "missing-token"
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "mode": mode,
+        "status": status,
+        "token": token,
+        "header": AUTH_TOKEN_HEADER,
+        "query_param": AUTH_QUERY_PARAM,
+    }
+
+
+def _web_auth_public_payload(web_auth: dict[str, Any] | None = None, *, include_token: bool = False) -> dict[str, Any]:
+    auth = web_auth or web_auth_config()
+    payload = {
+        "enabled": bool(auth.get("enabled")),
+        "configured": bool(auth.get("configured")),
+        "mode": str(auth.get("mode") or "auto"),
+        "status": str(auth.get("status") or "disabled"),
+        "header": AUTH_TOKEN_HEADER,
+        "query_param": AUTH_QUERY_PARAM,
+    }
+    if include_token and payload["enabled"] and payload["configured"]:
+        payload["token"] = str(auth.get("token") or "")
+    else:
+        payload["token"] = ""
+    return payload
 
 
 def serve(config: AppConfig, host: str, port: int) -> None:
     _clear_stale_current_job(config)
     close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_snapshot_if_idle(config.output.state_dir))
+    web_auth = web_auth_config()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
             query = parse_qs(parsed_url.query)
+            if path in SENSITIVE_GET_PATHS and not self._authorize_web_request(path, query, web_auth, check_origin=False):
+                return
             if path == "/":
-                self._html()
+                self._html(web_auth)
             elif path == "/api/status":
-                self._json(status_payload(config))
+                self._json(status_payload(config, web_auth=web_auth))
             elif path == "/api/events":
                 self._events()
             elif path == "/api/settings":
@@ -120,7 +181,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         def do_HEAD(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/":
-                data = index_html().encode("utf-8")
+                data = index_html(web_auth).encode("utf-8")
                 self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
             elif path == "/api/events":
                 self._head(HTTPStatus.OK, "text/event-stream; charset=utf-8", 0)
@@ -151,7 +212,11 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
 
         def do_POST(self) -> None:  # noqa: N802
-            path = urlparse(self.path).path
+            parsed_url = urlparse(self.path)
+            path = parsed_url.path
+            query = parse_qs(parsed_url.query)
+            if not self._authorize_web_request(path, query, web_auth, check_origin=True):
+                return
             if path == "/api/backups/upload":
                 try:
                     self._json(import_snapshot_archive(config.output.state_dir, self._request_upload_bytes()), status=HTTPStatus.ACCEPTED)
@@ -302,11 +367,13 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return
 
-        def _html(self) -> None:
-            data = index_html().encode("utf-8")
+        def _html(self, web_auth: dict[str, Any]) -> None:
+            data = index_html(web_auth).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            if web_auth.get("enabled") and web_auth.get("configured"):
+                self.send_header("Set-Cookie", f"{AUTH_QUERY_PARAM}={web_auth.get('token')}; Path=/; SameSite=Strict")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -321,7 +388,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             heartbeat_at = 0.0
             while True:
                 try:
-                    for event_name, payload in _event_payloads(config).items():
+                    for event_name, payload in _event_payloads(config, web_auth=web_auth).items():
                         try:
                             fingerprint = _event_fingerprint(payload)
                             if previous.get(event_name) == fingerprint:
@@ -421,6 +488,45 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         def _not_found(self) -> None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
+        def _authorize_web_request(
+            self,
+            path: str,
+            query: dict[str, list[str]],
+            web_auth: dict[str, Any],
+            *,
+            check_origin: bool,
+        ) -> bool:
+            if not web_auth.get("enabled"):
+                return True
+            if not web_auth.get("configured"):
+                self._json({"error": "web auth token is not configured"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return False
+            if check_origin and not self._origin_allowed():
+                self._json({"error": "origin is not allowed"}, status=HTTPStatus.FORBIDDEN)
+                return False
+            expected = str(web_auth.get("token") or "")
+            supplied = self.headers.get(AUTH_TOKEN_HEADER, "")
+            if not supplied:
+                authorization = self.headers.get("Authorization", "")
+                if authorization.lower().startswith("bearer "):
+                    supplied = authorization[7:].strip()
+            if not supplied:
+                supplied = _query_one(query, AUTH_QUERY_PARAM)
+            if not supplied or not hmac.compare_digest(supplied, expected):
+                self._json({"error": "web auth token is required"}, status=HTTPStatus.UNAUTHORIZED)
+                return False
+            return True
+
+        def _origin_allowed(self) -> bool:
+            origin = self.headers.get("Origin", "")
+            if not origin:
+                return True
+            host = self.headers.get("Host", "").lower()
+            if not host:
+                return False
+            parsed = urlparse(origin)
+            return parsed.netloc.lower() == host
+
         def _request_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or "0")
             if length <= 0:
@@ -438,8 +544,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     server.serve_forever()
 
 
-def index_html() -> str:
-    return """<!doctype html>
+def index_html(web_auth: dict[str, Any] | None = None) -> str:
+    html = """<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -495,6 +601,9 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   font-size: 12px;
   font-weight: 700;
 }
+.topbar-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.topbar-auth.off { border-color: rgba(245, 158, 11, .65); color: #ffd166; }
+.topbar-auth.on { border-color: rgba(34, 197, 94, .55); color: #9ff0bd; }
 .main {
   max-width: 1240px;
   margin: 0 auto;
@@ -1616,7 +1725,10 @@ pre {
         <h1>Подбор стратегий zapret2</h1>
         <div class="subtitle">Raspberry Pi · blockcheck2 · live-лог</div>
       </div>
-      <span class="topbar-version" id="app-version-badge">v-</span>
+      <div class="topbar-badges">
+        <span class="topbar-version" id="app-version-badge">v-</span>
+        <span class="topbar-version topbar-auth" id="web-auth-badge">auth</span>
+      </div>
     </div>
   </header>
   <main class="main">
@@ -1687,7 +1799,7 @@ pre {
               <div class="helper-text" id="run-mode-note">Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.</div>
               <div class="field multi-curl-field" id="multi-curl-field" hidden>
                 <label for="curl-parallelism">Параллельных curl</label>
-                <input id="curl-parallelism" type="number" min="1" max="10" step="1" value="4">
+                <input id="curl-parallelism" type="number" min="1" step="1" value="4">
                 <div class="helper-text">Работает только в режиме `Все домены на одной стратегии`: одна стратегия проверяет несколько доменов параллельно.</div>
               </div>
             </div>
@@ -1833,6 +1945,10 @@ pre {
               <div class="progress-value" id="progress-attempted">-</div>
             </div>
             <div class="progress-cell">
+              <div class="progress-label">Стратегии</div>
+              <div class="progress-value" id="progress-strategies">-</div>
+            </div>
+            <div class="progress-cell">
               <div class="progress-label">Найдено стратегий</div>
               <div class="progress-value" id="progress-successful">-</div>
             </div>
@@ -1848,9 +1964,13 @@ pre {
               <div class="progress-label">Осталось</div>
               <div class="progress-value" id="progress-eta">-</div>
             </div>
+            <div class="progress-cell">
+              <div class="progress-label">Прошло</div>
+              <div class="progress-value" id="progress-elapsed">-</div>
+            </div>
           </div>
-          <div class="progress-note" id="progress-note">Прогресс оценочный: blockcheck2 не отдает общий счетчик стратегий до старта.</div>
-          <div class="progress-note" id="progress-metrics">Метрики появятся после старта подбора.</div>
+          <div class="progress-note" id="progress-note">расчитанное среднее время попытки: -</div>
+          <div class="progress-note" id="progress-metrics">Настройки запуска появятся после старта подбора.</div>
         </div>
         <pre id="finder-log">Лога пока нет</pre>
       </section>
@@ -2057,12 +2177,13 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
+const WEB_AUTH = __WEB_AUTH_JSON__;
 const DISCOVERY_PROFILES = {
   quick: { name: 'quick', title: 'Быстрый', scan_level: 'quick' },
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2115,19 +2236,31 @@ function showToast(text, tone){
   }, 2000);
 }
 async function getJson(url){
-  const response = await fetch(url);
+  const response = await fetch(url, { headers: authHeaders(), credentials: 'same-origin' });
   if (!response.ok) throw new Error(await response.text());
   return await response.json();
 }
 async function postJson(url, payload){
   const response = await fetch(url, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: authHeaders({'Content-Type': 'application/json'}),
+    credentials: 'same-origin',
     body: JSON.stringify(payload || {})
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
+}
+function authHeaders(headers){
+  const result = { ...(headers || {}) };
+  if (WEB_AUTH.enabled && WEB_AUTH.token) result[WEB_AUTH.header || 'X-GP-Token'] = WEB_AUTH.token;
+  return result;
+}
+function authUrl(url){
+  if (!WEB_AUTH.enabled || !WEB_AUTH.token) return url;
+  const parsed = new URL(url, window.location.origin);
+  parsed.searchParams.set(WEB_AUTH.query_param || 'gp_token', WEB_AUTH.token);
+  return parsed.pathname + parsed.search + parsed.hash;
 }
 function friendlyDate(value){
   if (!value) return '-';
@@ -2419,7 +2552,8 @@ function persistCustomPresets(){
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
   fetch('/api/presets', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: authHeaders({'Content-Type': 'application/json'}),
+    credentials: 'same-origin',
     body: JSON.stringify({custom: state.customPresets})
   }).catch(() => {});
 }
@@ -2748,12 +2882,35 @@ function zapretCompactStatus(zapret){
   }).join('\\n');
   return { ok, total, ready, tooltip };
 }
+function renderWebAuthStatus(){
+  const auth = (state.status || {}).web_auth || WEB_AUTH || {};
+  const node = el('web-auth-badge');
+  if (!node) return;
+  const enabled = Boolean(auth.enabled);
+  const configured = Boolean(auth.configured);
+  node.textContent = enabled && configured ? 'auth on' : 'auth off';
+  node.className = `topbar-version topbar-auth ${enabled && configured ? 'on' : 'off'}`;
+  node.title = enabled && configured
+    ? 'Web API защищен локальным токеном'
+    : 'Web API работает без локального токена';
+}
 function testedDomainCount(){
   const domains = new Set(Array.isArray(state.testedDomains) ? state.testedDomains : []);
   (state.candidateDomains || []).forEach((item) => {
     if (item && item.domain) domains.add(String(item.domain));
   });
-  return Math.max(Number(state.candidateDomainTotal || 0), domains.size);
+  const current = Math.max(Number(state.candidateDomainTotal || 0), domains.size);
+  if (current > 0) {
+    state.lastCandidateDomainTotal = current;
+    return current;
+  }
+  if (Number(state.lastCandidateDomainTotal || 0) > 0 && (isBusy() || state.candidateLoading || !state.candidateDomainsLoaded)) {
+    return Number(state.lastCandidateDomainTotal || 0);
+  }
+  return current;
+}
+function metricJobNoteText(jobStatus, busy){
+  return busy ? runStatusLabel(jobStatus) : 'Свободна';
 }
 function jobStatusClass(status, busy){
   const normalized = busy ? String(status || 'running').toLowerCase() : 'idle';
@@ -2772,6 +2929,7 @@ function renderMetrics(){
   const phase = progress.phase_label || phaseLabel(progress.phase || '');
   const version = (state.status || {}).version || '-';
   setText('app-version-badge', `v${version}`);
+  renderWebAuthStatus();
   const zapretValue = el('metric-zapret');
   if (zapretValue) {
     zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${zapretCompact.ok}/${zapretCompact.total || 5}</span></span>`;
@@ -2785,14 +2943,7 @@ function renderMetrics(){
   setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободна');
   const jobCard = el('metric-job-card');
   if (jobCard) jobCard.className = jobStatusClass(jobStatus, busy);
-  const jobDetails = [];
-  if (busy) {
-    jobDetails.push(phase ? `этап: ${phase}` : (jobNames[board.current_job_name] || board.current_job_name || 'идет поиск'));
-  } else {
-    jobDetails.push(`обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
-  }
-  if (state.formMessage) jobDetails.push(state.formMessage);
-  setText('metric-job-note', jobDetails.join(' · '));
+  setText('metric-job-note', metricJobNoteText(jobStatus, busy));
   const testedCount = testedDomainCount();
   setText('metric-candidates', String(testedCount));
   setText('metric-candidates-note', state.candidateDomainsLoaded ? `загружено ${state.candidateDomains.length} доменов` : 'открыть список');
@@ -3592,7 +3743,7 @@ function renderLog(){
   const logNode = el('finder-log');
   logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
   renderProgress(log.progress || {});
-  renderRuntimeMetrics(log.metrics || {});
+  renderRunSettingsSummary(log.run_settings || {});
   if (state.activeTab === 'terminal') scrollLogToBottom();
 }
 function renderBackups(){
@@ -3648,7 +3799,7 @@ function backupCard(item){
   </article>`;
 }
 function backupDownloadUrl(snapshot, file){
-  return `/api/backups/download?snapshot=${encodeURIComponent(snapshot)}&file=${encodeURIComponent(file)}`;
+  return authUrl(`/api/backups/download?snapshot=${encodeURIComponent(snapshot)}&file=${encodeURIComponent(file)}`);
 }
 function formatBytes(value){
   const bytes = Number(value || 0);
@@ -3665,35 +3816,40 @@ function renderProgress(progress){
   const attemptTotal = Number(progress.attempt_total ?? 0);
   const effectiveTotal = Number(progress.effective_attempt_total || attemptTotal || 0);
   setText('progress-attempted', effectiveTotal ? `${attempted} / ${effectiveTotal}` : String(progress.attempted ?? 0));
+  const strategyChecked = Number(progress.strategy_checked ?? 0);
+  const strategyTotal = Number(progress.strategy_total ?? 0);
+  setText('progress-strategies', strategyTotal ? `${strategyChecked} / ${strategyTotal}` : '-');
   setText('progress-successful', String(progress.successful ?? 0));
   setText('progress-phase', progress.phase_label || phaseLabel(progress.phase || ''));
-  if (progress.script_total) {
-    const completedFiles = Math.max(0, Math.min(Number(progress.script_total || 0), Number(progress.script_index || 0) - 1));
-    const scriptParts = [`Файл ${progress.script_index || 0} из ${progress.script_total}`, `завершено: ${completedFiles}`];
-    if (progress.current_script_attempt_total) {
-      scriptParts.push(`попыток в файле: ${progress.current_script_attempted || 0} из ${progress.current_script_attempt_total}`);
-    }
-    setText('progress-scripts', scriptParts.join(', '));
-  } else {
-    setText('progress-scripts', '-');
-  }
-  setText('progress-eta', progress.eta_seconds == null ? etaStatusText(progress.eta_status) : formatDuration(Number(progress.eta_seconds)));
-  const current = progress.current_script ? `Текущий файл: ${progress.current_script}. ` : '';
-  const total = attemptTotal ? `Всего попыток рассчитано по файлам zapret2: ${attemptTotal}. ` : '';
-  const under = progress.progress_status === 'underestimated' ? 'План попыток оказался меньше фактического вывода blockcheck2, время уточняется по live-данным. ' : '';
-  const parallelism = Number(progress.eta_parallelism || 1);
-  const parallelText = parallelism > 1 ? `, параллельных curl: ${parallelism}` : '';
-  const etaMs = progress.eta_status === 'sample' ? progress.eta_ms_per_attempt : progress.eta_estimate_ms_per_attempt;
-  const etaMode = `Режим ETA: ${etaModeLabel(progress)}. `;
-  const eta = etaMs ? `Время считается как оставшиеся попытки × ${etaMs} мс${parallelText}. ` : '';
-  const fallback = Number(progress.summary_fallbacks || 0) > 0 ? `Fallback из summary: ${progress.summary_fallbacks}. ` : '';
-  setText('progress-note', `${current}${total}${under}${etaMode}${eta}${fallback}Прогресс считается по live-логу blockcheck2.`);
+  setText('progress-scripts', progress.current_script || '-');
+  const elapsed = progressLiveElapsedSeconds(progress);
+  setText('progress-elapsed', elapsed == null ? '-' : formatDuration(elapsed));
+  const eta = progressLiveEtaSeconds(progress);
+  setText('progress-eta', eta == null ? etaStatusText(progress.eta_status) : formatDuration(eta));
+  const etaMs = progress.eta_ms_per_attempt || progress.eta_estimate_ms_per_attempt;
+  setText('progress-note', `расчитанное среднее время попытки: ${etaMs ? `${etaMs} мс` : '-'}`);
+}
+function progressLiveElapsedSeconds(progress){
+  if (progress.elapsed_seconds == null) return null;
+  const base = Math.max(0, Number(progress.elapsed_seconds || 0));
+  const receivedAt = Number(progress.received_at_ms || 0);
+  if (!isBusy() || !receivedAt) return base;
+  return base + Math.max(0, Math.floor((Date.now() - receivedAt) / 1000));
+}
+function progressLiveEtaSeconds(progress){
+  if (progress.eta_seconds == null) return null;
+  const base = Math.max(0, Number(progress.eta_seconds || 0));
+  const baseElapsed = Math.max(0, Number(progress.elapsed_seconds || 0));
+  const liveElapsed = progressLiveElapsedSeconds(progress);
+  if (liveElapsed == null) return base;
+  return Math.max(0, base - Math.max(0, liveElapsed - baseElapsed));
 }
 function etaModeLabel(progress){
   const status = String(progress.eta_status || '');
   const progressStatus = String(progress.progress_status || '');
   if (status === 'sample') return 'по live-скорости';
   if (status === 'calculating') return 'сбор выборки';
+  if (status === 'elapsed_average') return 'по среднему времени попытки';
   if (status === 'underestimated' || progressStatus === 'underestimated') return 'уточняется';
   if (status === 'complete') return 'завершено';
   if (status === 'estimated') return 'по таймауту';
@@ -3704,24 +3860,48 @@ function etaStatusText(status){
   if (status === 'underestimated') return 'уточняется';
   return '-';
 }
-function renderRuntimeMetrics(metrics){
+function renderRunSettingsSummary(settings){
   const target = el('progress-metrics');
   if (!target) return;
-  if (!metrics || !Object.keys(metrics).length) {
-    target.textContent = 'Метрики появятся после старта подбора.';
+  if (!settings || !Object.keys(settings).length) {
+    target.textContent = 'Настройки запуска появятся после старта подбора.';
     return;
   }
-  const processes = metrics.processes || {};
-  const system = metrics.system || {};
-  const cpu = system.cpu_percent || {};
-  const memory = system.memory || {};
-  const files = metrics.files || {};
-  const memFree = memory.MemAvailable ? `RAM свободно: ${Math.round(Number(memory.MemAvailable) / 1024)} МБ` : '';
-  const cpuText = cpu.busy == null ? '' : `CPU: ${cpu.busy}%`;
-  const ioText = cpu.iowait == null ? '' : `iowait: ${cpu.iowait}%`;
-  const procText = `curl: ${processes.curl || 0}, nfqws2: ${processes.nfqws2 || 0}, blockcheck2: ${processes.blockcheck2 || 0}`;
-  const walText = files.sqlite_wal ? `SQLite WAL: ${formatBytes(files.sqlite_wal)}` : '';
-  target.textContent = [procText, cpuText, ioText, memFree, walText].filter(Boolean).join(' · ');
+  const protocols = [];
+  if (settings.enable_http) protocols.push('HTTP');
+  if (settings.enable_tls12) protocols.push('TLS 1.2');
+  if (settings.enable_tls13) protocols.push('TLS 1.3');
+  if (settings.enable_quic) protocols.push('QUIC');
+  const domainCount = Number(settings.domain_count || 0);
+  const mode = settings.kind === 'multi-domain-discovery' ? 'multi-domain' : 'обычный';
+  const ipMode = settings.enable_ipv6 ? 'IPv4+IPv6' : 'IPv4';
+  const scan = scanLevelLabel(settings.scan_level || 'standard');
+  const repeats = Number(settings.repeats || 1);
+  const repeatMode = settings.repeat_parallel ? 'повторы параллельно' : 'повторы последовательно';
+  const curl = settings.curl_parallelism ? `curl: ${settings.curl_parallelism}` : '';
+  const limit = Number(settings.timeout_seconds || 0) > 0 ? `лимит: ${formatDuration(Number(settings.timeout_seconds || 0))}` : 'без лимита';
+  const checks = [
+    settings.skip_dnscheck ? 'без DNS-check' : 'с DNS-check',
+    settings.skip_ipblock ? 'без IP-check' : 'с IP-check',
+  ].join(', ');
+  const timeouts = `таймауты HTTP/TLS ${settings.curl_max_time || 2}с, QUIC ${settings.curl_max_time_quic || 2}с, DoH ${settings.curl_max_time_doh || 2}с`;
+  target.textContent = [
+    `доменов: ${domainCount}`,
+    `режим: ${mode}`,
+    `протоколы: ${protocols.join('+') || '-'}`,
+    ipMode,
+    `скан: ${scan}`,
+    `повторы: ${repeats}`,
+    repeatMode,
+    curl,
+    checks,
+    limit,
+    timeouts,
+  ].filter(Boolean).join(' · ');
+}
+function scanLevelLabel(value){
+  const profile = DISCOVERY_PROFILES[String(value || 'standard')];
+  return profile ? profile.title : String(value || '-');
 }
 function renderSettings(){
   const settings = state.settings || {};
@@ -4359,6 +4539,8 @@ async function refreshDomainIndex(){
     state.candidateDomains = data.domains || [];
     state.candidateDomainTotal = Number(data.total || 0);
     state.candidateDomainStrategyTotal = Number(data.strategy_total || 0);
+    if (state.candidateDomainTotal > 0) state.lastCandidateDomainTotal = state.candidateDomainTotal;
+    if (state.candidateDomainStrategyTotal > 0) state.lastCandidateDomainStrategyTotal = state.candidateDomainStrategyTotal;
     rememberCandidateVersion(data.version || null);
     state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
     state.candidateDomainsLoaded = true;
@@ -4546,6 +4728,7 @@ function latestLogUrl(incremental){
 }
 function mergeLogPayload(previous, next){
   if (!previous || !next) return next;
+  if (next.progress) next.progress.received_at_ms = Date.now();
   const sameRun = previous.run_id && next.run_id && previous.run_id === next.run_id;
   const sameStdout = sameRun && previous.stdout_log && previous.stdout_log === next.stdout_log;
   const sameStderr = sameRun && previous.stderr_log && previous.stderr_log === next.stderr_log;
@@ -4579,19 +4762,20 @@ async function refreshRuns(){
     renderRuns();
     renderMetrics();
   } catch (error) {
-    setMessage(`РћС€РёР±РєР° РѕР±РЅРѕРІР»РµРЅРёСЏ РёСЃС‚РѕСЂРёРё: ${error.message}`, 'bad');
+    setMessage(`Ошибка обновления истории: ${error.message}`, 'bad');
   }
 }
 async function refreshLog(incremental = false){
   try {
     const previous = state.finderLog;
     const payload = await getJson(latestLogUrl(incremental));
+    if (payload.progress) payload.progress.received_at_ms = Date.now();
     state.finderLog = incremental ? mergeLogPayload(previous, payload) : payload;
     logDirty = false;
     renderLog();
     renderMetrics();
   } catch (error) {
-    setMessage(`РћС€РёР±РєР° РѕР±РЅРѕРІР»РµРЅРёСЏ Р»РѕРіР°: ${error.message}`, 'bad');
+    setMessage(`Ошибка обновления лога: ${error.message}`, 'bad');
   }
 }
 async function refreshPresets(){
@@ -4601,7 +4785,7 @@ async function refreshPresets(){
     renderPresetSelects();
     renderPresetManager();
   } catch (error) {
-    setMessage(`РћС€РёР±РєР° РѕР±РЅРѕРІР»РµРЅРёСЏ РїСЂРµСЃРµС‚РѕРІ: ${error.message}`, 'bad');
+    setMessage(`Ошибка обновления пресетов: ${error.message}`, 'bad');
   }
 }
 function handleCandidateEvent(payload){
@@ -4661,6 +4845,7 @@ async function refresh(){
     mergeStatusPayload(status);
     state.settings = (settings || {}).settings || status.settings || {};
     state.finderRuns = latestById(finderRuns.runs || []);
+    if (finderLog && finderLog.progress) finderLog.progress.received_at_ms = Date.now();
     state.finderLog = finderLog;
     state.domainSets = domainSets;
     state.domainSources = domainSources;
@@ -4753,7 +4938,8 @@ async function uploadBackup(){
   try {
     const response = await fetch('/api/backups/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/zip' },
+      headers: authHeaders({ 'Content-Type': 'application/zip' }),
+      credentials: 'same-origin',
       body: file
     });
     const data = await response.json().catch(() => ({}));
@@ -5100,9 +5286,13 @@ startRealtimeFallback();
 </script>
 </body></html>
 """
+    return html.replace(
+        "__WEB_AUTH_JSON__",
+        json.dumps(_web_auth_public_payload(web_auth, include_token=True), ensure_ascii=False, separators=(",", ":")),
+    )
 
 
-def status_payload(config: AppConfig) -> dict[str, Any]:
+def status_payload(config: AppConfig, web_auth: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = read_settings(config)
     run_preferences = read_run_preferences(config)
     state = read_state(config.output.state_dir)
@@ -5119,14 +5309,15 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
             "state_dir": str(config.output.state_dir),
         },
         "zapret2": check_install_cached(),
+        "web_auth": _web_auth_public_payload(web_auth, include_token=False),
     }
 
 
-def _event_payloads(config: AppConfig) -> dict[str, dict[str, Any]]:
-    status = status_payload(config)
+def _event_payloads(config: AppConfig, web_auth: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    status = status_payload(config, web_auth=web_auth)
     status_event = {
         key: status[key]
-        for key in ("version", "state", "settings", "run_preferences", "release_update", "paths", "zapret2")
+        for key in ("version", "state", "settings", "run_preferences", "release_update", "paths", "zapret2", "web_auth")
         if key in status
     }
     return {
@@ -5422,7 +5613,7 @@ def _normalize_discovery_profile(name: str, raw: dict[str, Any]) -> dict[str, An
         "repeat_parallel": _payload_bool(raw, "repeat_parallel", False),
         "skip_dnscheck": _payload_bool(raw, "skip_dnscheck", True),
         "skip_ipblock": _payload_bool(raw, "skip_ipblock", True),
-        "curl_parallelism": _bounded_int(raw.get("curl_parallelism"), default=4, minimum=1, maximum=10),
+        "curl_parallelism": _minimum_int(raw.get("curl_parallelism"), default=4, minimum=1),
         "limit_time_enabled": _payload_bool(raw, "limit_time_enabled", False),
         "timeout_hours": _bounded_int(raw.get("timeout_hours"), default=6, minimum=1, maximum=24),
     }

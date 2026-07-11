@@ -45,6 +45,34 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["last_job_status"], "success")
             self.assertIsNone(state["last_error"])
 
+    def test_dict_result_timeout_is_recorded_as_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+
+            runner.start("timeout-job", lambda _stop: {"status": "timeout", "id": "run-timeout"})
+            state = _wait_for_idle_state(state_dir)
+            records = _job_records(state_dir)
+
+            self.assertIsNone(state["current_job"])
+            self.assertEqual(state["last_job_status"], "timeout")
+            self.assertIsNone(state["last_error"])
+            self.assertIn("timeout", [item["status"] for item in records])
+
+    def test_dict_result_failed_is_recorded_as_failed_without_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+
+            runner.start("failed-result-job", lambda _stop: {"status": "failed", "id": "run-failed"})
+            state = _wait_for_idle_state(state_dir)
+            records = _job_records(state_dir)
+
+            self.assertIsNone(state["current_job"])
+            self.assertEqual(state["last_job_status"], "failed")
+            self.assertIsNone(state["last_error"])
+            self.assertIn("failed", [item["status"] for item in records])
+
     def test_current_job_is_cleared_when_cancelled_job_fails_during_save(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -134,6 +162,10 @@ def _wait_for_idle_state(state_dir: Path) -> dict[str, object]:
             return state
         time.sleep(0.01)
     raise AssertionError("job did not become idle")
+
+
+def _job_records(state_dir: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in (state_dir / "jobs.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
 if __name__ == "__main__":

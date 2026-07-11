@@ -22,3 +22,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 *.log
+
+# Local/internal notes.
+/TESTS.md

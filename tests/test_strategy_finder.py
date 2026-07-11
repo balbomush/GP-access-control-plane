@@ -27,8 +27,11 @@ from gp_control_plane.strategy_finder import (
     _RotatingTextWriter,
     _average_attempt_ms,
     _cleanup_old_strategy_logs,
+    _eta_recalculation_attempts,
+    _eta_recalculation_step,
     _progress_from_counts,
     _resolve_blockcheck_script,
+    _run_multidomain_blockcheck_live,
     _run_process_with_live_stdout,
     _standard_attempt_plan,
     _stdout_log_mode,
@@ -451,6 +454,8 @@ pktws_check_http3()
 
             self.assertEqual(plan["scripts"]["standard/10-test.sh"], 8)
             self.assertEqual(plan["total"], 8)
+            self.assertEqual(plan["strategy_scripts"]["standard/10-test.sh"], 4)
+            self.assertEqual(plan["strategy_total"], 4)
 
     def test_standard_attempt_plan_accounts_for_ipv6(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -475,8 +480,37 @@ pktws_check_https_tls12()
 
             self.assertEqual(plan["ip_version_count"], 2)
             self.assertEqual(plan["total"], 4)
+            self.assertEqual(plan["strategy_total"], 1)
 
-    def test_progress_uses_attempt_total_and_timeout_eta(self) -> None:
+    def test_progress_reports_strategy_templates_separately_from_attempts(self) -> None:
+        plan = {
+            "total": 80,
+            "scripts": {"standard/10-test.sh": 80},
+            "strategy_total": 4,
+            "strategy_scripts": {"standard/10-test.sh": 4},
+            "script_order": ["standard/10-test.sh"],
+            "domain_count": 20,
+            "ip_version_count": 1,
+            "source": "test",
+        }
+
+        progress = _progress_from_counts(
+            run={"id": "run-strategy-progress", "status": "running", "attempt_plan": plan},
+            attempted=39,
+            attempts_by_script={"standard/10-test.sh": 39},
+            successful=0,
+            current_script="standard/10-test.sh",
+            elapsed_seconds_override=10,
+        )
+
+        self.assertEqual(progress["attempted"], 39)
+        self.assertEqual(progress["attempt_total"], 80)
+        self.assertEqual(progress["strategy_checked"], 1)
+        self.assertEqual(progress["strategy_total"], 4)
+        self.assertEqual(progress["current_script_strategy_checked"], 1)
+        self.assertEqual(progress["current_script_strategy_total"], 4)
+
+    def test_progress_waits_for_elapsed_eta_without_started_at(self) -> None:
         plan = {
             "total": 40,
             "scripts": {"standard/10-test.sh": 40},
@@ -488,8 +522,66 @@ pktws_check_https_tls12()
 
         self.assertEqual(progress["attempted"], 30)
         self.assertEqual(progress["attempt_total"], 40)
-        self.assertEqual(progress["eta_seconds"], 21)
-        self.assertEqual(progress["eta_estimate_ms_per_attempt"], 2100)
+        self.assertIsNone(progress["eta_seconds"])
+        self.assertEqual(progress["eta_status"], "calculating")
+        self.assertEqual(progress["eta_method"], "waiting_for_attempts")
+
+    def test_progress_eta_uses_elapsed_average_per_attempt(self) -> None:
+        plan = {
+            "total": 40,
+            "scripts": {"standard/10-test.sh": 40},
+            "script_order": ["standard/10-test.sh"],
+            "source": "test",
+        }
+
+        progress = _progress_from_counts(
+            run={"id": "run-eta", "status": "running", "attempt_plan": plan},
+            attempted=30,
+            attempts_by_script={"standard/10-test.sh": 30},
+            successful=0,
+            current_script="standard/10-test.sh",
+            elapsed_seconds_override=60,
+        )
+
+        self.assertEqual(progress["remaining_attempts"], 10)
+        self.assertEqual(progress["eta_status"], "elapsed_average")
+        self.assertEqual(progress["eta_method"], "elapsed_average")
+        self.assertEqual(progress["eta_ms_per_attempt"], 2000)
+        self.assertEqual(progress["eta_seconds"], 20)
+
+    def test_progress_eta_recalculation_attempts_use_10_then_100_steps(self) -> None:
+        self.assertEqual(_eta_recalculation_attempts(0), 0)
+        self.assertEqual(_eta_recalculation_attempts(3), 3)
+        self.assertEqual(_eta_recalculation_step(999), 10)
+        self.assertEqual(_eta_recalculation_attempts(999), 990)
+        self.assertEqual(_eta_recalculation_step(1000), 100)
+        self.assertEqual(_eta_recalculation_attempts(1099), 1000)
+
+    def test_progress_eta_uses_matched_elapsed_baseline_between_recalculations(self) -> None:
+        plan = {
+            "total": 72780,
+            "scripts": {"standard/20-multi.sh": 72780},
+            "script_order": ["standard/20-multi.sh"],
+            "source": "test",
+        }
+
+        progress = _progress_from_counts(
+            run={"id": "run-eta-baseline", "status": "running", "attempt_plan": plan},
+            attempted=177,
+            attempts_by_script={"standard/20-multi.sh": 177},
+            successful=0,
+            current_script="standard/20-multi.sh",
+            elapsed_seconds_override=89,
+            eta_recalculation_attempts_override=170,
+            eta_elapsed_seconds_override=85,
+        )
+
+        self.assertEqual(progress["elapsed_seconds"], 89)
+        self.assertEqual(progress["eta_elapsed_seconds"], 85)
+        self.assertEqual(progress["eta_recalculation_attempts"], 170)
+        self.assertEqual(progress["eta_ms_per_attempt"], 500)
+        self.assertEqual(progress["remaining_attempts"], 72603)
+        self.assertEqual(progress["eta_seconds"], 36301)
 
     def test_stopped_progress_keeps_attempt_percent(self) -> None:
         plan = {
@@ -1108,11 +1200,66 @@ pktws_check_https_tls12()
             self.assertIn("for gp_domain in $DOMAINS", text)
             self.assertIn('pktws_start "$@"', text)
             self.assertIn("GP_MD_CURL_PARALLELISM", text)
+            self.assertIn("gp_md_normalize_ip_list", text)
+            self.assertIn('ips="$(gp_md_normalize_ip_list "$ips")"', text)
+            self.assertIn("GP-MULTIDOMAIN no resolved ip addresses for $proto/$port", text)
+            self.assertIn('tcp) pktws_ipt_prepare_tcp "$port" "$ips" ;;', text)
+            self.assertIn('udp) pktws_ipt_prepare_udp "$port" "$ips" ;;', text)
             self.assertIn('gp_md_run_domain_curl "$idx" "$testf" "$gp_domain" &', text)
             self.assertIn("gp_md_collect_record", text)
             self.assertIn('curl_test "$testf" "$gp_domain"', text)
             self.assertIn("working strategy found for ipv$IPV $gp_domain", text)
+            self.assertNotIn('[ "$n" -gt 16 ] && n=16', text)
             self.assertNotIn("echo stock main", text)
+
+            resolve_pos = text.index('ips="$(gp_md_resolve_all_ips)"')
+            normalize_pos = text.index('ips="$(gp_md_normalize_ip_list "$ips")"', resolve_pos)
+            empty_guard_pos = text.index('[ -n "$ips" ] || {', normalize_pos)
+            prepare_pos = text.index("pktws_ipt_prepare_udp", empty_guard_pos)
+            self.assertLess(resolve_pos, normalize_pos)
+            self.assertLess(normalize_pos, empty_guard_pos)
+            self.assertLess(empty_guard_pos, prepare_pos)
+
+    def test_multidomain_run_preserves_ui_curl_parallelism_above_10(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            state_dir = tmp / "state"
+            blockcheck = tmp / "blockcheck2.sh"
+            blockcheck.write_text("#!/bin/sh\n\nfsleep_setup\necho real\n", encoding="utf-8")
+            captured: dict[str, object] = {}
+            root_calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def fake_run_blockcheck_command_live(**kwargs: object) -> dict[str, object]:
+                captured.update(kwargs)
+                return {"status": "success"}
+
+            def fake_root_command(command: list[str], **kwargs: object) -> list[str]:
+                root_calls.append((command, kwargs))
+                return command
+
+            with (
+                patch("gp_control_plane.strategy_finder.shutil.which", return_value=str(blockcheck)),
+                patch("gp_control_plane.strategy_finder.root_command", side_effect=fake_root_command),
+                patch(
+                    "gp_control_plane.strategy_finder._run_blockcheck_command_live",
+                    side_effect=fake_run_blockcheck_command_live,
+                ),
+            ):
+                _run_multidomain_blockcheck_live(
+                    state_dir=state_dir,
+                    domains=["youtube.com"],
+                    timeout_seconds=60,
+                    options=DiscoveryOptions(),
+                    curl_parallelism=30,
+                )
+
+            env = captured["env"]
+            self.assertIsInstance(env, dict)
+            self.assertEqual(env["GP_MD_CURL_PARALLELISM"], "30")
+            self.assertEqual(captured["curl_parallelism"], 30)
+            self.assertEqual(root_calls[0][0], [str(blockcheck.resolve())])
+            self.assertEqual(root_calls[0][1]["helper_command"], "run-multidomain")
+            self.assertEqual(captured["command"], [str(blockcheck.resolve())])
 
     def test_resolve_blockcheck_script_follows_exec_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1124,31 +1271,35 @@ pktws_check_https_tls12()
 
             self.assertEqual(_resolve_blockcheck_script(wrapper), real.resolve())
 
-    def test_multidomain_progress_eta_uses_curl_parallelism(self) -> None:
+    def test_multidomain_progress_eta_uses_elapsed_average_not_parallelism(self) -> None:
         plan = {
             "total": 40,
             "scripts": {"standard/10-test.sh": 40},
             "script_order": ["standard/10-test.sh"],
             "source": "test",
         }
-        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 20)
 
-        progress = progress_from_stdout(
-            stdout,
-            {
+        progress = _progress_from_counts(
+            run={
                 "id": "run-parallel",
                 "kind": "multi-domain-discovery",
                 "status": "running",
                 "attempt_plan": plan,
                 "curl_parallelism": 4,
             },
+            attempted=20,
+            attempts_by_script={"standard/10-test.sh": 20},
+            successful=0,
+            current_script="standard/10-test.sh",
+            elapsed_seconds_override=40,
         )
 
         self.assertEqual(progress["remaining_attempts"], 20)
-        self.assertEqual(progress["eta_parallelism"], 4)
-        self.assertEqual(progress["eta_seconds"], 10)
+        self.assertEqual(progress["eta_configured_parallelism"], 4)
+        self.assertEqual(progress["eta_parallelism"], 1)
+        self.assertEqual(progress["eta_seconds"], 40)
 
-    def test_live_sample_eta_does_not_divide_by_parallelism_twice(self) -> None:
+    def test_elapsed_average_eta_ignores_live_sample_and_parallelism(self) -> None:
         plan = {
             "total": 100,
             "scripts": {"standard/10-test.sh": 100},
@@ -1170,14 +1321,16 @@ pktws_check_https_tls12()
             current_script="standard/10-test.sh",
             runtime_ms_per_attempt=500,
             runtime_sample_count=50,
+            elapsed_seconds_override=20,
         )
 
         self.assertEqual(progress["remaining_attempts"], 80)
-        self.assertEqual(progress["eta_status"], "sample")
-        self.assertEqual(progress["eta_method"], "live_smoothed")
+        self.assertEqual(progress["eta_status"], "elapsed_average")
+        self.assertEqual(progress["eta_method"], "elapsed_average")
+        self.assertEqual(progress["eta_ms_per_attempt"], 1000)
         self.assertEqual(progress["eta_configured_parallelism"], 4)
         self.assertEqual(progress["eta_parallelism"], 1)
-        self.assertEqual(progress["eta_seconds"], 40)
+        self.assertEqual(progress["eta_seconds"], 80)
 
     def test_progress_elapsed_uses_started_at(self) -> None:
         progress = _progress_from_counts(
@@ -1210,18 +1363,16 @@ pktws_check_https_tls12()
 
         self.assertLess(_average_attempt_ms(deque(timestamps)), 4000)
 
-    def test_progress_eta_accounts_for_sequential_repeats(self) -> None:
+    def test_progress_eta_elapsed_average_does_not_multiply_sequential_repeats(self) -> None:
         plan = {
             "total": 10,
             "scripts": {"standard/10-test.sh": 10},
             "script_order": ["standard/10-test.sh"],
             "source": "test",
         }
-        stdout = "\n".join(["* script : standard/10-test.sh"] + ["- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --one"] * 5)
 
-        progress = progress_from_stdout(
-            stdout,
-            {
+        progress = _progress_from_counts(
+            run={
                 "id": "run-repeats",
                 "kind": "standard-discovery",
                 "status": "running",
@@ -1229,10 +1380,15 @@ pktws_check_https_tls12()
                 "repeats": 3,
                 "repeat_parallel": False,
             },
+            attempted=5,
+            attempts_by_script={"standard/10-test.sh": 5},
+            successful=0,
+            current_script="standard/10-test.sh",
+            elapsed_seconds_override=10,
         )
 
-        self.assertEqual(progress["eta_estimate_ms_per_attempt"], 6300)
-        self.assertEqual(progress["eta_seconds"], 31)
+        self.assertEqual(progress["eta_estimate_ms_per_attempt"], 2000)
+        self.assertEqual(progress["eta_seconds"], 10)
 
     def test_running_progress_does_not_report_zero_eta_when_plan_is_underestimated(self) -> None:
         plan = {

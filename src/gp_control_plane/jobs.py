@@ -11,6 +11,9 @@ from .state import append_jsonl, now_iso, read_state, write_state
 from .storage import compact_run_payload
 
 
+FINAL_JOB_STATUSES = {"success", "failed", "timeout", "stopped"}
+
+
 @dataclass(frozen=True)
 class Job:
     id: str
@@ -80,7 +83,7 @@ class JobRunner:
         last_job_status = "failed"
         try:
             result = func(cancel_event)
-            status = "stopped" if isinstance(result, dict) and result.get("status") == "stopped" else "success"
+            status = _status_from_result(result)
             self._record(job_id, name, status, now_iso(), result=result)
             last_error = None
             last_job_status = status
@@ -138,3 +141,11 @@ class JobRunner:
         state["current_job_name"] = name
         state["current_job_status"] = status
         write_state(self.state_dir, state)
+
+
+def _status_from_result(result: Any) -> str:
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip().lower()
+        if status in FINAL_JOB_STATUSES:
+            return status
+    return "success"

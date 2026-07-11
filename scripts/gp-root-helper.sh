@@ -49,7 +49,7 @@ validate_run_target() {
   target="$(real_path "$1")"
   zapret_blockcheck="$(real_path "$ZAPRET_DIR/blockcheck2.sh")"
   case "$target" in
-    "$zapret_blockcheck"|/tmp/*/gp-multidomain-blockcheck.sh|/var/tmp/*/gp-multidomain-blockcheck.sh) ;;
+    "$zapret_blockcheck") ;;
     *) fail "unsupported run target: $1" ;;
   esac
   [ -x "$target" ] || fail "run target is not executable: $target"
@@ -81,6 +81,242 @@ run_target() {
   target="$(validate_run_target "$@")"
   shift
   exec "$target" "$@"
+}
+
+write_multidomain_runner() {
+  source="$1"
+  runner="$2"
+  if ! awk '
+    $0 == "fsleep_setup" { found=1; exit }
+    { print }
+    END { if (!found) exit 42 }
+  ' "$source" > "$runner"; then
+    fail "unsupported blockcheck2.sh layout: main marker not found"
+  fi
+  cat >> "$runner" <<'RUNNER'
+
+gp_md_primary_domain()
+{
+	local d
+	for d in $DOMAINS; do
+		echo "$d"
+		return
+	done
+}
+
+gp_md_resolve_all_ips()
+{
+	local d ips all_ips
+	for d in $DOMAINS; do
+		mdig_resolve_all $IPV ips "$d"
+		all_ips="${all_ips:+$all_ips }$ips"
+	done
+	echo "$all_ips" | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
+gp_md_normalize_ip_list()
+{
+	local ip result
+	for ip in $1; do
+		result="${result:+$result }$ip"
+	done
+	echo "$result"
+}
+
+gp_md_parallel_limit()
+{
+	local n="${GP_MD_CURL_PARALLELISM:-4}"
+	case "$n" in
+		""|*[!0-9]*) n=4 ;;
+	esac
+	n=$((n + 0))
+	[ "$n" -lt 1 ] && n=1
+	echo "$n"
+}
+
+gp_md_out_file()
+{
+	echo "${PARALLEL_OUT}_md_$1.out"
+}
+
+gp_md_code_file()
+{
+	echo "${PARALLEL_OUT}_md_$1.code"
+}
+
+gp_md_run_domain_curl()
+{
+	# $1 - index
+	# $2 - test function
+	# $3 - domain
+	local idx=$1 testf=$2 gp_domain="$3" code out codefile
+	out="$(gp_md_out_file "$idx")"
+	codefile="$(gp_md_code_file "$idx")"
+	curl_test "$testf" "$gp_domain" >"$out" 2>&1
+	code=$?
+	echo "$code" >"$codefile"
+	return 0
+}
+
+gp_md_collect_record()
+{
+	# $1 - pid:index:domain
+	# $2 - test function
+	# $3 - strategy text
+	local record="$1" testf=$2 strategy_text="$3" pid rest idx gp_domain code out codefile
+	pid="${record%%:*}"
+	rest="${record#*:}"
+	idx="${rest%%:*}"
+	gp_domain="${rest#*:}"
+
+	wait "$pid" 2>/dev/null
+	out="$(gp_md_out_file "$idx")"
+	codefile="$(gp_md_code_file "$idx")"
+	code="$(cat "$codefile" 2>/dev/null)"
+	[ -n "$code" ] || code=1
+
+	echo "- $testf ipv$IPV $gp_domain : $PKTWSD ${WF:+$WF }$strategy_text"
+	[ -f "$out" ] && cat "$out"
+	rm -f "$out" "$codefile"
+	if [ "$code" = 0 ]; then
+		echo "!!!!! $testf: working strategy found for ipv$IPV $gp_domain : nfqws2 ${WF:+$WF }$strategy_text !!!!!"
+		report_append "$gp_domain" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy_text"
+		return 0
+	fi
+	echo "GP-MULTIDOMAIN unavailable code=$code"
+	return 1
+}
+
+pktws_curl_test_update()
+{
+	# $1 - curl test function
+	# $2 - sample domain from the standard zapret2 script
+	# $3+ - nfqws2 args
+	local testf=$1 dom="$2" strategy ok=0 total=0 gp_domain idx=0 limit active=0 pending record
+	shift
+	shift
+	strategy="$*"
+	limit="$(gp_md_parallel_limit)"
+	rm -f "${PARALLEL_OUT}_md_"*
+
+	echo
+	echo "- gp_multidomain_strategy ipv$IPV parallel=$limit : $PKTWSD ${WF:+$WF }$strategy"
+	pktws_start "$@"
+	for gp_domain in $DOMAINS; do
+		idx=$(($idx + 1))
+		total=$(($total + 1))
+		gp_md_run_domain_curl "$idx" "$testf" "$gp_domain" &
+		record="$!:$idx:$gp_domain"
+		pending="${pending:+$pending }$record"
+		active=$(($active + 1))
+		if [ "$active" -ge "$limit" ]; then
+			record="${pending%% *}"
+			if [ "$record" = "$pending" ]; then
+				pending=
+			else
+				pending="${pending#* }"
+			fi
+			gp_md_collect_record "$record" "$testf" "$strategy" && ok=$(($ok + 1))
+			active=$(($active - 1))
+		fi
+	done
+	while [ -n "$pending" ]; do
+		record="${pending%% *}"
+		if [ "$record" = "$pending" ]; then
+			pending=
+		else
+			pending="${pending#* }"
+		fi
+		gp_md_collect_record "$record" "$testf" "$strategy" && ok=$(($ok + 1))
+	done
+	ws_kill
+	rm -f "${PARALLEL_OUT}_md_"*
+	echo "GP-MULTIDOMAIN result: $ok/$total domains available"
+	[ "$ok" = "$total" ]
+}
+
+gp_md_run_protocol()
+{
+	# $1 - standard script function
+	# $2 - curl test function
+	# $3 - tcp/udp
+	# $4 - port
+	local func=$1 testf=$2 proto=$3 port=$4 ips primary
+	primary="$(gp_md_primary_domain)"
+	[ -n "$primary" ] || return 1
+	ips="$(gp_md_resolve_all_ips)"
+	ips="$(gp_md_normalize_ip_list "$ips")"
+	[ -n "$ips" ] || {
+		echo "GP-MULTIDOMAIN no resolved ip addresses for $proto/$port"
+		return 1
+	}
+
+	echo
+	echo "GP-MULTIDOMAIN preparing $PKTWSD redirection for $proto/$port"
+	case "$proto" in
+		tcp) pktws_ipt_prepare_tcp "$port" "$ips" ;;
+		udp) pktws_ipt_prepare_udp "$port" "$ips" ;;
+		*) return 1 ;;
+	esac
+	test_runner "$func" "$testf" "$primary"
+	echo "GP-MULTIDOMAIN clearing $PKTWSD redirection for $proto/$port"
+	case "$proto" in
+		tcp) pktws_ipt_unprepare_tcp "$port" ;;
+		udp) pktws_ipt_unprepare_udp "$port" ;;
+	esac
+}
+
+fsleep_setup
+fix_sbin_path
+check_system
+check_already
+[ "$UNAME" != CYGWIN  -a "$SKIP_PKTWS" != 1 ] && require_root
+check_prerequisites
+trap sigint_cleanup INT
+check_dns
+check_virt
+ask_params
+trap - INT
+
+PID=
+NREPORT=
+unset WF
+trap sigint INT
+trap sigsilent PIPE
+trap sigsilent HUP
+for IPV in $IPVS; do
+	configure_ip_version
+	[ "$ENABLE_HTTP" = 1 ] && gp_md_run_protocol pktws_check_http curl_test_http tcp "$HTTP_PORT"
+	[ "$ENABLE_HTTPS_TLS12" = 1 ] && gp_md_run_protocol pktws_check_https_tls12 curl_test_https_tls12 tcp "$HTTPS_PORT"
+	[ "$ENABLE_HTTPS_TLS13" = 1 ] && gp_md_run_protocol pktws_check_https_tls13 curl_test_https_tls13 tcp "$HTTPS_PORT"
+	[ "$ENABLE_HTTP3" = 1 ] && gp_md_run_protocol pktws_check_http3 curl_test_http3 udp "$QUIC_PORT"
+done
+trap - HUP
+trap - PIPE
+trap - INT
+
+cleanup
+RUNNER
+  chmod 0700 "$runner"
+}
+
+run_multidomain_target() {
+  target="$(validate_run_target "$@")"
+  shift
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gp-root-helper.XXXXXX")"
+  runner="$tmp_dir/gp-multidomain-blockcheck.sh"
+  cleanup_runner() {
+    rm -rf "$tmp_dir"
+  }
+  trap cleanup_runner EXIT HUP INT TERM
+  write_multidomain_runner "$target" "$runner"
+  set +e
+  "$runner" "$@"
+  code="$?"
+  set -e
+  cleanup_runner
+  trap - EXIT HUP INT TERM
+  exit "$code"
 }
 
 queue_update() {
@@ -160,6 +396,9 @@ case "$command" in
   run)
     run_target "$@"
     ;;
+  run-multidomain)
+    run_multidomain_target "$@"
+    ;;
   run-env)
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--" ]; then
@@ -171,6 +410,18 @@ case "$command" in
       shift
     done
     run_target "$@"
+    ;;
+  run-multidomain-env)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--" ]; then
+        shift
+        break
+      fi
+      validate_env_assignment "$1"
+      export "$1"
+      shift
+    done
+    run_multidomain_target "$@"
     ;;
   queue-update)
     [ "$#" -eq 2 ] || fail "queue-update requires install directory and release ref"

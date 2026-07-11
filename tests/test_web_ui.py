@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -9,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -50,6 +52,11 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("backup-upload-file", html)
         self.assertIn("/api/backups/upload", html)
         self.assertIn("app-version-badge", html)
+        self.assertIn("web-auth-badge", html)
+        self.assertIn("WEB_AUTH", html)
+        self.assertIn("authHeaders", html)
+        self.assertIn("X-GP-Token", html)
+        self.assertIn("gp_token", html)
         self.assertNotIn("settings-version", html)
         self.assertIn("settings-enable-ipv6", html)
         self.assertIn("settings-debug-stdout", html)
@@ -255,13 +262,21 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("showToast", html)
         self.assertIn("progress-fill", html)
         self.assertIn("progress-attempted", html)
+        self.assertIn("progress-strategies", html)
         self.assertIn("progress-successful", html)
         self.assertIn("progress-phase", html)
+        self.assertIn("progress-elapsed", html)
         self.assertIn("progress-metrics", html)
         self.assertIn("phaseLabel", html)
-        self.assertIn("renderRuntimeMetrics", html)
+        self.assertIn("renderRunSettingsSummary", html)
+        self.assertIn("run_settings", html)
         self.assertIn("attempt_total", html)
+        self.assertIn("strategy_total", html)
         self.assertIn("eta_estimate_ms_per_attempt", html)
+        self.assertIn("расчитанное среднее время попытки", html)
+        self.assertNotIn("curl: ${processes.curl", html)
+        self.assertIn("progressLiveElapsedSeconds(progress)", html)
+        self.assertIn("progressLiveEtaSeconds(progress)", html)
         self.assertIn("runCandidateCount(row)", html)
         self.assertIn("runProgressText(row)", html)
         self.assertIn("data-action=\"run-selected-discovery\"", html)
@@ -269,6 +284,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("data-action=\"standard-discovery\"", html)
         self.assertIn("/api/jobs/zapret-multi-domain-discovery", html)
         self.assertIn("curl-parallelism", html)
+        self.assertNotIn('id="curl-parallelism" type="number" min="1" max="10"', html)
         self.assertNotIn("id=\"settings-curl-max\" type=\"number\" min=\"1\" max=\"10\"", html)
         self.assertIn("Можно ставить любое число от 1", html)
         self.assertIn("value=\"4\"", html)
@@ -342,17 +358,22 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("zapretDiagnostics", html)
         self.assertIn("status-check-message", html)
         self.assertIn("testedDomainCount", html)
+        self.assertIn("lastCandidateDomainTotal", html)
         self.assertNotIn("metric-last-run", html)
         self.assertNotIn("Последний запуск", html)
         self.assertNotIn("data-action=\"refresh\"", html)
         self.assertNotIn("Обновить данные", html)
         self.assertIn("runStatusLabel(status)", html)
+        self.assertIn("metricJobNoteText(jobStatus, busy)", html)
+        self.assertNotIn("jobDetails.push", html)
+        self.assertNotIn("этап: ${phase}", html)
         self.assertIn("etaModeLabel(progress)", html)
         self.assertIn("loading-skeleton", html)
         self.assertIn("candidateLoading", html)
         self.assertIn("candidateUpdatedAt", html)
         self.assertIn("backupsLoading", html)
         self.assertIn("backupsUpdatedAt", html)
+        self.assertIn("renderWebAuthStatus", html)
         self.assertIn("friendlyTime", html)
         self.assertIn("backups-updated-at", html)
         self.assertIn("останавливается", html)
@@ -566,6 +587,16 @@ class WebUiTests(unittest.TestCase):
 
         self.assertEqual([], errors[:10], f"Raw newline inside JS string literal near lines: {errors[:10]}")
 
+    def test_index_html_does_not_contain_mojibake_markers(self) -> None:
+        html = index_html()
+
+        for marker in ("\u0420\u045b", "\u0420\u0451", "\u0421\u0403"):
+            self.assertNotIn(marker, html)
+
+        self.assertIn("Ошибка обновления истории", html)
+        self.assertIn("Ошибка обновления лога", html)
+        self.assertIn("Ошибка обновления пресетов", html)
+
     def test_head_root_returns_ok_for_curl_i(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -665,6 +696,113 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"mtime_ns"', body)
             self.assertIn('"release_update"', body)
             self.assertIn('"status":"success"', body)
+
+    def test_web_auth_token_protects_mutating_api_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                body = json.dumps({"settings": {"curl_parallelism_max": 17}})
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request("POST", "/api/settings", body=body, headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                response.read()
+                connection.close()
+                self.assertEqual(response.status, 401)
+
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request(
+                    "POST",
+                    "/api/settings",
+                    body=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-GP-Token": "secret-token",
+                        "Origin": f"http://127.0.0.1:{port}",
+                    },
+                )
+                response = connection.getresponse()
+                saved = response.read().decode("utf-8")
+                connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"curl_parallelism_max":17', saved)
+
+    def test_web_auth_rejects_cross_origin_mutating_api(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                body = json.dumps({"settings": {"curl_parallelism_max": 17}})
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request(
+                    "POST",
+                    "/api/settings",
+                    body=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-GP-Token": "secret-token",
+                        "Origin": "http://evil.local",
+                    },
+                )
+                response = connection.getresponse()
+                error = response.read().decode("utf-8")
+                connection.close()
+
+            self.assertEqual(response.status, 403)
+            self.assertIn("origin", error)
+
+    def test_web_auth_token_protects_sensitive_get_api_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request("GET", "/api/backups/restore-preview?snapshot=missing")
+                response = connection.getresponse()
+                response.read()
+                connection.close()
+                self.assertEqual(response.status, 401)
+
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request(
+                    "GET",
+                    "/api/backups/restore-preview?snapshot=missing",
+                    headers={"X-GP-Token": "secret-token"},
+                )
+                response = connection.getresponse()
+                body = response.read().decode("utf-8")
+                connection.close()
+
+            self.assertEqual(response.status, 400)
+            self.assertIn("error", body)
 
     def test_events_endpoint_streams_sse_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

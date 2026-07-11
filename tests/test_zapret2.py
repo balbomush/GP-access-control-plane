@@ -149,6 +149,37 @@ class Zapret2Tests(unittest.TestCase):
             ],
         )
 
+    def test_root_command_wraps_multidomain_with_helper_owned_runner(self) -> None:
+        env = {"BATCH": "1", "DOMAINS": "youtube.com", "GP_MD_CURL_PARALLELISM": "30"}
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2.require_root_helper_ready"),
+            mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+            mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/bin/sudo"),
+        ):
+            command = root_command(
+                ["/opt/zapret2/blockcheck2.sh"],
+                env=env,
+                pass_env_keys=BLOCKCHECK_ENV_KEYS,
+                helper_command="run-multidomain",
+            )
+
+        self.assertEqual(
+            command,
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/helper/gp-root-helper",
+                "run-multidomain-env",
+                "BATCH=1",
+                "DOMAINS=youtube.com",
+                "GP_MD_CURL_PARALLELISM=30",
+                "--",
+                "/opt/zapret2/blockcheck2.sh",
+            ],
+        )
+
     def test_stop_process_group_terminates_process(self) -> None:
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=hasattr(os, "setsid"))
         try:

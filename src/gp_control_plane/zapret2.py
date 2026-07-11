@@ -149,9 +149,16 @@ def _stop_process_group(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=5)
 
 
-def root_command(command: list[str], env: dict[str, str] | None = None, pass_env_keys: tuple[str, ...] = ()) -> list[str]:
+def root_command(
+    command: list[str],
+    env: dict[str, str] | None = None,
+    pass_env_keys: tuple[str, ...] = (),
+    helper_command: str = "run",
+) -> list[str]:
     if _is_root():
         return command
+    if helper_command not in {"run", "run-multidomain"}:
+        raise ValueError(f"unsupported root helper command: {helper_command}")
     require_root_helper_ready()
     helper = _root_helper_path()
     sudo = shutil.which("sudo")
@@ -160,8 +167,9 @@ def root_command(command: list[str], env: dict[str, str] | None = None, pass_env
     if pass_env_keys:
         source_env = env or {}
         assignments = [f"{key}={source_env[key]}" for key in pass_env_keys if key in source_env]
-        return [sudo, "-n", helper, "run-env", *assignments, "--", *command]
-    return [sudo, "-n", helper, "run", *command]
+        env_command = "run-multidomain-env" if helper_command == "run-multidomain" else "run-env"
+        return [sudo, "-n", helper, env_command, *assignments, "--", *command]
+    return [sudo, "-n", helper, helper_command, *command]
 
 
 def require_root_helper_ready() -> None:
