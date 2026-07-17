@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-
-from . import simpleyaml
 
 
 @dataclass(frozen=True)
@@ -16,17 +15,12 @@ class AppConfig:
     output: OutputConfig
 
 
-def load_config(path: Path) -> AppConfig:
-    data = simpleyaml.load_file(path)
-    if not isinstance(data, dict):
-        raise ValueError("config root must be a mapping")
-
-    output = data.get("output") or {}
-
+def build_config(state_dir: str | Path | None = None) -> AppConfig:
+    value = state_dir or os.environ.get("GP_STATE_DIR") or "./build/state"
     cwd = Path.cwd()
     return AppConfig(
         output=OutputConfig(
-            state_dir=_resolve(cwd, output.get("state_dir", "./build/state")),
+            state_dir=_resolve(cwd, value),
         ),
     )
 

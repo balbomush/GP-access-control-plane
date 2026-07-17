@@ -246,6 +246,7 @@ _CURL_FAILURE_INFO = {
 }
 DEFAULT_PAGE_LIMIT = 200
 MAX_PAGE_LIMIT = 200
+NFQUEUE_MAXLEN_MISSING_RE = re.compile(r"can't set queue maxlen:\s+No such file or directory", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -900,6 +901,7 @@ def latest_log_tail(
         else:
             stderr_tail = ""
             stderr_append = stderr_delta
+        stderr_diagnostics = classify_stderr_diagnostics("\n".join(part for part in (stderr_tail, stderr_append) if part))
         progress = run.get("progress")
         if not isinstance(progress, dict):
             progress = _read_progress_log(run)
@@ -916,6 +918,7 @@ def latest_log_tail(
             "stdout_append": stdout_append,
             "stderr_tail": stderr_tail,
             "stderr_append": stderr_append,
+            "stderr_diagnostics": stderr_diagnostics,
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log) if stderr_log else "",
             "stdout_size": _file_version(stdout_log)["size"],
@@ -932,12 +935,42 @@ def latest_log_tail(
         "stdout_append": "",
         "stderr_tail": "",
         "stderr_append": "",
+        "stderr_diagnostics": [],
         "stdout_size": 0,
         "stderr_size": 0,
         "progress": progress_from_stdout("", {}),
         "metrics": {},
         "run_settings": {},
     }
+
+
+def classify_stderr_diagnostics(stderr_text: str) -> list[dict[str, str]]:
+    diagnostics: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in stderr_text.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if NFQUEUE_MAXLEN_MISSING_RE.search(text):
+            status = "nfqueue_maxlen_sysctl_missing"
+            if status in seen:
+                continue
+            seen.add(status)
+            diagnostics.append(
+                {
+                    "severity": "warning",
+                    "status": status,
+                    "label": "NFQUEUE maxlen недоступен",
+                    "message": (
+                        "На этой системе нет sysctl для queue maxlen. "
+                        "Это совместимость ядра/NFQUEUE: подбор может продолжаться, "
+                        "строка не считается фатальной ошибкой GP."
+                    ),
+                    "source": "stderr",
+                    "line": text,
+                }
+            )
+    return diagnostics
 
 
 def _run_settings_for_progress(run: dict[str, Any]) -> dict[str, Any]:

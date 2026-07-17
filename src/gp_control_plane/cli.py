@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import load_config
+from .config import build_config
 from .domain_sources import prepare_v2fly_local_storage
 from .strategy_finder import (
     domain_sets,
@@ -23,7 +23,11 @@ from .zapret2 import check_install
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gp-control-plane")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--config", default="configs/orchestrator.example.yaml", help="Path to orchestrator config")
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Path to GP state directory. Defaults to GP_STATE_DIR or ./build/state.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -89,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _main(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config))
+    config = build_config(args.state_dir)
 
     if args.command == "zapret2":
         if args.zapret_command == "check-install":
@@ -169,11 +173,11 @@ def _print_json(payload: dict[str, Any]) -> None:
 def _normalize_argv(argv: list[str]) -> list[str]:
     args = list(argv)
     for index, value in enumerate(args):
-        if value == "--config" and index + 1 < len(args):
+        if value == "--state-dir" and index + 1 < len(args):
             pair = args[index : index + 2]
             del args[index : index + 2]
             return pair + args
-        if value.startswith("--config="):
+        if value.startswith("--state-dir="):
             del args[index]
             return [value] + args
     return args

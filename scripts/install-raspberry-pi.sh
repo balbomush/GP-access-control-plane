@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPO_URL="${GP_REPO_URL:-https://github.com/balbomush/GP-access-control-plane.git}"
-BRANCH="${GP_BRANCH:-v0.3.3}"
+BRANCH="${GP_BRANCH:-v0.3.4}"
 SERVICE_NAME="${GP_SERVICE_NAME:-gp-control-plane-web.service}"
 WEB_HOST="${GP_WEB_HOST:-0.0.0.0}"
 WEB_PORT="${GP_WEB_PORT:-8080}"
@@ -180,6 +180,8 @@ install_web_env_file() {
   TMP_WEB_ENV="$(mktemp)"
   {
     printf 'GP_WEB_AUTH=%s\n' "$WEB_AUTH"
+    state_dir_escaped="$(printf '%s' "$INSTALL_DIR/build/state" | sed "s/'/'\\\\''/g")"
+    printf "GP_STATE_DIR='%s'\n" "$state_dir_escaped"
     if [ -n "$token" ]; then
       token_escaped="$(printf '%s' "$token" | sed "s/'/'\\\\''/g")"
       printf "GP_WEB_TOKEN='%s'\n" "$token_escaped"
@@ -190,7 +192,7 @@ install_web_env_file() {
 }
 
 prepare_v2fly_local_catalog() {
-  run_as_target sh -c 'cd "$1" && "$1/.venv/bin/gp-control-plane" --config "$1/configs/orchestrator.example.yaml" domain-sources prepare-v2fly' sh "$INSTALL_DIR"
+  run_as_target sh -c 'cd "$1" && GP_STATE_DIR="$1/build/state" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly' sh "$INSTALL_DIR"
 }
 
 if [ "$CURRENT_UID" -ne 0 ]; then
@@ -365,7 +367,7 @@ Environment=PATH=$SERVICE_PATH
 Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
 Environment=GP_ZAPRET_DIR=$ZAPRET_DIR
 EnvironmentFile=-$WEB_ENV_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --config $INSTALL_DIR/configs/orchestrator.example.yaml --host $WEB_HOST --port $WEB_PORT
+ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --host $WEB_HOST --port $WEB_PORT
 MemoryAccounting=true
 MemoryHigh=$SERVICE_MEMORY_HIGH
 MemoryMax=$SERVICE_MEMORY_MAX
@@ -382,7 +384,7 @@ SERVICE
 fi
 
 if step_log check "Checking installation"; then
-  run_as_target "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install --config "$INSTALL_DIR/configs/orchestrator.example.yaml" || true
+  run_as_target env GP_STATE_DIR="$INSTALL_DIR/build/state" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
   as_root systemctl --no-pager --full status "$SERVICE_NAME" || true
 fi
 

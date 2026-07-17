@@ -14,10 +14,10 @@ from .storage import connect, db_path
 
 
 SNAPSHOT_KEEP = 5
-BACKUP_SCHEMA_VERSION = "4"
-SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"2", "3", BACKUP_SCHEMA_VERSION}
+BACKUP_SCHEMA_VERSION = "5"
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = {BACKUP_SCHEMA_VERSION}
 SNAPSHOT_DOWNLOAD_FILES = {
-    "manifest.yaml",
+    "manifest.json",
     "checksums.sha256",
     "domains/domains.ndjson",
     "strategies/strategies.ndjson",
@@ -108,7 +108,7 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
     checksum_ok = verify_snapshot(state_dir, snapshot_id)
     if checksum_ok:
         _ensure_snapshot_compatible(path)
-    manifest = _read_simple_manifest(path / "manifest.yaml")
+    manifest = _read_manifest(path / "manifest.json")
     backup_domain_count = _int_value(manifest.get("domain_count"))
     backup_strategy_count = _int_value(manifest.get("strategy_count"))
     backup_link_count = _int_value(manifest.get("link_count"))
@@ -202,8 +202,10 @@ def import_snapshot_archive(state_dir: Path, archive_bytes: bytes) -> dict[str, 
                 with zf.open(member, "r") as src, target.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
         extracted = tmp_dir / snapshot_id
-        if not (extracted / "manifest.yaml").is_file():
-            raise ValueError("backup manifest.yaml not found")
+        if not (extracted / "manifest.json").is_file():
+            if (extracted / "manifest.yaml").is_file():
+                raise ValueError("unsupported legacy backup format: manifest.yaml")
+            raise ValueError("backup manifest.json not found")
         if not _verify_snapshot_path(extracted):
             raise ValueError("backup checksum verification failed")
         _ensure_snapshot_compatible(extracted)
@@ -319,8 +321,8 @@ def list_snapshots(state_dir: Path) -> dict[str, Any]:
 
 def snapshot_info(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     path = _snapshot_path(state_dir, snapshot_id)
-    manifest_path = path / "manifest.yaml"
-    manifest = _read_simple_manifest(manifest_path)
+    manifest_path = path / "manifest.json"
+    manifest = _read_manifest(manifest_path)
     return {
         "id": snapshot_id,
         "schema_version": manifest.get("schema_version") or "",
@@ -355,7 +357,7 @@ def _verify_snapshot_path(path: Path) -> bool:
 
 
 def _ensure_snapshot_compatible(path: Path) -> None:
-    manifest = _read_simple_manifest(path / "manifest.yaml")
+    manifest = _read_manifest(path / "manifest.json")
     if not _is_supported_snapshot_manifest(manifest):
         version = manifest.get("schema_version") or "missing"
         raise ValueError(f"unsupported backup schema_version: {version}")
@@ -443,7 +445,7 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
         "preset_link_count": str(preset_link_count),
         "completed": "true",
     }
-    _write_text(root / "manifest.yaml", _yaml_mapping(manifest))
+    _write_json(root / "manifest.json", manifest)
     _write_checksums(root)
 
 
@@ -571,7 +573,7 @@ def _read_required_ndjson(path: Path) -> list[dict[str, Any]]:
 
 def _load_restore_plan(path: Path) -> dict[str, Any]:
     _ensure_snapshot_compatible(path)
-    manifest = _read_simple_manifest(path / "manifest.yaml")
+    manifest = _read_manifest(path / "manifest.json")
     domains = _read_required_ndjson(path / "domains" / "domains.ndjson")
     strategies = _read_required_ndjson(path / "strategies" / "strategies.ndjson")
     links = _read_required_ndjson(path / "strategies" / "strategy-domain-links.ndjson")
@@ -766,7 +768,7 @@ def _snapshot_paths(state_dir: Path) -> list[Path]:
         return []
     result = []
     for path in root.iterdir():
-        if path.is_dir() and not path.name.startswith(".tmp-") and (path / "manifest.yaml").is_file():
+        if path.is_dir() and not path.name.startswith(".tmp-") and (path / "manifest.json").is_file():
             result.append(path)
     return result
 
@@ -798,16 +800,16 @@ def _write_latest_marker(state_dir: Path, snapshot_id: str) -> None:
     latest.write_text(snapshot_id + "\n", encoding="utf-8")
 
 
-def _read_simple_manifest(path: Path) -> dict[str, str]:
+def _read_manifest(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
-    result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        result[key.strip()] = value.strip().strip('"')
-    return result
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid backup manifest.json") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("backup manifest.json must be an object")
+    return {str(key): str(value) for key, value in payload.items()}
 
 
 def _dir_size(path: Path) -> int:
@@ -827,28 +829,5 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _yaml_mapping(mapping: dict[str, str]) -> str:
-    return "".join(f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in mapping.items())
-
-
-def _yaml_value(value: Any, indent: int = 0) -> str:
-    prefix = " " * indent
-    if isinstance(value, dict):
-        lines = []
-        for key, item in value.items():
-            if isinstance(item, (dict, list)):
-                lines.append(f"{prefix}{key}:")
-                lines.append(_yaml_value(item, indent + 2).rstrip("\n"))
-            else:
-                lines.append(f"{prefix}{key}: {json.dumps(item, ensure_ascii=False)}")
-        return "\n".join(lines) + "\n"
-    if isinstance(value, list):
-        lines = []
-        for item in value:
-            if isinstance(item, dict):
-                lines.append(f"{prefix}-")
-                lines.append(_yaml_value(item, indent + 2).rstrip("\n"))
-            else:
-                lines.append(f"{prefix}- {json.dumps(item, ensure_ascii=False)}")
-        return "\n".join(lines) + "\n"
-    return f"{prefix}{json.dumps(value, ensure_ascii=False)}\n"
+def _write_json(path: Path, payload: dict[str, str]) -> None:
+    _write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")

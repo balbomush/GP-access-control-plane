@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -254,9 +255,9 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "archive").is_file())
             self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "domains/domains.ndjson").is_file())
             with self.assertRaises(FileNotFoundError):
-                snapshot_file_path(state_dir, snapshot_id, "../manifest.yaml")
+                snapshot_file_path(state_dir, snapshot_id, "../manifest.json")
             with self.assertRaises(FileNotFoundError):
-                snapshot_file_path(state_dir, snapshot_id, "domains/../manifest.yaml")
+                snapshot_file_path(state_dir, snapshot_id, "domains/../manifest.json")
             with self.assertRaises(FileNotFoundError):
                 snapshot_file_path(state_dir, snapshot_id, "strategies/strategy-stats.ndjson")
 
@@ -291,9 +292,9 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             upsert_candidates(state_dir, parsed, {"id": "run-1"})
             snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
-            manifest_path = snapshot_path / "manifest.yaml"
+            manifest_path = snapshot_path / "manifest.json"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('schema_version: "4"', 'schema_version: "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "5"', '"schema_version": "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
@@ -367,15 +368,24 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             upsert_candidates(state_dir, parsed, {"id": "run-1"})
             snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
-            manifest_path = snapshot_path / "manifest.yaml"
+            manifest_path = snapshot_path / "manifest.json"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('schema_version: "4"', 'schema_version: "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "5"', '"schema_version": "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
             archive = snapshot_archive_path(state_dir, snapshot_id)
 
             with self.assertRaisesRegex(ValueError, "unsupported backup schema_version"):
+                import_snapshot_archive(Path(raw) / "target-state", archive.read_bytes())
+
+    def test_import_rejects_legacy_yaml_manifest_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            archive = Path(raw) / "legacy.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("legacy-snapshot/manifest.yaml", 'schema_version: "4"\n')
+
+            with self.assertRaisesRegex(ValueError, "unsupported legacy backup format"):
                 import_snapshot_archive(Path(raw) / "target-state", archive.read_bytes())
 
     def test_restore_snapshot_if_idle_skips_while_job_running(self) -> None:

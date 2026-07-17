@@ -87,17 +87,23 @@ class CliSafetyTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     parser.parse_args(command)
 
-    def test_config_argument_can_be_after_command(self) -> None:
+    def test_state_dir_argument_can_be_after_command(self) -> None:
         from gp_control_plane.cli import _normalize_argv
 
         self.assertEqual(
-            _normalize_argv(["web", "--config", "configs/orchestrator.example.yaml"]),
-            ["--config", "configs/orchestrator.example.yaml", "web"],
+            _normalize_argv(["web", "--state-dir", "/tmp/gp-state"]),
+            ["--state-dir", "/tmp/gp-state", "web"],
         )
         self.assertEqual(
-            _normalize_argv(["strategy-finder", "domains", "--config=configs/orchestrator.example.yaml"]),
-            ["--config=configs/orchestrator.example.yaml", "strategy-finder", "domains"],
+            _normalize_argv(["strategy-finder", "domains", "--state-dir=/tmp/gp-state"]),
+            ["--state-dir=/tmp/gp-state", "strategy-finder", "domains"],
         )
+
+    def test_config_argument_is_removed(self) -> None:
+        parser = build_parser()
+
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["--config", "configs/orchestrator.example.yaml", "web"])
 
     def test_forbidden_router_operations_are_not_in_source(self) -> None:
         source_root = Path(__file__).resolve().parents[1] / "src" / "gp_control_plane"

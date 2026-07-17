@@ -700,6 +700,31 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
+.stderr-diagnostics {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.stderr-diagnostic {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+}
+.stderr-diagnostic.warn {
+  border-color: #eed09a;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.stderr-diagnostic-title {
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.stderr-diagnostic.warn .stderr-diagnostic-title {
+  color: var(--amber);
+}
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
@@ -1972,6 +1997,7 @@ pre {
           <div class="progress-note" id="progress-note">расчитанное среднее время попытки: -</div>
           <div class="progress-note" id="progress-metrics">Настройки запуска появятся после старта подбора.</div>
         </div>
+        <div id="stderr-diagnostics" class="stderr-diagnostics" hidden></div>
         <pre id="finder-log">Лога пока нет</pre>
       </section>
     </section>
@@ -3742,9 +3768,28 @@ function renderLog(){
   if (log.stderr_tail) parts.push('--- stderr ---\\n' + log.stderr_tail);
   const logNode = el('finder-log');
   logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
+  renderStderrDiagnostics(log.stderr_diagnostics || []);
   renderProgress(log.progress || {});
   renderRunSettingsSummary(log.run_settings || {});
   if (state.activeTab === 'terminal') scrollLogToBottom();
+}
+function renderStderrDiagnostics(items){
+  const target = el('stderr-diagnostics');
+  if (!target) return;
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) {
+    target.hidden = true;
+    target.innerHTML = '';
+    return;
+  }
+  target.hidden = false;
+  target.innerHTML = rows.map((item) => {
+    const severity = item.severity === 'warning' ? 'warn' : '';
+    return `<div class="stderr-diagnostic ${severity}">
+      <div class="stderr-diagnostic-title">${esc(item.label || item.status || 'Диагностика stderr')}</div>
+      <div>${esc(item.message || '')}</div>
+    </div>`;
+  }).join('');
 }
 function renderBackups(){
   const rows = state.backups || [];
@@ -3770,7 +3815,7 @@ function renderBackups(){
 function backupCard(item){
   const id = String(item.id || '');
   const files = Array.isArray(item.files) ? item.files : [];
-  const visibleFiles = files.filter((file) => !String(file.path || '').endsWith('checksums.sha256') && String(file.path || '') !== 'manifest.yaml');
+  const visibleFiles = files.filter((file) => !String(file.path || '').endsWith('checksums.sha256') && String(file.path || '') !== 'manifest.json');
   return `<article class="backup-card">
     <div class="domain-header">
       <div>

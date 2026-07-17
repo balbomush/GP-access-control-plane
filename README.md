@@ -7,7 +7,7 @@
 Самый простой вариант для Raspberry Pi OS:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.3/scripts/install-raspberry-pi.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
 ```
 
 Что сделает скрипт:
@@ -36,13 +36,13 @@ http://<ip-raspberry-pi>:8080/
 Если запустить через `sudo`, установщик возьмет исходного пользователя из `SUDO_USER` и поставит проект ему, а не в `/root`:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.3/scripts/install-raspberry-pi.sh | sudo bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | sudo bash
 ```
 
 Если нужно явно выбрать пользователя:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.3/scripts/install-raspberry-pi.sh | sudo env GP_INSTALL_USER=pi bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | sudo env GP_INSTALL_USER=pi bash
 ```
 
 Путь установки можно поменять через `GP_INSTALL_DIR`, но выбранный пользователь должен иметь право записи в этот каталог. Для обычной установки лучше оставить путь по умолчанию: `~/gp/GP-access-control-plane`.
@@ -57,7 +57,7 @@ MemoryMax=1G
 Если для вашей платы нужны другие значения, задайте их при установке:
 
 ```bash
-GP_SERVICE_MEMORY_HIGH=768M GP_SERVICE_MEMORY_MAX=1500M curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.3/scripts/install-raspberry-pi.sh | bash
+GP_SERVICE_MEMORY_HIGH=768M GP_SERVICE_MEMORY_MAX=1500M curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
 ```
 
 Если репозиторий приватный, сначала настройте SSH-доступ к GitHub. Затем запустите установку через `git clone`:
@@ -99,7 +99,7 @@ nfqws2
 Проверка после установки:
 
 ```bash
-gp-control-plane zapret2 check-install --config ~/gp/GP-access-control-plane/configs/orchestrator.example.yaml
+gp-control-plane zapret2 check-install
 ```
 
 В выводе должны быть `root_helper_found: true` и `root_helper_ready: true`. Это важно: подбор запускается из web-сервиса без терминала, поэтому он не может вводить sudo-пароль. Установщик решает это через отдельный root-helper:
@@ -183,10 +183,10 @@ journalctl -u gp-control-plane-web.service -f
 Повторно запустите установщик:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.3/scripts/install-raspberry-pi.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
 ```
 
-Он установит текущий стабильный релиз `v0.3.3`, обновит Python-окружение и перезапустит сервис. Если нужно явно поставить другую ветку или тег, задайте `GP_BRANCH`, например `GP_BRANCH=main`.
+Он установит текущий стабильный релиз `v0.3.4`, обновит Python-окружение и перезапустит сервис. Если нужно явно поставить другую ветку или тег, задайте `GP_BRANCH`, например `GP_BRANCH=main`.
 
 Тестовые alpha/prerelease-сборки не ставятся этой командой. Для них используйте вкладку `Настройки` в web UI:
 
@@ -237,14 +237,16 @@ build/backups/
   latest.txt
   snapshots/
     <date>/
-      manifest.yaml
+      manifest.json
       checksums.sha256
       domains/
       strategies/
   archives/
 ```
 
-Бекап содержит домены, стратегии и связи стратегия-домен. Пользовательские списки и настройки не заменяются при восстановлении.
+Бекап содержит домены, стратегии, связи стратегия-домен и пользовательские списки доменов. Настройки UI не заменяются при восстановлении.
+
+Каталог состояния можно переопределить через переменную окружения `GP_STATE_DIR` или аргумент `--state-dir`. По умолчанию используется `./build/state` относительно рабочего каталога GP.
 
 Хранятся последние 5 успешных snapshot-ов. Более старые удаляются автоматически только после успешного создания новой копии. Snapshot создается только в простое, когда подбор не запущен.
 
@@ -259,9 +261,9 @@ sudo systemctl stop gp-control-plane-web.service
 python - <<'PY'
 from pathlib import Path
 from gp_control_plane.backups import import_snapshot_archive, restore_snapshot, restore_snapshot_preview
-from gp_control_plane.config import load_config
+from gp_control_plane.config import build_config
 
-config = load_config(Path("configs/orchestrator.example.yaml"))
+config = build_config()
 archive = Path("/path/to/backup.zip")
 snapshot = import_snapshot_archive(config.output.state_dir, archive.read_bytes())["snapshot"]["id"]
 print(restore_snapshot_preview(config.output.state_dir, snapshot))
@@ -293,7 +295,7 @@ python3 -m venv .venv
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 
-gp-control-plane web --config configs/orchestrator.example.yaml --host 0.0.0.0 --port 8080
+gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080
 ```
 
 Ручная установка выше не показывает все шаги установки `zapret2` и автозапуска. Для обычного использования проще и надежнее запускать `scripts/install-raspberry-pi.sh`.

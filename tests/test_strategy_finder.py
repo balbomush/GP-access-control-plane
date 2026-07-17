@@ -39,6 +39,7 @@ from gp_control_plane.strategy_finder import (
     candidate_id_for,
     candidate_total,
     classify_domain_input,
+    classify_stderr_diagnostics,
     close_stale_running_runs,
     curl_failure_info,
     latest_log_tail,
@@ -627,6 +628,44 @@ pktws_check_https_tls12()
             self.assertEqual(tail["run_id"], "run")
             self.assertEqual(tail["stdout_tail"], "b\nc")
             self.assertEqual(tail["stderr_tail"], "err")
+            self.assertEqual(tail["stderr_diagnostics"], [])
+
+    def test_classify_stderr_diagnostics_reports_nfqueue_maxlen_warning(self) -> None:
+        diagnostics = classify_stderr_diagnostics(
+            "can't set queue maxlen: No such file or directory\nother stderr\n"
+            "can't set queue maxlen: No such file or directory\n"
+        )
+
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["severity"], "warning")
+        self.assertEqual(diagnostics[0]["status"], "nfqueue_maxlen_sysctl_missing")
+        self.assertIn("не считается фатальной ошибкой", diagnostics[0]["message"])
+
+    def test_latest_log_tail_exposes_nfqueue_stderr_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            root = state_dir / "strategy-finder"
+            logs = root / "logs"
+            logs.mkdir(parents=True)
+            stdout = logs / "run.stdout.log"
+            stderr = logs / "run.stderr.log"
+            stdout.write_text("line\n", encoding="utf-8")
+            stderr.write_text("can't set queue maxlen: No such file or directory\n", encoding="utf-8")
+            append_run(
+                state_dir,
+                {
+                    "id": "run",
+                    "kind": "multi-domain-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout),
+                    "stderr_log": str(stderr),
+                },
+            )
+
+            tail = latest_log_tail(state_dir, max_lines=2)
+
+            self.assertEqual(tail["stderr_diagnostics"][0]["status"], "nfqueue_maxlen_sysctl_missing")
+            self.assertEqual(tail["stderr_diagnostics"][0]["severity"], "warning")
 
     def test_latest_log_tail_reads_only_requested_tail(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

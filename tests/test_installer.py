@@ -37,7 +37,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertNotIn("/var/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertIn("write_multidomain_runner", self.helper)
-        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
 
     def test_release_update_forces_clean_checkout_but_manual_install_keeps_dirty_guard(self) -> None:
         self.assertIn('INSTALL_FORCE_CLEAN="${GP_INSTALL_FORCE_CLEAN:-off}"', self.installer)
@@ -53,7 +53,7 @@ class InstallerTests(unittest.TestCase):
         self.assertLess(force_pos, installer_pos)
 
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
-        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.3}"', self.installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
         self.assertNotIn('BRANCH="${GP_BRANCH:-main}"', self.installer)
         self.assertIn('repo_git fetch origin "$BRANCH" || true', self.installer)
         self.assertIn('repo_git fetch origin "+refs/tags/$BRANCH:refs/tags/$BRANCH" || true', self.installer)
@@ -61,7 +61,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('repo_git checkout --detach "$BRANCH"', self.installer)
         self.assertIn('fail "Cannot find branch or tag: $BRANCH"', self.installer)
 
-    def test_installer_service_uses_install_dir_config_and_memory_limits(self) -> None:
+    def test_installer_service_uses_install_dir_state_and_memory_limits(self) -> None:
         self.assertIn("GP_SERVICE_MEMORY_HIGH", self.installer)
         self.assertIn("GP_SERVICE_MEMORY_MAX", self.installer)
         self.assertIn("MemoryAccounting=true", self.installer)
@@ -71,16 +71,17 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Environment=PATH=$SERVICE_PATH", self.installer)
         self.assertIn("WEB_ENV_FILE", self.installer)
         self.assertIn("EnvironmentFile=-$WEB_ENV_FILE", self.installer)
-        self.assertIn(
-            "ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --config $INSTALL_DIR/configs/orchestrator.example.yaml --host $WEB_HOST --port $WEB_PORT",
-            self.installer,
-        )
+        self.assertIn("GP_STATE_DIR", self.installer)
+        self.assertIn("GP_STATE_DIR='%s'", self.installer)
+        self.assertIn("ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --host $WEB_HOST --port $WEB_PORT", self.installer)
+        self.assertNotIn("--config", self.installer)
+        self.assertNotIn("orchestrator.example.yaml", self.installer)
 
     def test_installer_prepares_v2fly_with_service_config_but_keeps_install_non_blocking(self) -> None:
         self.assertIn("Preparing local v2fly domain catalog", self.installer)
         self.assertIn("prepare_v2fly_local_catalog", self.installer)
         self.assertIn(
-            'cd "$1" && "$1/.venv/bin/gp-control-plane" --config "$1/configs/orchestrator.example.yaml" domain-sources prepare-v2fly',
+            'cd "$1" && GP_STATE_DIR="$1/build/state" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly',
             self.installer,
         )
         self.assertIn("if ! prepare_v2fly_local_catalog", self.installer)
