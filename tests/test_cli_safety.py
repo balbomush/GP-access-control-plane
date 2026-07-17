@@ -99,8 +99,12 @@ class CliSafetyTests(unittest.TestCase):
             ["--state-dir=/tmp/gp-state", "strategy-finder", "domains"],
         )
 
-    def test_config_argument_is_removed(self) -> None:
+    def test_legacy_web_config_argument_is_ignored_for_release_update_compatibility(self) -> None:
         parser = build_parser()
+
+        args = parser.parse_args(["web", "--config", "configs/orchestrator.example.yaml"])
+        self.assertEqual(args.command, "web")
+        self.assertEqual(args.config, "configs/orchestrator.example.yaml")
 
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(["--config", "configs/orchestrator.example.yaml", "web"])

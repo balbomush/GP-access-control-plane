@@ -352,6 +352,41 @@ export GP_BRANCH=$(shell_quote "$ref")
 export GP_REPO_URL=$(shell_quote "$repo_url")
 export GP_SERVICE_NAME=$(shell_quote "$service_name")
 export GP_INSTALL_FORCE_CLEAN=on
+install_home="\$(getent passwd "\$GP_INSTALL_USER" | cut -d: -f6)"
+[ -n "\$install_home" ] || {
+  echo "status=failed"
+  echo "error=cannot detect install user home"
+  exit 126
+}
+run_as_install_user() {
+  if [ "\$(id -un)" = "\$GP_INSTALL_USER" ]; then
+    HOME="\$install_home" "\$@"
+  else
+    sudo -H -u "\$GP_INSTALL_USER" env HOME="\$install_home" "\$@"
+  fi
+}
+repo_git() {
+  run_as_install_user git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") "\$@"
+}
+if [ -n "\$(repo_git status --short)" ]; then
+  echo "Repository has local changes; release update will discard worktree changes before checkout"
+  repo_git reset --hard
+  repo_git clean -fd
+fi
+repo_git fetch origin "\$GP_BRANCH" || true
+if repo_git rev-parse --verify --quiet "refs/remotes/origin/\$GP_BRANCH" >/dev/null; then
+  repo_git checkout -B "\$GP_BRANCH" "origin/\$GP_BRANCH"
+  repo_git reset --hard "origin/\$GP_BRANCH"
+else
+  repo_git fetch origin "+refs/tags/\$GP_BRANCH:refs/tags/\$GP_BRANCH" || true
+  if ! repo_git rev-parse --verify --quiet "refs/tags/\$GP_BRANCH" >/dev/null; then
+    echo "status=failed"
+    echo "error=Cannot find branch or tag: \$GP_BRANCH"
+    exit 127
+  fi
+  repo_git checkout --detach "\$GP_BRANCH"
+  repo_git reset --hard "\$GP_BRANCH"
+fi
 if bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh"); then
   installed_ref="\$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") describe --tags --exact-match 2>/dev/null || git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   installed_commit="\$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --short HEAD 2>/dev/null || true)"

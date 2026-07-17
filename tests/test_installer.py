@@ -52,6 +52,17 @@ class InstallerTests(unittest.TestCase):
         installer_pos = self.helper.index("if bash", force_pos)
         self.assertLess(force_pos, installer_pos)
 
+    def test_release_update_bootstraps_target_ref_before_running_installer(self) -> None:
+        self.assertIn('repo_git fetch origin "\\$GP_BRANCH" || true', self.helper)
+        self.assertIn('repo_git checkout -B "\\$GP_BRANCH" "origin/\\$GP_BRANCH"', self.helper)
+        self.assertIn('repo_git fetch origin "+refs/tags/\\$GP_BRANCH:refs/tags/\\$GP_BRANCH" || true', self.helper)
+        self.assertIn('repo_git checkout --detach "\\$GP_BRANCH"', self.helper)
+        self.assertIn('repo_git reset --hard "\\$GP_BRANCH"', self.helper)
+
+        bootstrap_pos = self.helper.index('repo_git fetch origin "\\$GP_BRANCH" || true')
+        installer_pos = self.helper.index("if bash", bootstrap_pos)
+        self.assertLess(bootstrap_pos, installer_pos)
+
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
         self.assertIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
         self.assertNotIn('BRANCH="${GP_BRANCH:-main}"', self.installer)
@@ -74,6 +85,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("GP_STATE_DIR", self.installer)
         self.assertIn("GP_STATE_DIR='%s'", self.installer)
         self.assertIn("ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --host $WEB_HOST --port $WEB_PORT", self.installer)
+        self.assertIn('TMP_SERVICE="$(mktemp)"', self.installer)
+        self.assertIn('as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$SERVICE_NAME"', self.installer)
         self.assertNotIn("--config", self.installer)
         self.assertNotIn("orchestrator.example.yaml", self.installer)
 

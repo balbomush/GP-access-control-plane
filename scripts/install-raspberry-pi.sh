@@ -352,7 +352,8 @@ fi
 
 if step_log service "Creating and starting systemd service"; then
   install_web_env_file
-  as_root tee "/etc/systemd/system/$SERVICE_NAME" >/dev/null <<SERVICE
+  TMP_SERVICE="$(mktemp)"
+  cat > "$TMP_SERVICE" <<SERVICE
 [Unit]
 Description=GP Strategy Finder Web UI
 After=network-online.target
@@ -377,6 +378,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 SERVICE
+  as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$SERVICE_NAME"
+  rm -f "$TMP_SERVICE"
 
   as_root systemctl daemon-reload
   as_root systemctl enable "$SERVICE_NAME"

@@ -76,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     sources_subparsers = sources_parser.add_subparsers(dest="domain_sources_command", required=True)
     sources_subparsers.add_parser("prepare-v2fly", help="Download and prepare local v2fly domain-list storage")
     web_parser = subparsers.add_parser("web", help="Run local Raspberry Pi web UI")
+    web_parser.add_argument(
+        "--config",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     web_parser.add_argument("--host", default="0.0.0.0")
     web_parser.add_argument("--port", type=int, default=8080)
 
