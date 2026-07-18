@@ -905,8 +905,7 @@ button:disabled { opacity: .55; cursor: default; }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .time-limit-field[hidden] { display: none; }
 .preset-panel,
-.common-filter-panel,
-.candidate-filter-panel {
+.common-filter-panel {
   display: grid;
   gap: 10px;
   border: 1px solid var(--line);
@@ -915,33 +914,6 @@ button:disabled { opacity: .55; cursor: default; }
   background: var(--surface-soft);
 }
 .common-filter-panel[hidden] { display: none; }
-.candidate-filter-panel {
-  margin-bottom: 12px;
-}
-.candidate-filter-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  align-items: center;
-}
-.candidate-filter-option {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  color: var(--text-soft);
-  font-size: 13px;
-}
-.candidate-filter-option input {
-  width: auto;
-  min-width: 0;
-  accent-color: var(--blue);
-}
-.candidate-risk-line {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
 .strategy-family-list {
   display: grid;
   gap: 8px;
@@ -2061,31 +2033,6 @@ pre {
           <button class="subtab-button active" data-candidate-view="domain" type="button">По доменам</button>
           <button class="subtab-button" data-candidate-view="common" type="button">Общие стратегии</button>
         </div>
-        <div class="candidate-filter-panel">
-          <div class="candidate-filter-row">
-            <label class="candidate-filter-option">
-              <input id="candidate-hide-risky" type="checkbox">
-              Скрыть рискованные
-            </label>
-            <label class="candidate-filter-option">
-              <input data-fragmentation-class="position_free" type="checkbox" checked>
-              Без позиции
-            </label>
-            <label class="candidate-filter-option">
-              <input data-fragmentation-class="position_safe" type="checkbox" checked>
-              Относительная позиция
-            </label>
-            <label class="candidate-filter-option">
-              <input data-fragmentation-class="unknown" type="checkbox" checked>
-              Неясно
-            </label>
-            <label class="candidate-filter-option">
-              <input data-fragmentation-class="position_risky" type="checkbox" checked>
-              Рискованные
-            </label>
-          </div>
-          <div class="helper-text">Фильтр влияет на список доменов, общие стратегии и загружаемые варианты внутри семейства.</div>
-        </div>
         <div class="common-filter-panel" id="common-controls" hidden>
           <div class="preset-grid">
             <div class="field">
@@ -2352,14 +2299,13 @@ const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
 const CANDIDATE_PAGE_LIMIT = 200;
 const CUSTOM_SELECT_VALUE = 'custom';
-const FRAGMENTATION_CLASSES = ['position_free', 'position_safe', 'unknown', 'position_risky'];
 const WEB_AUTH = __WEB_AUTH_JSON__;
 const DISCOVERY_PROFILES = {
   quick: { name: 'quick', title: 'Быстрый', scan_level: 'quick' },
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', candidateFragmentationClasses: FRAGMENTATION_CLASSES.slice(), candidateHideRisky: false, commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2455,35 +2401,6 @@ function shortPath(value){
 }
 function badge(text, tone){
   return `<span class="badge ${esc(tone || '')}">${esc(text)}</span>`;
-}
-function fragmentationLabel(value){
-  const labels = {
-    position_free: 'без позиции',
-    position_safe: 'относительная позиция',
-    position_risky: 'риск позиции',
-    unknown: 'неясно'
-  };
-  return labels[String(value || '')] || 'неясно';
-}
-function fragmentationTone(value){
-  const text = String(value || '');
-  if (text === 'position_free' || text === 'position_safe') return 'good';
-  if (text === 'position_risky') return 'bad';
-  return 'warn';
-}
-function fragmentationBadge(row){
-  return badge(fragmentationLabel(row.fragmentation_class), fragmentationTone(row.fragmentation_class));
-}
-function activeFragmentationClasses(){
-  const selected = (state.candidateFragmentationClasses || []).filter((item) => FRAGMENTATION_CLASSES.includes(item));
-  const filtered = state.candidateHideRisky ? selected.filter((item) => item !== 'position_risky') : selected;
-  return filtered.length ? filtered : FRAGMENTATION_CLASSES.slice();
-}
-function candidateFilterKey(){
-  return activeFragmentationClasses().join(',');
-}
-function appendCandidateFilters(params){
-  params.set('fragmentation_class', candidateFilterKey());
 }
 function table(targetId, columns, rows, emptyText){
   if (!rows.length) {
@@ -3382,7 +3299,6 @@ function renderMetrics(){
 }
 function renderCandidates(){
   rememberStrategyEditorScrolls();
-  renderCandidateFilters();
   const isDomainView = state.candidateView === 'domain';
   const rows = isDomainView ? [] : filteredCandidates();
   const commonRows = dynamicCommonRows(rows);
@@ -3408,26 +3324,6 @@ function renderCandidates(){
     renderDomainCandidates();
   }
   restoreStrategyEditorScrolls();
-}
-function renderCandidateFilters(){
-  const hideRisky = el('candidate-hide-risky');
-  if (hideRisky) hideRisky.checked = Boolean(state.candidateHideRisky);
-  document.querySelectorAll('[data-fragmentation-class]').forEach((input) => {
-    input.checked = (state.candidateFragmentationClasses || []).includes(input.dataset.fragmentationClass || '');
-    input.disabled = Boolean(state.candidateHideRisky && input.dataset.fragmentationClass === 'position_risky');
-  });
-}
-function updateCandidateFilterState(){
-  const hideRisky = el('candidate-hide-risky');
-  state.candidateHideRisky = Boolean(hideRisky && hideRisky.checked);
-  const selected = [];
-  document.querySelectorAll('[data-fragmentation-class]').forEach((input) => {
-    if (input.checked && input.dataset.fragmentationClass) selected.push(input.dataset.fragmentationClass);
-  });
-  state.candidateFragmentationClasses = selected.length ? selected : FRAGMENTATION_CLASSES.slice();
-  invalidateCandidateCaches();
-  renderCandidatesOnly();
-  if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
 }
 function renderDomainCandidates(){
   const groups = state.candidateDomains || [];
@@ -3606,13 +3502,12 @@ function commonCandidateKey(){
 }
 function currentCandidateQueryKey(options){
   const opts = options || {};
-  const filterKey = candidateFilterKey();
-  if (opts.view === 'domain') return `domain:${opts.domain || ''}:${filterKey}`;
+  if (opts.view === 'domain') return `domain:${opts.domain || ''}`;
   if ((opts.view || state.candidateView) === 'common') {
     const domains = Array.isArray(opts.domains) ? opts.domains : selectedCommonDomains();
-    return `common:${domains.join('|')}:${filterKey}`;
+    return `common:${domains.join('|')}`;
   }
-  return `${String(opts.view || state.candidateView || 'domain')}:${filterKey}`;
+  return String(opts.view || state.candidateView || 'domain');
 }
 function candidateVersionKey(version){
   const value = version || {};
@@ -3681,7 +3576,7 @@ function storeCommonCandidateCache(key){
   };
 }
 function prepareCommonCandidateState(){
-  const key = `common:${commonCandidateKey()}:${candidateFilterKey()}`;
+  const key = `common:${commonCandidateKey()}`;
   if (state.candidateQueryKey === key) return state.candidatesLoaded;
   if (loadCommonCandidateCache(key)) return true;
   state.candidates = [];
@@ -3786,10 +3681,6 @@ function uniqueStrategyRows(rows){
 function uniqueStrategyArgs(rows){
   return uniqueStrategyRows(rows).map((row) => String(row.args || '').trim());
 }
-function riskRank(row){
-  const ranks = { position_free: 0, position_safe: 1, unknown: 2, position_risky: 3 };
-  return ranks[String(row.fragmentation_class || 'unknown')] ?? 2;
-}
 function strategyComplexity(row){
   return String(row.args || '').split(/\\s+/).filter(Boolean).length;
 }
@@ -3800,8 +3691,6 @@ function bestFamilyRow(rows){
   return rows.slice().sort((a, b) => {
     const coverage = strategyDomainCoverage(b) - strategyDomainCoverage(a);
     if (coverage) return coverage;
-    const risk = riskRank(a) - riskRank(b);
-    if (risk) return risk;
     const familyRank = Number(a.family_rank || 900) - Number(b.family_rank || 900);
     if (familyRank) return familyRank;
     return strategyComplexity(a) - strategyComplexity(b);
@@ -3821,7 +3710,6 @@ function strategyFamilyGroups(rows){
       family: String(best.family || 'other'),
       familyRank: Number(best.family_rank || 900),
       familyReason: String(best.family_reason || ''),
-      fragmentationReason: String(best.fragmentation_reason || ''),
       best,
       rows: items
     };
@@ -3913,7 +3801,6 @@ function strategyFamilyGroup(parentKey, group, index){
   const hidden = Number(group.hidden || 0);
   const reason = [
     group.familyReason ? `семейство: ${group.familyReason}` : '',
-    best.fragmentation_reason ? `риск: ${best.fragmentation_reason}` : '',
     hidden ? `скрыто вариантов: ${hidden}` : ''
   ].filter(Boolean).join(' · ');
   const key = `${parentKey}:family:${index}:${group.key}`;
@@ -3921,7 +3808,6 @@ function strategyFamilyGroup(parentKey, group, index){
     <summary class="strategy-family-summary">
       <div class="strategy-family-head">
         ${badge(group.family || 'other', '')}
-        ${fragmentationBadge(best)}
         ${badge(`${group.rows.length + hidden} вариантов`, group.rows.length + hidden > 1 ? 'warn' : '')}
       </div>
       <div class="strategy-family-reason">${esc(reason || 'семейство определено по аргументам стратегии')}</div>
@@ -5125,7 +5011,6 @@ function candidateParams(offset, options){
   params.set('limit', String(CANDIDATE_PAGE_LIMIT));
   params.set('offset', String(Math.max(0, offset || 0)));
   params.set('view', state.candidateView);
-  appendCandidateFilters(params);
   if (options && options.view) params.set('view', options.view);
   if (options && options.domain) params.set('domain', options.domain);
   if ((options && options.view === 'common') || (!options && state.candidateView === 'common')) {
@@ -5140,7 +5025,6 @@ async function refreshDomainIndex(){
   renderCandidatesOnly();
   try {
     const params = new URLSearchParams();
-    appendCandidateFilters(params);
     const data = await getJson(`/api/strategy-finder/candidate-domains?${params.toString()}`);
     if (requestId !== domainIndexRequestSeq) return;
     state.candidateDomains = data.domains || [];
@@ -5830,9 +5714,6 @@ document.addEventListener('scroll', (event) => {
   }
 }, true);
 document.addEventListener('change', (event) => {
-  if (event.target && (event.target.id === 'candidate-hide-risky' || event.target.dataset?.fragmentationClass)) {
-    updateCandidateFilterState();
-  }
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
     state.settingsTouched = true;
   }
