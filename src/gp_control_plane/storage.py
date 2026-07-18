@@ -60,6 +60,24 @@ _LEGACY_STORAGE_TABLES = (
     "candidates",
     "presets",
 )
+SYSTEM_DOMAIN_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
+    "finder": {
+        "required": {
+            "label": "Обязательные домены",
+            "domains": [],
+        },
+        "desired": {
+            "label": "Желательные домены",
+            "domains": [],
+        },
+    },
+    "common": {},
+}
+SYSTEM_DOMAIN_PRESET_NAMES = {
+    (scope, name)
+    for scope, scoped in SYSTEM_DOMAIN_PRESETS.items()
+    for name in scoped
+}
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -88,6 +106,7 @@ def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Conne
             conn.execute("PRAGMA foreign_keys=ON")
             _migrate_schema(conn)
             _cleanup_runtime_state(conn, path.parent)
+            _ensure_system_domain_presets_conn(conn)
             _run_deferred_vacuum(conn, state_dir)
             _MIGRATED_DB_PATHS.add(migration_key)
             return conn
@@ -1035,6 +1054,36 @@ def _save_domain_preset_conn(
         )
 
 
+def _ensure_system_domain_presets_conn(conn: sqlite3.Connection) -> None:
+    for scope, scoped in SYSTEM_DOMAIN_PRESETS.items():
+        for name, preset in scoped.items():
+            label = str(preset.get("label") or name)
+            source_json = json.dumps({"type": "system"}, ensure_ascii=False, separators=(",", ":"))
+            row = conn.execute(
+                "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'system'",
+                (scope, name),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE domain_presets
+                    SET label = ?, source_json = ?
+                    WHERE id = ? AND (label != ? OR source_json != ?)
+                    """,
+                    (label, source_json, int(row["id"]), label, source_json),
+                )
+                continue
+            _save_domain_preset_conn(
+                conn,
+                scope=scope,
+                name=name,
+                kind="system",
+                domains=[str(item or "") for item in preset.get("domains") or []],
+                updated_at="",
+                source_json=source_json,
+            )
+
+
 def append_run(state_dir: Path, run: dict[str, Any]) -> None:
     payload = compact_run_payload(run)
     with connect(state_dir) as conn:
@@ -1159,19 +1208,61 @@ def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
     return result
 
 
-def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
+def read_system_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
     with connect(state_dir) as conn:
+        _ensure_system_domain_presets_conn(conn)
         rows = conn.execute(
             """
-            SELECT p.scope, p.name, p.label,
-                   COUNT(pd.domain_id) AS total_count,
-                   COUNT(CASE WHEN COALESCE(pd.enabled, 1) = 1 THEN 1 END) AS enabled_count
+            SELECT p.scope, p.name, d.name AS domain
             FROM domain_presets p
             LEFT JOIN preset_domains pd ON pd.preset_id = p.id
-            WHERE p.kind = 'user'
-            GROUP BY p.id, p.scope, p.name, p.label
-            ORDER BY p.scope, p.name
+            LEFT JOIN domains d ON d.id = pd.domain_id
+            WHERE p.kind = 'system' AND COALESCE(pd.enabled, 1) = 1
+            ORDER BY p.scope, p.name, pd.position, d.name
             """
+        ).fetchall()
+    result: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
+    for scope, scoped in SYSTEM_DOMAIN_PRESETS.items():
+        result.setdefault(scope, {})
+        for name in scoped:
+            result[scope].setdefault(name, [])
+    for row in rows:
+        scope = str(row["scope"] or "")
+        name = str(row["name"] or "")
+        if not scope or not name:
+            continue
+        result.setdefault(scope, {}).setdefault(name, [])
+        domain = str(row["domain"] or "").strip()
+        if domain and domain not in result[scope][name]:
+            result[scope][name].append(domain)
+    return result
+
+
+def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    return _read_domain_preset_index(state_dir, kind="user")
+
+
+def read_system_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    return _read_domain_preset_index(state_dir, kind="system")
+
+
+def _read_domain_preset_index(state_dir: Path, *, kind: str) -> dict[str, dict[str, dict[str, Any]]]:
+    clean_kind = str(kind or "user").strip() or "user"
+    with connect(state_dir) as conn:
+        if clean_kind == "system":
+            _ensure_system_domain_presets_conn(conn)
+        rows = conn.execute(
+            """
+            SELECT p.scope, p.name, p.kind, p.label,
+                   COUNT(pd.domain_id) AS total_count,
+                   COUNT(CASE WHEN pd.domain_id IS NOT NULL AND COALESCE(pd.enabled, 1) = 1 THEN 1 END) AS enabled_count
+            FROM domain_presets p
+            LEFT JOIN preset_domains pd ON pd.preset_id = p.id
+            WHERE p.kind = ?
+            GROUP BY p.id, p.scope, p.name, p.kind, p.label
+            ORDER BY p.scope, p.name
+            """,
+            (clean_kind,),
         ).fetchall()
     result: dict[str, dict[str, dict[str, Any]]] = {"finder": {}, "common": {}}
     for row in rows:
@@ -1181,6 +1272,7 @@ def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, A
             continue
         result.setdefault(scope, {})[name] = {
             "name": name,
+            "kind": str(row["kind"] or clean_kind),
             "label": str(row["label"] or name),
             "enabled_count": int(row["enabled_count"] or 0),
             "total_count": int(row["total_count"] or 0),
@@ -1198,6 +1290,8 @@ def save_custom_presets(state_dir: Path, presets: dict[str, Any], updated_at: st
         for raw_name, raw_domains in raw_scope.items():
             name = str(raw_name or "").strip()
             if not name or not isinstance(raw_domains, list):
+                continue
+            if (scope, name) in SYSTEM_DOMAIN_PRESET_NAMES:
                 continue
             clean[scope][name] = _unique_nonempty([str(item or "") for item in raw_domains])
     with connect(state_dir) as conn:
@@ -1233,6 +1327,8 @@ def save_custom_preset(
         raise ValueError("scope must be finder or common")
     if not clean_name:
         raise ValueError("preset name is required")
+    if (clean_scope, clean_name) in SYSTEM_DOMAIN_PRESET_NAMES:
+        raise ValueError("preset name is reserved for a system list")
     clean_domains = _unique_nonempty([str(item or "") for item in domains])
     if not clean_domains:
         raise ValueError("preset must contain at least one domain")
@@ -1250,6 +1346,43 @@ def save_custom_preset(
     return read_custom_presets(state_dir)
 
 
+def save_system_preset(
+    state_dir: Path,
+    *,
+    scope: str,
+    name: str,
+    domains: list[str],
+    updated_at: str,
+) -> dict[str, dict[str, list[str]]]:
+    clean_scope = str(scope or "").strip()
+    clean_name = str(name or "").strip()
+    if (clean_scope, clean_name) not in SYSTEM_DOMAIN_PRESET_NAMES:
+        raise ValueError("unknown system preset")
+    clean_domains = _unique_nonempty([str(item or "") for item in domains])
+    preset = SYSTEM_DOMAIN_PRESETS[clean_scope][clean_name]
+    source_json = json.dumps({"type": "system"}, ensure_ascii=False, separators=(",", ":"))
+    with connect(state_dir) as conn:
+        _save_domain_preset_conn(
+            conn,
+            scope=clean_scope,
+            name=clean_name,
+            kind="system",
+            domains=clean_domains,
+            updated_at=updated_at,
+            source_json=source_json,
+        )
+        label = str(preset.get("label") or clean_name)
+        conn.execute(
+            """
+            UPDATE domain_presets
+            SET label = ?
+            WHERE scope = ? AND name = ? AND kind = 'system' AND label != ?
+            """,
+            (label, clean_scope, clean_name, label),
+        )
+    return read_system_presets(state_dir)
+
+
 def delete_custom_preset(state_dir: Path, *, scope: str, name: str) -> dict[str, dict[str, dict[str, Any]]]:
     clean_scope = str(scope or "").strip()
     clean_name = str(name or "").strip()
@@ -1261,6 +1394,23 @@ def delete_custom_preset(state_dir: Path, *, scope: str, name: str) -> dict[str,
         conn.execute(
             "DELETE FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'user'",
             (clean_scope, clean_name),
+        )
+    return read_custom_preset_index(state_dir)
+
+
+def delete_user_presets(state_dir: Path, *, scope: str, names: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
+    clean_scope = str(scope or "").strip()
+    if clean_scope not in {"finder", "common"}:
+        raise ValueError("scope must be finder or common")
+    clean_names = [str(name or "").strip() for name in names]
+    clean_names = [name for name in clean_names if name and (clean_scope, name) not in SYSTEM_DOMAIN_PRESET_NAMES]
+    if not clean_names:
+        raise ValueError("user preset name is required")
+    placeholders = ",".join("?" for _ in clean_names)
+    with connect(state_dir) as conn:
+        conn.execute(
+            f"DELETE FROM domain_presets WHERE scope = ? AND kind = 'user' AND name IN ({placeholders})",
+            (clean_scope, *clean_names),
         )
     return read_custom_preset_index(state_dir)
 
@@ -1293,6 +1443,8 @@ def read_preset_domains_page(
         filters.append("COALESCE(pd.enabled, 1) = 1")
     where = " AND ".join(filters)
     with connect(state_dir) as conn:
+        if clean_kind == "system":
+            _ensure_system_domain_presets_conn(conn)
         total_row = conn.execute(
             f"""
             SELECT COUNT(*) AS count
@@ -1351,8 +1503,8 @@ def set_preset_domain_enabled(
     clean_name = str(name or "").strip()
     clean_domain = str(domain or "").strip()
     clean_kind = str(kind or "user").strip() or "user"
-    if clean_kind != "user":
-        raise ValueError("only user presets can be edited")
+    if clean_kind not in {"user", "system"}:
+        raise ValueError("preset kind must be user or system")
     if clean_scope not in {"finder", "common"}:
         raise ValueError("scope must be finder or common")
     if not clean_name:
@@ -1360,15 +1512,17 @@ def set_preset_domain_enabled(
     if not clean_domain:
         raise ValueError("domain is required")
     with connect(state_dir) as conn:
+        if clean_kind == "system":
+            _ensure_system_domain_presets_conn(conn)
         row = conn.execute(
             """
             SELECT pd.preset_id, pd.domain_id
             FROM domain_presets p
             JOIN preset_domains pd ON pd.preset_id = p.id
             JOIN domains d ON d.id = pd.domain_id
-            WHERE p.scope = ? AND p.name = ? AND p.kind = 'user' AND d.name = ?
+            WHERE p.scope = ? AND p.name = ? AND p.kind = ? AND d.name = ?
             """,
-            (clean_scope, clean_name, clean_domain),
+            (clean_scope, clean_name, clean_kind, clean_domain),
         ).fetchone()
         if not row:
             raise ValueError("preset domain was not found")

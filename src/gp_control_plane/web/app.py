@@ -37,11 +37,15 @@ from ..releases import release_channel_info
 from ..state import now_iso, read_state, write_state
 from ..storage import (
     delete_custom_preset,
+    delete_user_presets,
     read_custom_preset_index,
     read_custom_presets,
     read_preset_domains_page,
+    read_system_preset_index,
+    read_system_presets,
     save_custom_preset,
     save_custom_presets,
+    save_system_preset,
     set_preset_domain_enabled,
 )
 from ..strategy_finder import (
@@ -204,6 +208,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 "/api/presets/domains",
                 "/api/presets/save",
                 "/api/presets/delete",
+                "/api/presets/delete-users-lists",
                 "/api/domain-sources",
                 "/api/domain-sources/v2fly/categories",
             }:
@@ -268,20 +273,39 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                 try:
                     scope = str(payload.get("scope") or "")
                     name = str(payload.get("name") or "")
+                    kind = str(payload.get("kind") or "user")
                     domains = _payload_string_list(payload, "domains")
-                    save_custom_preset(
+                    if kind == "system":
+                        save_system_preset(
+                            config.output.state_dir,
+                            scope=scope,
+                            name=name,
+                            domains=domains,
+                            updated_at=now_iso(),
+                        )
+                    else:
+                        save_custom_preset(
+                            config.output.state_dir,
+                            scope=scope,
+                            name=name,
+                            domains=domains,
+                            updated_at=now_iso(),
+                        )
+                    self._json(_presets_payload(config, {"include_domains": ["1"]}))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/presets/delete-users-lists":
+                try:
+                    names = _payload_string_list(payload, "names")
+                    if not names and payload.get("name"):
+                        names = [str(payload.get("name") or "")]
+                    metadata = delete_user_presets(
                         config.output.state_dir,
-                        scope=scope,
-                        name=name,
-                        domains=domains,
-                        updated_at=now_iso(),
+                        scope=str(payload.get("scope") or ""),
+                        names=names,
                     )
-                    self._json(
-                        {
-                            "custom": read_custom_presets(config.output.state_dir),
-                            "metadata": read_custom_preset_index(config.output.state_dir),
-                        }
-                    )
+                    self._json(_presets_payload(config, {"include_domains": ["1"]}) | {"metadata": metadata})
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -292,7 +316,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                         scope=str(payload.get("scope") or ""),
                         name=str(payload.get("name") or ""),
                     )
-                    self._json({"custom": {"finder": {}, "common": {}}, "metadata": metadata})
+                    self._json(_presets_payload(config, {"include_domains": ["1"]}) | {"metadata": metadata})
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -307,13 +331,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
                         updated_at=now_iso(),
                         kind=str(payload.get("kind") or "user"),
                     )
-                    self._json(
-                        {
-                            "domain": result,
-                            "custom": {"finder": {}, "common": {}},
-                            "metadata": read_custom_preset_index(config.output.state_dir),
-                        }
-                    )
+                    self._json(_presets_payload(config, {"include_domains": ["1"]}) | {"domain": result})
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -2109,6 +2127,7 @@ pre {
           <div class="button-row">
             <button data-action="preset-editor-save" type="button">Сохранить список</button>
             <button class="secondary" data-action="preset-editor-export" type="button">Скачать TXT</button>
+            <button class="secondary danger" data-action="preset-editor-delete" type="button" disabled>Удалить пользовательский список</button>
           </div>
           <div class="source-preview" id="preset-editor-preview">Изменения еще не проверялись.</div>
           <details class="preset-create-panel">
@@ -2292,7 +2311,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', candidateFragmentationClasses: FRAGMENTATION_CLASSES.slice(), candidateHideRisky: false, commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', candidateFragmentationClasses: FRAGMENTATION_CLASSES.slice(), candidateHideRisky: false, commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2492,8 +2511,7 @@ function fillDomains(kind){
 }
 function finderDomains(){
   const raw = el('finder-domains').value.trim();
-  if (!raw) return defaultDomains('critical');
-  return parseDomains(raw);
+  return raw ? parseDomains(raw) : [];
 }
 function selectedFinderDomains(){
   const raw = el('finder-domains').value.trim();
@@ -2550,7 +2568,7 @@ function useRunPreferencesOnce(){
   try {
     const domains = Array.isArray(prefs.domains) ? uniqueDomains(prefs.domains) : [];
     const presetSelect = el('finder-preset-select');
-    const presetValue = String(prefs.domain_preset || 'builtin:critical');
+    const presetValue = String(prefs.domain_preset || 'system:required');
     if (presetSelect && [...presetSelect.options].some((option) => option.value === presetValue)) {
       presetSelect.value = presetValue;
     }
@@ -2707,13 +2725,25 @@ function mergeCustomPresets(remote, metadata){
   state.customPresetMeta = normalizeCustomPresetMeta(metadata, state.customPresets);
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
 }
+function mergeSystemPresets(remote, metadata){
+  const result = { finder: {}, common: {} };
+  for (const scope of ['finder', 'common']) {
+    result[scope] = (remote && typeof remote[scope] === 'object' && remote[scope]) ? remote[scope] : {};
+  }
+  state.systemPresets = result;
+  state.systemPresetMeta = normalizePresetMeta(metadata, state.systemPresets, 'system');
+}
 function normalizeCustomPresetMeta(metadata, presets){
+  return normalizePresetMeta(metadata, presets, 'user');
+}
+function normalizePresetMeta(metadata, presets, fallbackKind){
   const result = { finder: {}, common: {} };
   for (const scope of ['finder', 'common']) {
     const remote = metadata && typeof metadata[scope] === 'object' ? metadata[scope] : {};
     Object.entries(remote).forEach(([name, meta]) => {
       result[scope][name] = {
         name,
+        kind: (meta && meta.kind) || fallbackKind,
         label: (meta && meta.label) || name,
         enabled_count: Number((meta && meta.enabled_count) || 0),
         total_count: Number((meta && meta.total_count) || 0),
@@ -2723,7 +2753,7 @@ function normalizeCustomPresetMeta(metadata, presets){
     Object.entries((presets && presets[scope]) || {}).forEach(([name, domains]) => {
       if (!result[scope][name]) {
         const count = uniqueDomainCount(domains);
-        result[scope][name] = { name, label: name, enabled_count: count, total_count: count, updated_at: '' };
+        result[scope][name] = { name, kind: fallbackKind, label: name, enabled_count: count, total_count: count, updated_at: '' };
       }
     });
   }
@@ -2734,7 +2764,7 @@ function customPresetNames(target){
   return [...new Set([
     ...scopes.flatMap((scope) => Object.keys((state.customPresetMeta && state.customPresetMeta[scope]) || {})),
     ...scopes.flatMap((scope) => Object.keys((state.customPresets && state.customPresets[scope]) || {}))
-  ])].sort((a, b) => a.localeCompare(b));
+  ])].filter((name) => !hasSystemPreset(target, name)).sort((a, b) => a.localeCompare(b));
 }
 function presetScopesForTarget(target){
   return target === 'common' ? ['common', 'finder'] : ['finder', 'common'];
@@ -2755,8 +2785,30 @@ function hasCustomPreset(target, name){
   const scope = customPresetSourceScope(target, name);
   return Boolean((state.customPresetMeta[scope] || {})[name] || (state.customPresets[scope] || {})[name]);
 }
+function systemPresetNames(target){
+  return [...new Set([
+    ...Object.keys((state.systemPresetMeta && state.systemPresetMeta[target]) || {}),
+    ...Object.keys((state.systemPresets && state.systemPresets[target]) || {})
+  ])].sort((a, b) => systemPresetLabel(target, a).localeCompare(systemPresetLabel(target, b)));
+}
+function systemPresetMeta(target, name){
+  return ((state.systemPresetMeta && state.systemPresetMeta[target]) || {})[name] || null;
+}
+function systemPresetLabel(target, name){
+  const meta = systemPresetMeta(target, name);
+  return (meta && meta.label) || name;
+}
+function systemPresetCount(target, name){
+  const meta = systemPresetMeta(target, name);
+  if (meta) return Number(meta.enabled_count || 0);
+  return uniqueDomainCount((state.systemPresets[target] || {})[name] || []);
+}
+function hasSystemPreset(target, name){
+  return Boolean(systemPresetMeta(target, name) || (state.systemPresets[target] || {})[name]);
+}
 function mergePresetResponse(data){
   mergeCustomPresets((data || {}).custom || {}, (data || {}).metadata || {});
+  mergeSystemPresets((data || {}).system || {}, (data || {}).system_metadata || {});
 }
 function builtInPresets(target){
   const groups = presetGroups(target);
@@ -2809,6 +2861,9 @@ function presetGroups(target){
 }
 function presetDomains(target, value){
   const [scope, key] = String(value || '').split(':');
+  if (scope === 'system') {
+    return state.systemPresets[target]?.[key] || [];
+  }
   if (scope === 'builtin') {
     const preset = builtInPresets(target).find((item) => item.key === key);
     return preset ? preset.domains : [];
@@ -2821,13 +2876,19 @@ function presetDomains(target, value){
 }
 function managerPresetEntries(){
   const target = 'finder';
+  const system = systemPresetNames(target).map((name) => ({
+    name,
+    label: systemPresetLabel(target, name),
+    count: systemPresetCount(target, name),
+    kind: 'system'
+  }));
   const custom = customPresetNames(target).map((name) => ({
     name,
     label: name,
     count: customPresetCount(target, name),
     kind: 'user'
-  }));
-  const seen = new Set(custom.map((item) => item.name));
+  })).filter((item) => !hasSystemPreset(target, item.name));
+  const seen = new Set([...system, ...custom].map((item) => item.name));
   const builtin = presetGroups(target)
     .flatMap((group) => group.presets.map((preset) => ({
       name: preset.key,
@@ -2836,7 +2897,12 @@ function managerPresetEntries(){
       kind: 'builtin'
     })))
     .filter((item) => item.count > 0 && !seen.has(item.name));
-  return [...custom, ...builtin].sort((a, b) => a.label.localeCompare(b.label));
+  return [...system, ...custom, ...builtin].sort((a, b) => {
+    const rank = { system: 0, user: 1, builtin: 2 };
+    const diff = (rank[a.kind] ?? 9) - (rank[b.kind] ?? 9);
+    if (diff) return diff;
+    return a.label.localeCompare(b.label);
+  });
 }
 function managerPresetEntry(name){
   return managerPresetEntries().find((item) => item.name === name) || null;
@@ -2845,6 +2911,10 @@ function renderPresetSelect(target){
   const select = el(`${target}-preset-select`);
   if (!select) return;
   const previous = select.value;
+  const systemEntries = systemPresetNames(target);
+  const systemGroup = systemEntries.length
+    ? `<optgroup label="Системные">${systemEntries.map((name) => `<option value="system:${esc(name)}">${esc(systemPresetLabel(target, name))} (${systemPresetCount(target, name)})</option>`).join('')}</optgroup>`
+    : '';
   const customEntries = customPresetNames(target);
   const customGroup = customEntries.length
     ? `<optgroup label="Персональные">${customEntries.map((name) => `<option value="custom:${esc(name)}">${esc(name)} (${customPresetCount(target, name)})</option>`).join('')}</optgroup>`
@@ -2853,9 +2923,10 @@ function renderPresetSelect(target){
     const options = group.presets.map((preset) => `<option value="builtin:${esc(preset.key)}">${esc(preset.label)} (${uniqueDomainCount(preset.domains)})</option>`).join('');
     return `<optgroup label="${esc(group.label)}">${options}</optgroup>`;
   }).join('');
-  select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>${customGroup}${builtInGroups}`;
+  select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>${systemGroup}${customGroup}${builtInGroups}`;
   if ([...select.options].some((option) => option.value === previous)) select.value = previous;
   else if (!previous && target === 'common' && [...select.options].some((option) => option.value === 'builtin:tested')) select.value = 'builtin:tested';
+  else if (!previous && [...select.options].some((option) => option.value === 'system:required')) select.value = 'system:required';
   else if (!previous && [...select.options].some((option) => option.value === 'builtin:critical')) select.value = 'builtin:critical';
   else select.value = CUSTOM_SELECT_VALUE;
 }
@@ -2871,6 +2942,13 @@ function markDomainPresetCustom(target){
   if (nameInput) nameInput.value = 'custom';
 }
 async function fetchAllPresetDomains(target, name){
+  if (hasSystemPreset(target, name)) {
+    const cached = (state.systemPresets[target] || {})[name] || [];
+    const expected = systemPresetCount(target, name);
+    if (expected === 0) return [];
+    if (cached.length && cached.length >= expected) return uniqueDomains(cached);
+    return fetchStoredPresetDomains(target, name, 'system');
+  }
   if (!hasCustomPreset(target, name)) {
     const builtin = builtInPresets(target).find((item) => item.key === name);
     if (builtin) return uniqueDomains(builtin.domains);
@@ -2879,6 +2957,9 @@ async function fetchAllPresetDomains(target, name){
   const cached = (state.customPresets[sourceScope] || {})[name] || [];
   const expected = customPresetCount(sourceScope, name);
   if (expected > 0 && cached.length && cached.length >= expected) return uniqueDomains(cached);
+  return fetchStoredPresetDomains(sourceScope, name, 'user');
+}
+async function fetchStoredPresetDomains(sourceScope, name, kind){
   let offset = 0;
   let hasMore = true;
   let domains = [];
@@ -2887,7 +2968,7 @@ async function fetchAllPresetDomains(target, name){
     const params = new URLSearchParams();
     params.set('scope', sourceScope);
     params.set('name', name);
-    params.set('kind', 'user');
+    params.set('kind', kind || 'user');
     params.set('include_disabled', '0');
     params.set('limit', '500');
     params.set('offset', String(offset));
@@ -2899,21 +2980,28 @@ async function fetchAllPresetDomains(target, name){
     if (!rows.length) break;
     guard += 1;
   }
+  const cleanDomains = uniqueDomains(domains);
+  if (kind === 'system') {
+    if (!state.systemPresets[sourceScope]) state.systemPresets[sourceScope] = {};
+    state.systemPresets[sourceScope][name] = cleanDomains;
+    return state.systemPresets[sourceScope][name];
+  }
   if (!state.customPresets[sourceScope]) state.customPresets[sourceScope] = {};
-  state.customPresets[sourceScope][name] = uniqueDomains(domains);
+  state.customPresets[sourceScope][name] = cleanDomains;
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
   return state.customPresets[sourceScope][name];
 }
 async function usePreset(target){
   const selected = el(`${target}-preset-select`).value;
   let domains = presetDomains(target, selected);
-  if (selected.startsWith('custom:')) {
-    const name = selected.slice('custom:'.length);
-    setMessage('Загружается пользовательский список доменов', 'warn');
+  if (selected.startsWith('custom:') || selected.startsWith('system:')) {
+    const isSystem = selected.startsWith('system:');
+    const cleanName = selected.slice((isSystem ? 'system:' : 'custom:').length);
+    setMessage(isSystem ? 'Загружается системный список доменов' : 'Загружается пользовательский список доменов', 'warn');
     try {
-      domains = await fetchAllPresetDomains(target, name);
+      domains = await fetchAllPresetDomains(target, cleanName);
     } catch (error) {
-      setMessage(`Ошибка загрузки пользовательского списка: ${error.message}`, 'bad');
+      setMessage(`Ошибка загрузки списка: ${error.message}`, 'bad');
       return;
     }
   }
@@ -2975,7 +3063,7 @@ async function deletePreset(target){
   }
   const name = selected.slice('custom:'.length);
   try {
-    const data = await postJson('/api/presets/delete', { scope: target, name });
+    const data = await postJson('/api/presets/delete-users-lists', { scope: target, name });
     delete state.customPresets[target][name];
     mergePresetResponse(data);
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
@@ -4464,21 +4552,28 @@ function renderPresetManager(){
   if (!manager.name || !names.includes(manager.name)) manager.name = names[0] || '';
   const entry = manager.name ? managerPresetEntry(manager.name) : null;
   const isStoredUser = manager.name ? hasCustomPreset(scope, manager.name) : false;
+  const isSystem = entry && entry.kind === 'system';
   const sourceScope = isStoredUser ? customPresetSourceScope(scope, manager.name) : scope;
   manager.scope = sourceScope;
   nameSelect.innerHTML = entries.length
     ? entries.map((item) => `<option value="${esc(item.name)}">${esc(item.label)} (${esc(item.count)})</option>`).join('')
     : '<option value="">Нет списков</option>';
   nameSelect.value = manager.name || '';
-  const meta = isStoredUser ? presetManagerMeta(sourceScope)[manager.name] : null;
+  const meta = isSystem ? systemPresetMeta(sourceScope, manager.name) : (isStoredUser ? presetManagerMeta(sourceScope)[manager.name] : null);
   const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : (entry ? `${entry.count}/${entry.count}` : '0');
   setText('preset-manager-count', count);
+  const deleteButton = document.querySelector('button[data-action="preset-editor-delete"]');
+  if (deleteButton) deleteButton.disabled = !isStoredUser || isSystem;
   const note = el('preset-manager-note');
   if (!manager.name) {
     note.textContent = 'Списков пока нет. Создайте список в подборе или импортируйте его из v2fly.';
     return;
   }
   const updated = meta && meta.updated_at ? ` · обновлено ${friendlyDate(meta.updated_at)}` : '';
+  if (isSystem) {
+    note.textContent = `Системный список "${entry.label}" всегда существует. Домены можно менять до пустого списка, удалить сам список нельзя. Доменов: ${meta ? meta.enabled_count : entry?.count || 0}${updated}.`;
+    return;
+  }
   note.textContent = `Редактируется список "${manager.name}". Доменов: ${meta ? meta.enabled_count : entry?.count || 0}${updated}${isStoredUser ? '' : ' · готовый список станет редактируемым после сохранения'}.`;
 }
 function renderPresetEditorPreview(preview){
@@ -4501,6 +4596,10 @@ function presetEditorScope(){
 }
 function presetEditorName(){
   return String(el('preset-manager-name')?.value || '').trim();
+}
+function presetEditorKind(){
+  const entry = managerPresetEntry(presetEditorName());
+  return entry && entry.kind === 'system' ? 'system' : 'user';
 }
 async function loadPresetEditorFromSelection(options){
   const opts = options || {};
@@ -4526,13 +4625,14 @@ async function loadPresetEditorFromSelection(options){
 async function buildPresetEditorPreview(){
   const scope = presetEditorScope();
   const name = presetEditorName();
+  const kind = presetEditorKind();
   const domains = presetEditorDomains();
-  if (!name || !domains.length) {
-    setMessage('Выберите список и оставьте хотя бы один домен', 'warn');
+  if (!name || (!domains.length && kind !== 'system')) {
+    setMessage(kind === 'system' ? 'Выберите список' : 'Выберите список и оставьте хотя бы один домен', 'warn');
     return null;
   }
   let current = [];
-  if (hasCustomPreset(scope, name) || managerPresetEntry(name)) {
+  if (hasCustomPreset(scope, name) || hasSystemPreset(scope, name) || managerPresetEntry(name)) {
     current = await fetchAllPresetDomains(scope, name);
   }
   const currentSet = new Set(current);
@@ -4542,6 +4642,7 @@ async function buildPresetEditorPreview(){
   const preview = {
     scope,
     name,
+    kind,
     total: domains.length,
     added: added.length,
     removed: removed.length,
@@ -4555,11 +4656,16 @@ async function savePresetEditor(){
     const preview = await buildPresetEditorPreview();
     if (!preview) return;
     const domains = presetEditorDomains();
-    const data = await postJson('/api/presets/save', { scope: preview.scope, name: preview.name, domains });
+    const data = await postJson('/api/presets/save', { scope: preview.scope, name: preview.name, kind: preview.kind, domains });
     mergePresetResponse(data);
-    if (!state.customPresets[preview.scope]) state.customPresets[preview.scope] = {};
-    state.customPresets[preview.scope][preview.name] = domains;
-    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    if (preview.kind === 'system') {
+      if (!state.systemPresets[preview.scope]) state.systemPresets[preview.scope] = {};
+      state.systemPresets[preview.scope][preview.name] = domains;
+    } else {
+      if (!state.customPresets[preview.scope]) state.customPresets[preview.scope] = {};
+      state.customPresets[preview.scope][preview.name] = domains;
+      localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    }
     state.presetManager.scope = preview.scope;
     state.presetManager.name = preview.name;
     renderPresetSelects();
@@ -4567,6 +4673,32 @@ async function savePresetEditor(){
     setMessage('Список сохранен', 'good');
   } catch (error) {
     setMessage(`Ошибка сохранения списка: ${error.message}`, 'bad');
+  }
+}
+async function deletePresetEditor(){
+  const scope = presetEditorScope();
+  const name = presetEditorName();
+  const entry = managerPresetEntry(name);
+  if (!name || !entry) {
+    setMessage('Выберите пользовательский список', 'warn');
+    return;
+  }
+  if (entry.kind !== 'user') {
+    setMessage('Системные и готовые списки удалить нельзя', 'warn');
+    return;
+  }
+  try {
+    const data = await postJson('/api/presets/delete-users-lists', { scope, name });
+    if (state.customPresets[scope]) delete state.customPresets[scope][name];
+    mergePresetResponse(data);
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    state.presetManager.name = '';
+    renderPresetSelects();
+    renderPresetManager();
+    await loadPresetEditorFromSelection({ silent: true });
+    setMessage('Пользовательский список удален', 'good');
+  } catch (error) {
+    setMessage(`Ошибка удаления списка: ${error.message}`, 'bad');
   }
 }
 function presetNewName(){
@@ -4588,6 +4720,11 @@ async function savePresetNew(){
   if (!name || !domains.length) {
     renderPresetNewPreview('Укажите название нового списка и хотя бы один домен.', 'bad');
     setMessage('Укажите название нового списка и хотя бы один домен', 'warn');
+    return;
+  }
+  if (hasSystemPreset(scope, name)) {
+    renderPresetNewPreview('Это имя занято системным списком.', 'bad');
+    setMessage('Это имя занято системным списком', 'warn');
     return;
   }
   try {
@@ -4743,7 +4880,8 @@ function renderAll(options){
   renderSettings();
   useRunPreferencesOnce();
   if (!state.domainsInitialized && !state.domainsTouched && !el('finder-domains').value.trim() && state.domainSets) {
-    const domains = [...new Set(defaultDomains('critical'))];
+    const selected = el('finder-preset-select')?.value || 'system:required';
+    const domains = uniqueDomains(presetDomains('finder', selected));
     el('finder-domains').value = domains.join('\\n');
     state.domainsInitialized = true;
   }
@@ -5044,7 +5182,7 @@ async function refreshLog(incremental = false){
 async function refreshPresets(){
   try {
     const presets = await getJson('/api/presets');
-    mergeCustomPresets((presets || {}).custom || {}, (presets || {}).metadata || {});
+    mergePresetResponse(presets);
     renderPresetSelects();
     renderPresetManager();
   } catch (error) {
@@ -5112,7 +5250,7 @@ async function refresh(){
     state.finderLog = finderLog;
     state.domainSets = domainSets;
     state.domainSources = domainSources;
-    mergeCustomPresets((presets || {}).custom || {}, (presets || {}).metadata || {});
+    mergePresetResponse(presets);
     renderAll({ skipCandidates: true });
     if (!state.candidateDomainsLoaded) refreshDomainIndex();
     else if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
@@ -5234,8 +5372,13 @@ async function startSelectedDiscovery(){
     return;
   }
   const mode = selectedRunMode();
+  const domains = finderDomains();
+  if (!domains.length) {
+    setMessage('Добавьте хотя бы один домен для подбора', 'bad');
+    return;
+  }
   const payload = {
-    domains: finderDomains(),
+    domains,
     ...options
   };
   const timeout = timeoutSecondsOrNull();
@@ -5352,6 +5495,10 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'preset-editor-save') {
     savePresetEditor();
+    return;
+  }
+  if (button.dataset.action === 'preset-editor-delete') {
+    deletePresetEditor();
     return;
   }
   if (button.dataset.action === 'preset-editor-export') {
@@ -5592,7 +5739,14 @@ def _event_payloads(config: AppConfig, web_auth: dict[str, Any] | None = None) -
         "log": _log_event_payload(config.output.state_dir),
         "candidates": {"version": status.get("candidate_version") or {}},
         "settings": {"version": _event_fingerprint(status.get("settings") or {})},
-        "presets": {"version": _event_fingerprint(read_custom_preset_index(config.output.state_dir))},
+        "presets": {
+            "version": _event_fingerprint(
+                {
+                    "custom": read_custom_preset_index(config.output.state_dir),
+                    "system": read_system_preset_index(config.output.state_dir),
+                }
+            )
+        },
     }
 
 
@@ -5672,7 +5826,7 @@ DEFAULT_SETTINGS = {
 
 DEFAULT_RUN_PREFERENCES = {
     "domains": [],
-    "domain_preset": "builtin:critical",
+    "domain_preset": "system:required",
     "discovery_profile": "standard",
     "run_mode": "standard",
     "curl_parallelism": 4,
@@ -5794,7 +5948,7 @@ def _normalize_run_preferences(raw: dict[str, Any]) -> dict[str, Any]:
     timeout_hours = max(0.1, min(24.0, timeout_hours))
     return {
         "domains": _clean_domain_list(raw.get("domains") or []),
-        "domain_preset": str(raw.get("domain_preset") or "builtin:critical")[:160],
+        "domain_preset": str(raw.get("domain_preset") or "system:required")[:160],
         "discovery_profile": discovery_profile,
         "run_mode": run_mode,
         "curl_parallelism": _minimum_int(raw.get("curl_parallelism"), default=4, minimum=1),
@@ -5926,7 +6080,11 @@ def _candidate_domain_index_payload(config: AppConfig, query: dict[str, list[str
 
 
 def _presets_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
-    payload: dict[str, Any] = {"metadata": read_custom_preset_index(config.output.state_dir)}
+    payload: dict[str, Any] = {
+        "metadata": read_custom_preset_index(config.output.state_dir),
+        "system_metadata": read_system_preset_index(config.output.state_dir),
+        "system": read_system_presets(config.output.state_dir),
+    }
     if _query_bool(query, "include_domains", False):
         payload["custom"] = read_custom_presets(config.output.state_dir)
     else:

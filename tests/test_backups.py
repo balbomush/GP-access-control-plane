@@ -129,7 +129,8 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertTrue(preset_link_file.exists())
             presets = [json.loads(line) for line in preset_file.read_text(encoding="utf-8").splitlines()]
             preset_links = [json.loads(line) for line in preset_link_file.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual({item["name"] for item in presets}, {"mine", "shared"})
+            self.assertEqual({item["name"] for item in presets}, {"mine", "shared", "required", "desired"})
+            self.assertEqual({item["kind"] for item in presets if item["name"] in {"required", "desired"}}, {"system"})
             self.assertEqual({item["domain"] for item in preset_links}, {"youtube.com", "discord.com"})
 
     def test_restore_snapshot_replaces_strategies_and_presets(self) -> None:

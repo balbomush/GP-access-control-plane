@@ -149,7 +149,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("renderBackupRestorePreview", html)
         self.assertIn("/api/presets", html)
         self.assertIn("/api/presets/save", html)
-        self.assertIn("/api/presets/delete", html)
+        self.assertIn("/api/presets/delete-users-lists", html)
         self.assertIn("/api/presets/domains", html)
         self.assertIn("domain-preset-manager-panel", html)
         self.assertNotIn("profiles-manager-panel", html)
@@ -165,8 +165,13 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("preset-new-name", html)
         self.assertIn("preset-new-domains", html)
         self.assertIn("data-action=\"preset-new-save\"", html)
+        self.assertIn("data-action=\"preset-editor-delete\"", html)
         self.assertIn("savePresetNew", html)
+        self.assertIn("deletePresetEditor", html)
         self.assertIn("Создать новый список", html)
+        self.assertIn("system:required", html)
+        self.assertIn("systemPresets", html)
+        self.assertIn("systemPresetMeta", html)
         self.assertIn("fetchAllPresetDomains", html)
         self.assertIn("function hasCustomPreset(target, name)", html)
         self.assertIn("function managerPresetEntries()", html)
@@ -985,6 +990,56 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('"enabled":false', toggled)
             self.assertNotIn('"discord.com","discordcdn.com"', toggled)
+
+    def test_system_preset_api_allows_empty_save_and_user_only_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps({"scope": "finder", "name": "required", "kind": "system", "domains": []})
+            connection.request("POST", "/api/presets/save", body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            saved = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertIn('"system"', saved)
+            self.assertIn('"required":[]', saved)
+            self.assertIn('"enabled_count":0', saved)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps({"scope": "finder", "name": "mine", "domains": ["youtube.com"]})
+            connection.request("POST", "/api/presets/save", body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            self.assertEqual(response.status, 200)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            body = json.dumps({"scope": "finder", "names": ["mine", "required"]})
+            connection.request(
+                "POST",
+                "/api/presets/delete-users-lists",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            deleted = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 200)
+            self.assertNotIn('"mine"', deleted)
+            self.assertIn('"required":[]', deleted)
+            self.assertIn('"kind":"system"', deleted)
 
     def test_discovery_profiles_endpoint_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

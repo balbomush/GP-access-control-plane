@@ -15,13 +15,17 @@ from gp_control_plane.storage import (
     append_run,
     connect,
     delete_custom_preset,
+    delete_user_presets,
     db_path,
     get_meta,
-    read_run_payloads,
     read_custom_preset_index,
     read_custom_presets,
     read_preset_domains_page,
+    read_run_payloads,
+    read_system_preset_index,
+    read_system_presets,
     save_custom_presets,
+    save_system_preset,
     set_preset_domain_enabled,
     storage_status,
 )
@@ -694,6 +698,54 @@ class StorageTests(unittest.TestCase):
 
             self.assertEqual(index["finder"]["mine"]["enabled_count"], 1)
             self.assertEqual(index["finder"]["mine"]["total_count"], 2)
+
+    def test_system_domain_presets_are_created_with_required_and_desired_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            presets = read_system_presets(state_dir)
+            index = read_system_preset_index(state_dir)
+
+            self.assertIn("required", presets["finder"])
+            self.assertIn("desired", presets["finder"])
+            self.assertEqual(presets["finder"]["required"], [])
+            self.assertEqual(presets["finder"]["desired"], [])
+            self.assertEqual(index["finder"]["required"]["kind"], "system")
+            self.assertEqual(index["finder"]["required"]["enabled_count"], 0)
+            self.assertEqual(index["finder"]["desired"]["enabled_count"], 0)
+
+    def test_system_domain_preset_can_be_saved_as_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            save_system_preset(
+                state_dir,
+                scope="finder",
+                name="required",
+                domains=[],
+                updated_at="2026-07-18T00:00:00Z",
+            )
+            page = read_preset_domains_page(state_dir, scope="finder", name="required", kind="system")
+            index = read_system_preset_index(state_dir)
+
+            self.assertEqual(read_system_presets(state_dir)["finder"]["required"], [])
+            self.assertEqual(page["total"], 0)
+            self.assertEqual(index["finder"]["required"]["total_count"], 0)
+
+    def test_delete_user_presets_does_not_remove_system_list(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"mine": ["youtube.com"], "required": ["example.com"]}, "common": {}},
+                "2026-07-18T00:00:00Z",
+            )
+
+            index = delete_user_presets(state_dir, scope="finder", names=["mine", "required"])
+
+            self.assertNotIn("mine", index["finder"])
+            self.assertIn("required", read_system_preset_index(state_dir)["finder"])
+            self.assertEqual(read_system_presets(state_dir)["finder"]["required"], [])
 
     def test_delete_custom_preset_removes_one_scope_entry(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
