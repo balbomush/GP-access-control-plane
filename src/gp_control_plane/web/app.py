@@ -3688,9 +3688,9 @@ function strategyDomainCoverage(row){
   return candidateAllDomains(row).length;
 }
 function strategyDisplayFamilyKey(row){
+  const protocol = String(row.protocol || 'unknown');
   const family = String(row.family || 'other');
-  if (family === 'udp/quic') return family;
-  return String(row.family_key || `${row.protocol || 'unknown'}:${family}:${normalizeStrategyArg(row.args || '')}`);
+  return `${protocol}:${family}`;
 }
 function bestFamilyRow(rows){
   return rows.slice().sort((a, b) => {

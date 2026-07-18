@@ -222,7 +222,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("fragmentationBadge", html)
         self.assertIn("strategyFamilyGroups", html)
         self.assertIn("strategyDisplayFamilyKey", html)
-        self.assertIn("if (family === 'udp/quic') return family;", html)
+        self.assertIn("return `${protocol}:${family}`;", html)
         self.assertIn("strategy-family-list", html)
         self.assertIn("strategy-family-reason", html)
         self.assertNotIn("appendCandidateFilters", html)
