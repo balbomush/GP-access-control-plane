@@ -1193,6 +1193,50 @@ button:disabled { opacity: .55; cursor: default; }
   font-size: 12px;
   line-height: 1.4;
 }
+.run-launch-summary {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+.run-launch-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.run-launch-summary-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+.run-launch-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+.run-launch-summary-item {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px;
+  display: grid;
+  gap: 3px;
+}
+.run-launch-summary-label {
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.25;
+}
+.run-launch-summary-value {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
 .candidate-summary {
   color: var(--text-soft);
   font-size: 13px;
@@ -1966,6 +2010,13 @@ pre {
                 <span>Пропустить проверку IP/port-блокировки</span>
               </label>
             </details>
+            <section class="run-launch-summary" aria-label="Сводка параметров запуска">
+              <div class="run-launch-summary-header">
+                <div class="run-launch-summary-title">Параметры запуска</div>
+                <span class="badge" id="run-launch-readiness">-</span>
+              </div>
+              <div class="run-launch-summary-grid" id="run-launch-summary-grid"></div>
+            </section>
             <div class="button-row run-actions">
               <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, глубиной проверки и параметрами." type="button">Запустить выбранный режим</button>
               <button class="secondary danger tooltip-button" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
@@ -2548,6 +2599,86 @@ function discoveryOptions(){
     skip_ipblock: el('skip-ipblock').checked
   };
 }
+function selectedFinderPresetSummary(){
+  const value = el('finder-preset-select')?.value || CUSTOM_SELECT_VALUE;
+  if (value === CUSTOM_SELECT_VALUE) return 'ручной список';
+  const [kind, name] = String(value || '').split(':');
+  if (kind === 'system') {
+    return `${systemPresetLabel('finder', name)} (${systemPresetCount('finder', name)})`;
+  }
+  if (kind === 'custom') {
+    return `Пользовательский: ${name} (${customPresetCount('finder', name)})`;
+  }
+  if (kind === 'builtin') {
+    const preset = builtInPresets('finder').find((item) => item.key === name);
+    return preset ? `${preset.label} (${uniqueDomainCount(preset.domains)})` : name || '-';
+  }
+  return value || '-';
+}
+function selectedRunModeLabel(){
+  return selectedRunMode() === 'multi' ? 'Все домены на одной стратегии' : 'Домены по очереди';
+}
+function protocolSummary(options){
+  const protocols = [];
+  if (options.enable_http) protocols.push('HTTP');
+  if (options.enable_tls12) protocols.push('TLS 1.2');
+  if (options.enable_tls13) protocols.push('TLS 1.3');
+  if (options.include_quic) protocols.push('QUIC');
+  return protocols.join(' + ') || 'не выбран';
+}
+function runLaunchReadiness(domains, options){
+  const status = state.status || {};
+  const ready = zapretCompactStatus(status.zapret2 || {}).ready;
+  if (isBusy()) return { text: 'Идет подбор', tone: 'warn' };
+  if (!ready) return { text: 'Требуется настройка', tone: 'warn' };
+  if (!domains.length) return { text: 'Нужны домены', tone: 'warn' };
+  if (!hasEnabledProtocol(options)) return { text: 'Нужен протокол', tone: 'warn' };
+  return { text: 'Готово к старту', tone: 'good' };
+}
+function runLaunchSummaryItems(){
+  const domains = finderDomains();
+  const options = discoveryOptions();
+  const settings = state.settings || {};
+  const mode = selectedRunMode();
+  const limit = timeoutSecondsOrNull();
+  const checks = [
+    options.skip_dnscheck ? 'DNS: пропуск' : 'DNS: проверять',
+    options.skip_ipblock ? 'IP/port: пропуск' : 'IP/port: проверять'
+  ].join(', ');
+  const repeats = `${options.repeats} · ${options.repeat_parallel ? 'параллельно' : 'последовательно'}`;
+  const curl = mode === 'multi' ? `${curlParallelism()} параллельно` : 'не применяется';
+  const timeouts = `HTTP/TLS ${settings.curl_max_time || 2}с · QUIC ${settings.curl_max_time_quic || 2}с · DoH ${settings.curl_max_time_doh || 2}с`;
+  return {
+    readiness: runLaunchReadiness(domains, options),
+    items: [
+      ['Домены запуска', `${domains.length}`],
+      ['Обязательные', `${systemPresetCount('finder', 'required')}`],
+      ['Желательные', `${systemPresetCount('finder', 'desired')}`],
+      ['Источник', selectedFinderPresetSummary()],
+      ['Режим', selectedRunModeLabel()],
+      ['Проверочные запросы', curl],
+      ['Протоколы', protocolSummary(options)],
+      ['IP-режим', options.enable_ipv6 ? 'IPv4 + IPv6' : 'IPv4'],
+      ['Глубина', scanLevelLabel(options.scan_level || 'standard')],
+      ['DNS/IP-check', checks],
+      ['Повторы', repeats],
+      ['Лимит времени', limit ? formatDuration(limit) : 'без лимита'],
+      ['Таймауты', timeouts]
+    ]
+  };
+}
+function renderRunLaunchSummary(){
+  const grid = el('run-launch-summary-grid');
+  const badgeNode = el('run-launch-readiness');
+  if (!grid || !badgeNode) return;
+  const summary = runLaunchSummaryItems();
+  badgeNode.textContent = summary.readiness.text;
+  badgeNode.className = `badge ${summary.readiness.tone}`;
+  grid.innerHTML = summary.items.map(([label, value]) => `<div class="run-launch-summary-item">
+    <div class="run-launch-summary-label">${esc(label)}</div>
+    <div class="run-launch-summary-value">${esc(value)}</div>
+  </div>`).join('');
+}
 function collectRunPreferences(){
   const timeoutHours = Number(el('finder-timeout-hours')?.value || 6);
   return {
@@ -2629,6 +2760,29 @@ async function saveRunPreferencesNow(){
   }
 }
 const DISCOVERY_PROFILE_CONTROL_IDS = new Set(['scan-level']);
+const RUN_LAUNCH_SUMMARY_CONTROL_IDS = new Set([
+  'finder-domains',
+  'finder-preset-select',
+  'curl-parallelism',
+  'enable-http',
+  'enable-tls12',
+  'enable-tls13',
+  'include-quic',
+  'enable-ipv6',
+  'discovery-profile-select',
+  'scan-level',
+  'repeats',
+  'repeat-parallel',
+  'skip-dnscheck',
+  'skip-ipblock',
+  'limit-time-enabled',
+  'finder-timeout-hours'
+]);
+function isRunLaunchSummaryControl(target){
+  if (!target) return false;
+  if (target.name === 'run-mode') return true;
+  return RUN_LAUNCH_SUMMARY_CONTROL_IDS.has(String(target.id || ''));
+}
 function markDiscoveryProfileCustom(){
   if (state.loadingDiscoveryProfile) return;
   renderDiscoveryProfileNote();
@@ -3016,7 +3170,10 @@ async function usePreset(target){
       renderCandidatesOnly();
       if (selectedCommonDomains().length >= 2) refreshCandidates(true);
     }
-    else renderCandidates();
+    else {
+      renderCandidates();
+      renderRunLaunchSummary();
+    }
   } finally {
     state.loadingDomainPreset = false;
   }
@@ -4901,6 +5058,7 @@ function renderAll(options){
     state.domainsInitialized = true;
   }
   renderMetrics();
+  renderRunLaunchSummary();
   if (!opts.skipCandidates) renderCandidates();
   renderRuns();
   renderLog();
@@ -5618,6 +5776,9 @@ document.addEventListener('input', (event) => {
   if (event.target && event.target.id === 'common-domain-add') {
     renderCommonDomainSuggestions();
   }
+  if (isRunLaunchSummaryControl(event.target)) {
+    renderRunLaunchSummary();
+  }
 });
 document.addEventListener('scroll', (event) => {
   if (event.target && event.target.matches && event.target.matches('.strategy-code, .line-numbered-textarea')) {
@@ -5674,6 +5835,9 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && DISCOVERY_PROFILE_CONTROL_IDS.has(event.target.id)) {
     markDiscoveryProfileCustom();
+  }
+  if (isRunLaunchSummaryControl(event.target)) {
+    renderRunLaunchSummary();
   }
 });
 document.addEventListener('keydown', (event) => {

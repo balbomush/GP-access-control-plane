@@ -478,6 +478,53 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/jobs/zapret-strategy-check", html)
         self.assertNotIn("/api/jobs/zapret-custom-verification", html)
 
+    def test_launch_summary_panel_is_next_to_start_actions(self) -> None:
+        html = index_html()
+
+        summary_start = html.index('class="run-launch-summary"')
+        actions_start = html.index('class="button-row run-actions"')
+        self.assertLess(summary_start, actions_start)
+        self.assertIn('aria-label="Сводка параметров запуска"', html)
+        self.assertIn("run-launch-readiness", html)
+        self.assertIn("run-launch-summary-grid", html)
+        self.assertIn("Параметры запуска", html)
+
+    def test_launch_summary_shows_result_affecting_parameters(self) -> None:
+        html = index_html()
+
+        for label in (
+            "Домены запуска",
+            "Обязательные",
+            "Желательные",
+            "Источник",
+            "Режим",
+            "Проверочные запросы",
+            "Протоколы",
+            "IP-режим",
+            "Глубина",
+            "DNS/IP-check",
+            "Повторы",
+            "Лимит времени",
+            "Таймауты",
+        ):
+            self.assertIn(label, html)
+        self.assertIn("selectedFinderPresetSummary", html)
+        self.assertIn("selectedRunModeLabel", html)
+        self.assertIn("protocolSummary(options)", html)
+        self.assertIn("curlParallelism()", html)
+        self.assertIn("timeoutSecondsOrNull()", html)
+
+    def test_launch_summary_has_explicit_readiness_states(self) -> None:
+        html = index_html()
+
+        self.assertIn("runLaunchReadiness", html)
+        self.assertIn("Готово к старту", html)
+        self.assertIn("Требуется настройка", html)
+        self.assertIn("Нужны домены", html)
+        self.assertIn("Нужен протокол", html)
+        self.assertIn("Идет подбор", html)
+        self.assertIn("hasEnabledProtocol(options)", html)
+
     def test_curl_parallelism_field_is_scoped_to_multi_domain_mode(self) -> None:
         html = index_html()
 
