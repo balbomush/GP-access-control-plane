@@ -3687,6 +3687,11 @@ function strategyComplexity(row){
 function strategyDomainCoverage(row){
   return candidateAllDomains(row).length;
 }
+function strategyDisplayFamilyKey(row){
+  const family = String(row.family || 'other');
+  if (family === 'udp/quic') return family;
+  return String(row.family_key || `${row.protocol || 'unknown'}:${family}:${normalizeStrategyArg(row.args || '')}`);
+}
 function bestFamilyRow(rows){
   return rows.slice().sort((a, b) => {
     const coverage = strategyDomainCoverage(b) - strategyDomainCoverage(a);
@@ -3699,7 +3704,7 @@ function bestFamilyRow(rows){
 function strategyFamilyGroups(rows){
   const groups = new Map();
   uniqueStrategyRows(rows).forEach((row) => {
-    const key = String(row.family_key || `${row.protocol || 'unknown'}:${row.family || 'other'}:${normalizeStrategyArg(row.args || '')}`);
+    const key = strategyDisplayFamilyKey(row);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   });
