@@ -1823,7 +1823,7 @@ pre {
     <div class="topbar-inner">
       <div class="brand">
         <h1>Подбор стратегий zapret2</h1>
-        <div class="subtitle">Raspberry Pi · blockcheck2 · live-лог</div>
+        <div class="subtitle">Raspberry Pi · проверка стратегий · live-лог</div>
       </div>
       <div class="topbar-badges">
         <span class="topbar-version" id="app-version-badge">v-</span>
@@ -1834,12 +1834,12 @@ pre {
   <main class="main">
     <section class="status-grid" aria-label="Сводка">
       <div class="metric">
-        <div class="metric-label">zapret2</div>
+        <div class="metric-label">Система</div>
         <div class="metric-value" id="metric-zapret">Загрузка</div>
         <div class="metric-note" id="metric-zapret-note">-</div>
       </div>
       <button class="metric metric-button" data-tab="terminal" id="metric-job-card" type="button">
-        <div class="metric-label">Задание</div>
+        <div class="metric-label">Подбор</div>
         <div class="metric-value" id="metric-job">-</div>
         <div class="metric-note" id="metric-job-note">-</div>
       </button>
@@ -1865,7 +1865,7 @@ pre {
         <section class="panel">
           <div class="panel-header">
             <h2>Запуск поиска</h2>
-            <span class="badge" id="job-badge">Свободна</span>
+            <span class="badge" id="job-badge">Можно запускать</span>
           </div>
           <div class="form-grid">
             <div class="field">
@@ -1886,19 +1886,19 @@ pre {
               <div class="field">
                 <label>Режим поиска</label>
                 <div class="segmented-control" id="run-mode-control">
-                  <label class="segment-option tooltip-button" data-tooltip="Запускает штатный blockcheck2: домены проверяются обычным порядком скрипта. Хороший режим для базовой совместимости.">
+                  <label class="segment-option tooltip-button" data-tooltip="Запускает штатную проверку стратегий: домены проверяются обычным порядком. Хороший режим для базовой совместимости.">
                     <input type="radio" name="run-mode" value="standard" checked>
                     Домены по очереди
                   </label>
-                  <label class="segment-option tooltip-button" data-tooltip="Одна стратегия запускается один раз, затем все выбранные домены проверяются параллельными curl. Удобно быстрее понять, какие домены покрывает одна стратегия.">
+                  <label class="segment-option tooltip-button" data-tooltip="Одна стратегия запускается один раз, затем все выбранные домены проверяются параллельными проверочными запросами. Удобно быстрее понять, какие домены покрывает одна стратегия.">
                     <input type="radio" name="run-mode" value="multi">
                     Все домены на одной стратегии
                   </label>
                 </div>
               </div>
-              <div class="helper-text" id="run-mode-note">Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.</div>
+              <div class="helper-text" id="run-mode-note">Обычный режим: штатная проверка стратегий проходит по своему порядку.</div>
               <div class="field multi-curl-field" id="multi-curl-field" hidden>
-                <label for="curl-parallelism">Параллельных curl</label>
+                <label for="curl-parallelism">Параллельных проверочных запросов</label>
                 <input id="curl-parallelism" type="number" min="1" step="1" value="4">
                 <div class="helper-text">Работает только в режиме `Все домены на одной стратегии`: одна стратегия проверяет несколько доменов параллельно.</div>
               </div>
@@ -1912,7 +1912,7 @@ pre {
               <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
             </div>
             <div class="preset-panel finder-options-panel">
-              <div class="helper-text">Основные проверки blockcheck2, которые реально влияют на подбор стратегий.</div>
+              <div class="helper-text">Основные проверки, которые реально влияют на подбор стратегий.</div>
               <div class="protocol-grid">
                 <label class="checkbox-row">
                   <input id="enable-http" type="checkbox">
@@ -1936,9 +1936,9 @@ pre {
                 </label>
               </div>
               <div class="field scan-level-field">
-                <label for="discovery-profile-select">Уровень поиска blockcheck2</label>
+                <label for="discovery-profile-select">Глубина проверки стратегий</label>
                 <select id="discovery-profile-select"></select>
-                <div class="helper-text" id="discovery-profile-note">Настройка самого blockcheck2: quick, standard или force.</div>
+                <div class="helper-text" id="discovery-profile-note">Технический профиль проверки: quick, standard или force.</div>
               </div>
               <input id="scan-level" type="hidden" value="standard">
             </div>
@@ -1967,7 +1967,7 @@ pre {
               </label>
             </details>
             <div class="button-row run-actions">
-              <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, профилем подбора и пресетом настроек." type="button">Запустить выбранный режим</button>
+              <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, глубиной проверки и параметрами." type="button">Запустить выбранный режим</button>
               <button class="secondary danger tooltip-button" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
             </div>
             <div class="message" id="message">Готово</div>
@@ -2318,7 +2318,7 @@ const jobNames = {
   'standard-discovery': 'Поиск стратегий',
   'multi-domain-discovery': 'Все домены на одной стратегии'
 };
-const statusTone = { success: 'good', failed: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
+const statusTone = { success: 'good', failed: 'bad', error: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 let toastTimer = null;
 let refreshInFlight = false;
 let realtimeSource = null;
@@ -2670,7 +2670,7 @@ function renderRunModeNote(){
     note.textContent = 'Режим “Все домены на одной стратегии”: одна стратегия запускается один раз, затем домены проверяются параллельно.';
     return;
   }
-  note.textContent = 'Обычный режим: штатный blockcheck2 проверяет домены по своему порядку.';
+  note.textContent = 'Обычный режим: штатная проверка стратегий проходит по своему порядку.';
 }
 function profileTitle(name, profile){
   return String((profile && profile.title) || name || '-');
@@ -3091,9 +3091,9 @@ function zapretDiagnosticItems(zapret){
   const diagnostics = Array.isArray(zapret.diagnostics) && zapret.diagnostics.length
     ? zapret.diagnostics
     : [
-        {label: 'nfqws2', ok: Boolean(zapret.nfqws2_found), message: zapret.nfqws2_found ? 'найден' : 'не найден'},
-        {label: 'blockcheck2', ok: Boolean(zapret.blockcheck_found), message: zapret.blockcheck_found ? 'найден' : 'не найден'},
-        {label: 'root-helper', ok: Boolean(zapret.root_helper_ready), message: zapret.root_helper_ready ? 'готов' : (zapret.root_helper_error || 'не готов')}
+        {label: 'движок применения стратегии', ok: Boolean(zapret.nfqws2_found), message: zapret.nfqws2_found ? 'найден' : 'не найден'},
+        {label: 'проверка стратегий', ok: Boolean(zapret.blockcheck_found), message: zapret.blockcheck_found ? 'найдена' : 'не найдена'},
+        {label: 'служба с повышенными правами', ok: Boolean(zapret.root_helper_ready), message: zapret.root_helper_ready ? 'готова' : (zapret.root_helper_error || 'не готова')}
       ];
   return diagnostics;
 }
@@ -3135,8 +3135,22 @@ function testedDomainCount(){
   }
   return current;
 }
-function metricJobNoteText(jobStatus, busy){
-  return busy ? runStatusLabel(jobStatus) : 'Свободна';
+function nextActionStatus(ready, busy, jobStatus, status){
+  const stateBoard = (status || {}).state || {};
+  const normalized = String(jobStatus || '').toLowerCase();
+  if (busy) {
+    return normalized === 'stopping'
+      ? { text: 'Останавливается', tone: 'warn' }
+      : { text: 'Идет подбор', tone: 'warn' };
+  }
+  if (normalized === 'failed' || normalized === 'error' || stateBoard.last_error) {
+    return { text: 'Есть ошибка', tone: 'bad' };
+  }
+  if (!ready) return { text: 'Требуется настройка', tone: 'warn' };
+  return { text: 'Можно запускать', tone: 'good' };
+}
+function metricJobNoteText(ready, busy, jobStatus, status){
+  return nextActionStatus(ready, busy, jobStatus, status).text;
 }
 function jobStatusClass(status, busy){
   const normalized = busy ? String(status || 'running').toLowerCase() : 'idle';
@@ -3151,31 +3165,30 @@ function renderMetrics(){
   const ready = zapretCompact.ready;
   const busy = isBusy();
   const jobStatus = board.current_job_status || (busy ? 'running' : '');
-  const progress = (state.finderLog && state.finderLog.progress) || {};
-  const phase = progress.phase_label || phaseLabel(progress.phase || '');
   const version = (state.status || {}).version || '-';
+  const action = nextActionStatus(ready, busy, jobStatus, status);
   setText('app-version-badge', `v${version}`);
   renderWebAuthStatus();
   const zapretValue = el('metric-zapret');
   if (zapretValue) {
-    zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${zapretCompact.ok}/${zapretCompact.total || 5}</span></span>`;
+    zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${ready ? 'Готова' : 'Проблема'}</span></span>`;
     zapretValue.title = zapretCompact.tooltip;
   }
   const zapretNote = el('metric-zapret-note');
   if (zapretNote) {
-    zapretNote.textContent = ready ? 'готово' : 'есть проблема';
+    zapretNote.textContent = ready ? 'службы готовы' : 'проверьте систему';
     zapretNote.title = zapretCompact.tooltip;
   }
-  setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободна');
+  setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободно');
   const jobCard = el('metric-job-card');
   if (jobCard) jobCard.className = jobStatusClass(jobStatus, busy);
-  setText('metric-job-note', metricJobNoteText(jobStatus, busy));
+  setText('metric-job-note', metricJobNoteText(ready, busy, jobStatus, status));
   const testedCount = testedDomainCount();
   setText('metric-candidates', String(testedCount));
   setText('metric-candidates-note', state.candidateDomainsLoaded ? `загружено ${state.candidateDomains.length} доменов` : 'открыть список');
   const jobBadge = el('job-badge');
-  jobBadge.textContent = busy ? 'В работе' : 'Свободна';
-  jobBadge.className = busy ? 'badge warn' : 'badge good';
+  jobBadge.textContent = action.text;
+  jobBadge.className = `badge ${action.tone}`;
   document.querySelectorAll('button[data-action="run-selected-discovery"]').forEach((button) => {
     button.disabled = busy;
   });
@@ -3813,13 +3826,15 @@ function runField(label, value){
 }
 function runStatusLabel(status){
   const labels = {
-    success: 'готово',
-    failed: 'ошибка',
-    running: 'идет',
-    queued: 'очередь',
-    stopping: 'останавливается',
-    stopped: 'остановлено',
-    timeout: 'таймаут'
+    success: 'Завершено',
+    failed: 'Ошибка',
+    error: 'Ошибка',
+    running: 'Идет подбор',
+    queued: 'Запускается',
+    stopping: 'Останавливается',
+    stopped: 'Остановлено',
+    timeout: 'Таймаут',
+    idle: 'Свободно'
   };
   return labels[status] || status || '-';
 }
