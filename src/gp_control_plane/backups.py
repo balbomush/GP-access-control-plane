@@ -10,6 +10,7 @@ from typing import Any
 
 from . import __version__
 from .state import now_iso, read_state
+from .strategy_safety import analyze_strategy
 from .storage import connect, db_path
 
 
@@ -250,17 +251,31 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             candidate_id = str(item.get("id") or "").strip()
             if not candidate_id:
                 continue
+            protocol = str(item.get("protocol") or "")
+            args = str(item.get("args") or "")
+            analysis = analyze_strategy(protocol, args)
             conn.execute(
                 """
-                INSERT INTO strategies(id, protocol, args, args_hash, status)
-                VALUES(?, ?, ?, ?, ?)
+                INSERT INTO strategies(
+                    id, protocol, args, args_hash, status,
+                    fragmentation_class, fragmentation_safe, fragmentation_reason,
+                    family, family_key, family_rank, family_reason
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
-                    str(item.get("protocol") or ""),
-                    str(item.get("args") or ""),
-                    _sha256_text(str(item.get("args") or "")),
+                    protocol,
+                    args,
+                    _sha256_text(args),
                     str(item.get("status") or "candidate"),
+                    str(item.get("fragmentation_class") or analysis.fragmentation_class),
+                    1 if _bool_value(item.get("fragmentation_safe", analysis.fragmentation_safe)) else 0,
+                    str(item.get("fragmentation_reason") or analysis.fragmentation_reason),
+                    str(item.get("family") or analysis.family),
+                    str(item.get("family_key") or analysis.family_key),
+                    int(item.get("family_rank") or analysis.family_rank),
+                    str(item.get("family_reason") or analysis.family_reason),
                 ),
             )
         known_ids = {
@@ -474,7 +489,9 @@ def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
         with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
             for row in conn.execute(
                 """
-                SELECT s.id, s.protocol, s.args, s.status
+                SELECT s.id, s.protocol, s.args, s.status,
+                       s.fragmentation_class, s.fragmentation_safe, s.fragmentation_reason,
+                       s.family, s.family_key, s.family_rank, s.family_reason
                 FROM strategies s
                 ORDER BY s.id ASC
                 """
@@ -634,6 +651,14 @@ def _linked_domain_count(conn: Any) -> int:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _restore_domain_id(conn: Any, domain: str) -> int:

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .state import append_jsonl, now_iso
+from .strategy_safety import analyze_strategy
 from .storage import (
     append_run,
     connect,
@@ -612,7 +613,9 @@ def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
     with connect(state_dir) as conn:
         rows = conn.execute(
             """
-            SELECT id, protocol, args, status
+            SELECT id, protocol, args, status,
+                   fragmentation_class, fragmentation_safe, fragmentation_reason,
+                   family, family_key, family_rank, family_reason
             FROM strategies
             ORDER BY id ASC
             """
@@ -629,6 +632,7 @@ def read_candidate_page(
     view: str = "domain",
     domains: list[str] | None = None,
     domain: str = "",
+    fragmentation_classes: list[str] | None = None,
 ) -> dict[str, Any]:
     limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
     offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
@@ -646,6 +650,7 @@ def read_candidate_page(
             view=view,
             domains=selected_domains,
             domain=selected_domain,
+            fragmentation_classes=_clean_fragmentation_classes(fragmentation_classes or []),
         )
         candidates = [_compact_candidate(_candidate_from_db(conn, row, include_events=False)) for row in rows]
     version = _storage_version(state_dir)
@@ -664,11 +669,17 @@ def candidate_storage_version(state_dir: Path) -> dict[str, int]:
     return _storage_version(state_dir)
 
 
-def read_candidate_domain_index(state_dir: Path, *, query: str = "") -> dict[str, Any]:
+def read_candidate_domain_index(
+    state_dir: Path,
+    *,
+    query: str = "",
+    fragmentation_classes: list[str] | None = None,
+) -> dict[str, Any]:
     query = query.strip().lower()
+    clean_fragmentation_classes = _clean_fragmentation_classes(fragmentation_classes or [])
     with connect(state_dir) as conn:
         tested_domains = _tested_domains_from_db(conn)
-        rows = _read_candidate_domain_index_sql(conn, query=query)
+        rows = _read_candidate_domain_index_sql(conn, query=query, fragmentation_classes=clean_fragmentation_classes)
     return {
         "domains": rows,
         "total": len(rows),
@@ -687,8 +698,10 @@ def _read_candidate_page_sql(
     view: str,
     domains: list[str],
     domain: str,
+    fragmentation_classes: list[str],
 ) -> tuple[list[Any], int]:
     query_clause, query_params = _strategy_query_clause(query)
+    fragmentation_clause, fragmentation_params = _fragmentation_query_clause(fragmentation_classes)
     if view == "common":
         if len(domains) < 2:
             return [], 0
@@ -697,29 +710,29 @@ def _read_candidate_page_sql(
             FROM strategies s
             JOIN strategy_domain_results r ON r.strategy_id = s.id
             JOIN domains d ON d.id = r.domain_id
-            WHERE d.name IN ({placeholders}) {query_clause}
+            WHERE d.name IN ({placeholders}) {query_clause} {fragmentation_clause}
             GROUP BY s.id
             HAVING COUNT(DISTINCT d.name) = ?
         """
-        params: list[Any] = [*domains, *query_params, len(domains)]
+        params: list[Any] = [*domains, *query_params, *fragmentation_params, len(domains)]
     elif domain:
         base = f"""
             FROM strategies s
             JOIN strategy_domain_results r ON r.strategy_id = s.id
             JOIN domains d ON d.id = r.domain_id
-            WHERE d.name = ? {query_clause}
+            WHERE d.name = ? {query_clause} {fragmentation_clause}
             GROUP BY s.id
         """
-        params = [domain, *query_params]
+        params = [domain, *query_params, *fragmentation_params]
     else:
         base = f"""
             FROM strategies s
             JOIN strategy_domain_results r ON r.strategy_id = s.id
             JOIN domains d ON d.id = r.domain_id
-            WHERE 1 = 1 {query_clause}
+            WHERE 1 = 1 {query_clause} {fragmentation_clause}
             GROUP BY s.id
         """
-        params = [*query_params]
+        params = [*query_params, *fragmentation_params]
     total = int(
         conn.execute(
             f"SELECT COUNT(*) AS count FROM (SELECT s.id {base}) AS candidate_page",
@@ -729,6 +742,8 @@ def _read_candidate_page_sql(
     rows = conn.execute(
         f"""
         SELECT s.id, s.protocol, s.args, s.status
+               , s.fragmentation_class, s.fragmentation_safe, s.fragmentation_reason
+               , s.family, s.family_key, s.family_rank, s.family_reason
         {base}
         ORDER BY s.id ASC
         LIMIT ? OFFSET ?
@@ -738,19 +753,25 @@ def _read_candidate_page_sql(
     return rows, total
 
 
-def _read_candidate_domain_index_sql(conn: Any, *, query: str) -> list[dict[str, Any]]:
+def _read_candidate_domain_index_sql(
+    conn: Any,
+    *,
+    query: str,
+    fragmentation_classes: list[str],
+) -> list[dict[str, Any]]:
     query_clause, query_params = _strategy_query_clause(query)
+    fragmentation_clause, fragmentation_params = _fragmentation_query_clause(fragmentation_classes)
     domain_rows = conn.execute(
         f"""
         SELECT d.name AS domain, COUNT(DISTINCT r.strategy_id) AS strategy_count
         FROM domains d
         JOIN strategy_domain_results r ON r.domain_id = d.id
         JOIN strategies s ON s.id = r.strategy_id
-        WHERE 1 = 1 {query_clause}
+        WHERE 1 = 1 {query_clause} {fragmentation_clause}
         GROUP BY d.id, d.name
         ORDER BY d.name ASC
         """,
-        query_params,
+        [*query_params, *fragmentation_params],
     ).fetchall()
     protocol_rows = conn.execute(
         f"""
@@ -758,11 +779,11 @@ def _read_candidate_domain_index_sql(conn: Any, *, query: str) -> list[dict[str,
         FROM domains d
         JOIN strategy_domain_results r ON r.domain_id = d.id
         JOIN strategies s ON s.id = r.strategy_id
-        WHERE 1 = 1 {query_clause}
+        WHERE 1 = 1 {query_clause} {fragmentation_clause}
         GROUP BY d.id, d.name, r.protocol
         ORDER BY d.name ASC, r.protocol ASC
         """,
-        query_params,
+        [*query_params, *fragmentation_params],
     ).fetchall()
     protocols: dict[str, list[dict[str, Any]]] = {}
     for row in protocol_rows:
@@ -787,6 +808,24 @@ def _strategy_query_clause(query: str) -> tuple[str, list[Any]]:
         "AND (LOWER(s.id) LIKE ? OR LOWER(s.protocol) LIKE ? OR LOWER(s.args) LIKE ? OR LOWER(d.name) LIKE ?)",
         [pattern, pattern, pattern, pattern],
     )
+
+
+def _clean_fragmentation_classes(values: list[str]) -> list[str]:
+    allowed = {"position_free", "position_safe", "position_risky", "unknown"}
+    result: list[str] = []
+    for raw in values:
+        for item in str(raw or "").split(","):
+            clean = item.strip()
+            if clean in allowed and clean not in result:
+                result.append(clean)
+    return result
+
+
+def _fragmentation_query_clause(classes: list[str]) -> tuple[str, list[Any]]:
+    if not classes:
+        return "", []
+    placeholders = ", ".join("?" for _item in classes)
+    return f"AND s.fragmentation_class IN ({placeholders})", list(classes)
 
 
 def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
@@ -3483,7 +3522,9 @@ def _cleanup_old_strategy_logs(logs: Path) -> dict[str, int]:
 def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT id, protocol, args, status
+        SELECT id, protocol, args, status,
+               fragmentation_class, fragmentation_safe, fragmentation_reason,
+               family, family_key, family_rank, family_reason
         FROM strategies
         ORDER BY id ASC
         """
@@ -3494,6 +3535,7 @@ def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
 
 def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str, Any]:
     row_keys = set(row.keys()) if hasattr(row, "keys") else set()
+    analysis = analyze_strategy(str(row["protocol"] or ""), str(row["args"] or ""))
     candidate = {
         "id": row["id"],
         "protocol": row["protocol"],
@@ -3501,6 +3543,21 @@ def _candidate_from_db(conn: Any, row: Any, *, include_events: bool) -> dict[str
         "status": row["status"],
         "first_seen_at": row["first_seen_at"] if "first_seen_at" in row_keys else "",
         "last_seen_at": row["last_seen_at"] if "last_seen_at" in row_keys else "",
+        "fragmentation_class": (
+            str(row["fragmentation_class"] or "") if "fragmentation_class" in row_keys else ""
+        )
+        or analysis.fragmentation_class,
+        "fragmentation_safe": (
+            bool(row["fragmentation_safe"]) if "fragmentation_safe" in row_keys else analysis.fragmentation_safe
+        ),
+        "fragmentation_reason": (
+            str(row["fragmentation_reason"] or "") if "fragmentation_reason" in row_keys else ""
+        )
+        or analysis.fragmentation_reason,
+        "family": (str(row["family"] or "") if "family" in row_keys else "") or analysis.family,
+        "family_key": (str(row["family_key"] or "") if "family_key" in row_keys else "") or analysis.family_key,
+        "family_rank": int(row["family_rank"] or 0) if "family_rank" in row_keys else analysis.family_rank,
+        "family_reason": (str(row["family_reason"] or "") if "family_reason" in row_keys else "") or analysis.family_reason,
     }
     if include_events:
         seen_rows = conn.execute(
@@ -3655,6 +3712,13 @@ def _compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "status": candidate.get("status"),
         "first_seen_at": candidate.get("first_seen_at"),
         "last_seen_at": candidate.get("last_seen_at"),
+        "fragmentation_class": candidate.get("fragmentation_class"),
+        "fragmentation_safe": bool(candidate.get("fragmentation_safe")),
+        "fragmentation_reason": candidate.get("fragmentation_reason"),
+        "family": candidate.get("family"),
+        "family_key": candidate.get("family_key"),
+        "family_rank": candidate.get("family_rank"),
+        "family_reason": candidate.get("family_reason"),
         "seen": [{"domain": domain} for domain in domains],
     }
     if common_domains:

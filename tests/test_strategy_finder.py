@@ -204,7 +204,76 @@ UNAVAILABLE code=7
             self.assertEqual(candidates[0]["id"], candidate_id_for("tls", "--payload tls_client_hello --lua-desync=fake"))
             self.assertEqual(len(candidates[0]["seen"]), 1)
             self.assertEqual(candidates[0]["seen"][0]["domain"], "youtube.com")
+            self.assertEqual(candidates[0]["fragmentation_class"], "position_free")
+            self.assertTrue(candidates[0]["fragmentation_safe"])
+            self.assertEqual(candidates[0]["family"], "fake")
+            self.assertIn("fragmentation_reason", candidates[0])
+            self.assertIn("family_reason", candidates[0])
             self.assertNotIn("verifications", candidates[0])
+
+    def test_candidate_page_can_filter_fragmentation_classes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            parsed = {
+                "candidates": [
+                    {
+                        "domain": "youtube.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=fake",
+                    },
+                    {
+                        "domain": "youtube.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload=tls_client_hello --lua-desync=multisplit:pos=1",
+                    },
+                ]
+            }
+
+            upsert_candidates(state_dir, parsed, {"id": "run1"})
+
+            safe_page = read_candidate_page(
+                state_dir,
+                domain="youtube.com",
+                fragmentation_classes=["position_free", "position_safe", "unknown"],
+            )
+            risky_page = read_candidate_page(state_dir, domain="youtube.com", fragmentation_classes=["position_risky"])
+
+            self.assertEqual(safe_page["total"], 1)
+            self.assertEqual(safe_page["candidates"][0]["fragmentation_class"], "position_free")
+            self.assertEqual(risky_page["total"], 1)
+            self.assertEqual(risky_page["candidates"][0]["fragmentation_class"], "position_risky")
+
+    def test_candidate_domain_index_respects_fragmentation_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            parsed = {
+                "candidates": [
+                    {
+                        "domain": "youtube.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload tls_client_hello --lua-desync=fake",
+                    },
+                    {
+                        "domain": "discord.com",
+                        "test": "curl_test_https_tls12",
+                        "ip_version": "4",
+                        "protocol": "tls",
+                        "args": "--payload=tls_client_hello --lua-desync=multisplit:pos=1",
+                    },
+                ]
+            }
+
+            upsert_candidates(state_dir, parsed, {"id": "run1"})
+            index = read_candidate_domain_index(state_dir, fragmentation_classes=["position_risky"])
+
+            self.assertEqual([item["domain"] for item in index["domains"]], ["discord.com"])
+            self.assertEqual(index["strategy_total"], 1)
 
     def test_parse_blockcheck_common_extracts_common_candidates(self) -> None:
         stdout = """
@@ -321,8 +390,8 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             upsert_candidates(state_dir, parsed, {"id": "run1"})
             status = storage_status(state_dir)
 
-            self.assertEqual(status["schema_version"], "9")
-            self.assertEqual(status["expected_schema_version"], "9")
+            self.assertEqual(status["schema_version"], "10")
+            self.assertEqual(status["expected_schema_version"], "10")
             self.assertEqual(status["integrity_check"], "ok")
             self.assertGreater(status["db_size_bytes"], 0)
             self.assertEqual(status["tables"]["domains"], 1)

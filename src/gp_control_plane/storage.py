@@ -7,8 +7,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .strategy_safety import analyze_strategy
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
@@ -19,6 +20,7 @@ SCHEMA_MIGRATIONS = (
     (7, "compact_runtime_payloads"),
     (8, "trim_strategy_attempt_diagnostics"),
     (9, "minimal_sqlite_working_model"),
+    (10, "strategy_analysis_metadata"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
@@ -185,7 +187,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             protocol TEXT NOT NULL DEFAULT '',
             args TEXT NOT NULL DEFAULT '',
             args_hash TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'candidate'
+            status TEXT NOT NULL DEFAULT 'candidate',
+            fragmentation_class TEXT NOT NULL DEFAULT 'unknown',
+            fragmentation_safe INTEGER NOT NULL DEFAULT 0,
+            fragmentation_reason TEXT NOT NULL DEFAULT '',
+            family TEXT NOT NULL DEFAULT 'other',
+            family_key TEXT NOT NULL DEFAULT '',
+            family_rank INTEGER NOT NULL DEFAULT 900,
+            family_reason TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_strategies_protocol ON strategies(protocol);
         CREATE INDEX IF NOT EXISTS idx_strategies_args_hash ON strategies(args_hash);
@@ -247,6 +256,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         GROUP BY s.id, s.protocol;
         """
     )
+    _ensure_column(conn, "strategies", "fragmentation_class", "TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "strategies", "fragmentation_safe", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "strategies", "fragmentation_reason", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "strategies", "family", "TEXT NOT NULL DEFAULT 'other'")
+    _ensure_column(conn, "strategies", "family_key", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "strategies", "family_rank", "INTEGER NOT NULL DEFAULT 900")
+    _ensure_column(conn, "strategies", "family_reason", "TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_family ON strategies(family, family_rank)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_fragmentation ON strategies(fragmentation_class)")
     _ensure_column(conn, "domain_presets", "source_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "preset_domains", "enabled", "INTEGER NOT NULL DEFAULT 1")
     conn.execute(
@@ -255,6 +273,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_preset_domains_preset_position ON preset_domains(preset_id, position)")
     _migrate_minimal_working_model_schema(conn)
     _recreate_stats_views(conn)
+    _backfill_strategy_analysis(conn)
     _drop_legacy_storage(conn)
     _compact_run_payloads(conn)
     _drop_strategy_attempts(conn)
@@ -596,6 +615,46 @@ def _recreate_stats_views(conn: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_strategy_analysis(conn: sqlite3.Connection) -> None:
+    if get_meta(conn, "strategy_analysis_backfilled_v10") == "1":
+        return
+    rows = conn.execute(
+        """
+        SELECT id, protocol, args
+        FROM strategies
+        WHERE COALESCE(family_key, '') = ''
+           OR COALESCE(fragmentation_reason, '') = ''
+           OR COALESCE(family_reason, '') = ''
+        """
+    ).fetchall()
+    for row in rows:
+        analysis = analyze_strategy(str(row["protocol"] or ""), str(row["args"] or ""))
+        conn.execute(
+            """
+            UPDATE strategies
+            SET fragmentation_class = ?,
+                fragmentation_safe = ?,
+                fragmentation_reason = ?,
+                family = ?,
+                family_key = ?,
+                family_rank = ?,
+                family_reason = ?
+            WHERE id = ?
+            """,
+            (
+                analysis.fragmentation_class,
+                1 if analysis.fragmentation_safe else 0,
+                analysis.fragmentation_reason,
+                analysis.family,
+                analysis.family_key,
+                analysis.family_rank,
+                analysis.family_reason,
+                str(row["id"] or ""),
+            ),
+        )
+    set_meta(conn, "strategy_analysis_backfilled_v10", "1")
+
+
 def _drop_legacy_storage(conn: sqlite3.Connection) -> None:
     if get_meta(conn, "legacy_storage_removed_v9") == "1":
         return
@@ -853,21 +912,53 @@ def _upsert_strategy_conn(
     strategy_id = str(strategy_id or "").strip()
     if not strategy_id:
         return
+    analysis = analyze_strategy(protocol, args)
     conn.execute(
         """
-        INSERT INTO strategies(id, protocol, args, args_hash, status)
-        VALUES(?, ?, ?, ?, ?)
+        INSERT INTO strategies(
+            id, protocol, args, args_hash, status,
+            fragmentation_class, fragmentation_safe, fragmentation_reason,
+            family, family_key, family_rank, family_reason
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             protocol = excluded.protocol,
             args = excluded.args,
             args_hash = excluded.args_hash,
-            status = excluded.status
+            status = excluded.status,
+            fragmentation_class = excluded.fragmentation_class,
+            fragmentation_safe = excluded.fragmentation_safe,
+            fragmentation_reason = excluded.fragmentation_reason,
+            family = excluded.family,
+            family_key = excluded.family_key,
+            family_rank = excluded.family_rank,
+            family_reason = excluded.family_reason
         WHERE strategies.protocol != excluded.protocol
            OR strategies.args != excluded.args
            OR strategies.args_hash != excluded.args_hash
            OR strategies.status != excluded.status
+           OR strategies.fragmentation_class != excluded.fragmentation_class
+           OR strategies.fragmentation_safe != excluded.fragmentation_safe
+           OR strategies.fragmentation_reason != excluded.fragmentation_reason
+           OR strategies.family != excluded.family
+           OR strategies.family_key != excluded.family_key
+           OR strategies.family_rank != excluded.family_rank
+           OR strategies.family_reason != excluded.family_reason
         """,
-        (strategy_id, protocol, args, _args_hash(args), status or "candidate"),
+        (
+            strategy_id,
+            protocol,
+            args,
+            _args_hash(args),
+            status or "candidate",
+            analysis.fragmentation_class,
+            1 if analysis.fragmentation_safe else 0,
+            analysis.fragmentation_reason,
+            analysis.family,
+            analysis.family_key,
+            analysis.family_rank,
+            analysis.family_reason,
+        ),
     )
 
 

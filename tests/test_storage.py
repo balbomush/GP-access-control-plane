@@ -193,7 +193,7 @@ class StorageTests(unittest.TestCase):
 
             with connect(state_dir) as conn:
                 raw = str(conn.execute("SELECT payload_json FROM runs WHERE id = 'old-run'").fetchone()["payload_json"])
-                self.assertEqual(get_meta(conn, "schema_version"), "9")
+                self.assertEqual(get_meta(conn, "schema_version"), "10")
                 self.assertEqual(get_meta(conn, "run_payloads_compacted_v7"), "1")
 
             stored = json.loads(raw)
@@ -256,7 +256,7 @@ class StorageTests(unittest.TestCase):
                     """
                 ).fetchone()[0]
 
-            self.assertEqual(schema, "9")
+            self.assertEqual(schema, "10")
             self.assertEqual(int(has_attempts_table), 0)
             self.assertEqual(removed_count, "1")
 
@@ -443,7 +443,23 @@ class StorageTests(unittest.TestCase):
                     for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
                 }
 
-            self.assertEqual(strategy_columns, {"id", "protocol", "args", "args_hash", "status"})
+            self.assertEqual(
+                strategy_columns,
+                {
+                    "id",
+                    "protocol",
+                    "args",
+                    "args_hash",
+                    "status",
+                    "fragmentation_class",
+                    "fragmentation_safe",
+                    "fragmentation_reason",
+                    "family",
+                    "family_key",
+                    "family_rank",
+                    "family_reason",
+                },
+            )
             self.assertEqual(domain_columns, {"id", "name", "service_group"})
             self.assertEqual(link_columns, {"strategy_id", "domain_id", "protocol", "source_mode"})
             self.assertEqual(preset_columns, {"id", "scope", "name", "kind", "label", "source_json"})
