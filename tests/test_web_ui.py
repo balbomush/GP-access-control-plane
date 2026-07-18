@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.state import read_state, write_state
+from gp_control_plane.web import app as web_app
 from gp_control_plane.web.app import index_html, serve
 
 
@@ -322,6 +323,16 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("repeat-parallel", html)
         self.assertIn("skip-dnscheck", html)
         self.assertIn("skip-ipblock", html)
+        self.assertIn("Расширенные параметры", html)
+        self.assertIn("run-curl-max-time", html)
+        self.assertIn("run-curl-max-time-quic", html)
+        self.assertIn("run-curl-max-time-doh", html)
+        self.assertIn("runTimeoutSettings()", html)
+        self.assertIn("RUN_TIMEOUT_CONTROL_IDS", html)
+        self.assertIn("saveLaunchTimeoutDefaultsNow", html)
+        self.assertNotIn("settings-curl-max-time", html)
+        self.assertNotIn("settings-curl-max-time-quic", html)
+        self.assertNotIn("settings-curl-max-time-doh", html)
         self.assertIn("discoveryOptions()", html)
         self.assertIn("hasEnabledProtocol", html)
         self.assertIn("enable_http", html)
@@ -538,7 +549,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Все домены на одной стратегии", field_html)
         self.assertIn("curlField.hidden = mode !== 'multi';", html)
 
-    def test_discovery_profile_is_blockcheck_scan_level_control(self) -> None:
+    def test_discovery_profile_is_advanced_blockcheck_scan_level_control(self) -> None:
         html = index_html()
 
         self.assertNotIn("Профиль подбора", html)
@@ -547,12 +558,23 @@ class WebUiTests(unittest.TestCase):
         options_start = html.index('<div class="preset-panel finder-options-panel">')
         options_end = html.index('<details class="preset-panel">', options_start)
         options_html = html[options_start:options_end]
+        advanced_start = options_end
+        advanced_end = html.index("</details>", advanced_start)
+        advanced_html = html[advanced_start:advanced_end]
 
-        self.assertIn('id="discovery-profile-select"', options_html)
-        self.assertIn('id="scan-level"', options_html)
         self.assertIn('id="enable-http"', options_html)
         self.assertIn('id="enable-tls12"', options_html)
         self.assertIn('id="include-quic"', options_html)
+        self.assertNotIn('id="discovery-profile-select"', options_html)
+        self.assertNotIn('id="scan-level"', options_html)
+        self.assertNotIn('id="repeats"', options_html)
+        self.assertIn('id="discovery-profile-select"', advanced_html)
+        self.assertIn('id="scan-level"', advanced_html)
+        self.assertIn('id="repeats"', advanced_html)
+        self.assertIn('id="limit-time-enabled"', advanced_html)
+        self.assertIn('id="run-curl-max-time"', advanced_html)
+        self.assertIn('id="run-curl-max-time-quic"', advanced_html)
+        self.assertIn('id="run-curl-max-time-doh"', advanced_html)
         render_start = html.index("function renderDiscoveryProfiles()")
         render_end = html.index("function hasEnabledProtocol", render_start)
         render_html = html[render_start:render_end]
@@ -938,6 +960,46 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"curl_max_time":1', saved)
             self.assertIn('"curl_max_time_quic":3', saved)
             self.assertIn('"curl_max_time_doh":4', saved)
+
+    def test_standard_discovery_job_uses_launch_timeout_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            payload = {
+                "domains": ["youtube.com"],
+                "curl_max_time": 7,
+                "curl_max_time_quic": 8,
+                "curl_max_time_doh": 9,
+            }
+
+            with mock.patch.object(web_app, "run_standard_discovery", return_value={"status": "success"}) as runner:
+                result = web_app._job_zapret_standard_discovery(config, payload, object())
+
+            self.assertEqual({"status": "success"}, result)
+            self.assertEqual(7, runner.call_args.kwargs["curl_max_time"])
+            self.assertEqual(8, runner.call_args.kwargs["curl_max_time_quic"])
+            self.assertEqual(9, runner.call_args.kwargs["curl_max_time_doh"])
+
+    def test_multi_domain_discovery_job_uses_launch_timeout_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            payload = {
+                "domains": ["youtube.com", "discord.com"],
+                "curl_parallelism": 2,
+                "curl_max_time": 11,
+                "curl_max_time_quic": 12,
+                "curl_max_time_doh": 13,
+            }
+
+            with mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}) as runner:
+                result = web_app._job_zapret_multi_domain_discovery(config, payload, object())
+
+            self.assertEqual({"status": "success"}, result)
+            self.assertEqual(11, runner.call_args.kwargs["curl_max_time"])
+            self.assertEqual(12, runner.call_args.kwargs["curl_max_time_quic"])
+            self.assertEqual(13, runner.call_args.kwargs["curl_max_time_doh"])
+            self.assertEqual(2, runner.call_args.kwargs["curl_parallelism"])
 
     def test_run_preferences_endpoint_saves_last_finder_form(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

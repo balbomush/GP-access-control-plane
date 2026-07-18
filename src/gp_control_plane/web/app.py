@@ -1947,14 +1947,6 @@ pre {
                 <div class="helper-text">Работает только в режиме `Все домены на одной стратегии`: одна стратегия проверяет несколько доменов параллельно.</div>
               </div>
             </div>
-            <label class="checkbox-row">
-              <input id="limit-time-enabled" type="checkbox">
-              <span>Ограничить время поиска</span>
-            </label>
-            <div class="field time-limit-field" id="time-limit-field" hidden>
-              <label for="finder-timeout-hours">Лимит поиска, часов</label>
-              <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
-            </div>
             <div class="preset-panel finder-options-panel">
               <div class="helper-text">Основные проверки, которые реально влияют на подбор стратегий.</div>
               <div class="protocol-grid">
@@ -1979,22 +1971,42 @@ pre {
                   <span>IPv6</span>
                 </label>
               </div>
-              <div class="field scan-level-field">
-                <label for="discovery-profile-select">Глубина проверки стратегий</label>
-                <select id="discovery-profile-select"></select>
-                <div class="helper-text" id="discovery-profile-note">Технический профиль проверки: quick, standard или force.</div>
-              </div>
-              <input id="scan-level" type="hidden" value="standard">
             </div>
             <details class="preset-panel">
               <summary class="domain-header">
-                <span class="domain-title">Дополнительно</span>
-                <span class="helper-text">повторы, DNS/IP checks, IPv6</span>
+                <span class="domain-title">Расширенные параметры</span>
+                <span class="helper-text">глубина, повторы, DNS/IP-check, лимиты и timeout</span>
               </summary>
+              <div class="field scan-level-field">
+                <label for="discovery-profile-select">Глубина проверки стратегий</label>
+                <select id="discovery-profile-select"></select>
+                <input id="scan-level" type="hidden" value="standard">
+                <div class="helper-text" id="discovery-profile-note">Технический профиль проверки: quick, standard или force.</div>
+              </div>
               <div class="preset-grid">
                 <div class="field">
                   <label for="repeats">Повторы проверки стратегии</label>
                   <input id="repeats" type="number" min="1" max="10" step="1" value="1">
+                </div>
+                <label class="checkbox-row">
+                  <input id="limit-time-enabled" type="checkbox">
+                  <span>Ограничить время поиска</span>
+                </label>
+                <div class="field time-limit-field" id="time-limit-field" hidden>
+                  <label for="finder-timeout-hours">Лимит поиска, часов</label>
+                  <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
+                </div>
+                <div class="field">
+                  <label for="run-curl-max-time">Timeout HTTP/TLS, сек</label>
+                  <input id="run-curl-max-time" type="number" min="1" step="1" value="2">
+                </div>
+                <div class="field">
+                  <label for="run-curl-max-time-quic">Timeout QUIC, сек</label>
+                  <input id="run-curl-max-time-quic" type="number" min="1" step="1" value="2">
+                </div>
+                <div class="field">
+                  <label for="run-curl-max-time-doh">Timeout DoH, сек</label>
+                  <input id="run-curl-max-time-doh" type="number" min="1" step="1" value="2">
                 </div>
               </div>
               <label class="checkbox-row">
@@ -2261,21 +2273,6 @@ pre {
               <label for="settings-curl-max">Максимум параллельных curl</label>
               <input id="settings-curl-max" type="number" min="1" value="10">
               <div class="setting-note">Верхняя граница для запуска параллельных curl. Можно ставить любое число от 1, если плата и сеть справляются.</div>
-            </div>
-            <div class="field">
-              <label for="settings-curl-max-time">Таймаут HTTP/TLS, сек</label>
-              <input id="settings-curl-max-time" type="number" min="1" step="1" value="2">
-              <div class="setting-note">Дефолт `CURL_MAX_TIME` для новых запусков.</div>
-            </div>
-            <div class="field">
-              <label for="settings-curl-max-time-quic">Таймаут QUIC, сек</label>
-              <input id="settings-curl-max-time-quic" type="number" min="1" step="1" value="2">
-              <div class="setting-note">Дефолт `CURL_MAX_TIME_QUIC` для новых запусков.</div>
-            </div>
-            <div class="field">
-              <label for="settings-curl-max-time-doh">Таймаут DoH, сек</label>
-              <input id="settings-curl-max-time-doh" type="number" min="1" step="1" value="2">
-              <div class="setting-note">Дефолт `CURL_MAX_TIME_DOH` для новых запусков.</div>
             </div>
           </div>
           <div class="button-row">
@@ -2585,7 +2582,22 @@ function repeatsValue(){
   if (!Number.isFinite(value)) return 1;
   return Math.max(1, Math.min(10, Math.round(value)));
 }
+function minimumInputSeconds(id, fallback){
+  const node = el(id);
+  const value = Number(node?.value || fallback || 2);
+  if (!Number.isFinite(value)) return Math.max(1, Math.round(Number(fallback || 2)));
+  return Math.max(1, Math.round(value));
+}
+function runTimeoutSettings(){
+  const settings = state.settings || {};
+  return {
+    curl_max_time: minimumInputSeconds('run-curl-max-time', settings.curl_max_time || 2),
+    curl_max_time_quic: minimumInputSeconds('run-curl-max-time-quic', settings.curl_max_time_quic || 2),
+    curl_max_time_doh: minimumInputSeconds('run-curl-max-time-doh', settings.curl_max_time_doh || 2)
+  };
+}
 function discoveryOptions(){
+  const timeouts = runTimeoutSettings();
   return {
     enable_http: el('enable-http').checked,
     enable_tls12: el('enable-tls12').checked,
@@ -2596,7 +2608,8 @@ function discoveryOptions(){
     repeats: repeatsValue(),
     repeat_parallel: el('repeat-parallel').checked,
     skip_dnscheck: el('skip-dnscheck').checked,
-    skip_ipblock: el('skip-ipblock').checked
+    skip_ipblock: el('skip-ipblock').checked,
+    ...timeouts
   };
 }
 function selectedFinderPresetSummary(){
@@ -2647,7 +2660,8 @@ function runLaunchSummaryItems(){
   ].join(', ');
   const repeats = `${options.repeats} · ${options.repeat_parallel ? 'параллельно' : 'последовательно'}`;
   const curl = mode === 'multi' ? `${curlParallelism()} параллельно` : 'не применяется';
-  const timeouts = `HTTP/TLS ${settings.curl_max_time || 2}с · QUIC ${settings.curl_max_time_quic || 2}с · DoH ${settings.curl_max_time_doh || 2}с`;
+  const timeouts = runTimeoutSettings();
+  const timeoutText = `HTTP/TLS ${timeouts.curl_max_time}с · QUIC ${timeouts.curl_max_time_quic}с · DoH ${timeouts.curl_max_time_doh}с`;
   return {
     readiness: runLaunchReadiness(domains, options),
     items: [
@@ -2663,7 +2677,7 @@ function runLaunchSummaryItems(){
       ['DNS/IP-check', checks],
       ['Повторы', repeats],
       ['Лимит времени', limit ? formatDuration(limit) : 'без лимита'],
-      ['Таймауты', timeouts]
+      ['Таймауты', timeoutText]
     ]
   };
 }
@@ -2738,6 +2752,9 @@ function useRunPreferencesOnce(){
     el('skip-ipblock').checked = Boolean(prefs.skip_ipblock ?? true);
     el('limit-time-enabled').checked = Boolean(prefs.limit_time_enabled);
     el('finder-timeout-hours').value = String(prefs.timeout_hours || 6);
+    el('run-curl-max-time').value = String((state.settings || {}).curl_max_time || 2);
+    el('run-curl-max-time-quic').value = String((state.settings || {}).curl_max_time_quic || 2);
+    el('run-curl-max-time-doh').value = String((state.settings || {}).curl_max_time_doh || 2);
     el('time-limit-field').hidden = !el('limit-time-enabled').checked;
     renderDiscoveryProfileNote();
     renderRunModeNote();
@@ -2760,6 +2777,7 @@ async function saveRunPreferencesNow(){
   }
 }
 const DISCOVERY_PROFILE_CONTROL_IDS = new Set(['scan-level']);
+const RUN_TIMEOUT_CONTROL_IDS = new Set(['run-curl-max-time', 'run-curl-max-time-quic', 'run-curl-max-time-doh']);
 const RUN_LAUNCH_SUMMARY_CONTROL_IDS = new Set([
   'finder-domains',
   'finder-preset-select',
@@ -2776,7 +2794,10 @@ const RUN_LAUNCH_SUMMARY_CONTROL_IDS = new Set([
   'skip-dnscheck',
   'skip-ipblock',
   'limit-time-enabled',
-  'finder-timeout-hours'
+  'finder-timeout-hours',
+  'run-curl-max-time',
+  'run-curl-max-time-quic',
+  'run-curl-max-time-doh'
 ]);
 function isRunLaunchSummaryControl(target){
   if (!target) return false;
@@ -4429,16 +4450,13 @@ function renderSettings(){
   const ipv6 = el('settings-enable-ipv6');
   const debugStdout = el('settings-debug-stdout');
   const curlMax = el('settings-curl-max');
-  const curlMaxTime = el('settings-curl-max-time');
-  const curlMaxTimeQuic = el('settings-curl-max-time-quic');
-  const curlMaxTimeDoh = el('settings-curl-max-time-doh');
+  const runCurlMaxTime = el('run-curl-max-time');
+  const runCurlMaxTimeQuic = el('run-curl-max-time-quic');
+  const runCurlMaxTimeDoh = el('run-curl-max-time-doh');
   const channel = el('settings-update-channel');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
-  if (curlMaxTime) curlMaxTime.value = String(settings.curl_max_time || 2);
-  if (curlMaxTimeQuic) curlMaxTimeQuic.value = String(settings.curl_max_time_quic || 2);
-  if (curlMaxTimeDoh) curlMaxTimeDoh.value = String(settings.curl_max_time_doh || 2);
   if (channel) channel.value = settings.update_channel || 'stable';
   renderReleaseInfo();
   if (!state.settingsTouched && !state.runPreferencesApplied) {
@@ -4449,6 +4467,9 @@ function renderSettings(){
     }
     const finderIpv6 = el('enable-ipv6');
     if (finderIpv6) finderIpv6.checked = Boolean(settings.enable_ipv6);
+    if (runCurlMaxTime) runCurlMaxTime.value = String(settings.curl_max_time || 2);
+    if (runCurlMaxTimeQuic) runCurlMaxTimeQuic.value = String(settings.curl_max_time_quic || 2);
+    if (runCurlMaxTimeDoh) runCurlMaxTimeDoh.value = String(settings.curl_max_time_doh || 2);
   } else {
     renderRunModeNote();
   }
@@ -4522,15 +4543,27 @@ function releaseVersionLabel(release){
   return `${release.available_version || '-'} · ${suffix}`;
 }
 function currentSettingsFromForm(){
+  const current = state.settings || {};
+  const timeouts = runTimeoutSettings();
   return {
     enable_ipv6: Boolean(el('settings-enable-ipv6')?.checked),
     debug_stdout: Boolean(el('settings-debug-stdout')?.checked),
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
-    curl_max_time: Number(el('settings-curl-max-time')?.value || 2),
-    curl_max_time_quic: Number(el('settings-curl-max-time-quic')?.value || 2),
-    curl_max_time_doh: Number(el('settings-curl-max-time-doh')?.value || 2),
-    update_channel: el('settings-update-channel')?.value || 'stable'
+    curl_parallelism_default: Number(current.curl_parallelism_default || 4),
+    ...timeouts,
+    update_channel: el('settings-update-channel')?.value || current.update_channel || 'stable'
   };
+}
+async function saveLaunchTimeoutDefaultsNow(){
+  const payload = currentSettingsFromForm();
+  try {
+    const data = await postJson('/api/settings', { settings: payload });
+    state.settings = data.settings || { ...(state.settings || {}), ...payload };
+    state.settingsTouched = false;
+    renderRunLaunchSummary();
+  } catch (_error) {
+    // Best-effort persistence: the run payload already contains the selected timeout values.
+  }
 }
 async function saveSettings(){
   try {
@@ -5563,7 +5596,10 @@ async function startSelectedDiscovery(){
   } else {
     response = await startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
   }
-  if (response) await saveRunPreferencesNow();
+  if (response) {
+    await saveLaunchTimeoutDefaultsNow();
+    await saveRunPreferencesNow();
+  }
 }
 async function stopCurrentJob(){
   try {
@@ -5734,6 +5770,9 @@ document.addEventListener('input', (event) => {
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
     state.settingsTouched = true;
   }
+  if (event.target && RUN_TIMEOUT_CONTROL_IDS.has(event.target.id)) {
+    state.settingsTouched = true;
+  }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
   }
@@ -5795,6 +5834,9 @@ document.addEventListener('change', (event) => {
     updateCandidateFilterState();
   }
   if (event.target && ['curl-parallelism', 'enable-ipv6'].includes(event.target.id)) {
+    state.settingsTouched = true;
+  }
+  if (event.target && RUN_TIMEOUT_CONTROL_IDS.has(event.target.id)) {
     state.settingsTouched = true;
   }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
@@ -6414,9 +6456,13 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
-        curl_max_time=_minimum_int(settings.get("curl_max_time"), default=2, minimum=1),
-        curl_max_time_quic=_minimum_int(settings.get("curl_max_time_quic"), default=2, minimum=1),
-        curl_max_time_doh=_minimum_int(settings.get("curl_max_time_doh"), default=2, minimum=1),
+        curl_max_time=_minimum_int(payload.get("curl_max_time", settings.get("curl_max_time")), default=2, minimum=1),
+        curl_max_time_quic=_minimum_int(
+            payload.get("curl_max_time_quic", settings.get("curl_max_time_quic")), default=2, minimum=1
+        ),
+        curl_max_time_doh=_minimum_int(
+            payload.get("curl_max_time_doh", settings.get("curl_max_time_doh")), default=2, minimum=1
+        ),
         debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
     )
@@ -6440,9 +6486,13 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
         skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
         skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
-        curl_max_time=_minimum_int(settings.get("curl_max_time"), default=2, minimum=1),
-        curl_max_time_quic=_minimum_int(settings.get("curl_max_time_quic"), default=2, minimum=1),
-        curl_max_time_doh=_minimum_int(settings.get("curl_max_time_doh"), default=2, minimum=1),
+        curl_max_time=_minimum_int(payload.get("curl_max_time", settings.get("curl_max_time")), default=2, minimum=1),
+        curl_max_time_quic=_minimum_int(
+            payload.get("curl_max_time_quic", settings.get("curl_max_time_quic")), default=2, minimum=1
+        ),
+        curl_max_time_doh=_minimum_int(
+            payload.get("curl_max_time_doh", settings.get("curl_max_time_doh")), default=2, minimum=1
+        ),
         curl_parallelism=_bounded_int(payload.get("curl_parallelism"), default=int(settings.get("curl_parallelism_default") or 4), minimum=1, maximum=max_parallelism),
         debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
