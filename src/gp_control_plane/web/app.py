@@ -3154,10 +3154,13 @@ function presetGroups(target){
   const make = (key, label) => ({ key, label, domains: defaultDomains(key) });
   const groups = [];
   if (target === 'common') {
-    groups.push({
-      label: 'Протестированные',
-      presets: [{ key: 'tested', label: 'Все протестированные', domains: testedDomains() }]
-    });
+    const tested = testedDomains();
+    if (tested.length) {
+      groups.push({
+        label: 'Протестированные',
+        presets: [{ key: 'tested', label: 'Все протестированные', domains: tested }]
+      });
+    }
   }
   groups.push({
     label: 'Обязательные',
@@ -3259,7 +3262,6 @@ function renderPresetSelect(target){
   }).join('');
   select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>${systemGroup}${customGroup}${builtInGroups}`;
   if ([...select.options].some((option) => option.value === previous)) select.value = previous;
-  else if (!previous && target === 'common' && [...select.options].some((option) => option.value === 'builtin:tested')) select.value = 'builtin:tested';
   else if (!previous && [...select.options].some((option) => option.value === 'system:required')) select.value = 'system:required';
   else if (!previous && [...select.options].some((option) => option.value === 'builtin:critical')) select.value = 'builtin:critical';
   else select.value = CUSTOM_SELECT_VALUE;
@@ -3715,6 +3717,15 @@ function candidateAllDomains(row){
 function testedDomains(){
   if (Array.isArray(state.testedDomains) && state.testedDomains.length) return state.testedDomains;
   return [...new Set(state.candidates.flatMap((row) => candidateAllDomains(row)))].sort((a, b) => a.localeCompare(b));
+}
+function updateTestedDomains(domains){
+  if (!Array.isArray(domains)) return false;
+  const next = uniqueDomains(domains);
+  const previous = Array.isArray(state.testedDomains) ? state.testedDomains : [];
+  const changed = next.length !== previous.length || next.some((domain, index) => domain !== previous[index]);
+  state.testedDomains = next;
+  if (changed) renderPresetSelect('common');
+  return changed;
 }
 function candidateResultModeLabel(mode){
   return {
@@ -5724,7 +5735,7 @@ async function refreshDomainIndex(){
     if (state.candidateDomainTotal > 0) state.lastCandidateDomainTotal = state.candidateDomainTotal;
     if (state.candidateDomainStrategyTotal > 0) state.lastCandidateDomainStrategyTotal = state.candidateDomainStrategyTotal;
     rememberCandidateVersion(data.version || null);
-    state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+    updateTestedDomains(data.tested_domains);
     state.candidateDomainsLoaded = true;
     state.candidateUpdatedAt = new Date().toISOString();
     state.candidateLoading = false;
@@ -5753,7 +5764,7 @@ async function refreshDomainStrategies(domain, reset){
       version: data.version || state.candidateKnownVersion
     };
     rememberCandidateVersion(data.version || null);
-    state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+    updateTestedDomains(data.tested_domains);
     renderCandidatesOnly();
   } catch (error) {
     setMessage(`Ошибка загрузки стратегий домена: ${error.message}`, 'bad');
@@ -5781,7 +5792,7 @@ async function loadAllDomainStrategies(domain){
         break;
       }
       candidates = [...candidates, ...rows];
-      state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+      updateTestedDomains(data.tested_domains);
       rememberCandidateVersion(data.version || null);
       guard += 1;
     }
@@ -5819,7 +5830,7 @@ async function loadAllCommonStrategies(){
         break;
       }
       candidates = [...candidates, ...rows];
-      state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+      updateTestedDomains(data.tested_domains);
       rememberCandidateVersion(data.version || null);
       guard += 1;
     }
@@ -5857,7 +5868,7 @@ async function refreshCandidates(reset){
     state.candidateOffset = Number(data.offset || 0);
     state.candidateHasMore = Boolean(data.has_more);
     rememberCandidateVersion(data.version || null);
-    state.testedDomains = Array.isArray(data.tested_domains) ? data.tested_domains : state.testedDomains;
+    updateTestedDomains(data.tested_domains);
     state.candidatesLoaded = true;
     state.candidateQueryKey = queryKey;
     state.candidateUpdatedAt = new Date().toISOString();

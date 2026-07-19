@@ -492,6 +492,23 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/jobs/zapret-strategy-check", html)
         self.assertNotIn("/api/jobs/zapret-custom-verification", html)
 
+    def test_common_tested_preset_waits_for_loaded_tested_domains(self) -> None:
+        html = index_html()
+
+        preset_start = html.index("function presetGroups(target)")
+        preset_end = html.index("function presetDomains(target, value)", preset_start)
+        preset_html = html[preset_start:preset_end]
+        self.assertIn("const tested = testedDomains();", preset_html)
+        self.assertIn("if (tested.length)", preset_html)
+
+        select_start = html.index("function renderPresetSelect(target)")
+        select_end = html.index("function renderPresetSelects()", select_start)
+        select_html = html[select_start:select_end]
+        self.assertNotIn("target === 'common' && [...select.options].some((option) => option.value === 'builtin:tested')", select_html)
+        self.assertIn("function updateTestedDomains(domains)", html)
+        self.assertIn("updateTestedDomains(data.tested_domains)", html)
+        self.assertIn("renderPresetSelect('common')", html)
+
     def test_launch_summary_panel_is_next_to_start_actions(self) -> None:
         html = index_html()
 
