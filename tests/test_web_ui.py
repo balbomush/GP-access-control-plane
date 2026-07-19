@@ -659,6 +659,14 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("candidate-result-panel", html)
+        common_start = html.index('id="common-controls"')
+        result_start = html.index('class="candidate-result-panel"', common_start)
+        preset_start = html.index('id="common-preset-select"', common_start)
+        self.assertGreater(result_start, common_start)
+        self.assertGreater(result_start, preset_start)
+        self.assertIn("Пресет доменов для пересечения", html)
+        self.assertIn("Итоговый набор общих стратегий", html)
+        self.assertIn('data-action="build-candidate-result"', html)
         for label in ("Максимум покрытия", "Минимум стратегий", "Баланс"):
             self.assertIn(label, html)
         for field in ("required_coverage", "desired_coverage", "uncovered_required", "uncovered_desired", "strategy_set", "reason", "mode"):
@@ -667,17 +675,29 @@ class WebUiTests(unittest.TestCase):
     def test_candidate_result_is_computed_from_loaded_candidates_only(self) -> None:
         html = index_html()
 
-        self.assertIn("function loadedCandidateRows()", html)
+        self.assertIn("function commonCandidateResultRows()", html)
         self.assertIn("state.candidates", html)
-        self.assertIn("state.domainStrategies", html)
-        self.assertIn("Расчет по загруженным стратегиям", html)
+        self.assertIn("const rows = commonCandidateResultRows();", html)
+        self.assertNotIn("function loadedCandidateRows()", html)
+        self.assertIn("Расчет по загруженным общим стратегиям", html)
         self.assertNotIn("/api/candidate-result", html)
+
+    def test_candidate_result_is_one_button_common_action(self) -> None:
+        html = index_html()
+
+        self.assertIn("candidateResultRequested: false", html)
+        self.assertIn("function buildCandidateResultNow()", html)
+        self.assertIn("state.candidateResultRequested = true;", html)
+        self.assertIn("if (!state.candidateResultRequested)", html)
+        self.assertIn("panel.hidden = state.candidateView !== 'common';", html)
+        self.assertIn("Нажмите «Собрать итоговый набор»", html)
+        self.assertIn("state.candidateResultRequested = false;", html)
 
     def test_candidate_result_does_not_fallback_required_to_launch_domains(self) -> None:
         html = index_html()
 
         start = html.index("function candidateResultTargets()")
-        end = html.index("function loadedCandidateRows()", start)
+        end = html.index("function commonCandidateResultRows()", start)
         target_html = html[start:end]
         self.assertIn("const required = uniqueDomains(presetDomains('finder', 'system:required'));", target_html)
         self.assertIn("const desired = uniqueDomains(presetDomains('finder', 'system:desired'))", target_html)

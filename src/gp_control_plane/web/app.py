@@ -1249,6 +1249,12 @@ button:disabled { opacity: .55; cursor: default; }
   justify-content: flex-end;
   gap: 8px;
 }
+.candidate-result-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .candidate-result-body {
   display: grid;
   gap: 10px;
@@ -2215,22 +2221,6 @@ pre {
           <span class="badge" id="candidates-count">0</span>
         </div>
         <div class="candidate-summary" id="candidate-summary">-</div>
-        <section class="candidate-result-panel" aria-label="Итоговый набор стратегий">
-          <div class="candidate-result-head">
-            <div>
-              <h3>Итоговый набор</h3>
-              <div class="helper-text" id="candidate-result-source">Расчет появится после загрузки найденных стратегий.</div>
-            </div>
-            <div class="candidate-result-modes" role="tablist" aria-label="Режим итогового набора">
-              <button class="subtab-button" id="candidate-result-mode-coverage" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="coverage" type="button">Максимум покрытия</button>
-              <button class="subtab-button" id="candidate-result-mode-minimal" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="minimal" type="button">Минимум стратегий</button>
-              <button class="subtab-button active" id="candidate-result-mode-balance" role="tab" aria-selected="true" aria-controls="candidate-result-body" data-candidate-result-mode="balance" type="button">Баланс</button>
-            </div>
-          </div>
-          <div id="candidate-result-body" class="candidate-result-body" role="tabpanel" aria-live="polite" aria-labelledby="candidate-result-mode-balance">
-            <div class="empty">Нужно загрузить найденные стратегии.</div>
-          </div>
-        </section>
         <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
           <button class="subtab-button active" id="candidate-view-domain" role="tab" aria-selected="true" aria-controls="candidates-table" data-candidate-view="domain" type="button">По доменам</button>
           <button class="subtab-button" id="candidate-view-common" role="tab" aria-selected="false" aria-controls="candidates-table" data-candidate-view="common" type="button">Общие стратегии</button>
@@ -2258,6 +2248,25 @@ pre {
           </div>
           <datalist id="tested-domain-options"></datalist>
           <div class="helper-text" id="common-domain-note">Выберите минимум два протестированных домена.</div>
+          <section class="candidate-result-panel" aria-label="Итоговый набор общих стратегий">
+            <div class="candidate-result-head">
+              <div>
+                <h3>Итоговый набор общих стратегий</h3>
+                <div class="helper-text" id="candidate-result-source">Выберите домены для пересечения и соберите итоговый набор.</div>
+              </div>
+              <div class="candidate-result-toolbar">
+                <button data-action="build-candidate-result" type="button">Собрать итоговый набор</button>
+                <div class="candidate-result-modes" role="tablist" aria-label="Режим итогового набора">
+                  <button class="subtab-button" id="candidate-result-mode-coverage" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="coverage" type="button">Максимум покрытия</button>
+                  <button class="subtab-button" id="candidate-result-mode-minimal" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="minimal" type="button">Минимум стратегий</button>
+                  <button class="subtab-button active" id="candidate-result-mode-balance" role="tab" aria-selected="true" aria-controls="candidate-result-body" data-candidate-result-mode="balance" type="button">Баланс</button>
+                </div>
+              </div>
+            </div>
+            <div id="candidate-result-body" class="candidate-result-body" role="tabpanel" aria-live="polite" aria-labelledby="candidate-result-mode-balance">
+              <div class="empty">Нажмите «Собрать итоговый набор» после выбора доменов.</div>
+            </div>
+          </section>
         </div>
         <div id="candidates-table"></div>
       </section>
@@ -2518,7 +2527,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -3277,6 +3286,7 @@ function markDomainPresetCustom(target){
   if (select && select.value !== CUSTOM_SELECT_VALUE) select.value = CUSTOM_SELECT_VALUE;
   const nameInput = el(`${target}-preset-name`);
   if (nameInput) nameInput.value = 'custom';
+  if (target === 'common') resetCandidateResult();
 }
 async function fetchAllPresetDomains(target, name){
   if (hasSystemPreset(target, name)) {
@@ -3349,6 +3359,7 @@ async function usePreset(target){
     updateEditorLineNumbers(`${target}-domains`);
     if (target === 'finder') state.domainsTouched = true;
     if (target === 'common') {
+      state.candidateResultRequested = false;
       prepareCommonCandidateState();
       renderCandidatesOnly();
       if (selectedCommonDomains().length >= 2) refreshCandidates(true);
@@ -3389,7 +3400,10 @@ async function savePreset(target){
     el(`${target}-preset-select`).value = `custom:${name}`;
     renderPresetManager();
     showToast('Пресет сохранен', 'good');
-    if (target === 'common') refreshCandidates(true);
+    if (target === 'common') {
+      state.candidateResultRequested = false;
+      refreshCandidates(true);
+    }
     else renderCandidates();
   } catch (error) {
     showToast(`Ошибка сохранения пресета: ${error.message}`, 'bad');
@@ -3410,7 +3424,10 @@ async function deletePreset(target){
     renderPresetSelect(target);
     renderPresetManager();
     showToast('Пресет удален', 'good');
-    if (target === 'common') refreshCandidates(true);
+    if (target === 'common') {
+      state.candidateResultRequested = false;
+      refreshCandidates(true);
+    }
   } catch (error) {
     showToast(`Ошибка удаления пресета: ${error.message}`, 'bad');
   }
@@ -3743,13 +3760,8 @@ function candidateResultTargets(){
     desired
   };
 }
-function loadedCandidateRows(){
-  const rows = [];
-  if (Array.isArray(state.candidates)) rows.push(...state.candidates);
-  Object.values(state.domainStrategies || {}).forEach((entry) => {
-    if (entry && Array.isArray(entry.candidates)) rows.push(...entry.candidates);
-  });
-  return uniqueStrategyRows(rows);
+function commonCandidateResultRows(){
+  return uniqueStrategyRows(Array.isArray(state.candidates) ? state.candidates : []);
 }
 function rowTargetCoverage(row, targets){
   const domains = new Set(candidateAllDomains(row));
@@ -3765,7 +3777,7 @@ function resultPickScore(row, uncoveredRequired, uncoveredDesired, mode){
 }
 function buildCandidateResult(mode){
   const targets = candidateResultTargets();
-  const rows = loadedCandidateRows();
+  const rows = commonCandidateResultRows();
   const uncoveredRequired = new Set(targets.required);
   const uncoveredDesired = new Set(targets.desired);
   const selected = [];
@@ -3811,9 +3823,25 @@ function candidateResultText(result){
   const lines = (result.strategy_set || []).map((item) => item.args).filter(Boolean);
   return lines.join('\\n');
 }
+function resetCandidateResult(){
+  state.candidateResultRequested = false;
+  renderCandidateResult();
+}
+async function buildCandidateResultNow(){
+  state.candidateResultRequested = true;
+  if (state.candidateView !== 'common') state.candidateView = 'common';
+  const selectedDomains = selectedCommonDomains();
+  const loaded = prepareCommonCandidateState();
+  renderCandidatesOnly();
+  if (selectedDomains.length >= 2 && !loaded) {
+    await refreshCandidates(true);
+  }
+}
 function renderCandidateResult(){
+  const panel = document.querySelector('.candidate-result-panel');
   const body = el('candidate-result-body');
   const source = el('candidate-result-source');
+  if (panel) panel.hidden = state.candidateView !== 'common';
   if (!body) return;
   const mode = state.candidateResultMode || 'balance';
   document.querySelectorAll('[data-candidate-result-mode]').forEach((button) => {
@@ -3822,15 +3850,27 @@ function renderCandidateResult(){
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   body.setAttribute('aria-labelledby', `candidate-result-mode-${mode}`);
+  if (state.candidateView !== 'common') return;
+  if (!state.candidateResultRequested) {
+    if (source) source.textContent = 'Выберите домены для пересечения и соберите итоговый набор.';
+    body.innerHTML = '<div class="empty">Нажмите «Собрать итоговый набор» после выбора доменов.</div>';
+    return;
+  }
+  const selectedDomains = selectedCommonDomains();
+  if (selectedDomains.length < 2) {
+    if (source) source.textContent = 'Для итогового набора нужны минимум два протестированных домена.';
+    body.innerHTML = '<div class="empty">Выберите минимум два домена в пресете доменов для пересечения.</div>';
+    return;
+  }
   const result = buildCandidateResult(mode);
   const rows = Number(result.loaded_rows || 0);
   const requiredTotal = Number(result.required_coverage.total || 0);
   const desiredTotal = Number(result.desired_coverage.total || 0);
   if (source) {
-    source.textContent = `Расчет по загруженным стратегиям: ${rows}. Обязательные: ${requiredTotal}. Желательные: ${desiredTotal}.`;
+    source.textContent = `Расчет по загруженным общим стратегиям: ${rows}. Обязательные: ${requiredTotal}. Желательные: ${desiredTotal}.`;
   }
   if (!rows) {
-    body.innerHTML = '<div class="empty">Откройте домены со стратегиями или загрузите общие стратегии, чтобы собрать итоговый набор.</div>';
+    body.innerHTML = '<div class="empty">Для выбранного пересечения пока нет загруженных общих стратегий.</div>';
     return;
   }
   const strategies = result.strategy_set || [];
@@ -4104,6 +4144,7 @@ function addCommonDomain(){
   hideCommonDomainSuggestions();
   updateEditorLineNumbers('common-domains');
   markDomainPresetCustom('common');
+  state.candidateResultRequested = false;
   prepareCommonCandidateState();
   renderCandidatesOnly();
   if (selectedCommonDomains().length >= 2) refreshCandidates(true);
@@ -5892,6 +5933,7 @@ function scheduleCandidateRefresh(){
       state.openCandidateDomains = {};
       refreshDomainIndex();
     } else {
+      state.candidateResultRequested = false;
       prepareCommonCandidateState();
       renderCandidatesOnly();
       if (selectedCommonDomains().length >= 2) refreshCandidates(true);
@@ -6257,6 +6299,10 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'copy-diagnostics') {
     copyDiagnostics();
+    return;
+  }
+  if (button.dataset.action === 'build-candidate-result') {
+    buildCandidateResultNow();
     return;
   }
   if (button.dataset.action === 'copy-candidate-result') {
