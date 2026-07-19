@@ -358,6 +358,39 @@ bbbb refs/tags/v0.3.1
             self.assertEqual(status["installed_version"], "0.3.1")
             self.assertIn("status=success", status["log_tail"])
 
+    def test_release_update_status_clears_stale_error_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            log_path = Path(raw) / "update.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "installed_ref=v0.3.1",
+                        "installed_version=0.3.1",
+                        "status=success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_state(
+                state_dir,
+                {
+                    "release_update": {
+                        "status": "failed",
+                        "error": "release update queue timeout",
+                        "target_ref": "v0.3.1",
+                        "log_path": str(log_path),
+                        "release": {"available_version": "v0.3.1"},
+                    }
+                },
+            )
+
+            status = release_update_status(state_dir, current_version="0.3.1")
+
+            self.assertEqual(status["status"], "success")
+            self.assertEqual(status["error"], "")
+            self.assertTrue(status["verified"])
+
     def test_release_update_status_recovers_after_service_restart_before_final_state_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"

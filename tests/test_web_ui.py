@@ -644,6 +644,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("stateBoard.last_error", html)
         self.assertIn("log.stderr_diagnostics", html)
         self.assertIn("state.releaseUpdate", html)
+        self.assertIn("releaseStatus === 'failed'", html)
+        self.assertNotIn("release.status === 'failed' || release.error", html)
         self.assertNotIn("eventStore", html)
 
     def test_events_panel_has_repeat_log_and_copy_actions(self) -> None:

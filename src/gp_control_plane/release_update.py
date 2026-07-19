@@ -185,7 +185,7 @@ def release_update_status(
     payload["installed_version"] = installed_version
     payload["installed_ref"] = installed_ref
     payload["verified"] = bool(status == "success" and (installed_ref or installed_version))
-    payload["error"] = str(log_values.get("error") or payload.get("error") or "")
+    payload["error"] = "" if status == "success" else str(log_values.get("error") or payload.get("error") or "")
     return payload
 
 

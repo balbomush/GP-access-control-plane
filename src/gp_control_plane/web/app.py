@@ -4922,7 +4922,8 @@ function eventRows(){
     });
   }
   const release = state.releaseUpdate || {};
-  if (release.status === 'failed' || release.error) {
+  const releaseStatus = String(release.status || '').toLowerCase();
+  if (releaseStatus === 'failed') {
     rows.push({
       severity: 'error',
       time: now,
