@@ -3262,6 +3262,7 @@ function renderPresetSelect(target){
   }).join('');
   select.innerHTML = `<option value="${CUSTOM_SELECT_VALUE}">Custom</option>${systemGroup}${customGroup}${builtInGroups}`;
   if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+  else if (target === 'common') select.value = CUSTOM_SELECT_VALUE;
   else if (!previous && [...select.options].some((option) => option.value === 'system:required')) select.value = 'system:required';
   else if (!previous && [...select.options].some((option) => option.value === 'builtin:critical')) select.value = 'builtin:critical';
   else select.value = CUSTOM_SELECT_VALUE;

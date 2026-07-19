@@ -504,6 +504,7 @@ class WebUiTests(unittest.TestCase):
         select_start = html.index("function renderPresetSelect(target)")
         select_end = html.index("function renderPresetSelects()", select_start)
         select_html = html[select_start:select_end]
+        self.assertIn("else if (target === 'common') select.value = CUSTOM_SELECT_VALUE;", select_html)
         self.assertNotIn("target === 'common' && [...select.options].some((option) => option.value === 'builtin:tested')", select_html)
         self.assertIn("function updateTestedDomains(domains)", html)
         self.assertIn("updateTestedDomains(data.tested_domains)", html)
