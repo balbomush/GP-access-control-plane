@@ -6215,8 +6215,7 @@ async function refresh(){
     state.domainSources = domainSources;
     mergePresetResponse(presets);
     renderAll({ skipCandidates: true });
-    if (!state.candidateDomainsLoaded) refreshDomainIndex();
-    else if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
+    if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
   } catch (error) {
     setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   } finally {

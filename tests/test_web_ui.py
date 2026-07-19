@@ -39,6 +39,12 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("refreshRuns(false)", html)
         self.assertNotIn(".slice(0, 12)", html)
 
+    def test_refresh_does_not_prefetch_candidates_before_candidates_tab_is_opened(self) -> None:
+        html = index_html()
+
+        self.assertIn("if (state.activeTab === 'candidates') ensureCandidateViewLoaded();", html)
+        self.assertNotIn("if (!state.candidateDomainsLoaded) refreshDomainIndex();\n    else if", html)
+
     def test_index_html_is_focused_on_strategy_finder_only(self) -> None:
         html = index_html()
 
