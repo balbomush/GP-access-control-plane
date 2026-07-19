@@ -812,6 +812,13 @@ button {
   overflow-wrap: anywhere;
 }
 button:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+label.file-button:focus-visible {
+  outline: 3px solid rgba(120, 211, 255, .78);
+  outline-offset: 2px;
+}
 button.secondary { background: var(--surface-soft); color: var(--blue-strong); }
 button.secondary:hover { background: #243149; }
 a.button-link {
@@ -1216,6 +1223,86 @@ button:disabled { opacity: .55; cursor: default; }
   text-align: right;
   margin-bottom: 10px;
 }
+.candidate-result-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: var(--surface-soft);
+}
+.candidate-result-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+.candidate-result-head h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+.candidate-result-modes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.candidate-result-body {
+  display: grid;
+  gap: 10px;
+}
+.candidate-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+.candidate-result-cell {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 9px 10px;
+}
+.candidate-result-label {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.candidate-result-value {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.candidate-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.candidate-result-strategies {
+  display: grid;
+  gap: 6px;
+}
+.candidate-result-strategy {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-code);
+  padding: 8px;
+  display: grid;
+  gap: 5px;
+}
+.candidate-result-strategy code {
+  color: var(--code-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.candidate-result-domains {
+  color: var(--text-soft);
+  font-size: 12px;
+}
 .candidate-tabs {
   display: flex;
   gap: 8px;
@@ -1463,11 +1550,106 @@ button:disabled { opacity: .55; cursor: default; }
   min-height: 420px;
   height: calc(100vh - 260px);
 }
+.raw-log-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  overflow: hidden;
+}
+.raw-log-panel summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 800;
+  list-style: none;
+}
+.raw-log-panel summary::-webkit-details-marker { display: none; }
+.raw-log-panel pre {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
 .terminal-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.live-run-panel,
+.events-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.live-run-card,
+.event-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-soft);
+  display: grid;
+  gap: 10px;
+}
+.live-run-header,
+.event-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.live-run-title,
+.event-title {
+  font-weight: 800;
+  color: var(--text);
+}
+.live-run-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+.live-run-cell {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--surface);
+}
+.live-run-label {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.live-run-value {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.live-run-actions,
+.event-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.event-card.warn {
+  border-color: #eed09a;
+  background: var(--amber-soft);
+}
+.event-card.bad {
+  border-color: #f0b9b5;
+  background: var(--red-soft);
+}
+.event-meta {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+.event-card.warn .event-meta,
+.event-card.bad .event-meta {
+  color: inherit;
 }
 .progress-panel {
   display: grid;
@@ -1510,6 +1692,10 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .progress-note {
   color: var(--text-soft);
+  font-size: 12px;
+}
+.mutating-disabled-note {
+  color: var(--amber);
   font-size: 12px;
 }
 .message {
@@ -1867,15 +2053,15 @@ pre {
     </section>
 
     <nav class="tabs" role="tablist" aria-label="Разделы">
-      <button class="tab-button active" data-tab="finder" type="button">Подбор</button>
-      <button class="tab-button" data-tab="history" type="button">История</button>
-      <button class="tab-button" data-tab="candidates" type="button">Кандидаты</button>
-      <button class="tab-button" data-tab="terminal" type="button">Терминал</button>
-      <button class="tab-button" data-tab="lists" type="button">Списки и профили</button>
-      <button class="tab-button" data-tab="settings" type="button">Настройки</button>
+      <button class="tab-button active" id="tab-finder" role="tab" aria-selected="true" aria-controls="tab-panel-finder" data-tab="finder" type="button">Подбор</button>
+      <button class="tab-button" id="tab-history" role="tab" aria-selected="false" aria-controls="tab-panel-history" data-tab="history" type="button">История</button>
+      <button class="tab-button" id="tab-candidates" role="tab" aria-selected="false" aria-controls="tab-panel-candidates" data-tab="candidates" type="button">Кандидаты</button>
+      <button class="tab-button" id="tab-terminal" role="tab" aria-selected="false" aria-controls="tab-panel-terminal" data-tab="terminal" type="button">Терминал</button>
+      <button class="tab-button" id="tab-lists" role="tab" aria-selected="false" aria-controls="tab-panel-lists" data-tab="lists" type="button">Списки и профили</button>
+      <button class="tab-button" id="tab-settings" role="tab" aria-selected="false" aria-controls="tab-panel-settings" data-tab="settings" type="button">Настройки</button>
     </nav>
 
-    <section class="tab-page active" data-tab-page="finder">
+    <section class="tab-page active" id="tab-panel-finder" role="tabpanel" aria-labelledby="tab-finder" data-tab-page="finder">
     <div class="layout finder-layout">
       <div class="stack">
         <section class="panel">
@@ -2012,7 +2198,7 @@ pre {
     </div>
     </section>
 
-    <section class="tab-page history-page" data-tab-page="history">
+    <section class="tab-page history-page" id="tab-panel-history" role="tabpanel" aria-labelledby="tab-history" data-tab-page="history">
       <section class="panel">
         <div class="panel-header">
           <h2>История запусков</h2>
@@ -2022,16 +2208,32 @@ pre {
       </section>
     </section>
 
-    <section class="tab-page candidates-page" data-tab-page="candidates">
+    <section class="tab-page candidates-page" id="tab-panel-candidates" role="tabpanel" aria-labelledby="tab-candidates" data-tab-page="candidates">
       <section class="panel">
         <div class="panel-header">
           <h2>Найденные стратегии</h2>
           <span class="badge" id="candidates-count">0</span>
         </div>
         <div class="candidate-summary" id="candidate-summary">-</div>
+        <section class="candidate-result-panel" aria-label="Итоговый набор стратегий">
+          <div class="candidate-result-head">
+            <div>
+              <h3>Итоговый набор</h3>
+              <div class="helper-text" id="candidate-result-source">Расчет появится после загрузки найденных стратегий.</div>
+            </div>
+            <div class="candidate-result-modes" role="tablist" aria-label="Режим итогового набора">
+              <button class="subtab-button" id="candidate-result-mode-coverage" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="coverage" type="button">Максимум покрытия</button>
+              <button class="subtab-button" id="candidate-result-mode-minimal" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="minimal" type="button">Минимум стратегий</button>
+              <button class="subtab-button active" id="candidate-result-mode-balance" role="tab" aria-selected="true" aria-controls="candidate-result-body" data-candidate-result-mode="balance" type="button">Баланс</button>
+            </div>
+          </div>
+          <div id="candidate-result-body" class="candidate-result-body" role="tabpanel" aria-live="polite" aria-labelledby="candidate-result-mode-balance">
+            <div class="empty">Нужно загрузить найденные стратегии.</div>
+          </div>
+        </section>
         <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
-          <button class="subtab-button active" data-candidate-view="domain" type="button">По доменам</button>
-          <button class="subtab-button" data-candidate-view="common" type="button">Общие стратегии</button>
+          <button class="subtab-button active" id="candidate-view-domain" role="tab" aria-selected="true" aria-controls="candidates-table" data-candidate-view="domain" type="button">По доменам</button>
+          <button class="subtab-button" id="candidate-view-common" role="tab" aria-selected="false" aria-controls="candidates-table" data-candidate-view="common" type="button">Общие стратегии</button>
         </div>
         <div class="common-filter-panel" id="common-controls" hidden>
           <div class="preset-grid">
@@ -2061,7 +2263,7 @@ pre {
       </section>
     </section>
 
-    <section class="tab-page terminal-page" data-tab-page="terminal">
+    <section class="tab-page terminal-page" id="tab-panel-terminal" role="tabpanel" aria-labelledby="tab-terminal" data-tab-page="terminal">
       <section class="panel terminal-panel">
         <div class="panel-header">
           <h2>Терминал</h2>
@@ -2070,8 +2272,9 @@ pre {
             <button class="secondary danger" data-action="stop-current" title="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." disabled>Остановить</button>
           </div>
         </div>
+        <section class="live-run-panel" id="live-run-panel" aria-label="Текущий подбор" aria-live="polite"></section>
         <div class="progress-panel">
-          <div class="progress-bar" aria-label="Прогресс подбора">
+          <div class="progress-bar" id="progress-bar" role="progressbar" aria-label="Прогресс подбора" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div class="progress-fill" id="progress-fill"></div>
           </div>
           <div class="progress-grid">
@@ -2107,12 +2310,16 @@ pre {
           <div class="progress-note" id="progress-note">расчитанное среднее время попытки: -</div>
           <div class="progress-note" id="progress-metrics">Настройки запуска появятся после старта подбора.</div>
         </div>
+        <section class="events-panel" id="events-panel" aria-label="Ошибки и предупреждения"></section>
         <div id="stderr-diagnostics" class="stderr-diagnostics" hidden></div>
-        <pre id="finder-log">Лога пока нет</pre>
+        <details class="raw-log-panel">
+          <summary>Raw log / debug</summary>
+          <pre id="finder-log">Лога пока нет</pre>
+        </details>
       </section>
     </section>
 
-    <section class="tab-page lists-page" data-tab-page="lists">
+    <section class="tab-page lists-page" id="tab-panel-lists" role="tabpanel" aria-labelledby="tab-lists" data-tab-page="lists">
       <section class="panel">
         <div class="panel-header">
           <h2>Списки и профили</h2>
@@ -2196,7 +2403,7 @@ pre {
       </section>
     </section>
 
-    <section class="tab-page settings-page" data-tab-page="settings">
+    <section class="tab-page settings-page" id="tab-panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-tab-page="settings">
       <section class="panel">
         <div class="panel-header">
           <h2>Настройки</h2>
@@ -2215,11 +2422,11 @@ pre {
               <input id="settings-debug-stdout" type="checkbox">
               Подробный debug-лог stdout
             </label>
-            <div class="setting-note">Включает расширенную запись stdout blockcheck2 в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
+            <div class="setting-note">Включает расширенную запись stdout проверки стратегий в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
             <div class="field">
-              <label for="settings-curl-max">Максимум параллельных curl</label>
+              <label for="settings-curl-max">Максимум параллельных проверочных запросов</label>
               <input id="settings-curl-max" type="number" min="1" value="10">
-              <div class="setting-note">Верхняя граница для запуска параллельных curl. Можно ставить любое число от 1, если плата и сеть справляются.</div>
+              <div class="setting-note">Верхняя граница для запуска параллельных проверочных запросов. Можно ставить любое число от 1, если плата и сеть справляются.</div>
             </div>
           </div>
           <div class="button-row">
@@ -2266,7 +2473,7 @@ pre {
         </div>
         <div class="preset-panel settings-backups-panel">
           <div class="panel-header">
-            <h2>Бекапы</h2>
+            <h2>Бекапы и восстановление</h2>
             <span class="badge" id="backups-count">0</span>
           </div>
           <div class="button-row">
@@ -2288,6 +2495,12 @@ pre {
           </div>
           <div id="backups-table" class="backup-list"></div>
         </div>
+        <div class="preset-panel settings-danger-panel">
+          <div class="panel-header">
+            <h2>Опасные действия</h2>
+          </div>
+          <div class="helper-text" id="mutating-lock-note">Восстановление, удаление данных, обновления и изменение настроек недоступны во время активного подбора.</div>
+        </div>
         </div>
       </section>
     </section>
@@ -2305,7 +2518,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2425,9 +2638,13 @@ function syncActiveTabUi(){
   document.querySelectorAll('.tab-button[data-tab]').forEach((button) => {
     const active = button.dataset.tab === state.activeTab;
     button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll('[data-tab-page]').forEach((page) => {
-    page.classList.toggle('active', page.dataset.tabPage === state.activeTab);
+    const active = page.dataset.tabPage === state.activeTab;
+    page.classList.toggle('active', active);
+    page.hidden = !active;
   });
 }
 function setActiveTab(tabName){
@@ -2443,7 +2660,7 @@ function setActiveTab(tabName){
     loadPresetEditorFromSelection({ silent: true });
   }
   if (tabName === 'settings') {
-    if (!state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
+    if (!mutatingBlocked() && !state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
     if (!state.backupsLoaded) refreshBackups();
   }
 }
@@ -2453,6 +2670,18 @@ function latestRun(){
 function isBusy(){
   const board = (state.status || {}).state || {};
   return Boolean(board.current_job);
+}
+function mutatingBlocked(){
+  return isBusy();
+}
+function mutatingBlockedMessage(){
+  return 'Идет подбор. Дождитесь завершения или остановите текущий подбор перед изменениями.';
+}
+function requireNoActiveRun(){
+  if (!mutatingBlocked()) return true;
+  setMessage(mutatingBlockedMessage(), 'warn');
+  showToast(mutatingBlockedMessage(), 'warn');
+  return false;
 }
 function defaultDomains(kind){
   const sets = state.domainSets || {};
@@ -2715,6 +2944,19 @@ const RUN_LAUNCH_SUMMARY_CONTROL_IDS = new Set([
   'run-curl-max-time',
   'run-curl-max-time-quic',
   'run-curl-max-time-doh'
+]);
+const MUTATING_ACTIONS = new Set([
+  'save-settings',
+  'check-releases',
+  'update-from-release',
+  'create-backup',
+  'upload-backup',
+  'preset-editor-save',
+  'preset-editor-delete',
+  'preset-new-save',
+  'v2fly-load-categories',
+  'v2fly-preview',
+  'v2fly-import'
 ]);
 function isRunLaunchSummaryControl(target){
   if (!target) return false;
@@ -3287,15 +3529,42 @@ function renderMetrics(){
   document.querySelectorAll('button[data-action="run-selected-discovery"]').forEach((button) => {
     button.disabled = busy;
   });
-  document.querySelectorAll('button[data-action="update-from-release"]').forEach((button) => {
+  document.querySelectorAll('button[data-action="update-from-release"], button[data-action="check-releases"]').forEach((button) => {
     button.disabled = busy;
-    button.dataset.tooltip = busy
-      ? 'Обновление можно запускать только когда подбор стратегий остановлен.'
-      : 'Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап.';
+    if (button.dataset.action === 'update-from-release') {
+      button.dataset.tooltip = busy
+        ? 'Обновление можно запускать только когда подбор стратегий остановлен.'
+        : 'Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап.';
+    }
+  });
+  const mutatingSelectors = [
+    'button[data-action="save-settings"]',
+    'button[data-action="create-backup"]',
+    'button[data-action="upload-backup"]',
+    'button[data-backup-restore]',
+    'button[data-backup-delete]',
+    'button[data-action="preset-editor-save"]',
+    'button[data-action="preset-editor-delete"]',
+    'button[data-action="preset-new-save"]',
+    'button[data-action="v2fly-preview"]',
+    'button[data-action="v2fly-import"]',
+    'button[data-action="v2fly-load-categories"]'
+  ].join(', ');
+  document.querySelectorAll(mutatingSelectors).forEach((button) => {
+    button.disabled = busy;
+    if (busy && !button.dataset.tooltip) button.dataset.tooltip = mutatingBlockedMessage();
+    if (!busy && button.dataset.tooltip === mutatingBlockedMessage()) delete button.dataset.tooltip;
   });
   document.querySelectorAll('button[data-action="stop-current"]').forEach((button) => {
     button.disabled = !busy;
   });
+  const lockNote = el('mutating-lock-note');
+  if (lockNote) {
+    lockNote.textContent = busy
+      ? mutatingBlockedMessage()
+      : 'Восстановление, удаление данных, обновления и изменение настроек недоступны во время активного подбора.';
+    lockNote.className = busy ? 'mutating-disabled-note' : 'helper-text';
+  }
 }
 function renderCandidates(){
   rememberStrategyEditorScrolls();
@@ -3316,7 +3585,9 @@ function renderCandidates(){
   setText('candidate-summary', `${loadedNote}${commonNote}`);
   document.querySelectorAll('[data-candidate-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.candidateView === state.candidateView);
+    button.setAttribute('aria-selected', button.dataset.candidateView === state.candidateView ? 'true' : 'false');
   });
+  renderCandidateResult();
   renderCommonControls();
   if (state.candidateView === 'common') {
     renderCommonCandidates(commonRows);
@@ -3384,7 +3655,7 @@ function renderCommonCandidates(rows){
       </summary>
       <div class="protocol-group">
         <div class="protocol-header">
-          <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из запуска blockcheck2'}</div>
+        <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из проверки стратегий'}</div>
         </div>
         ${expanded ? strategyEditor(`common:${protocolGroup.protocol}:${domains.join('|')}`, protocolGroup.rows, 'Общие стратегии', {
           hasRemoteMore,
@@ -3444,6 +3715,198 @@ function candidateAllDomains(row){
 function testedDomains(){
   if (Array.isArray(state.testedDomains) && state.testedDomains.length) return state.testedDomains;
   return [...new Set(state.candidates.flatMap((row) => candidateAllDomains(row)))].sort((a, b) => a.localeCompare(b));
+}
+function candidateResultModeLabel(mode){
+  return {
+    coverage: 'Максимум покрытия',
+    minimal: 'Минимум стратегий',
+    balance: 'Баланс'
+  }[mode] || 'Баланс';
+}
+function candidateResultTargets(){
+  const required = uniqueDomains(presetDomains('finder', 'system:required'));
+  const desired = uniqueDomains(presetDomains('finder', 'system:desired')).filter((domain) => !required.includes(domain));
+  const fallback = uniqueDomains(selectedFinderDomains()).filter((domain) => !required.includes(domain) && !desired.includes(domain));
+  return {
+    required: required.length ? required : fallback,
+    desired: required.length ? desired : []
+  };
+}
+function loadedCandidateRows(){
+  const rows = [];
+  if (Array.isArray(state.candidates)) rows.push(...state.candidates);
+  Object.values(state.domainStrategies || {}).forEach((entry) => {
+    if (entry && Array.isArray(entry.candidates)) rows.push(...entry.candidates);
+  });
+  return uniqueStrategyRows(rows);
+}
+function rowTargetCoverage(row, targets){
+  const domains = new Set(candidateAllDomains(row));
+  return targets.filter((domain) => domains.has(domain));
+}
+function resultPickScore(row, uncoveredRequired, uncoveredDesired, mode){
+  const requiredGain = rowTargetCoverage(row, [...uncoveredRequired]).length;
+  const desiredGain = rowTargetCoverage(row, [...uncoveredDesired]).length;
+  const complexity = strategyComplexity(row);
+  if (mode === 'coverage') return (requiredGain + desiredGain) * 10000 + strategyDomainCoverage(row) * 10 - complexity;
+  if (mode === 'minimal') return (requiredGain + desiredGain) * 10000 - complexity * 5;
+  return requiredGain * 100000 + desiredGain * 1000 - complexity;
+}
+function buildCandidateResult(mode){
+  const targets = candidateResultTargets();
+  const rows = loadedCandidateRows();
+  const uncoveredRequired = new Set(targets.required);
+  const uncoveredDesired = new Set(targets.desired);
+  const selected = [];
+  const remaining = rows.slice();
+  while ((uncoveredRequired.size || uncoveredDesired.size) && remaining.length) {
+    remaining.sort((a, b) => resultPickScore(b, uncoveredRequired, uncoveredDesired, mode) - resultPickScore(a, uncoveredRequired, uncoveredDesired, mode));
+    const best = remaining.shift();
+    if (!best) break;
+    const requiredHit = rowTargetCoverage(best, [...uncoveredRequired]);
+    const desiredHit = rowTargetCoverage(best, [...uncoveredDesired]);
+    if (!requiredHit.length && !desiredHit.length) continue;
+    selected.push({ row: best, requiredHit, desiredHit });
+    requiredHit.forEach((domain) => uncoveredRequired.delete(domain));
+    desiredHit.forEach((domain) => uncoveredDesired.delete(domain));
+    if (mode === 'minimal' && !uncoveredRequired.size && !uncoveredDesired.size) break;
+  }
+  const coveredRequired = targets.required.filter((domain) => !uncoveredRequired.has(domain));
+  const coveredDesired = targets.desired.filter((domain) => !uncoveredDesired.has(domain));
+  const modeLabel = candidateResultModeLabel(mode);
+  const reason = selected.length
+    ? `${modeLabel}: покрыто ${coveredRequired.length}/${targets.required.length} обязательных и ${coveredDesired.length}/${targets.desired.length} желательных доменов по загруженным стратегиям.`
+    : 'Нет загруженных стратегий, которые покрывают выбранные домены.';
+  return {
+    required_coverage: { covered: coveredRequired.length, total: targets.required.length },
+    desired_coverage: { covered: coveredDesired.length, total: targets.desired.length },
+    uncovered_required: [...uncoveredRequired],
+    uncovered_desired: [...uncoveredDesired],
+    strategy_set: selected.map((item) => ({
+      args: String(item.row.args || '').trim(),
+      protocol: String(item.row.protocol || '-'),
+      domains: uniqueDomains([...item.requiredHit, ...item.desiredHit])
+    })),
+    reason,
+    mode: modeLabel,
+    loaded_rows: rows.length,
+    targets
+  };
+}
+function candidateResultText(result){
+  const lines = (result.strategy_set || []).map((item) => item.args).filter(Boolean);
+  return lines.join('\\n');
+}
+function renderCandidateResult(){
+  const body = el('candidate-result-body');
+  const source = el('candidate-result-source');
+  if (!body) return;
+  const mode = state.candidateResultMode || 'balance';
+  document.querySelectorAll('[data-candidate-result-mode]').forEach((button) => {
+    const active = button.dataset.candidateResultMode === mode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  body.setAttribute('aria-labelledby', `candidate-result-mode-${mode}`);
+  const result = buildCandidateResult(mode);
+  const rows = Number(result.loaded_rows || 0);
+  const requiredTotal = Number(result.required_coverage.total || 0);
+  const desiredTotal = Number(result.desired_coverage.total || 0);
+  if (source) {
+    source.textContent = `Расчет по загруженным стратегиям: ${rows}. Обязательные: ${requiredTotal}. Желательные: ${desiredTotal}.`;
+  }
+  if (!rows) {
+    body.innerHTML = '<div class="empty">Откройте домены со стратегиями или загрузите общие стратегии, чтобы собрать итоговый набор.</div>';
+    return;
+  }
+  const strategies = result.strategy_set || [];
+  const strategiesHtml = strategies.length
+    ? `<div class="candidate-result-strategies">${strategies.map((item) => `<div class="candidate-result-strategy">
+        <code>${esc(item.args || '-')}</code>
+        <div class="candidate-result-domains">${esc(item.protocol || '-')} · ${esc((item.domains || []).join(', ') || '-')}</div>
+      </div>`).join('')}</div>`
+    : '<div class="empty">По загруженным стратегиям нет покрытия выбранных доменов.</div>';
+  body.innerHTML = `<div class="candidate-result-grid">
+    <div class="candidate-result-cell">
+      <div class="candidate-result-label">mode</div>
+      <div class="candidate-result-value">${esc(result.mode)}</div>
+    </div>
+    <div class="candidate-result-cell">
+      <div class="candidate-result-label">required_coverage</div>
+      <div class="candidate-result-value">${result.required_coverage.covered} / ${result.required_coverage.total}</div>
+    </div>
+    <div class="candidate-result-cell">
+      <div class="candidate-result-label">desired_coverage</div>
+      <div class="candidate-result-value">${result.desired_coverage.covered} / ${result.desired_coverage.total}</div>
+    </div>
+    <div class="candidate-result-cell">
+      <div class="candidate-result-label">strategy_set</div>
+      <div class="candidate-result-value">${strategies.length}</div>
+    </div>
+  </div>
+  <div class="helper-text">${esc(result.reason)}</div>
+  <details class="candidate-result-details" open>
+    <summary>Детали итогового набора</summary>
+    <div class="helper-text">uncovered_required: ${esc(result.uncovered_required.join(', ') || '-')}</div>
+    <div class="helper-text">uncovered_desired: ${esc(result.uncovered_desired.join(', ') || '-')}</div>
+    ${strategiesHtml}
+  </details>
+  <div class="candidate-result-actions">
+    <button class="secondary" data-action="copy-candidate-result" type="button"${strategies.length ? '' : ' disabled'}>Скопировать для zapret2</button>
+    <button class="secondary" data-action="export-candidate-result" type="button"${strategies.length ? '' : ' disabled'}>Экспорт TXT</button>
+    <button class="secondary" data-action="use-candidate-result-domains" type="button">Повторить подбор</button>
+    <button class="secondary" data-action="open-candidate-result" type="button">Открыть детали</button>
+  </div>`;
+}
+async function copyCandidateResult(){
+  const result = buildCandidateResult(state.candidateResultMode || 'balance');
+  const text = candidateResultText(result);
+  if (!text) {
+    setMessage('В итоговом наборе нет стратегий для копирования', 'warn');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    setMessage('Итоговый набор скопирован', 'good');
+  } catch (error) {
+    setMessage(`Не удалось скопировать итоговый набор: ${error.message}`, 'bad');
+  }
+}
+function exportCandidateResult(){
+  const result = buildCandidateResult(state.candidateResultMode || 'balance');
+  const text = candidateResultText(result);
+  if (!text) {
+    setMessage('В итоговом наборе нет стратегий для экспорта', 'warn');
+    return;
+  }
+  const blob = new Blob([text + '\\n'], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'gp-candidate-result.txt';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+function useCandidateResultDomains(){
+  const result = buildCandidateResult(state.candidateResultMode || 'balance');
+  const domains = uniqueDomains([...(result.targets.required || []), ...(result.targets.desired || [])]);
+  if (!domains.length) {
+    setMessage('Нет доменов для повторного запуска', 'warn');
+    return;
+  }
+  el('finder-domains').value = domains.join('\\n');
+  state.domainsTouched = true;
+  markDomainPresetCustom('finder');
+  updateEditorLineNumbers('finder-domains');
+  renderRunLaunchSummary();
+  setActiveTab('finder');
+  setMessage('Домены итогового набора перенесены в форму запуска. Старт выполните вручную.', 'good');
+}
+function openCandidateResultDetails(){
+  const details = document.querySelector('.candidate-result-details');
+  if (details) details.open = true;
 }
 function filterTestedDomains(domains){
   const tested = new Set(testedDomains());
@@ -3952,7 +4415,7 @@ function diagnosticShortLabel(status, fallback){
     quic_connect_error: 'QUIC/connect не установился',
     timeout: 'проверка не дождалась ответа',
     needs_discovery: 'нужен подбор стратегии',
-    curl_error: 'curl вернул ошибку',
+    curl_error: 'проверочный запрос вернул ошибку',
     direct_available: 'прямой доступ есть'
   };
   return labels[status] || fallback || status || '-';
@@ -3961,16 +4424,16 @@ function diagnosticExplanation(item, row){
   const status = item.status || '';
   const found = runCandidateCount(row) > 0;
   const explanations = {
-    invalid_domain: 'Строка не похожа на домен, поэтому blockcheck2 не может проверить ее как сайт.',
+    invalid_domain: 'Строка не похожа на домен, поэтому проверка стратегий не может проверить ее как сайт.',
     dns_error: 'DNS не вернул адрес. Это проблема разрешения имени до проверки стратегии.',
-    tls_sni_problem: 'curl получил сертификат не для этого домена. Такое бывает при SNI/TLS-проверках, DPI или особенностях service-доменов.',
+    tls_sni_problem: 'Проверочный запрос получил сертификат не для этого домена. Такое бывает при SNI/TLS-проверках, DPI или особенностях service-доменов.',
     ssl_connect_error: 'TLS-соединение оборвалось до нормального ответа сервера.',
     quic_connect_error: 'QUIC или connect-проверка не смогла установить соединение.',
     timeout: found
       ? 'Часть проверок не успела ответить за таймаут. Это не отменяет найденные стратегии: успешные проверки уже сохранены отдельно.'
       : 'Домен не ответил за заданный таймаут. Увеличьте таймаут или проверьте доступность домена отдельно.',
     needs_discovery: 'Для домена не найден прямой рабочий вариант, нужен подбор стратегии.',
-    curl_error: 'curl вернул ошибку, которую нужно смотреть в технических деталях.',
+    curl_error: 'Проверочный запрос вернул ошибку, которую нужно смотреть в технических деталях.',
     direct_available: 'Домен открывался напрямую, стратегия для него может быть не нужна.'
   };
   return explanations[status] || item.message || 'Подробности доступны в технических деталях.';
@@ -3984,7 +4447,7 @@ function curlCodeLabel(code){
     '35': 'TLS/SSL сбой',
     '60': 'TLS/SNI не совпал'
   };
-  return labels[String(code)] || 'curl вернул ошибку';
+  return labels[String(code)] || 'проверочный запрос вернул ошибку';
 }
 function curlCodeDetails(codes){
   if (!codes || !Object.keys(codes).length) return '';
@@ -4091,11 +4554,11 @@ function runSettingsText(row){
   const repeatParallel = truthyOption(options.repeat_parallel, row.repeat_parallel) ? ', параллельные повторы' : '';
   const skip = [
     truthyOption(options.skip_dnscheck, row.skip_dnscheck) ? 'без DNS' : 'с DNS',
-    truthyOption(options.skip_ipblock, row.skip_ipblock) ? 'без IP-check' : 'с IP-check',
+    truthyOption(options.skip_ipblock, row.skip_ipblock) ? 'без IP-проверки' : 'с IP-проверкой',
   ].join(', ');
   const ipv6 = truthyOption(options.enable_ipv6, row.enable_ipv6) ? ', IPv6' : '';
   const debugLog = truthyOption(row.debug_stdout, false) ? ', debug-log' : '';
-  const curl = row.kind === 'multi-domain-discovery' ? `, curl ${row.curl_parallelism || 4}` : '';
+  const curl = row.kind === 'multi-domain-discovery' ? `, проверочных запросов ${row.curl_parallelism || 4}` : '';
   const limit = row.timeout_seconds ? `, лимит ${formatDuration(Number(row.timeout_seconds || 0))}` : ', без лимита';
   return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${debugLog}${curl}${limit}`;
 }
@@ -4118,10 +4581,51 @@ function runPayload(row){
     skip_dnscheck: truthyOption(options.skip_dnscheck, row.skip_dnscheck),
     skip_ipblock: truthyOption(options.skip_ipblock, row.skip_ipblock),
     debug_stdout: truthyOption(row.debug_stdout, false),
+    curl_max_time: Number(options.curl_max_time || row.curl_max_time || (state.settings || {}).curl_max_time || 2),
+    curl_max_time_quic: Number(options.curl_max_time_quic || row.curl_max_time_quic || (state.settings || {}).curl_max_time_quic || 2),
+    curl_max_time_doh: Number(options.curl_max_time_doh || row.curl_max_time_doh || (state.settings || {}).curl_max_time_doh || 2),
   };
   if (row.timeout_seconds) payload.timeout_seconds = Number(row.timeout_seconds);
   if (row.kind === 'multi-domain-discovery') payload.curl_parallelism = Number(row.curl_parallelism || 4);
   return payload;
+}
+function fillRunFormFromPayload(row, payload){
+  const data = payload || runPayload(row);
+  const domains = uniqueDomains(data.domains || []);
+  el('finder-domains').value = domains.join('\\n');
+  state.domainsTouched = true;
+  markDomainPresetCustom('finder');
+  updateEditorLineNumbers('finder-domains');
+  const multi = row && row.kind === 'multi-domain-discovery';
+  const modeInput = document.querySelector(`input[name="run-mode"][value="${multi ? 'multi' : 'standard'}"]`);
+  if (modeInput) modeInput.checked = true;
+  el('curl-parallelism').value = String(data.curl_parallelism || curlParallelism());
+  el('enable-http').checked = Boolean(data.enable_http);
+  el('enable-tls12').checked = Boolean(data.enable_tls12);
+  el('enable-tls13').checked = Boolean(data.enable_tls13);
+  el('include-quic').checked = Boolean(data.include_quic);
+  el('enable-ipv6').checked = Boolean(data.enable_ipv6);
+  el('scan-level').value = data.scan_level || 'standard';
+  const profileSelect = el('discovery-profile-select');
+  if (profileSelect && [...profileSelect.options].some((option) => option.value === (data.scan_level || 'standard'))) {
+    profileSelect.value = data.scan_level || 'standard';
+  }
+  el('repeats').value = String(data.repeats || 1);
+  el('repeat-parallel').checked = Boolean(data.repeat_parallel);
+  el('skip-dnscheck').checked = Boolean(data.skip_dnscheck);
+  el('skip-ipblock').checked = Boolean(data.skip_ipblock);
+  el('run-curl-max-time').value = String(data.curl_max_time || 2);
+  el('run-curl-max-time-quic').value = String(data.curl_max_time_quic || 2);
+  el('run-curl-max-time-doh').value = String(data.curl_max_time_doh || 2);
+  const timeout = Number(data.timeout_seconds || 0);
+  el('limit-time-enabled').checked = timeout > 0;
+  el('time-limit-field').hidden = !(timeout > 0);
+  if (timeout > 0) el('finder-timeout-hours').value = String(Math.max(0.1, Math.round((timeout / 3600) * 10) / 10));
+  renderDiscoveryProfileNote();
+  renderRunModeNote();
+  renderRunLaunchSummary();
+  setActiveTab('finder');
+  setMessage('Параметры прошлого подбора перенесены в форму запуска. Проверьте сводку и запустите вручную.', 'good');
 }
 function repeatRun(runKey){
   const row = state.finderRuns.find((item) => runDomainKey(item) === runKey || String(item.id || '') === runKey);
@@ -4130,12 +4634,7 @@ function repeatRun(runKey){
     return;
   }
   const payload = runPayload(row);
-  const multi = row.kind === 'multi-domain-discovery';
-  startJob(
-    multi ? '/api/jobs/zapret-multi-domain-discovery' : '/api/jobs/zapret-standard-discovery',
-    payload,
-    multi ? 'Повтор стратегии -> домены' : 'Повтор обычного поиска'
-  );
+  fillRunFormFromPayload(row, payload);
 }
 function runProgressText(row){
   const progress = row.progress || {};
@@ -4159,6 +4658,8 @@ function renderLog(){
   renderStderrDiagnostics(log.stderr_diagnostics || []);
   renderProgress(log.progress || {});
   renderRunSettingsSummary(log.run_settings || {});
+  renderLiveRun();
+  renderEvents();
   if (state.activeTab === 'terminal') scrollLogToBottom();
 }
 function renderStderrDiagnostics(items){
@@ -4199,6 +4700,7 @@ function renderBackups(){
     return;
   }
   target.innerHTML = rows.map((item) => backupCard(item)).join('');
+  renderMetrics();
 }
 function backupCard(item){
   const id = String(item.id || '');
@@ -4245,6 +4747,11 @@ function renderProgress(progress){
   const percent = Number(progress.percent || 0);
   const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
   el('progress-fill').style.width = `${safePercent}%`;
+  const bar = el('progress-bar');
+  if (bar) {
+    bar.setAttribute('aria-valuenow', String(Math.round(safePercent)));
+    bar.setAttribute('aria-valuetext', `${Math.round(safePercent)}%`);
+  }
   const attempted = Number(progress.attempted ?? 0);
   const attemptTotal = Number(progress.attempt_total ?? 0);
   const effectiveTotal = Number(progress.effective_attempt_total || attemptTotal || 0);
@@ -4261,6 +4768,183 @@ function renderProgress(progress){
   setText('progress-eta', eta == null ? etaStatusText(progress.eta_status) : formatDuration(eta));
   const etaMs = progress.eta_ms_per_attempt || progress.eta_estimate_ms_per_attempt;
   setText('progress-note', `расчитанное среднее время попытки: ${etaMs ? `${etaMs} мс` : '-'}`);
+}
+function progressAttemptText(progress){
+  const attempted = Number(progress.attempted ?? 0);
+  const total = Number(progress.effective_attempt_total || progress.attempt_total || 0);
+  return total ? `${attempted} / ${total}` : String(progress.attempted ?? 0);
+}
+function progressStrategyText(progress){
+  const checked = Number(progress.strategy_checked ?? 0);
+  const total = Number(progress.strategy_total ?? 0);
+  return total ? `${checked} / ${total}` : '-';
+}
+function interruptedRunWarning(){
+  if (isBusy()) return '';
+  const row = latestRun();
+  if (!row) return '';
+  const status = String(row.status || '').toLowerCase();
+  if (!['running', 'queued', 'stopping'].includes(status)) return '';
+  return 'Предыдущий подбор был прерван перезагрузкой';
+}
+function liveRunStatusText(){
+  const board = (state.status || {}).state || {};
+  if (isBusy()) return runStatusLabel(board.current_job_status || 'running');
+  const interrupted = interruptedRunWarning();
+  if (interrupted) return 'Остановлено';
+  const row = latestRun();
+  return row ? runStatusLabel(row.status || 'idle') : 'Свободно';
+}
+function liveRunCells(progress){
+  const elapsed = progressLiveElapsedSeconds(progress);
+  const eta = progressLiveEtaSeconds(progress);
+  return [
+    ['Статус', liveRunStatusText()],
+    ['Этап', progress.phase_label || phaseLabel(progress.phase || '')],
+    ['Попытки', progressAttemptText(progress)],
+    ['Стратегии', progressStrategyText(progress)],
+    ['Найдено', String(progress.successful ?? 0)],
+    ['Текущий файл', progress.current_script || '-'],
+    ['Прошло', elapsed == null ? '-' : formatDuration(elapsed)],
+    ['Осталось', eta == null ? etaStatusText(progress.eta_status) : formatDuration(eta)]
+  ];
+}
+function latestImportantLogMessage(){
+  const log = state.finderLog || {};
+  const diagnostics = Array.isArray(log.stderr_diagnostics) ? log.stderr_diagnostics : [];
+  if (diagnostics.length) return diagnostics[0].message || diagnostics[0].label || diagnostics[0].status || '';
+  const stderr = String(log.stderr_tail || '').trim().split('\\n').filter(Boolean);
+  return stderr.length ? stderr[stderr.length - 1] : '';
+}
+function renderLiveRun(){
+  const target = el('live-run-panel');
+  if (!target) return;
+  const log = state.finderLog || {};
+  const progress = log.progress || {};
+  const interrupted = interruptedRunWarning();
+  const important = interrupted || latestImportantLogMessage();
+  const tone = isBusy() ? 'warn' : (interrupted ? 'warn' : '');
+  target.innerHTML = `<article class="live-run-card">
+    <div class="live-run-header">
+      <div class="live-run-title">Текущий подбор</div>
+      ${badge(liveRunStatusText(), tone)}
+    </div>
+    <div class="live-run-grid">
+      ${liveRunCells(progress).map(([label, value]) => `<div class="live-run-cell">
+        <div class="live-run-label">${esc(label)}</div>
+        <div class="live-run-value">${esc(value || '-')}</div>
+      </div>`).join('')}
+    </div>
+    <div class="helper-text">${important ? esc(important) : 'Ошибок и предупреждений в текущем срезе нет.'}</div>
+    <div class="live-run-actions">
+      <button class="secondary danger" data-action="stop-current" type="button"${isBusy() ? '' : ' disabled'}>Остановить</button>
+      <button class="secondary" data-action="open-log" type="button">Открыть лог</button>
+      <button class="secondary" data-action="open-candidates" type="button">Открыть результаты</button>
+    </div>
+  </article>`;
+}
+function eventRows(){
+  const rows = [];
+  const now = new Date().toISOString();
+  const stateBoard = (state.status || {}).state || {};
+  const interrupted = interruptedRunWarning();
+  if (interrupted) {
+    rows.push({
+      severity: 'warning',
+      time: now,
+      title: interrupted,
+      source: 'История запуска',
+      message: 'Активный подбор не восстанавливается после перезагрузки. Откройте последний лог или повторите запуск вручную.'
+    });
+  }
+  if (stateBoard.last_error) {
+    rows.push({
+      severity: 'error',
+      time: now,
+      title: 'Ошибка сервиса',
+      source: 'status',
+      message: String(stateBoard.last_error)
+    });
+  }
+  const release = state.releaseUpdate || {};
+  if (release.status === 'failed' || release.error) {
+    rows.push({
+      severity: 'error',
+      time: now,
+      title: 'Ошибка обновления',
+      source: 'release update',
+      message: release.error || release.log_tail || 'Обновление завершилось ошибкой.'
+    });
+  }
+  const log = state.finderLog || {};
+  const diagnostics = Array.isArray(log.stderr_diagnostics) ? log.stderr_diagnostics : [];
+  diagnostics.slice(0, 3).forEach((item) => {
+    rows.push({
+      severity: item.severity === 'warning' ? 'warning' : 'error',
+      time: now,
+      title: item.label || item.status || 'Диагностика подбора',
+      source: 'latest-log',
+      message: item.message || ''
+    });
+  });
+  if (!rows.length && String(log.stderr_tail || '').trim()) {
+    rows.push({
+      severity: 'warning',
+      time: now,
+      title: 'Последний stderr',
+      source: 'latest-log',
+      message: String(log.stderr_tail || '').trim().split('\\n').slice(-1)[0]
+    });
+  }
+  return rows;
+}
+function diagnosticsText(){
+  const rows = eventRows();
+  const log = state.finderLog || {};
+  const parts = rows.map((row) => `[${row.severity}] ${row.title}: ${row.message}`);
+  if (log.stderr_tail) parts.push(`stderr:\n${log.stderr_tail}`);
+  if ((state.status || {}).state?.last_error) parts.push(`last_error: ${(state.status || {}).state.last_error}`);
+  return parts.join('\\n\\n') || 'Ошибок и предупреждений нет.';
+}
+async function copyDiagnostics(){
+  const text = diagnosticsText();
+  try {
+    await navigator.clipboard.writeText(text);
+    setMessage('Диагностика скопирована', 'good');
+  } catch (error) {
+    setMessage(`Не удалось скопировать диагностику: ${error.message}`, 'bad');
+  }
+}
+function renderEvents(){
+  const target = el('events-panel');
+  if (!target) return;
+  const rows = eventRows();
+  if (!rows.length) {
+    target.innerHTML = `<article class="event-card">
+      <div class="event-header">
+        <div class="event-title">Ошибки и предупреждения</div>
+        ${badge('нет активных событий', 'good')}
+      </div>
+      <div class="event-meta">Текущий срез не содержит значимых ошибок.</div>
+    </article>`;
+    return;
+  }
+  target.innerHTML = rows.map((row) => {
+    const tone = row.severity === 'error' ? 'bad' : 'warn';
+    return `<article class="event-card ${tone}">
+      <div class="event-header">
+        <div class="event-title">${esc(row.title)}</div>
+        ${badge(row.severity === 'error' ? 'Ошибка' : 'Предупреждение', tone)}
+      </div>
+      <div>${esc(row.message || '-')}</div>
+      <div class="event-meta">${esc(friendlyTime(row.time) || '-')} · ${esc(row.source || '-')}</div>
+      <div class="event-actions">
+        <button class="secondary" data-action="repeat-last-run" type="button">Повторить</button>
+        <button class="secondary" data-action="open-log" type="button">Открыть лог</button>
+        <button class="secondary" data-action="copy-diagnostics" type="button">Скопировать диагностику</button>
+      </div>
+    </article>`;
+  }).join('');
 }
 function progressLiveElapsedSeconds(progress){
   if (progress.elapsed_seconds == null) return null;
@@ -4306,16 +4990,16 @@ function renderRunSettingsSummary(settings){
   if (settings.enable_tls13) protocols.push('TLS 1.3');
   if (settings.enable_quic) protocols.push('QUIC');
   const domainCount = Number(settings.domain_count || 0);
-  const mode = settings.kind === 'multi-domain-discovery' ? 'multi-domain' : 'обычный';
+  const mode = settings.kind === 'multi-domain-discovery' ? 'все домены на одной стратегии' : 'обычный';
   const ipMode = settings.enable_ipv6 ? 'IPv4+IPv6' : 'IPv4';
   const scan = scanLevelLabel(settings.scan_level || 'standard');
   const repeats = Number(settings.repeats || 1);
   const repeatMode = settings.repeat_parallel ? 'повторы параллельно' : 'повторы последовательно';
-  const curl = settings.curl_parallelism ? `curl: ${settings.curl_parallelism}` : '';
+  const curl = settings.curl_parallelism ? `проверочных запросов: ${settings.curl_parallelism}` : '';
   const limit = Number(settings.timeout_seconds || 0) > 0 ? `лимит: ${formatDuration(Number(settings.timeout_seconds || 0))}` : 'без лимита';
   const checks = [
-    settings.skip_dnscheck ? 'без DNS-check' : 'с DNS-check',
-    settings.skip_ipblock ? 'без IP-check' : 'с IP-check',
+    settings.skip_dnscheck ? 'без DNS-проверки' : 'с DNS-проверкой',
+    settings.skip_ipblock ? 'без IP-проверки' : 'с IP-проверкой',
   ].join(', ');
   const timeouts = `таймауты HTTP/TLS ${settings.curl_max_time || 2}с, QUIC ${settings.curl_max_time_quic || 2}с, DoH ${settings.curl_max_time_doh || 2}с`;
   target.textContent = [
@@ -4323,7 +5007,7 @@ function renderRunSettingsSummary(settings){
     `режим: ${mode}`,
     `протоколы: ${protocols.join('+') || '-'}`,
     ipMode,
-    `скан: ${scan}`,
+    `глубина: ${scan}`,
     `повторы: ${repeats}`,
     repeatMode,
     curl,
@@ -5247,6 +5931,8 @@ function mergeStatusPayload(status){
   if (status.settings) state.settings = status.settings;
   if (status.run_preferences) state.runPreferences = status.run_preferences;
   renderMetrics();
+  renderLiveRun();
+  renderEvents();
   const settingsChanged = previousSettings !== JSON.stringify(state.settings || {});
   if (settingsChanged) renderSettings();
   return settingsChanged;
@@ -5478,16 +6164,14 @@ async function startSelectedDiscovery(){
   };
   const timeout = timeoutSecondsOrNull();
   if (timeout !== null) payload.timeout_seconds = timeout;
+  await saveLaunchTimeoutDefaultsNow();
+  await saveRunPreferencesNow();
   let response = null;
   if (mode === 'multi') {
     payload.curl_parallelism = curlParallelism();
     response = await startJob('/api/jobs/zapret-multi-domain-discovery', payload, 'Все домены на одной стратегии');
   } else {
     response = await startJob('/api/jobs/zapret-standard-discovery', payload, 'Поиск стратегий');
-  }
-  if (response) {
-    await saveLaunchTimeoutDefaultsNow();
-    await saveRunPreferencesNow();
   }
 }
 async function stopCurrentJob(){
@@ -5520,6 +6204,9 @@ document.addEventListener('click', (event) => {
   }
   const button = event.target.closest('button');
   if (!button) return;
+  const action = button.dataset.action || '';
+  const protectedMutation = MUTATING_ACTIONS.has(action) || Boolean(button.dataset.backupRestore) || Boolean(button.dataset.backupDelete);
+  if (protectedMutation && !requireNoActiveRun()) return;
   if (button.dataset.commonDomainSuggestion) {
     chooseCommonDomainSuggestion(button.dataset.commonDomainSuggestion);
     return;
@@ -5531,6 +6218,47 @@ document.addEventListener('click', (event) => {
   if (button.dataset.tab) setActiveTab(button.dataset.tab);
   if (button.dataset.candidateView) {
     setCandidateView(button.dataset.candidateView);
+    return;
+  }
+  if (button.dataset.candidateResultMode) {
+    state.candidateResultMode = button.dataset.candidateResultMode;
+    renderCandidateResult();
+    return;
+  }
+  if (button.dataset.action === 'open-log') {
+    setActiveTab('terminal');
+    const raw = document.querySelector('.raw-log-panel');
+    if (raw) raw.open = true;
+    return;
+  }
+  if (button.dataset.action === 'open-candidates') {
+    setActiveTab('candidates');
+    return;
+  }
+  if (button.dataset.action === 'repeat-last-run') {
+    const row = latestRun();
+    if (row) repeatRun(runDomainKey(row));
+    else setMessage('В истории пока нет запуска для повтора', 'warn');
+    return;
+  }
+  if (button.dataset.action === 'copy-diagnostics') {
+    copyDiagnostics();
+    return;
+  }
+  if (button.dataset.action === 'copy-candidate-result') {
+    copyCandidateResult();
+    return;
+  }
+  if (button.dataset.action === 'export-candidate-result') {
+    exportCandidateResult();
+    return;
+  }
+  if (button.dataset.action === 'use-candidate-result-domains') {
+    useCandidateResultDomains();
+    return;
+  }
+  if (button.dataset.action === 'open-candidate-result') {
+    openCandidateResultDetails();
     return;
   }
   if (button.dataset.action === 'refresh') {

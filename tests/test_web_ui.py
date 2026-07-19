@@ -584,6 +584,164 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn('<option value="${CUSTOM_SELECT_VALUE}">Custom</option>', render_html)
         self.assertNotIn("event.target.value === CUSTOM_SELECT_VALUE", html[html.index("if (event.target && event.target.id === 'discovery-profile-select')"):html.index("if (event.target && event.target.name === 'run-mode')")])
 
+    def test_live_run_panel_has_current_operational_slice(self) -> None:
+        html = index_html()
+
+        self.assertIn('id="live-run-panel"', html)
+        self.assertIn("function renderLiveRun()", html)
+        self.assertIn("function liveRunCells(progress)", html)
+        for label in ("Текущий подбор", "Статус", "Этап", "Попытки", "Стратегии", "Найдено", "Текущий файл", "Прошло", "Осталось"):
+            self.assertIn(label, html)
+
+    def test_live_run_panel_keeps_stop_log_and_results_actions(self) -> None:
+        html = index_html()
+
+        self.assertIn('data-action="stop-current"', html)
+        self.assertIn('data-action="open-log"', html)
+        self.assertIn('data-action="open-candidates"', html)
+        self.assertIn("renderLiveRun();", html)
+        self.assertIn("latestImportantLogMessage", html)
+
+    def test_live_run_panel_warns_about_interrupted_run_after_restart(self) -> None:
+        html = index_html()
+
+        self.assertIn("interruptedRunWarning", html)
+        self.assertIn("Предыдущий подбор был прерван перезагрузкой", html)
+        self.assertIn("Активный подбор не восстанавливается после перезагрузки", html)
+        self.assertIn("!['running', 'queued', 'stopping'].includes(status)", html)
+
+    def test_terminal_tab_keeps_raw_log_as_secondary_debug_block(self) -> None:
+        html = index_html()
+
+        self.assertIn('class="raw-log-panel"', html)
+        self.assertIn("Raw log / debug", html)
+        self.assertLess(html.index('id="live-run-panel"'), html.index('class="raw-log-panel"'))
+        self.assertLess(html.index('id="events-panel"'), html.index('class="raw-log-panel"'))
+
+    def test_events_panel_uses_existing_status_log_and_diagnostics(self) -> None:
+        html = index_html()
+
+        self.assertIn('id="events-panel"', html)
+        self.assertIn("function eventRows()", html)
+        self.assertIn("stateBoard.last_error", html)
+        self.assertIn("log.stderr_diagnostics", html)
+        self.assertIn("state.releaseUpdate", html)
+        self.assertNotIn("eventStore", html)
+
+    def test_events_panel_has_repeat_log_and_copy_actions(self) -> None:
+        html = index_html()
+
+        self.assertIn('data-action="repeat-last-run"', html)
+        self.assertIn('data-action="open-log"', html)
+        self.assertIn('data-action="copy-diagnostics"', html)
+        self.assertIn("function copyDiagnostics()", html)
+        self.assertIn("diagnosticsText()", html)
+
+    def test_candidate_result_panel_has_agreed_modes_and_fields(self) -> None:
+        html = index_html()
+
+        self.assertIn("candidate-result-panel", html)
+        for label in ("Максимум покрытия", "Минимум стратегий", "Баланс"):
+            self.assertIn(label, html)
+        for field in ("required_coverage", "desired_coverage", "uncovered_required", "uncovered_desired", "strategy_set", "reason", "mode"):
+            self.assertIn(field, html)
+
+    def test_candidate_result_is_computed_from_loaded_candidates_only(self) -> None:
+        html = index_html()
+
+        self.assertIn("function loadedCandidateRows()", html)
+        self.assertIn("state.candidates", html)
+        self.assertIn("state.domainStrategies", html)
+        self.assertIn("Расчет по загруженным стратегиям", html)
+        self.assertNotIn("/api/candidate-result", html)
+
+    def test_candidate_result_actions_are_practical_without_new_validation(self) -> None:
+        html = index_html()
+
+        self.assertIn('data-action="copy-candidate-result"', html)
+        self.assertIn('data-action="export-candidate-result"', html)
+        self.assertIn('data-action="use-candidate-result-domains"', html)
+        self.assertIn('data-action="open-candidate-result"', html)
+        self.assertNotIn("data-candidate-verify", html)
+        self.assertNotIn("/api/jobs/zapret-custom-verification", html)
+
+    def test_candidate_balance_covers_required_before_desired(self) -> None:
+        html = index_html()
+
+        self.assertIn("requiredGain * 100000 + desiredGain * 1000", html)
+        self.assertIn("uncoveredRequired", html)
+        self.assertIn("uncoveredDesired", html)
+        self.assertIn("Нет загруженных стратегий, которые покрывают выбранные домены.", html)
+
+    def test_history_repeat_fills_launch_form_without_autostart(self) -> None:
+        html = index_html()
+
+        start = html.index("function repeatRun(runKey)")
+        end = html.index("function runProgressText(row)", start)
+        repeat_html = html[start:end]
+        self.assertIn("fillRunFormFromPayload(row, payload);", repeat_html)
+        self.assertNotIn("startJob(", repeat_html)
+        self.assertIn("Параметры прошлого подбора перенесены в форму запуска", html)
+
+    def test_history_repeat_restores_result_affecting_parameters(self) -> None:
+        html = index_html()
+
+        start = html.index("function fillRunFormFromPayload")
+        end = html.index("function repeatRun(runKey)", start)
+        repeat_html = html[start:end]
+        for token in ("finder-domains", "run-mode", "curl-parallelism", "enable-http", "enable-tls12", "include-quic", "scan-level", "repeats", "skip-dnscheck", "run-curl-max-time", "limit-time-enabled"):
+            self.assertIn(token, repeat_html)
+
+    def test_mutating_actions_are_blocked_during_active_run(self) -> None:
+        html = index_html()
+
+        self.assertIn("const MUTATING_ACTIONS = new Set", html)
+        for action in ("save-settings", "check-releases", "update-from-release", "create-backup", "upload-backup", "preset-editor-save", "preset-editor-delete", "preset-new-save"):
+            self.assertIn(action, html)
+        self.assertIn("requireNoActiveRun()", html)
+        self.assertIn("protectedMutation", html)
+
+    def test_mutating_buttons_are_disabled_but_monitoring_actions_remain(self) -> None:
+        html = index_html()
+
+        self.assertIn("mutatingSelectors", html)
+        self.assertIn("button.disabled = busy;", html)
+        self.assertIn("button.disabled = !busy;", html)
+        self.assertNotIn("'open-log'", html[html.index("const MUTATING_ACTIONS = new Set"):html.index("]);", html.index("const MUTATING_ACTIONS = new Set"))])
+
+    def test_settings_auto_release_check_waits_for_active_run(self) -> None:
+        html = index_html()
+
+        self.assertIn("if (!mutatingBlocked() && !state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });", html)
+
+    def test_settings_are_split_into_operational_groups(self) -> None:
+        html = index_html()
+
+        for marker in ("settings-discovery-panel", "settings-release-panel", "settings-backups-panel", "settings-danger-panel"):
+            self.assertIn(marker, html)
+        for title in ("Параметры подбора", "Релизы и обновления", "Бекапы и восстановление", "Опасные действия"):
+            self.assertIn(title, html)
+
+    def test_tabs_have_basic_accessibility_contract(self) -> None:
+        html = index_html()
+
+        self.assertIn('role="tablist"', html)
+        self.assertIn('role="tab"', html)
+        self.assertIn('aria-selected="true"', html)
+        self.assertIn('aria-controls="tab-panel-finder"', html)
+        self.assertIn('role="tabpanel"', html)
+        self.assertIn("syncActiveTabUi", html)
+
+    def test_progress_and_focus_have_accessibility_contract(self) -> None:
+        html = index_html()
+
+        self.assertIn('role="progressbar"', html)
+        self.assertIn('aria-valuemin="0"', html)
+        self.assertIn('aria-valuemax="100"', html)
+        self.assertIn("aria-valuenow", html)
+        self.assertIn("button:focus-visible", html)
+        self.assertIn("summary:focus-visible", html)
+
     def test_index_script_has_no_raw_newlines_inside_quoted_strings(self) -> None:
         html = index_html()
         marker_start = "<script>"
