@@ -920,6 +920,49 @@ button:disabled { opacity: .55; cursor: default; }
   padding: 12px;
   background: var(--surface-soft);
 }
+details.preset-panel > summary {
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding-right: 118px;
+}
+details.preset-panel > summary::-webkit-details-marker {
+  display: none;
+}
+details.preset-panel > summary::before {
+  content: "";
+  position: absolute;
+  right: 92px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--blue-strong);
+  border-bottom: 2px solid var(--blue-strong);
+  transform: translateY(-65%) rotate(45deg);
+}
+details.preset-panel[open] > summary::before {
+  transform: translateY(-35%) rotate(225deg);
+}
+details.preset-panel > summary::after {
+  content: "Раскрыть";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--blue-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+details.preset-panel[open] > summary::after {
+  content: "Свернуть";
+}
+details.preset-panel > summary:hover,
+details.preset-panel > summary:focus-visible {
+  border-color: var(--blue-strong);
+  background: var(--surface);
+}
 .common-filter-panel[hidden] { display: none; }
 .strategy-family-list {
   display: grid;

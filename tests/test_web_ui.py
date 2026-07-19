@@ -602,6 +602,15 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn('<option value="${CUSTOM_SELECT_VALUE}">Custom</option>', render_html)
         self.assertNotIn("event.target.value === CUSTOM_SELECT_VALUE", html[html.index("if (event.target && event.target.id === 'discovery-profile-select')"):html.index("if (event.target && event.target.name === 'run-mode')")])
 
+    def test_expandable_preset_panel_has_clear_affordance(self) -> None:
+        html = index_html()
+
+        self.assertIn("details.preset-panel > summary::before", html)
+        self.assertIn('content: "Раскрыть";', html)
+        self.assertIn("details.preset-panel[open] > summary::after", html)
+        self.assertIn('content: "Свернуть";', html)
+        self.assertIn("details.preset-panel > summary:focus-visible", html)
+
     def test_live_run_panel_has_current_operational_slice(self) -> None:
         html = index_html()
 
