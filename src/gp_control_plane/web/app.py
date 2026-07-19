@@ -3726,10 +3726,9 @@ function candidateResultModeLabel(mode){
 function candidateResultTargets(){
   const required = uniqueDomains(presetDomains('finder', 'system:required'));
   const desired = uniqueDomains(presetDomains('finder', 'system:desired')).filter((domain) => !required.includes(domain));
-  const fallback = uniqueDomains(selectedFinderDomains()).filter((domain) => !required.includes(domain) && !desired.includes(domain));
   return {
-    required: required.length ? required : fallback,
-    desired: required.length ? desired : []
+    required,
+    desired
   };
 }
 function loadedCandidateRows(){
@@ -3774,7 +3773,10 @@ function buildCandidateResult(mode){
   const coveredRequired = targets.required.filter((domain) => !uncoveredRequired.has(domain));
   const coveredDesired = targets.desired.filter((domain) => !uncoveredDesired.has(domain));
   const modeLabel = candidateResultModeLabel(mode);
-  const reason = selected.length
+  const targetCount = targets.required.length + targets.desired.length;
+  const reason = !targetCount
+    ? 'Нет обязательных или желательных доменов для расчета итогового набора.'
+    : selected.length
     ? `${modeLabel}: покрыто ${coveredRequired.length}/${targets.required.length} обязательных и ${coveredDesired.length}/${targets.desired.length} желательных доменов по загруженным стратегиям.`
     : 'Нет загруженных стратегий, которые покрывают выбранные домены.';
   return {

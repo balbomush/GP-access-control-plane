@@ -655,6 +655,18 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Расчет по загруженным стратегиям", html)
         self.assertNotIn("/api/candidate-result", html)
 
+    def test_candidate_result_does_not_fallback_required_to_launch_domains(self) -> None:
+        html = index_html()
+
+        start = html.index("function candidateResultTargets()")
+        end = html.index("function loadedCandidateRows()", start)
+        target_html = html[start:end]
+        self.assertIn("const required = uniqueDomains(presetDomains('finder', 'system:required'));", target_html)
+        self.assertIn("const desired = uniqueDomains(presetDomains('finder', 'system:desired'))", target_html)
+        self.assertNotIn("selectedFinderDomains()", target_html)
+        self.assertNotIn("required.length ? required", target_html)
+        self.assertIn("Нет обязательных или желательных доменов для расчета итогового набора.", html)
+
     def test_candidate_result_actions_are_practical_without_new_validation(self) -> None:
         html = index_html()
 
