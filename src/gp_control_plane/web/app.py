@@ -910,7 +910,6 @@ button:disabled { opacity: .55; cursor: default; }
   border-top-color: var(--surface-code);
 }
 .fill-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.time-limit-field[hidden] { display: none; }
 .preset-panel,
 .common-filter-panel {
   display: grid;
@@ -962,6 +961,32 @@ details.preset-panel > summary:hover,
 details.preset-panel > summary:focus-visible {
   border-color: var(--blue-strong);
   background: var(--surface);
+}
+.time-limit-panel {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+.time-limit-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+.time-limit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
+  gap: 10px;
+  align-items: end;
+}
+.time-limit-panel.disabled {
+  background: var(--surface-soft);
+}
+.time-limit-field input:disabled {
+  opacity: .65;
+  cursor: not-allowed;
 }
 .common-filter-panel[hidden] { display: none; }
 .strategy-family-list {
@@ -2056,7 +2081,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-downloads, .release-grid, .category-toolbar { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-downloads, .release-grid, .category-toolbar, .time-limit-row { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -2190,18 +2215,23 @@ pre {
                 <input id="scan-level" type="hidden" value="standard">
                 <div class="helper-text" id="discovery-profile-note">Технический профиль проверки: quick, standard или force.</div>
               </div>
+              <div class="time-limit-panel disabled" id="time-limit-panel">
+                <div class="time-limit-title">Ограничение времени поиска</div>
+                <div class="time-limit-row">
+                  <label class="checkbox-row">
+                    <input id="limit-time-enabled" type="checkbox">
+                    <span>Ограничить время поиска</span>
+                  </label>
+                  <div class="field time-limit-field" id="time-limit-field" aria-disabled="true">
+                    <label for="finder-timeout-hours">Лимит поиска, часов</label>
+                    <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6" disabled>
+                  </div>
+                </div>
+              </div>
               <div class="preset-grid">
                 <div class="field">
                   <label for="repeats">Повторы проверки стратегии</label>
                   <input id="repeats" type="number" min="1" max="10" step="1" value="1">
-                </div>
-                <label class="checkbox-row">
-                  <input id="limit-time-enabled" type="checkbox">
-                  <span>Ограничить время поиска</span>
-                </label>
-                <div class="field time-limit-field" id="time-limit-field" hidden>
-                  <label for="finder-timeout-hours">Лимит поиска, часов</label>
-                  <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6">
                 </div>
                 <div class="field">
                   <label for="run-curl-max-time">Timeout HTTP/TLS, сек</label>
@@ -2769,6 +2799,15 @@ function timeoutSecondsOrNull(){
   const hours = Number(el('finder-timeout-hours').value || 6);
   return Math.max(60, Math.round(hours * 3600));
 }
+function syncTimeLimitUi(){
+  const enabled = Boolean(el('limit-time-enabled')?.checked);
+  const input = el('finder-timeout-hours');
+  const field = el('time-limit-field');
+  const panel = el('time-limit-panel');
+  if (input) input.disabled = !enabled;
+  if (field) field.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  if (panel) panel.classList.toggle('disabled', !enabled);
+}
 function curlParallelism(){
   const value = Number(el('curl-parallelism').value || 4);
   const max = Number((state.settings || {}).curl_parallelism_max || 10);
@@ -2953,7 +2992,7 @@ function useRunPreferencesOnce(){
     el('run-curl-max-time').value = String((state.settings || {}).curl_max_time || 2);
     el('run-curl-max-time-quic').value = String((state.settings || {}).curl_max_time_quic || 2);
     el('run-curl-max-time-doh').value = String((state.settings || {}).curl_max_time_doh || 2);
-    el('time-limit-field').hidden = !el('limit-time-enabled').checked;
+    syncTimeLimitUi();
     renderDiscoveryProfileNote();
     renderRunModeNote();
   } finally {
@@ -4717,7 +4756,7 @@ function fillRunFormFromPayload(row, payload){
   el('run-curl-max-time-doh').value = String(data.curl_max_time_doh || 2);
   const timeout = Number(data.timeout_seconds || 0);
   el('limit-time-enabled').checked = timeout > 0;
-  el('time-limit-field').hidden = !(timeout > 0);
+  syncTimeLimitUi();
   if (timeout > 0) el('finder-timeout-hours').value = String(Math.max(0.1, Math.round((timeout / 3600) * 10) / 10));
   renderDiscoveryProfileNote();
   renderRunModeNote();
@@ -6571,7 +6610,7 @@ document.addEventListener('change', (event) => {
     renderV2flyPreview();
   }
   if (event.target && event.target.id === 'limit-time-enabled') {
-    el('time-limit-field').hidden = !event.target.checked;
+    syncTimeLimitUi();
     markDiscoveryProfileCustom();
   }
   if (event.target && (event.target.id === 'finder-preset-select' || event.target.id === 'common-preset-select')) {

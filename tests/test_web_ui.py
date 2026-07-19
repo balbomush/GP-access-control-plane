@@ -347,8 +347,10 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("skip_ipblock", html)
         self.assertNotIn("Пресет настроек", html)
         self.assertIn("limit-time-enabled", html)
+        self.assertIn("time-limit-panel", html)
         self.assertIn("time-limit-field", html)
         self.assertIn("timeoutSecondsOrNull", html)
+        self.assertIn("syncTimeLimitUi()", html)
         self.assertIn("data-tooltip=\"Запускает штатную проверку стратегий", html)
         self.assertIn("data-tooltip=\"Одна стратегия запускается один раз", html)
         self.assertIn("grid-template-columns: minmax(0, 460px) minmax(0, 1fr)", html)
@@ -356,6 +358,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn(".finder-layout {\n  grid-template-columns: minmax(0, 520px);\n  max-width: 560px;\n}", html)
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))", html)
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(150px, 1fr))", html)
+        self.assertIn(".time-limit-row { grid-template-columns: 1fr; }", html)
         self.assertIn("class=\"button-row run-actions\"", html)
         self.assertIn("min-width: 760px", html)
         self.assertIn("table-layout: auto", html)
@@ -610,6 +613,26 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("details.preset-panel[open] > summary::after", html)
         self.assertIn('content: "Свернуть";', html)
         self.assertIn("details.preset-panel > summary:focus-visible", html)
+
+    def test_time_limit_panel_keeps_layout_stable_when_disabled(self) -> None:
+        html = index_html()
+
+        advanced_start = html.index('<details class="preset-panel">')
+        advanced_end = html.index("</details>", advanced_start)
+        advanced_html = html[advanced_start:advanced_end]
+        time_panel_start = advanced_html.index('id="time-limit-panel"')
+        preset_grid_start = advanced_html.index('<div class="preset-grid">')
+        preset_grid_html = advanced_html[preset_grid_start:advanced_html.index('id="repeat-parallel"', preset_grid_start)]
+
+        self.assertLess(time_panel_start, preset_grid_start)
+        self.assertIn('<div class="time-limit-panel disabled" id="time-limit-panel">', advanced_html)
+        self.assertIn('<div class="field time-limit-field" id="time-limit-field" aria-disabled="true">', advanced_html)
+        self.assertIn('id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6" disabled', advanced_html)
+        self.assertNotIn('id="limit-time-enabled"', preset_grid_html)
+        self.assertNotIn(".time-limit-field[hidden]", html)
+        self.assertNotIn("el('time-limit-field').hidden", html)
+        self.assertIn("input.disabled = !enabled;", html)
+        self.assertIn("panel.classList.toggle('disabled', !enabled);", html)
 
     def test_live_run_panel_has_current_operational_slice(self) -> None:
         html = index_html()
