@@ -1102,13 +1102,62 @@ def append_run(state_dir: Path, run: dict[str, Any]) -> None:
         )
 
 
-def read_run_payloads(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
-    limit = max(1, min(int(limit or 50), 1000))
+def _page_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def read_run_payloads(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    limit = _page_int(limit, default=50, minimum=1, maximum=1000)
+    offset = _page_int(offset, default=0, minimum=0, maximum=10_000_000)
     with connect(state_dir) as conn:
         rows = conn.execute(
-            "SELECT payload_json FROM runs ORDER BY seq DESC LIMIT ?",
-            (limit,),
+            "SELECT payload_json FROM runs ORDER BY seq DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
+    return _decode_run_payload_rows(rows)
+
+
+def read_latest_run_payloads(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    limit = _page_int(limit, default=50, minimum=1, maximum=1000)
+    offset = _page_int(offset, default=0, minimum=0, maximum=10_000_000)
+    with connect(state_dir) as conn:
+        rows = conn.execute(
+            """
+            SELECT r.payload_json
+            FROM runs r
+            JOIN (
+                SELECT MAX(seq) AS seq
+                FROM runs
+                GROUP BY CASE WHEN id = '' THEN 'seq:' || seq ELSE id END
+            ) latest ON latest.seq = r.seq
+            ORDER BY r.seq DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return _decode_run_payload_rows(rows)
+
+
+def count_latest_run_payloads(state_dir: Path) -> int:
+    with connect(state_dir) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM (
+                SELECT 1
+                FROM runs
+                GROUP BY CASE WHEN id = '' THEN 'seq:' || seq ELSE id END
+            ) latest
+            """
+        ).fetchone()
+    return int(row["count"] or 0) if row else 0
+
+
+def _decode_run_payload_rows(rows: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for row in reversed(rows):
         try:

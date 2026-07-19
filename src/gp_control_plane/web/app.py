@@ -56,6 +56,7 @@ from ..strategy_finder import (
     read_candidate_domain_index,
     read_candidate_page,
     read_runs,
+    read_runs_page,
     run_multi_domain_discovery,
     run_standard_discovery,
     stop_active_blockcheck_runtime,
@@ -158,7 +159,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             elif path == "/api/strategy-finder/candidates":
                 self._json(_candidate_page_payload(config, query))
             elif path == "/api/strategy-finder/runs":
-                self._json({"runs": read_runs(config.output.state_dir)})
+                self._json(_runs_page_payload(config, query))
             elif path == "/api/strategy-finder/latest-log":
                 self._json(_latest_log_payload(config, query))
             elif path == "/api/backups":
@@ -2592,7 +2593,10 @@ pre {
 <script>
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
-const CANDIDATE_PAGE_LIMIT = 200;
+const LIST_PAGE_LIMIT = 50;
+const CANDIDATE_PAGE_LIMIT = LIST_PAGE_LIMIT;
+const DOMAIN_PAGE_LIMIT = LIST_PAGE_LIMIT;
+const RUN_PAGE_LIMIT = LIST_PAGE_LIMIT;
 const CUSTOM_SELECT_VALUE = 'custom';
 const WEB_AUTH = __WEB_AUTH_JSON__;
 const DISCOVERY_PROFILES = {
@@ -2600,7 +2604,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingAll: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2715,6 +2719,27 @@ function latestById(rows){
     byId.set(row.id || `row-${index}`, row);
   });
   return Array.from(byId.values()).sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+}
+function listLoadMore(action, hasMore, loading){
+  if (!hasMore) return '';
+  const label = loading ? 'Загружается...' : 'Загрузить еще';
+  const disabled = loading ? ' disabled' : '';
+  return `<div class="button-row list-load-more"><button class="secondary" data-action="${esc(action)}" type="button"${disabled}>${label}</button></div>`;
+}
+function runParams(offset){
+  const params = new URLSearchParams();
+  params.set('limit', String(RUN_PAGE_LIMIT));
+  params.set('offset', String(Math.max(0, offset || 0)));
+  return params;
+}
+function mergeRunPage(payload, reset){
+  const rows = latestById((payload || {}).runs || []);
+  state.finderRuns = reset ? rows : latestById([...rows, ...state.finderRuns]);
+  state.finderRunTotal = Number((payload || {}).total || state.finderRuns.length);
+  state.finderRunOffset = Number((payload || {}).offset || 0) + ((payload || {}).runs || []).length;
+  state.finderRunHasMore = Boolean((payload || {}).has_more);
+  state.finderRunsLoaded = true;
+  state.finderRunsLoading = false;
 }
 function syncActiveTabUi(){
   document.querySelectorAll('.tab-button[data-tab]').forEach((button) => {
@@ -3725,7 +3750,7 @@ function renderDomainCandidates(){
         ${domainStrategyContent(domainGroup.domain)}
       </div>` : ''}
     </details>`;
-  }).join('')}</div>`;
+  }).join('')}</div>${candidateDomainPager()}`;
 }
 function renderCommonCandidates(rows){
   const selectedDomains = selectedCommonDomains();
@@ -3768,11 +3793,13 @@ function renderCommonCandidates(rows){
         }) : ''}
       </div>
     </details>`;
-  }).join('')}</div>`;
+  }).join('')}</div>${candidatePager()}`;
+}
+function candidateDomainPager(){
+  return listLoadMore('load-more-candidate-domains', state.candidateDomainHasMore, state.candidateLoading);
 }
 function candidatePager(){
-  if (!state.candidateHasMore) return '';
-  return `<div class="button-row"><button class="secondary" data-action="load-more-candidates" type="button">Показать еще ${CANDIDATE_PAGE_LIMIT}</button></div>`;
+  return listLoadMore('load-more-candidates', state.candidateHasMore, state.candidateLoading);
 }
 function domainStrategyContent(domain){
   const data = state.domainStrategies[domain] || {};
@@ -4134,6 +4161,8 @@ function invalidateCandidateCaches(){
   state.candidateDomains = [];
   state.candidateDomainTotal = 0;
   state.candidateDomainStrategyTotal = 0;
+  state.candidateDomainOffset = 0;
+  state.candidateDomainHasMore = false;
   state.candidateDomainsLoaded = false;
   state.domainStrategies = {};
   state.commonCandidateCache = {};
@@ -4442,13 +4471,16 @@ function isCommonStrategyListKey(key){
 }
 function renderRuns(){
   const rows = state.finderRuns.filter((row) => isDiscoveryRun(row));
-  setText('finder-runs-count', String(rows.length));
-  const visible = rows.slice().reverse().slice(0, 12);
+  setText('finder-runs-count', String(state.finderRunTotal || rows.length));
+  const visible = rows.slice().reverse();
   if (!visible.length) {
     el('finder-runs-table').innerHTML = '<div class="empty">Запусков поиска пока не было</div>';
     return;
   }
-  el('finder-runs-table').innerHTML = `<div class="run-history">${visible.map(renderRunCard).join('')}</div>`;
+  el('finder-runs-table').innerHTML = `<div class="run-history">${visible.map(renderRunCard).join('')}</div>${runPager()}`;
+}
+function runPager(){
+  return listLoadMore('load-more-runs', state.finderRunHasMore, state.finderRunsLoading);
 }
 function renderRunCard(row){
   const count = runCandidateCount(row);
@@ -5846,17 +5878,23 @@ function candidateParams(offset, options){
   }
   return params;
 }
-async function refreshDomainIndex(){
+async function refreshDomainIndex(reset = true){
   const requestId = ++domainIndexRequestSeq;
+  const offset = reset ? 0 : state.candidateDomainOffset;
   state.candidateLoading = true;
   renderCandidatesOnly();
   try {
     const params = new URLSearchParams();
+    params.set('limit', String(DOMAIN_PAGE_LIMIT));
+    params.set('offset', String(Math.max(0, offset || 0)));
     const data = await getJson(`/api/strategy-finder/candidate-domains?${params.toString()}`);
     if (requestId !== domainIndexRequestSeq) return;
-    state.candidateDomains = data.domains || [];
+    const rows = data.domains || [];
+    state.candidateDomains = reset ? rows : [...state.candidateDomains, ...rows];
     state.candidateDomainTotal = Number(data.total || 0);
     state.candidateDomainStrategyTotal = Number(data.strategy_total || 0);
+    state.candidateDomainOffset = Number(data.offset || offset) + rows.length;
+    state.candidateDomainHasMore = Boolean(data.has_more);
     if (state.candidateDomainTotal > 0) state.lastCandidateDomainTotal = state.candidateDomainTotal;
     if (state.candidateDomainStrategyTotal > 0) state.lastCandidateDomainStrategyTotal = state.candidateDomainStrategyTotal;
     rememberCandidateVersion(data.version || null);
@@ -6076,13 +6114,18 @@ function mergeStatusPayload(status){
   if (settingsChanged) renderSettings();
   return settingsChanged;
 }
-async function refreshRuns(){
+async function refreshRuns(reset = true){
+  const offset = reset ? 0 : state.finderRunOffset;
+  state.finderRunsLoading = true;
+  renderRuns();
   try {
-    const finderRuns = await getJson('/api/strategy-finder/runs');
-    state.finderRuns = latestById(finderRuns.runs || []);
+    const finderRuns = await getJson(`/api/strategy-finder/runs?${runParams(offset).toString()}`);
+    mergeRunPage(finderRuns, reset);
     renderRuns();
     renderMetrics();
   } catch (error) {
+    state.finderRunsLoading = false;
+    renderRuns();
     setMessage(`Ошибка обновления истории: ${error.message}`, 'bad');
   }
 }
@@ -6156,7 +6199,7 @@ async function refresh(){
   try {
     const [status, finderRuns, finderLog, domainSets, presets, settings, domainSources] = await Promise.all([
       getJson('/api/status'),
-      getJson('/api/strategy-finder/runs'),
+      getJson(`/api/strategy-finder/runs?${runParams(0).toString()}`),
       getJson('/api/strategy-finder/latest-log'),
       getJson('/api/strategy-finder/domains'),
       getJson('/api/presets'),
@@ -6165,7 +6208,7 @@ async function refresh(){
     ]);
     mergeStatusPayload(status);
     state.settings = (settings || {}).settings || status.settings || {};
-    state.finderRuns = latestById(finderRuns.runs || []);
+    mergeRunPage(finderRuns, true);
     if (finderLog && finderLog.progress) finderLog.progress.received_at_ms = Date.now();
     state.finderLog = finderLog;
     state.domainSets = domainSets;
@@ -6492,6 +6535,14 @@ document.addEventListener('click', (event) => {
   }
   if (button.dataset.action === 'load-more-candidates') {
     refreshCandidates(false);
+    return;
+  }
+  if (button.dataset.action === 'load-more-candidate-domains') {
+    refreshDomainIndex(false);
+    return;
+  }
+  if (button.dataset.action === 'load-more-runs') {
+    refreshRuns(false);
     return;
   }
   if (button.dataset.fill) fillDomains(button.dataset.fill);
@@ -7039,7 +7090,7 @@ def _clear_stale_current_job(config: AppConfig) -> None:
 def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     return read_candidate_page(
         config.output.state_dir,
-        limit=_query_int(query, "limit", 200),
+        limit=_query_int(query, "limit", 50),
         offset=_query_int(query, "offset", 0),
         query=_query_str(query, "query", ""),
         view=_query_str(query, "view", "domain"),
@@ -7052,8 +7103,18 @@ def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> d
 def _candidate_domain_index_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     return read_candidate_domain_index(
         config.output.state_dir,
+        limit=_query_int(query, "limit", 50),
+        offset=_query_int(query, "offset", 0),
         query=_query_str(query, "query", ""),
         fragmentation_classes=_query_domains(query, "fragmentation_class"),
+    )
+
+
+def _runs_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return read_runs_page(
+        config.output.state_dir,
+        limit=_query_int(query, "limit", 50),
+        offset=_query_int(query, "offset", 0),
     )
 
 

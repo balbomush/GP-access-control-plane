@@ -23,6 +23,8 @@ from .strategy_safety import analyze_strategy
 from .storage import (
     append_run,
     connect,
+    count_latest_run_payloads,
+    read_latest_run_payloads,
     read_run_payloads,
     upsert_candidate_event,
     upsert_candidate_event_conn,
@@ -245,7 +247,7 @@ _CURL_FAILURE_INFO = {
         "message": "сертификат или hostname не совпали; для service-доменов это не всегда провал стратегии.",
     },
 }
-DEFAULT_PAGE_LIMIT = 200
+DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 200
 NFQUEUE_MAXLEN_MISSING_RE = re.compile(r"can't set queue maxlen:\s+No such file or directory", re.IGNORECASE)
 
@@ -672,18 +674,31 @@ def candidate_storage_version(state_dir: Path) -> dict[str, int]:
 def read_candidate_domain_index(
     state_dir: Path,
     *,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
     query: str = "",
     fragmentation_classes: list[str] | None = None,
 ) -> dict[str, Any]:
+    limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
+    offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
     query = query.strip().lower()
     clean_fragmentation_classes = _clean_fragmentation_classes(fragmentation_classes or [])
     with connect(state_dir) as conn:
         tested_domains = _tested_domains_from_db(conn)
-        rows = _read_candidate_domain_index_sql(conn, query=query, fragmentation_classes=clean_fragmentation_classes)
+        rows, total, strategy_total = _read_candidate_domain_index_sql(
+            conn,
+            limit=limit,
+            offset=offset,
+            query=query,
+            fragmentation_classes=clean_fragmentation_classes,
+        )
     return {
         "domains": rows,
-        "total": len(rows),
-        "strategy_total": sum(int(item["strategy_count"]) for item in rows),
+        "total": total,
+        "strategy_total": strategy_total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(rows) < total,
         "tested_domains": sorted(tested_domains),
         "version": _storage_version(state_dir),
     }
@@ -756,41 +771,63 @@ def _read_candidate_page_sql(
 def _read_candidate_domain_index_sql(
     conn: Any,
     *,
+    limit: int,
+    offset: int,
     query: str,
     fragmentation_classes: list[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int, int]:
     query_clause, query_params = _strategy_query_clause(query)
     fragmentation_clause, fragmentation_params = _fragmentation_query_clause(fragmentation_classes)
-    domain_rows = conn.execute(
-        f"""
-        SELECT d.name AS domain, COUNT(DISTINCT r.strategy_id) AS strategy_count
+    base = f"""
         FROM domains d
         JOIN strategy_domain_results r ON r.domain_id = d.id
         JOIN strategies s ON s.id = r.strategy_id
         WHERE 1 = 1 {query_clause} {fragmentation_clause}
         GROUP BY d.id, d.name
-        ORDER BY d.name ASC
+    """
+    count_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count, COALESCE(SUM(strategy_count), 0) AS strategy_total
+        FROM (
+            SELECT d.id, COUNT(DISTINCT r.strategy_id) AS strategy_count
+            {base}
+        ) domain_index
         """,
         [*query_params, *fragmentation_params],
+    ).fetchone()
+    total = int(count_row["count"] or 0) if count_row else 0
+    strategy_total = int(count_row["strategy_total"] or 0) if count_row else 0
+    domain_rows = conn.execute(
+        f"""
+        SELECT d.name AS domain, COUNT(DISTINCT r.strategy_id) AS strategy_count
+        {base}
+        ORDER BY d.name ASC
+        LIMIT ? OFFSET ?
+        """,
+        [*query_params, *fragmentation_params, limit, offset],
     ).fetchall()
+    page_domains = [str(row["domain"]) for row in domain_rows]
+    if not page_domains:
+        return [], total, strategy_total
+    page_placeholders = ", ".join("?" for _item in page_domains)
     protocol_rows = conn.execute(
         f"""
         SELECT d.name AS domain, r.protocol AS protocol, COUNT(DISTINCT r.strategy_id) AS count
         FROM domains d
         JOIN strategy_domain_results r ON r.domain_id = d.id
         JOIN strategies s ON s.id = r.strategy_id
-        WHERE 1 = 1 {query_clause} {fragmentation_clause}
+        WHERE d.name IN ({page_placeholders}) {query_clause} {fragmentation_clause}
         GROUP BY d.id, d.name, r.protocol
         ORDER BY d.name ASC, r.protocol ASC
         """,
-        [*query_params, *fragmentation_params],
+        [*page_domains, *query_params, *fragmentation_params],
     ).fetchall()
     protocols: dict[str, list[dict[str, Any]]] = {}
     for row in protocol_rows:
         protocols.setdefault(str(row["domain"]), []).append(
             {"protocol": str(row["protocol"] or "unknown"), "count": int(row["count"] or 0)}
         )
-    return [
+    rows = [
         {
             "domain": str(row["domain"]),
             "strategy_count": int(row["strategy_count"] or 0),
@@ -798,6 +835,7 @@ def _read_candidate_domain_index_sql(
         }
         for row in domain_rows
     ]
+    return rows, total, strategy_total
 
 
 def _strategy_query_clause(query: str) -> tuple[str, list[Any]]:
@@ -828,8 +866,22 @@ def _fragmentation_query_clause(classes: list[str]) -> tuple[str, list[Any]]:
     return f"AND s.fragmentation_class IN ({placeholders})", list(classes)
 
 
-def read_runs(state_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
-    return [_compact_run(run) for run in read_run_payloads(state_dir, limit=limit)]
+def read_runs(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    return [_compact_run(run) for run in read_run_payloads(state_dir, limit=limit, offset=offset)]
+
+
+def read_runs_page(state_dir: Path, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    limit = _bounded_int(limit, default=50, minimum=1, maximum=1000)
+    offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
+    runs = [_compact_run(run) for run in read_latest_run_payloads(state_dir, limit=limit, offset=offset)]
+    total = count_latest_run_payloads(state_dir)
+    return {
+        "runs": runs,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(runs) < total,
+    }
 
 
 def _compact_run(run: dict[str, Any]) -> dict[str, Any]:

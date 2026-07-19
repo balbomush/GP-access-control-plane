@@ -49,6 +49,7 @@ from gp_control_plane.strategy_finder import (
     read_candidate_page,
     read_candidates,
     read_runs,
+    read_runs_page,
     run_standard_discovery,
     upsert_candidates,
     validate_domain_inputs,
@@ -950,6 +951,33 @@ pktws_check_https_tls12()
                 [{"protocol": "quic", "count": 2}, {"protocol": "tls", "count": 1}],
             )
 
+    def test_read_candidate_domain_index_limits_results_and_reports_total(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            candidates = [
+                {
+                    "id": f"tls-{index}",
+                    "protocol": "tls",
+                    "args": f"--strategy {index}",
+                    "status": "candidate",
+                    "seen": [{"domain": f"domain-{index}.test"}],
+                }
+                for index in range(3)
+            ]
+            _store_candidate_rows(state_dir, candidates)
+
+            first = read_candidate_domain_index(state_dir, limit=2)
+            second = read_candidate_domain_index(state_dir, limit=2, offset=2)
+
+            self.assertEqual(first["total"], 3)
+            self.assertEqual(first["strategy_total"], 3)
+            self.assertEqual(len(first["domains"]), 2)
+            self.assertTrue(first["has_more"])
+            self.assertEqual(first["offset"], 0)
+            self.assertEqual(len(second["domains"]), 1)
+            self.assertFalse(second["has_more"])
+            self.assertEqual(second["offset"], 2)
+
     def test_latest_log_tail_prefers_live_progress_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -1061,6 +1089,41 @@ pktws_check_https_tls12()
             self.assertEqual(runs[0]["id"], "run-heavy")
             self.assertNotIn("summary", runs[0])
             self.assertNotIn("results", runs[0])
+
+    def test_read_runs_page_returns_latest_run_states_with_pagination(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            for index in range(60):
+                append_run(
+                    state_dir,
+                    {
+                        "id": f"run-{index:02d}",
+                        "kind": "standard-discovery",
+                        "status": "running",
+                        "timestamp": f"2026-06-25T17:{index:02d}:00Z",
+                    },
+                )
+            append_run(
+                state_dir,
+                {
+                    "id": "run-59",
+                    "kind": "standard-discovery",
+                    "status": "success",
+                    "timestamp": "2026-06-25T18:00:00Z",
+                },
+            )
+
+            first = read_runs_page(state_dir, limit=50)
+            second = read_runs_page(state_dir, limit=50, offset=50)
+
+            self.assertEqual(first["total"], 60)
+            self.assertEqual(len(first["runs"]), 50)
+            self.assertTrue(first["has_more"])
+            self.assertEqual(first["runs"][-1]["id"], "run-59")
+            self.assertEqual(first["runs"][-1]["status"], "success")
+            self.assertEqual(len(second["runs"]), 10)
+            self.assertFalse(second["has_more"])
+            self.assertEqual(second["runs"][0]["id"], "run-00")
 
     def test_live_stdout_recorder_persists_success_without_full_stdout_parse(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

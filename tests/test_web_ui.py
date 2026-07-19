@@ -21,6 +21,24 @@ from gp_control_plane.web.app import index_html, serve
 
 
 class WebUiTests(unittest.TestCase):
+    def test_candidates_and_runs_use_50_item_load_more_pagination(self) -> None:
+        html = index_html()
+
+        self.assertIn("const LIST_PAGE_LIMIT = 50;", html)
+        self.assertIn("const CANDIDATE_PAGE_LIMIT = LIST_PAGE_LIMIT;", html)
+        self.assertIn("const DOMAIN_PAGE_LIMIT = LIST_PAGE_LIMIT;", html)
+        self.assertIn("const RUN_PAGE_LIMIT = LIST_PAGE_LIMIT;", html)
+        self.assertIn("params.set('limit', String(DOMAIN_PAGE_LIMIT));", html)
+        self.assertIn("params.set('limit', String(RUN_PAGE_LIMIT));", html)
+        self.assertIn("listLoadMore('load-more-candidates'", html)
+        self.assertIn("listLoadMore('load-more-candidate-domains'", html)
+        self.assertIn("listLoadMore('load-more-runs'", html)
+        self.assertIn('data-action="${esc(action)}"', html)
+        self.assertIn("Загрузить еще", html)
+        self.assertIn("refreshDomainIndex(false)", html)
+        self.assertIn("refreshRuns(false)", html)
+        self.assertNotIn(".slice(0, 12)", html)
+
     def test_index_html_is_focused_on_strategy_finder_only(self) -> None:
         html = index_html()
 
