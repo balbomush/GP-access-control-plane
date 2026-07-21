@@ -16,7 +16,7 @@ from .strategy_finder import (
     run_standard_discovery,
 )
 from .storage import storage_status
-from .web.app import serve
+from .web.app import serve, serve_core
 from .zapret2 import check_install
 
 
@@ -83,6 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     web_parser.add_argument("--host", default="0.0.0.0")
     web_parser.add_argument("--port", type=int, default=8080)
+    core_parser = subparsers.add_parser("core", help="Run API-only headless Core service")
+    core_parser.add_argument("--host", default="127.0.0.1")
+    core_parser.add_argument("--port", type=int, default=8081)
 
     return parser
 
@@ -166,6 +169,10 @@ def _main(args: argparse.Namespace) -> int:
 
     if args.command == "web":
         serve(config, host=args.host, port=args.port)
+        return 0
+
+    if args.command == "core":
+        serve_core(config, host=args.host, port=args.port)
         return 0
 
     raise ValueError(f"unsupported command: {args.command}")

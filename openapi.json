@@ -1,0 +1,2256 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GP Access Control Plane Core API",
+    "version": "0.1.0-research",
+    "description": "First-level future API contract for the headless runtime and штатный Web UI. This contract is a research artifact: it defines target namespaces and payload shape before the service split is implemented."
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Current compatibility mode and future штатный Web UI entrypoint"
+    },
+    {
+      "url": "http://127.0.0.1:8081",
+      "description": "Future local Core service entrypoint"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Reserved namespace. The auth model is deferred to a separate architecture decision."
+    },
+    {
+      "name": "Core Status",
+      "description": "Product/core runtime state."
+    },
+    {
+      "name": "Core Strategy Discovery",
+      "description": "Start, stop, progress, logs and preflight for strategy discovery."
+    },
+    {
+      "name": "Core Presets",
+      "description": "Domain lists and v2fly-assisted domain selection."
+    },
+    {
+      "name": "Core Backups",
+      "description": "Backup, upload, download and restore of internal GP data."
+    },
+    {
+      "name": "Core Runs",
+      "description": "Full run history, run logs and strategy candidates."
+    },
+    {
+      "name": "Core Settings",
+      "description": "Settings that affect real strategy discovery runs."
+    },
+    {
+      "name": "Core Events",
+      "description": "Normalized product events."
+    },
+    {
+      "name": "Service Status",
+      "description": "Installed GP service state and normalized service diagnostics."
+    },
+    {
+      "name": "Service Releases",
+      "description": "Release channel, available releases and installation actions."
+    },
+    {
+      "name": "Service V2fly",
+      "description": "Local v2fly storage status and update actions."
+    },
+    {
+      "name": "Web Slices",
+      "description": "Штатный Web UI optimized list slices, pagination and screen-specific views."
+    }
+  ],
+  "paths": {
+    "/api/core/status": {
+      "get": {
+        "tags": [
+          "Core Status"
+        ],
+        "operationId": "getCoreStatus",
+        "summary": "Get current product runtime state",
+        "description": "Answers what the GP product core is doing now: current discovery run, core jobs and product runtime state.",
+        "responses": {
+          "200": {
+            "description": "Current core state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoreStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/strategy-discovery/start-run": {
+      "post": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "startStrategyDiscoveryRun",
+        "summary": "Start a strategy discovery run",
+        "description": "Routes a discovery request by mode. The request contains final concrete domains and settings, not a preset id or live preset link.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Run accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/strategy-discovery/stop-current-run": {
+      "post": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "stopCurrentStrategyDiscoveryRun",
+        "summary": "Stop the current strategy discovery run",
+        "responses": {
+          "202": {
+            "description": "Stop requested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionAccepted"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/strategy-discovery/current-run-progress": {
+      "get": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "getCurrentStrategyDiscoveryProgress",
+        "summary": "Get current run progress",
+        "responses": {
+          "200": {
+            "description": "Current run progress or idle state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunProgress"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/strategy-discovery/current-run-latest-log": {
+      "get": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "getCurrentStrategyDiscoveryLatestLog",
+        "summary": "Get latest log tail for the current run",
+        "responses": {
+          "200": {
+            "description": "Latest run log tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunLogTail"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/strategy-discovery/preflight": {
+      "get": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "getStrategyDiscoveryPreflight",
+        "summary": "Check discovery prerequisites",
+        "description": "Checks GP/zapret/v2fly prerequisites needed to start discovery. It reports product readiness, not OS monitoring metrics.",
+        "responses": {
+          "200": {
+            "description": "Preflight facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/presets/domain-lists": {
+      "get": {
+        "tags": [
+          "Core Presets"
+        ],
+        "operationId": "getDomainLists",
+        "summary": "List stored domain lists",
+        "description": "Returns only real stored lists: required first, desired second, then user lists in storage order.",
+        "responses": {
+          "200": {
+            "description": "Stored domain lists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainListsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/presets/save-domain-list": {
+      "post": {
+        "tags": [
+          "Core Presets"
+        ],
+        "operationId": "saveDomainList",
+        "summary": "Save one domain list",
+        "description": "Saves one required, desired or user domain list. The list contents replace the previous contents of that list.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveDomainListRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainList"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/presets/delete-user-domain-list": {
+      "post": {
+        "tags": [
+          "Core Presets"
+        ],
+        "operationId": "deleteUserDomainList",
+        "summary": "Delete one user domain list",
+        "description": "Deletes a user-created list. Required and desired lists cannot be deleted by this method.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteDomainListRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "List deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/presets/delete-user-lists": {
+      "post": {
+        "tags": [
+          "Core Presets"
+        ],
+        "operationId": "deleteUserDomainLists",
+        "summary": "Delete all user domain lists",
+        "responses": {
+          "200": {
+            "description": "User lists deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/presets/v2fly/categories": {
+      "get": {
+        "tags": [
+          "Core Presets"
+        ],
+        "operationId": "getV2flyCategories",
+        "summary": "List local v2fly categories",
+        "description": "Returns categories from prepared local v2fly storage. If storage is not ready, returns a structured error.",
+        "responses": {
+          "200": {
+            "description": "v2fly categories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2flyCategoriesResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/presets/v2fly/category-domains": {
+      "get": {
+        "tags": [
+          "Core Presets"
+        ],
+        "operationId": "getV2flyCategoryDomains",
+        "summary": "Get domains from one v2fly category",
+        "parameters": [
+          {
+            "name": "category",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Domains from the requested category",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2flyCategoryDomainsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/backups/create": {
+      "post": {
+        "tags": [
+          "Core Backups"
+        ],
+        "operationId": "createBackup",
+        "summary": "Create a GP data backup",
+        "responses": {
+          "201": {
+            "description": "Backup created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/backups/list": {
+      "get": {
+        "tags": [
+          "Core Backups"
+        ],
+        "operationId": "listBackups",
+        "summary": "List local backups",
+        "responses": {
+          "200": {
+            "description": "Backups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/backups/restore": {
+      "post": {
+        "tags": [
+          "Core Backups"
+        ],
+        "operationId": "restoreBackup",
+        "summary": "Restore a GP data backup",
+        "description": "Restores a selected snapshot after UI/client confirmation. There is no separate restore-preview endpoint in the target contract.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Restore accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionAccepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/backups/delete": {
+      "post": {
+        "tags": [
+          "Core Backups"
+        ],
+        "operationId": "deleteBackup",
+        "summary": "Delete a backup snapshot",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backup deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/backups/download-file": {
+      "get": {
+        "tags": [
+          "Core Backups"
+        ],
+        "operationId": "downloadBackupFile",
+        "summary": "Download a backup archive",
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backup ZIP archive",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/backups/upload": {
+      "post": {
+        "tags": [
+          "Core Backups"
+        ],
+        "operationId": "uploadBackupFile",
+        "summary": "Upload a backup archive",
+        "description": "Accepts a ZIP backup, validates structure, checksum and compatibility, then imports it into backup storage.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            },
+            "application/zip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Backup imported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/run-settings": {
+      "get": {
+        "tags": [
+          "Core Settings"
+        ],
+        "operationId": "getRunSettings",
+        "summary": "Get discovery run settings",
+        "responses": {
+          "200": {
+            "description": "Run settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/run-settings/save": {
+      "post": {
+        "tags": [
+          "Core Settings"
+        ],
+        "operationId": "saveRunSettings",
+        "summary": "Save discovery run settings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunSettings"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved run settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/runs/history": {
+      "get": {
+        "tags": [
+          "Core Runs"
+        ],
+        "operationId": "getRunHistory",
+        "summary": "Get full run history",
+        "description": "Returns product run history without UI pagination. UI slices belong to /api/web/...",
+        "responses": {
+          "200": {
+            "description": "Run history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunHistoryResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/runs/latest-log": {
+      "get": {
+        "tags": [
+          "Core Runs"
+        ],
+        "operationId": "getRunLatestLog",
+        "summary": "Get latest log tail for a run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run log tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunLogTail"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/strategy-candidates": {
+      "get": {
+        "tags": [
+          "Core Runs"
+        ],
+        "operationId": "getStrategyCandidates",
+        "summary": "Get full strategy candidate set",
+        "description": "Returns normalized product candidate data. UI grouping and pagination belong to /api/web/...",
+        "responses": {
+          "200": {
+            "description": "Strategy candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyCandidatesResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/core/events": {
+      "get": {
+        "tags": [
+          "Core Events"
+        ],
+        "operationId": "getCoreEvents",
+        "summary": "Get normalized product events",
+        "parameters": [
+          {
+            "name": "after_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/status": {
+      "get": {
+        "tags": [
+          "Service Status"
+        ],
+        "operationId": "getServiceStatus",
+        "summary": "Get installed GP service status",
+        "description": "Answers whether the installed GP service and its data/install state are alive.",
+        "responses": {
+          "200": {
+            "description": "Service status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/diagnostics": {
+      "get": {
+        "tags": [
+          "Service Status"
+        ],
+        "operationId": "getServiceDiagnostics",
+        "summary": "Get normalized GP service diagnostics",
+        "description": "Returns normalized GP facts only. OS CPU/RAM/load metrics and UI cards are intentionally out of scope.",
+        "responses": {
+          "200": {
+            "description": "Diagnostics facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceDiagnostics"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/releases/available": {
+      "get": {
+        "tags": [
+          "Service Releases"
+        ],
+        "operationId": "getAvailableReleases",
+        "summary": "Get available GP releases",
+        "responses": {
+          "200": {
+            "description": "Available releases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableReleases"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/releases/install-channel": {
+      "get": {
+        "tags": [
+          "Service Releases"
+        ],
+        "operationId": "getReleaseInstallChannel",
+        "summary": "Get release install channel",
+        "responses": {
+          "200": {
+            "description": "Install channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallChannel"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/releases/set-install-channel": {
+      "post": {
+        "tags": [
+          "Service Releases"
+        ],
+        "operationId": "setReleaseInstallChannel",
+        "summary": "Set release install channel",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallChannel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved install channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallChannel"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/releases/install": {
+      "post": {
+        "tags": [
+          "Service Releases"
+        ],
+        "operationId": "installRelease",
+        "summary": "Install the selected GP release",
+        "description": "Starts installation if allowed. If blocked, returns a structured reason without starting root-helper.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallReleaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Install accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionAccepted"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/v2fly/local-storage-status": {
+      "get": {
+        "tags": [
+          "Service V2fly"
+        ],
+        "operationId": "getV2flyLocalStorageStatus",
+        "summary": "Get local v2fly storage status",
+        "responses": {
+          "200": {
+            "description": "Local v2fly storage status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2flyStorageStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/v2fly/check-updates": {
+      "post": {
+        "tags": [
+          "Service V2fly"
+        ],
+        "operationId": "checkV2flyUpdates",
+        "summary": "Check v2fly source updates",
+        "responses": {
+          "202": {
+            "description": "Update check accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionAccepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/service/v2fly/update-local-storage": {
+      "post": {
+        "tags": [
+          "Service V2fly"
+        ],
+        "operationId": "updateV2flyLocalStorage",
+        "summary": "Update local v2fly storage",
+        "responses": {
+          "202": {
+            "description": "Storage update accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionAccepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/runs/history-page": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebRunHistoryPage",
+        "summary": "Get a paginated run history page for штатный Web UI",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated run history page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PagedRunHistoryResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/strategy-candidates-page": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebStrategyCandidatesPage",
+        "summary": "Get a paginated strategy candidates page for штатный Web UI",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated strategy candidates page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PagedStrategyCandidatesResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/events": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebEvents",
+        "summary": "Get a штатный Web UI event slice",
+        "parameters": [
+          {
+            "name": "after_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "UI event slice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "GpToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Reserved for the future auth model. Token lifetime and login flow are intentionally not defined in this research contract."
+      }
+    },
+    "parameters": {
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 50
+        }
+      },
+      "Offset": {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Structured error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ActionAccepted": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "status"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "const": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AvailableReleases": {
+        "type": "object",
+        "required": [
+          "current",
+          "releases"
+        ],
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/InstalledVersion"
+          },
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseInfo"
+            }
+          },
+          "stable_release_url": {
+            "type": "string"
+          },
+          "prerelease_url": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BackupActionRequest": {
+        "type": "object",
+        "required": [
+          "snapshot_id"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "BackupSnapshot": {
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "created_at",
+          "schema_version"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "schema_version": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "checksum": {
+            "type": "string"
+          },
+          "entity_counts": {
+            "$ref": "#/components/schemas/EntityCounts"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BackupsResponse": {
+        "type": "object",
+        "required": [
+          "backups"
+        ],
+        "properties": {
+          "backups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BackupSnapshot"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CoreStatus": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "stopping",
+              "degraded",
+              "error"
+            ]
+          },
+          "current_run": {
+            "$ref": "#/components/schemas/RunRef"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/StorageStatus"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteDomainListRequest": {
+        "type": "object",
+        "properties": {
+          "list_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteResult": {
+        "type": "object",
+        "required": [
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DomainList": {
+        "type": "object",
+        "required": [
+          "list_id",
+          "kind",
+          "name",
+          "domains"
+        ],
+        "properties": {
+          "list_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "required",
+              "desired",
+              "user"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DomainListsResponse": {
+        "type": "object",
+        "required": [
+          "lists"
+        ],
+        "properties": {
+          "lists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DomainList"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "EntityCounts": {
+        "type": "object",
+        "properties": {
+          "domains": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "strategies": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "strategy_domain_links": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "domain_lists": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "settings": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "type",
+          "created_at"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "EventsResponse": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "next_after_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InstallChannel": {
+        "type": "object",
+        "required": [
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "prerelease"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "InstallReleaseRequest": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "prerelease"
+            ]
+          },
+          "target_ref": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InstalledVersion": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "installed_ref": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PagedRunHistoryResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RunHistoryResponse"
+          },
+          {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        ]
+      },
+      "PagedStrategyCandidatesResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StrategyCandidatesResponse"
+          },
+          {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        ]
+      },
+      "Pagination": {
+        "type": "object",
+        "required": [
+          "limit",
+          "offset",
+          "total",
+          "has_more"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PreflightStatus": {
+        "type": "object",
+        "required": [
+          "ready",
+          "checks"
+        ],
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreflightCheck"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PreflightCheck": {
+        "type": "object",
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "error",
+              "unknown"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleaseInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "channel",
+          "ref"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "prerelease"
+            ]
+          },
+          "ref": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunAccepted": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "run_id",
+          "status"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "const": true
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunHistoryItem": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "started_at"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RunMode"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunHistoryResponse": {
+        "type": "object",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunHistoryItem"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunLogTail": {
+        "type": "object",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunMode": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "multi_domain",
+          "common_strategy"
+        ]
+      },
+      "RunProgress": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "current_file": {
+            "type": "string"
+          },
+          "domains_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "domains_processed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "attempts_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "attempts_processed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "strategies_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "strategies_processed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "elapsed_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "eta_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "avg_attempt_seconds": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunRef": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunSettings": {
+        "type": "object",
+        "properties": {
+          "curl_parallelism_default": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "curl_parallelism_max": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "curl_max_time": {
+            "type": "number",
+            "minimum": 1
+          },
+          "curl_max_time_quic": {
+            "type": "number",
+            "minimum": 1
+          },
+          "curl_max_time_doh": {
+            "type": "number",
+            "minimum": 1
+          },
+          "enable_ipv6": {
+            "type": "boolean"
+          },
+          "debug_stdout": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunStatus": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "queued",
+          "running",
+          "stopping",
+          "stopped",
+          "success",
+          "failed",
+          "timeout"
+        ]
+      },
+      "SaveDomainListRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "domains"
+        ],
+        "properties": {
+          "list_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "required",
+              "desired",
+              "user"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceDiagnostics": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "$ref": "#/components/schemas/InstalledVersion"
+          },
+          "service": {
+            "$ref": "#/components/schemas/ServiceStatus"
+          },
+          "external_sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceFact"
+            }
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceFact"
+            }
+          },
+          "log_tail": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceFact": {
+        "type": "object",
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceStatus": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "inactive",
+              "degraded",
+              "error",
+              "unknown"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/InstalledVersion"
+          },
+          "data_state": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StartRunRequest": {
+        "type": "object",
+        "required": [
+          "mode",
+          "domains"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/RunMode"
+          },
+          "domains": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "protocols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "tcp",
+                "quic"
+              ]
+            }
+          },
+          "curl_parallelism": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "mode_settings": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "StorageStatus": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "schema_version": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state_dir": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StrategyCandidate": {
+        "type": "object",
+        "required": [
+          "strategy_id"
+        ],
+        "properties": {
+          "strategy_id": {
+            "type": "string"
+          },
+          "strategy_name": {
+            "type": "string"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "domain_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "protocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "facts": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "StrategyCandidatesResponse": {
+        "type": "object",
+        "required": [
+          "candidates"
+        ],
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StrategyCandidate"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "V2flyCategoriesResponse": {
+        "type": "object",
+        "required": [
+          "categories"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2flyCategory"
+            }
+          },
+          "storage": {
+            "$ref": "#/components/schemas/V2flyStorageStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "V2flyCategory": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "domain_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "V2flyCategoryDomainsResponse": {
+        "type": "object",
+        "required": [
+          "category",
+          "domains"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "storage": {
+            "$ref": "#/components/schemas/V2flyStorageStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "V2flyStorageStatus": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "missing",
+              "preparing",
+              "error",
+              "unknown"
+            ]
+          },
+          "source_repo": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": "string"
+          },
+          "source_commit": {
+            "type": "string"
+          },
+          "prepared_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "group_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "archive_sha256": {
+            "type": "string"
+          },
+          "catalog_sha256": {
+            "type": "string"
+          },
+          "last_update_check": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "x-gp-contract-stage": "research-first-level",
+  "x-gp-decisions": {
+    "runtime": "web-service-proxies-api-to-local-core-service",
+    "auth": "deferred",
+    "legacy_api_compatibility": "deferred-to-migration-stage",
+    "web_ui_install_default": "install",
+    "headless_install": "explicit-opt-out-from-web-ui"
+  }
+}

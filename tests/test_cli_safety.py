@@ -41,6 +41,10 @@ class CliSafetyTests(unittest.TestCase):
             parser.parse_args(["domain-sources", "prepare-v2fly"]).domain_sources_command,
             "prepare-v2fly",
         )
+        core_args = parser.parse_args(["core"])
+        self.assertEqual(core_args.command, "core")
+        self.assertEqual(core_args.host, "127.0.0.1")
+        self.assertEqual(core_args.port, 8081)
         standard_args = parser.parse_args(
             [
                 "strategy-finder",

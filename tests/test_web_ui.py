@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.web import app as web_app
-from gp_control_plane.web.app import index_html, serve
+from gp_control_plane.web.app import index_html, serve, serve_core
 
 
 class WebUiTests(unittest.TestCase):
@@ -1057,6 +1057,37 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"mtime_ns"', body)
             self.assertIn('"release_update"', body)
             self.assertIn('"status":"success"', body)
+
+    def test_core_mode_serves_api_without_web_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/")
+            root_response = connection.getresponse()
+            root_body = root_response.read().decode("utf-8")
+            connection.close()
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/status")
+            api_response = connection.getresponse()
+            api_body = api_response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(root_response.status, 404)
+            self.assertIn("web ui is disabled", root_body)
+            self.assertNotIn("<!doctype html>", root_body.lower())
+            self.assertEqual(api_response.status, 200)
+            self.assertIn('"version"', api_body)
 
     def test_web_auth_token_protects_mutating_api_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

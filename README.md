@@ -298,6 +298,12 @@ python -m pip install -e .
 gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080
 ```
 
+Для API-only headless runtime без штатного Web UI:
+
+```bash
+gp-control-plane core --state-dir ./build/state --host 127.0.0.1 --port 8081
+```
+
 Ручная установка выше не показывает все шаги установки `zapret2` и автозапуска. Для обычного использования проще и надежнее запускать `scripts/install-raspberry-pi.sh`.
 
 ## Тесты для разработчика

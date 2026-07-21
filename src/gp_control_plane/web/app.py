@@ -123,7 +123,7 @@ def _web_auth_public_payload(web_auth: dict[str, Any] | None = None, *, include_
     return payload
 
 
-def serve(config: AppConfig, host: str, port: int) -> None:
+def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -> None:
     _clear_stale_current_job(config)
     close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_snapshot_if_idle(config.output.state_dir))
@@ -137,7 +137,10 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             if path in SENSITIVE_GET_PATHS and not self._authorize_web_request(path, query, web_auth, check_origin=False):
                 return
             if path == "/":
-                self._html(web_auth)
+                if ui_enabled:
+                    self._html(web_auth)
+                else:
+                    self._json({"error": "web ui is disabled in core mode"}, status=HTTPStatus.NOT_FOUND)
             elif path == "/api/status":
                 self._json(status_payload(config, web_auth=web_auth))
             elif path == "/api/events":
@@ -186,8 +189,11 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         def do_HEAD(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/":
-                data = index_html(web_auth).encode("utf-8")
-                self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
+                if ui_enabled:
+                    data = index_html(web_auth).encode("utf-8")
+                    self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
+                else:
+                    self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
             elif path == "/api/events":
                 self._head(HTTPStatus.OK, "text/event-stream; charset=utf-8", 0)
             elif path in {
@@ -559,8 +565,13 @@ def serve(config: AppConfig, host: str, port: int) -> None:
             return parsed
 
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"GP control plane web UI listening on http://{host}:{port}")
+    mode = "web UI" if ui_enabled else "core API"
+    print(f"GP control plane {mode} listening on http://{host}:{port}")
     server.serve_forever()
+
+
+def serve_core(config: AppConfig, host: str = "127.0.0.1", port: int = 8081) -> None:
+    serve(config, host=host, port=port, ui_enabled=False)
 
 
 def index_html(web_auth: dict[str, Any] | None = None) -> str:
