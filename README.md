@@ -10,6 +10,14 @@
 curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
 ```
 
+Headless-установка без штатного Web UI:
+
+```bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | GP_INSTALL_WEB=off bash
+```
+
+В headless-режиме systemd запускает API-only Core service на `127.0.0.1:8081` по умолчанию. Внешний bind для Core API задается явно через `GP_CORE_HOST` и `GP_CORE_PORT`.
+
 Что сделает скрипт:
 
 - обновит систему через `apt`;
@@ -21,7 +29,7 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scrip
 - подготовит локальный каталог групп `v2fly/domain-list-community` для импорта доменных списков без live-запросов из web UI;
 - установит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
 - создаст и включит systemd-сервис;
-- запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi.
+- по умолчанию запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi; при `GP_INSTALL_WEB=off` вместо него запустит API-only Core service.
 
 Установка рассчитана на Raspberry Pi OS. Скрипт можно запускать из-под любого пользователя с правом `sudo`.
 
