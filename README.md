@@ -18,6 +18,13 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scrip
 
 Обычная установка запускает два systemd-сервиса: `gp-control-plane-core.service` на `127.0.0.1:8081` и `gp-control-plane-web.service` на `0.0.0.0:8080`. Web service отдает штатный интерфейс и проксирует `/api/*` в Core service. В headless-режиме systemd запускает только API-only Core service. Внешний bind для Core API задается явно через `GP_CORE_HOST` и `GP_CORE_PORT`.
 
+API-контракт можно открыть в браузере:
+
+- Swagger UI: `http://<board>:8080/swagger`;
+- raw OpenAPI JSON: `http://<board>:8080/openapi.json`.
+
+В headless-only режиме эти же маршруты доступны на локальном Core API: `http://127.0.0.1:8081/swagger` и `http://127.0.0.1:8081/openapi.json`.
+
 Что сделает скрипт:
 
 - обновит систему через `apt`;

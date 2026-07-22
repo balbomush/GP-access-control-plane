@@ -1089,6 +1089,33 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(api_response.status, 200)
             self.assertIn('"version"', api_body)
 
+    def test_openapi_and_swagger_are_served_by_monolith_and_core_mode(self) -> None:
+        for target in (serve, serve_core):
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                port = _free_port()
+                thread = threading.Thread(target=target, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                status, headers, body = _http_request(port, "/openapi.json")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+                self.assertEqual(json.loads(body.decode("utf-8"))["openapi"], "3.1.0")
+
+                status, headers, body = _http_request(port, "/swagger")
+                swagger_html = body.decode("utf-8")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
+                self.assertIn("SwaggerUIBundle", swagger_html)
+                self.assertIn("url: '/openapi.json'", swagger_html)
+
+                status, headers, body = _http_request(port, "/swagger", method="HEAD")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
+                self.assertEqual(body, b"")
+
     def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -1144,14 +1171,18 @@ class WebUiTests(unittest.TestCase):
             thread.start()
             time.sleep(0.1)
 
-            connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
-            connection.request("GET", "/api/status")
-            response = connection.getresponse()
-            body = response.read().decode("utf-8")
-            connection.close()
+            openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json")
+            swagger_status, swagger_headers, swagger_body = _http_request(web_port, "/swagger")
+            status, _, body = _http_request(web_port, "/api/status")
 
-            self.assertEqual(response.status, 502)
-            self.assertIn("core api is unavailable", body)
+            self.assertEqual(openapi_status, 200)
+            self.assertEqual(openapi_headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual(json.loads(openapi_body.decode("utf-8"))["openapi"], "3.1.0")
+            self.assertEqual(swagger_status, 200)
+            self.assertEqual(swagger_headers.get("content-type"), "text/html; charset=utf-8")
+            self.assertIn("SwaggerUIBundle", swagger_body.decode("utf-8"))
+            self.assertEqual(status, 502)
+            self.assertIn("core api is unavailable", body.decode("utf-8"))
 
     def test_web_auth_token_protects_mutating_api_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1575,6 +1606,16 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _http_request(port: int, path: str, *, method: str = "GET") -> tuple[int, dict[str, str], bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection.request(method, path)
+    response = connection.getresponse()
+    headers = {key.lower(): value for key, value in response.getheaders()}
+    body = response.read()
+    connection.close()
+    return response.status, headers, body
 
 
 if __name__ == "__main__":

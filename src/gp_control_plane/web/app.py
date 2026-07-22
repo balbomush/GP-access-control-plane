@@ -85,6 +85,77 @@ PROXY_SKIP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+OPENAPI_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+SWAGGER_HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+SWAGGER_PATHS = {"/swagger", "/swagger/"}
+
+
+def openapi_json_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "openapi.json"
+
+
+def openapi_json_bytes() -> bytes:
+    return openapi_json_path().read_bytes()
+
+
+def swagger_ui_html() -> str:
+    return """<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GP Control Plane API</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #f8fafc; }
+    .topbar { display: none; }
+    .swagger-ui .info { margin: 24px 0; }
+    .swagger-ui .scheme-container { box-shadow: none; border: 1px solid #e2e8f0; }
+    .swagger-ui .wrapper { max-width: 1280px; }
+    .offline {
+      margin: 24px;
+      padding: 16px 18px;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      background: #fff1f2;
+      color: #7f1d1d;
+      font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .offline a { color: #991b1b; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <noscript>
+    <div class="offline">Для Swagger UI нужен JavaScript. Raw OpenAPI доступен по адресу <a href="/openapi.json">/openapi.json</a>.</div>
+  </noscript>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.addEventListener('load', () => {
+      if (!window.SwaggerUIBundle || !window.SwaggerUIStandalonePreset) {
+        document.getElementById('swagger-ui').innerHTML =
+          '<div class="offline">Не удалось загрузить Swagger UI. Raw OpenAPI доступен по адресу <a href="/openapi.json">/openapi.json</a>.</div>';
+        return;
+      }
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        displayRequestDuration: true,
+        docExpansion: 'list',
+        defaultModelsExpandDepth: 1,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        layout: 'BaseLayout'
+      });
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 def web_auth_config() -> dict[str, Any]:
@@ -152,6 +223,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self._html(web_auth)
                 else:
                     self._json({"error": "web ui is disabled in core mode"}, status=HTTPStatus.NOT_FOUND)
+            elif path == "/openapi.json":
+                self._openapi_json()
+            elif path in SWAGGER_PATHS:
+                self._swagger()
             elif path == "/api/status":
                 self._json(status_payload(config, web_auth=web_auth))
             elif path == "/api/events":
@@ -205,6 +280,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
                 else:
                     self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
+            elif path == "/openapi.json":
+                self._head_openapi_json()
+            elif path in SWAGGER_PATHS:
+                data = swagger_ui_html().encode("utf-8")
+                self._head(HTTPStatus.OK, SWAGGER_HTML_CONTENT_TYPE, len(data))
             elif path == "/api/events":
                 self._head(HTTPStatus.OK, "text/event-stream; charset=utf-8", 0)
             elif path in {
@@ -414,6 +494,17 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             self.end_headers()
             self.wfile.write(data)
 
+        def _swagger(self) -> None:
+            self._bytes(swagger_ui_html().encode("utf-8"), SWAGGER_HTML_CONTENT_TYPE, cache_control="no-store")
+
+        def _openapi_json(self) -> None:
+            try:
+                data = openapi_json_bytes()
+            except OSError as exc:
+                self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._bytes(data, OPENAPI_JSON_CONTENT_TYPE, cache_control="no-store")
+
         def _events(self) -> None:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -513,6 +604,15 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     self.wfile.write(chunk)
 
+        def _bytes(self, data: bytes, content_type: str, *, cache_control: str | None = None) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _head(self, status: HTTPStatus, content_type: str, content_length: int) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -520,6 +620,14 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(content_length))
             self.end_headers()
+
+        def _head_openapi_json(self) -> None:
+            try:
+                size = openapi_json_path().stat().st_size
+            except OSError:
+                self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
+                return
+            self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, size)
 
         def _not_found(self) -> None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -612,6 +720,16 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 else:
                     self._html(data)
                 return
+            if path == "/openapi.json" and self.command in {"GET", "HEAD"}:
+                self._openapi_json()
+                return
+            if path in SWAGGER_PATHS and self.command in {"GET", "HEAD"}:
+                data = swagger_ui_html().encode("utf-8")
+                if self.command == "HEAD":
+                    self._head(HTTPStatus.OK, SWAGGER_HTML_CONTENT_TYPE, len(data))
+                else:
+                    self._bytes(data, SWAGGER_HTML_CONTENT_TYPE, cache_control="no-store")
+                return
             if path.startswith("/api/"):
                 self._proxy_to_core()
                 return
@@ -679,6 +797,26 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.send_header("Cache-Control", "no-store")
             if web_auth.get("enabled") and web_auth.get("configured"):
                 self.send_header("Set-Cookie", f"{AUTH_QUERY_PARAM}={web_auth.get('token')}; Path=/; SameSite=Strict")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _openapi_json(self) -> None:
+            try:
+                data = openapi_json_bytes()
+            except OSError as exc:
+                self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            if self.command == "HEAD":
+                self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, len(data))
+            else:
+                self._bytes(data, OPENAPI_JSON_CONTENT_TYPE, cache_control="no-store")
+
+        def _bytes(self, data: bytes, content_type: str, *, cache_control: str | None = None) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
