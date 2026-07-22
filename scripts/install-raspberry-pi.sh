@@ -11,6 +11,7 @@ WEB_PORT="${GP_WEB_PORT:-8080}"
 WEB_ENV_FILE="${GP_WEB_ENV_FILE:-/etc/default/gp-control-plane-web}"
 CORE_HOST="${GP_CORE_HOST:-127.0.0.1}"
 CORE_PORT="${GP_CORE_PORT:-8081}"
+CORE_URL="${GP_CORE_URL:-http://$CORE_HOST:$CORE_PORT}"
 CORE_ENV_FILE="${GP_CORE_ENV_FILE:-/etc/default/gp-control-plane-core}"
 WEB_AUTH="${GP_WEB_AUTH:-on}"
 ZAPRET_REPO_URL="${ZAPRET_REPO_URL:-https://github.com/bol-van/zapret2.git}"
@@ -32,8 +33,8 @@ Default is --steps all. Available steps:
   packages,zapret,app,v2fly,root-helper,service,check
 
 Runtime:
-  GP_INSTALL_WEB=on   installs the штатный Web UI service on GP_WEB_HOST:GP_WEB_PORT.
-  GP_INSTALL_WEB=off  installs API-only Core service on GP_CORE_HOST:GP_CORE_PORT.
+  GP_INSTALL_WEB=on   installs Core service and штатный Web UI proxy service.
+  GP_INSTALL_WEB=off  installs only API-only Core service on GP_CORE_HOST:GP_CORE_PORT.
 USAGE
 }
 
@@ -121,21 +122,8 @@ install_web_enabled() {
   esac
 }
 
-if install_web_enabled; then
-  RUNTIME_SERVICE_NAME="$SERVICE_NAME"
-  RUNTIME_ENV_FILE="$WEB_ENV_FILE"
-  RUNTIME_HOST="$WEB_HOST"
-  RUNTIME_PORT="$WEB_PORT"
-  RUNTIME_COMMAND="web"
-  RUNTIME_DESCRIPTION="GP Strategy Finder Web UI"
-else
-  RUNTIME_SERVICE_NAME="$CORE_SERVICE_NAME"
-  RUNTIME_ENV_FILE="$CORE_ENV_FILE"
-  RUNTIME_HOST="$CORE_HOST"
-  RUNTIME_PORT="$CORE_PORT"
-  RUNTIME_COMMAND="core"
-  RUNTIME_DESCRIPTION="GP Strategy Finder Core API"
-fi
+SERVICE_TOKEN_RESOLVED="off"
+SERVICE_TOKEN=""
 
 CURRENT_UID="$(id -u)"
 CURRENT_USER="$(id -un)"
@@ -205,19 +193,25 @@ generate_web_token() {
   run_as_target python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 }
 
+resolve_service_token() {
+  [ "$SERVICE_TOKEN_RESOLVED" = "on" ] && return 0
+  SERVICE_TOKEN="${GP_WEB_TOKEN:-}"
+  if [ "$WEB_AUTH" != "off" ] && [ -z "$SERVICE_TOKEN" ]; then
+    SERVICE_TOKEN="$(generate_web_token)"
+  fi
+  SERVICE_TOKEN_RESOLVED="on"
+}
+
 install_service_env_file() {
   env_file="$1"
-  token="${GP_WEB_TOKEN:-}"
-  if [ "$WEB_AUTH" != "off" ] && [ -z "$token" ]; then
-    token="$(generate_web_token)"
-  fi
+  resolve_service_token
   TMP_WEB_ENV="$(mktemp)"
   {
     printf 'GP_WEB_AUTH=%s\n' "$WEB_AUTH"
     state_dir_escaped="$(printf '%s' "$INSTALL_DIR/build/state" | sed "s/'/'\\\\''/g")"
     printf "GP_STATE_DIR='%s'\n" "$state_dir_escaped"
-    if [ -n "$token" ]; then
-      token_escaped="$(printf '%s' "$token" | sed "s/'/'\\\\''/g")"
+    if [ -n "$SERVICE_TOKEN" ]; then
+      token_escaped="$(printf '%s' "$SERVICE_TOKEN" | sed "s/'/'\\\\''/g")"
       printf "GP_WEB_TOKEN='%s'\n" "$token_escaped"
     fi
   } > "$TMP_WEB_ENV"
@@ -227,6 +221,56 @@ install_service_env_file() {
 
 install_web_env_file() {
   install_service_env_file "$WEB_ENV_FILE"
+}
+
+install_systemd_service() {
+  service_name="$1"
+  description="$2"
+  command_name="$3"
+  host="$4"
+  port="$5"
+  env_file="$6"
+  extra_args="${7:-}"
+  after_extra="${8:-}"
+  wants_extra="${9:-}"
+  after_line="network-online.target"
+  wants_line="network-online.target"
+  [ -z "$after_extra" ] || after_line="$after_line $after_extra"
+  [ -z "$wants_extra" ] || wants_line="$wants_line $wants_extra"
+  exec_start="$INSTALL_DIR/.venv/bin/gp-control-plane $command_name --host $host --port $port"
+  [ -z "$extra_args" ] || exec_start="$exec_start $extra_args"
+  privileged_env=""
+  if [ "$command_name" = "core" ]; then
+    privileged_env="Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
+Environment=GP_ZAPRET_DIR=$ZAPRET_DIR"
+  fi
+  TMP_SERVICE="$(mktemp)"
+  cat > "$TMP_SERVICE" <<SERVICE
+[Unit]
+Description=$description
+After=$after_line
+Wants=$wants_line
+
+[Service]
+Type=simple
+User=$TARGET_USER
+WorkingDirectory=$INSTALL_DIR
+Environment=HOME=$TARGET_HOME
+Environment=PATH=$SERVICE_PATH
+$privileged_env
+EnvironmentFile=-$env_file
+ExecStart=$exec_start
+MemoryAccounting=true
+MemoryHigh=$SERVICE_MEMORY_HIGH
+MemoryMax=$SERVICE_MEMORY_MAX
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+  as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$service_name"
+  rm -f "$TMP_SERVICE"
 }
 
 prepare_v2fly_local_catalog() {
@@ -389,44 +433,28 @@ if step_log root-helper "Installing GP root helper"; then
 fi
 
 if step_log service "Creating and starting systemd service"; then
-  install_service_env_file "$RUNTIME_ENV_FILE"
-  TMP_SERVICE="$(mktemp)"
-  cat > "$TMP_SERVICE" <<SERVICE
-[Unit]
-Description=$RUNTIME_DESCRIPTION
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$TARGET_USER
-WorkingDirectory=$INSTALL_DIR
-Environment=HOME=$TARGET_HOME
-Environment=PATH=$SERVICE_PATH
-Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
-Environment=GP_ZAPRET_DIR=$ZAPRET_DIR
-EnvironmentFile=-$RUNTIME_ENV_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane $RUNTIME_COMMAND --host $RUNTIME_HOST --port $RUNTIME_PORT
-MemoryAccounting=true
-MemoryHigh=$SERVICE_MEMORY_HIGH
-MemoryMax=$SERVICE_MEMORY_MAX
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-  as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$RUNTIME_SERVICE_NAME"
-  rm -f "$TMP_SERVICE"
-
+  install_service_env_file "$CORE_ENV_FILE"
+  install_systemd_service "$CORE_SERVICE_NAME" "GP Strategy Finder Core API" "core" "$CORE_HOST" "$CORE_PORT" "$CORE_ENV_FILE"
   as_root systemctl daemon-reload
-  as_root systemctl enable "$RUNTIME_SERVICE_NAME"
-  as_root systemctl restart "$RUNTIME_SERVICE_NAME"
+  as_root systemctl enable "$CORE_SERVICE_NAME"
+  as_root systemctl restart "$CORE_SERVICE_NAME"
+  if install_web_enabled; then
+    install_service_env_file "$WEB_ENV_FILE"
+    install_systemd_service "$SERVICE_NAME" "GP Strategy Finder Web UI" "web" "$WEB_HOST" "$WEB_PORT" "$WEB_ENV_FILE" "--core-url $CORE_URL" "$CORE_SERVICE_NAME" "$CORE_SERVICE_NAME"
+    as_root systemctl daemon-reload
+    as_root systemctl enable "$SERVICE_NAME"
+    as_root systemctl restart "$SERVICE_NAME"
+  else
+    as_root systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
 fi
 
 if step_log check "Checking installation"; then
   run_as_target env GP_STATE_DIR="$INSTALL_DIR/build/state" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
-  as_root systemctl --no-pager --full status "$RUNTIME_SERVICE_NAME" || true
+  as_root systemctl --no-pager --full status "$CORE_SERVICE_NAME" || true
+  if install_web_enabled; then
+    as_root systemctl --no-pager --full status "$SERVICE_NAME" || true
+  fi
 fi
 
 IP_ADDRESS="$(hostname -I 2>/dev/null | awk '{print $1}')"

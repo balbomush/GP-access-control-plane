@@ -1,6 +1,6 @@
 # Headless Runtime / Core API Research
 
-Статус: результат research-этапа. Этот документ фиксирует архитектуру, API-границы и план миграции. Первый кодовый этап добавляет API-only команду `gp-control-plane core`; разделение systemd-сервисов и Web proxy остаются следующими этапами.
+Статус: результат research-этапа и текущая целевая схема реализации. В feature-ветке добавлены API-only команда `gp-control-plane core`, proxy-режим `gp-control-plane web --core-url ...` и installer-flow, который по умолчанию поднимает Core service и Web proxy service.
 
 Постоянный API-контракт первого уровня находится в [`../openapi.json`](../openapi.json). При изменении API этот файл должен обновляться вместе с кодом.
 
@@ -8,7 +8,7 @@
 
 Выбран вариант А: штатный Web UI остается доступен пользователю по одному внешнему адресу, а будущий Web service проксирует API-запросы в локальный Core service.
 
-Целевая схема:
+Реализуемая схема:
 
 ```text
 Browser / штатный Web UI
@@ -44,9 +44,9 @@ Headless-сценарий устанавливает только `gp-control-pl
 - Не делать два разных формата состояния для headless и web.
 - Не удалять legacy `/api/*` endpoint'ы без отдельного этапа совместимости.
 
-## Текущее Состояние
+## Текущее Состояние Compatibility-Mode
 
-Сейчас `gp-control-plane web` запускает единый HTTP-сервер. В нем находятся:
+`gp-control-plane web` без `--core-url` остается compatibility-mode и запускает единый HTTP-сервер. В нем находятся:
 
 - HTML/CSS/JS штатного интерфейса.
 - API `/api/*`.
@@ -54,7 +54,7 @@ Headless-сценарий устанавливает только `gp-control-pl
 - Чтение storage, backups, candidates, runs, settings, release metadata.
 - Вызов `gp-root-helper` для привилегированных операций.
 
-Такой режим остается compatibility-mode до отдельного решения о полном переносе на split-runtime.
+Такой режим остается для ручного rollback и совместимости. Установщик в обычном режиме должен использовать split-runtime: `gp-control-plane core` + `gp-control-plane web --core-url http://127.0.0.1:8081`.
 
 ## Ответственность Процессов
 
@@ -258,9 +258,9 @@ UI-state вроде выбранной вкладки, раскрытых пан
 
 Interactive install:
 
-1. Установщик спрашивает, ставить ли штатный Web UI.
-2. Default: установить Web UI.
-3. Если Web UI устанавливается, создаются Core service и Web service.
+1. Default: установить штатный Web UI.
+2. При default-установке создаются два сервиса: `gp-control-plane-core.service` и `gp-control-plane-web.service`.
+3. Web service запускается с `--core-url http://127.0.0.1:8081` и проксирует `/api/*` в Core service.
 4. Если пользователь выбирает headless, создается только Core service.
 
 Headless/non-interactive install:
@@ -291,22 +291,20 @@ Headless/non-interactive install:
 
 Compatibility-mode:
 
-- текущий `gp-control-plane-web.service` и команда `gp-control-plane web` остаются рабочими;
+- команда `gp-control-plane web` без `--core-url` остается рабочей как старый единый web-режим;
 - старый единый web-режим не удаляется без отдельного решения;
-- в первом implementation-этапе новые endpoint'ы можно добавить в текущий web process, чтобы не делать service split и API rename одновременно.
+- установленный default-runtime использует split: Core service + Web proxy service.
 
 ## Migration И Rollback
 
 Безопасная последовательность внедрения после research:
 
 1. Добавить OpenAPI validation в локальные проверки.
-2. Добавить новые `/api/core/...`, `/api/service/...`, `/api/web/...` endpoint'ы в текущий единый process, не удаляя старые URL.
+2. Добавить новые `/api/core/...`, `/api/service/...`, `/api/web/...` endpoint'ы в текущий API, не удаляя старые URL.
 3. Перевести штатный Web UI на новые endpoint'ы.
 4. Зафиксировать compatibility layer для legacy URL или явно согласовать его удаление.
-5. Вынести Core API в отдельный внутренний server module.
-6. Добавить `gp-control-plane core` как отдельную CLI-команду.
-7. Добавить Web service как статический UI/proxy поверх Core.
-8. Обновить installer и systemd units с default-установкой Web UI и explicit headless mode.
+5. Выделить Core API в отдельный внутренний server module, чтобы убрать UI-зависимости из core-кода.
+6. Уточнить Web proxy под долгие SSE/download/upload сценарии и лимиты памяти.
 
 Rollback:
 
@@ -321,7 +319,7 @@ Rollback:
 Зафиксировано:
 
 - текущий `gp-control-plane web` остается рабочим;
-- текущая команда установки остается рабочей;
+- текущая команда установки остается рабочей и по умолчанию поднимает Core service + Web proxy service;
 - Web UI по умолчанию остается доступен на одном внешнем адресе;
 - постоянный API-контракт - `openapi.json`;
 - `api_inventory.md` является временным черновиком исследования.

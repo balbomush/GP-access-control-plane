@@ -16,7 +16,7 @@ Headless-установка без штатного Web UI:
 curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | GP_INSTALL_WEB=off bash
 ```
 
-В headless-режиме systemd запускает API-only Core service на `127.0.0.1:8081` по умолчанию. Внешний bind для Core API задается явно через `GP_CORE_HOST` и `GP_CORE_PORT`.
+Обычная установка запускает два systemd-сервиса: `gp-control-plane-core.service` на `127.0.0.1:8081` и `gp-control-plane-web.service` на `0.0.0.0:8080`. Web service отдает штатный интерфейс и проксирует `/api/*` в Core service. В headless-режиме systemd запускает только API-only Core service. Внешний bind для Core API задается явно через `GP_CORE_HOST` и `GP_CORE_PORT`.
 
 Что сделает скрипт:
 
@@ -28,8 +28,8 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scrip
 - установит команду `gp-control-plane`;
 - подготовит локальный каталог групп `v2fly/domain-list-community` для импорта доменных списков без live-запросов из web UI;
 - установит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
-- создаст и включит systemd-сервис;
-- по умолчанию запустит веб-интерфейс автоматически сейчас и при каждой загрузке Raspberry Pi; при `GP_INSTALL_WEB=off` вместо него запустит API-only Core service.
+- создаст и включит systemd-сервисы;
+- по умолчанию запустит Core service и штатный Web UI proxy автоматически сейчас и при каждой загрузке Raspberry Pi; при `GP_INSTALL_WEB=off` запустит только API-only Core service.
 
 Установка рассчитана на Raspberry Pi OS. Скрипт можно запускать из-под любого пользователя с правом `sudo`.
 
@@ -303,13 +303,20 @@ python3 -m venv .venv
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 
-gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080
+gp-control-plane core --state-dir ./build/state --host 127.0.0.1 --port 8081
+gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080 --core-url http://127.0.0.1:8081
 ```
 
 Для API-only headless runtime без штатного Web UI:
 
 ```bash
 gp-control-plane core --state-dir ./build/state --host 127.0.0.1 --port 8081
+```
+
+Старый монолитный режим остается для совместимости:
+
+```bash
+gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080
 ```
 
 Ручная установка выше не показывает все шаги установки `zapret2` и автозапуска. Для обычного использования проще и надежнее запускать `scripts/install-raspberry-pi.sh`.

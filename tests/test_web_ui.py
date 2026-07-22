@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.web import app as web_app
-from gp_control_plane.web.app import index_html, serve, serve_core
+from gp_control_plane.web.app import index_html, serve, serve_core, serve_web_proxy
 
 
 class WebUiTests(unittest.TestCase):
@@ -1088,6 +1088,70 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn("<!doctype html>", root_body.lower())
             self.assertEqual(api_response.status, 200)
             self.assertIn('"version"', api_body)
+
+    def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            core_port = _free_port()
+            web_port = _free_port()
+            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "off"}):
+                core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+                web_thread = threading.Thread(
+                    target=serve_web_proxy,
+                    args=(config, "127.0.0.1", web_port),
+                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                    daemon=True,
+                )
+                core_thread.start()
+                web_thread.start()
+                time.sleep(0.1)
+
+                connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+                connection.request("GET", "/")
+                root_response = connection.getresponse()
+                root_body = root_response.read().decode("utf-8")
+                connection.close()
+
+                connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+                connection.request("GET", "/api/status")
+                api_response = connection.getresponse()
+                api_body = api_response.read().decode("utf-8")
+                connection.close()
+
+            self.assertEqual(root_response.status, 200)
+            self.assertIn("<!doctype html>", root_body.lower())
+            self.assertEqual(api_response.status, 200)
+            self.assertIn('"version"', api_body)
+            self.assertIn('"web_auth"', api_body)
+
+    def test_web_proxy_reports_bad_gateway_when_core_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            unused_core_port = _free_port()
+            web_port = _free_port()
+            thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": f"http://127.0.0.1:{unused_core_port}"},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+            connection.request("GET", "/api/status")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(response.status, 502)
+            self.assertIn("core api is unavailable", body)
 
     def test_web_auth_token_protects_mutating_api_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

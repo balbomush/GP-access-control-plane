@@ -45,6 +45,9 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(core_args.command, "core")
         self.assertEqual(core_args.host, "127.0.0.1")
         self.assertEqual(core_args.port, 8081)
+        web_proxy_args = parser.parse_args(["web", "--core-url", "http://127.0.0.1:8081"])
+        self.assertEqual(web_proxy_args.command, "web")
+        self.assertEqual(web_proxy_args.core_url, "http://127.0.0.1:8081")
         standard_args = parser.parse_args(
             [
                 "strategy-finder",
