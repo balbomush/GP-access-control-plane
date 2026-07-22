@@ -511,7 +511,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return
             if path == "/api/core/presets/delete-user-lists":
                 try:
-                    self._json(_delete_core_user_domain_lists_payload(config))
+                    self._json(_delete_core_user_domain_lists_payload(config, payload))
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -549,11 +549,22 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return
             if path == "/api/service/releases/install":
                 try:
+                    channel = str(payload.get("channel") or read_settings(config).get("update_channel") or "stable")
+                    if channel not in {"stable", "prerelease"}:
+                        raise ValueError("channel must be stable or prerelease")
+                    if payload.get("dry_run"):
+                        self._json(
+                            {"accepted": True, "status": "dry_run", "job_id": str(payload.get("target_ref") or channel)},
+                            status=HTTPStatus.ACCEPTED,
+                        )
+                        return
                     update = _queue_release_update_payload(config, payload).get("update") or {}
                     self._json(
                         {"accepted": True, "status": str(update.get("status") or "queued"), "job_id": str(update.get("target_ref") or "")},
                         status=HTTPStatus.ACCEPTED,
                     )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                 return
@@ -565,7 +576,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return
             if path == "/api/service/v2fly/update-local-storage":
                 try:
-                    self._json(_v2fly_update_local_storage_payload(config), status=HTTPStatus.ACCEPTED)
+                    self._json(_v2fly_update_local_storage_payload(config, payload), status=HTTPStatus.ACCEPTED)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -7536,16 +7547,18 @@ def _delete_core_user_domain_list_payload(config: AppConfig, payload: dict[str, 
     return {"deleted": 1}
 
 
-def _delete_core_user_domain_lists_payload(config: AppConfig) -> dict[str, int]:
+def _delete_core_user_domain_lists_payload(config: AppConfig, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     deleted = 0
     index = read_custom_preset_index(config.output.state_dir)
+    dry_run = bool((payload or {}).get("dry_run"))
     for scope, scoped in index.items():
         names = list((scoped or {}).keys())
         if not names:
             continue
-        delete_user_presets(config.output.state_dir, scope=scope, names=names)
+        if not dry_run:
+            delete_user_presets(config.output.state_dir, scope=scope, names=names)
         deleted += len(names)
-    return {"deleted": deleted}
+    return {"deleted": 0 if dry_run else deleted, "would_delete": deleted, "dry_run": dry_run}
 
 
 def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -7729,7 +7742,14 @@ def _v2fly_check_updates_payload(config: AppConfig) -> dict[str, Any]:
     return {"accepted": True, "status": "success", "job_id": "v2fly-check-updates", "storage": storage}
 
 
-def _v2fly_update_local_storage_payload(config: AppConfig) -> dict[str, Any]:
+def _v2fly_update_local_storage_payload(config: AppConfig, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if (payload or {}).get("dry_run"):
+        return {
+            "accepted": True,
+            "status": "dry_run",
+            "job_id": "v2fly-update-local-storage",
+            "storage": _v2fly_storage_status_payload(config),
+        }
     result = prepare_v2fly_local_storage(config.output.state_dir, revision_fetcher=fetch_v2fly_revision)
     return {
         "accepted": True,
