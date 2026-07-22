@@ -1105,6 +1105,9 @@ class WebUiTests(unittest.TestCase):
                 openapi_contract = json.loads(body.decode("utf-8"))
                 self.assertEqual(openapi_contract["openapi"], "3.1.0")
                 self.assertNotIn("jsonSchemaDialect", openapi_contract)
+                self.assertEqual([{"url": "/"}], [{"url": server["url"]} for server in openapi_contract["servers"]])
+                self.assertNotIn("localhost", body.decode("utf-8"))
+                self.assertNotIn("127.0.0.1:8081", body.decode("utf-8"))
                 examples = openapi_contract["components"]["examples"]
                 self.assertIn("StartRunRequestMultiDomain", examples)
                 self.assertEqual(30, examples["StartRunRequestMultiDomain"]["value"]["curl_parallelism"])

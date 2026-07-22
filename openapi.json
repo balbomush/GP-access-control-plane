@@ -7,12 +7,8 @@
   },
   "servers": [
     {
-      "url": "http://localhost:8080",
-      "description": "Current compatibility mode and future штатный Web UI entrypoint"
-    },
-    {
-      "url": "http://127.0.0.1:8081",
-      "description": "Future local Core service entrypoint"
+      "url": "/",
+      "description": "Current Swagger origin. When opened from Web UI it uses the board address; when opened from Core it uses the local Core address."
     }
   ],
   "tags": [
