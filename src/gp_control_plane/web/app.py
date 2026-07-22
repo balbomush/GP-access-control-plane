@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import http.client
 import json
 import mimetypes
-import os
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -66,15 +64,6 @@ from ..zapret2 import check_install_cached
 
 
 MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
-AUTH_OFF_VALUES = {"0", "false", "no", "off", "disabled"}
-AUTH_ON_VALUES = {"1", "true", "yes", "on", "enabled", "required"}
-AUTH_TOKEN_HEADER = "X-GP-Token"
-AUTH_QUERY_PARAM = "gp_token"
-SENSITIVE_GET_PATHS = {
-    "/api/backups/download",
-    "/api/backups/restore-preview",
-    "/api/releases/update-plan",
-}
 PROXY_SKIP_HEADERS = {
     "connection",
     "keep-alive",
@@ -158,69 +147,19 @@ def swagger_ui_html() -> str:
 """
 
 
-def web_auth_config() -> dict[str, Any]:
-    token = str(os.environ.get("GP_WEB_TOKEN") or "").strip()
-    raw_mode = str(os.environ.get("GP_WEB_AUTH") or "auto").strip().lower()
-    if raw_mode in AUTH_OFF_VALUES:
-        enabled = False
-        mode = "off"
-    elif raw_mode in AUTH_ON_VALUES:
-        enabled = True
-        mode = "on"
-    else:
-        enabled = bool(token)
-        mode = "auto"
-    configured = bool(token)
-    if not enabled:
-        status = "disabled"
-    elif configured:
-        status = "enabled"
-    else:
-        status = "missing-token"
-    return {
-        "enabled": enabled,
-        "configured": configured,
-        "mode": mode,
-        "status": status,
-        "token": token,
-        "header": AUTH_TOKEN_HEADER,
-        "query_param": AUTH_QUERY_PARAM,
-    }
-
-
-def _web_auth_public_payload(web_auth: dict[str, Any] | None = None, *, include_token: bool = False) -> dict[str, Any]:
-    auth = web_auth or web_auth_config()
-    payload = {
-        "enabled": bool(auth.get("enabled")),
-        "configured": bool(auth.get("configured")),
-        "mode": str(auth.get("mode") or "auto"),
-        "status": str(auth.get("status") or "disabled"),
-        "header": AUTH_TOKEN_HEADER,
-        "query_param": AUTH_QUERY_PARAM,
-    }
-    if include_token and payload["enabled"] and payload["configured"]:
-        payload["token"] = str(auth.get("token") or "")
-    else:
-        payload["token"] = ""
-    return payload
-
-
 def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -> None:
     _clear_stale_current_job(config)
     close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_snapshot_if_idle(config.output.state_dir))
-    web_auth = web_auth_config()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
             query = parse_qs(parsed_url.query)
-            if path in SENSITIVE_GET_PATHS and not self._authorize_web_request(path, query, web_auth, check_origin=False):
-                return
             if path == "/":
                 if ui_enabled:
-                    self._html(web_auth)
+                    self._html()
                 else:
                     self._json({"error": "web ui is disabled in core mode"}, status=HTTPStatus.NOT_FOUND)
             elif path == "/openapi.json":
@@ -228,7 +167,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             elif path in SWAGGER_PATHS:
                 self._swagger()
             elif path == "/api/status":
-                self._json(status_payload(config, web_auth=web_auth))
+                self._json(status_payload(config))
             elif path == "/api/events":
                 self._events()
             elif path == "/api/settings":
@@ -276,7 +215,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             path = urlparse(self.path).path
             if path == "/":
                 if ui_enabled:
-                    data = index_html(web_auth).encode("utf-8")
+                    data = index_html().encode("utf-8")
                     self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
                 else:
                     self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
@@ -317,9 +256,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def do_POST(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
-            query = parse_qs(parsed_url.query)
-            if not self._authorize_web_request(path, query, web_auth, check_origin=True):
-                return
             if path == "/api/backups/upload":
                 try:
                     self._json(import_snapshot_archive(config.output.state_dir, self._request_upload_bytes()), status=HTTPStatus.ACCEPTED)
@@ -483,13 +419,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return
 
-        def _html(self, web_auth: dict[str, Any]) -> None:
-            data = index_html(web_auth).encode("utf-8")
+        def _html(self) -> None:
+            data = index_html().encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            if web_auth.get("enabled") and web_auth.get("configured"):
-                self.send_header("Set-Cookie", f"{AUTH_QUERY_PARAM}={web_auth.get('token')}; Path=/; SameSite=Strict")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -515,7 +449,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             heartbeat_at = 0.0
             while True:
                 try:
-                    for event_name, payload in _event_payloads(config, web_auth=web_auth).items():
+                    for event_name, payload in _event_payloads(config).items():
                         try:
                             fingerprint = _event_fingerprint(payload)
                             if previous.get(event_name) == fingerprint:
@@ -632,45 +566,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def _not_found(self) -> None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
-        def _authorize_web_request(
-            self,
-            path: str,
-            query: dict[str, list[str]],
-            web_auth: dict[str, Any],
-            *,
-            check_origin: bool,
-        ) -> bool:
-            if not web_auth.get("enabled"):
-                return True
-            if not web_auth.get("configured"):
-                self._json({"error": "web auth token is not configured"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
-                return False
-            if check_origin and not self._origin_allowed():
-                self._json({"error": "origin is not allowed"}, status=HTTPStatus.FORBIDDEN)
-                return False
-            expected = str(web_auth.get("token") or "")
-            supplied = self.headers.get(AUTH_TOKEN_HEADER, "")
-            if not supplied:
-                authorization = self.headers.get("Authorization", "")
-                if authorization.lower().startswith("bearer "):
-                    supplied = authorization[7:].strip()
-            if not supplied:
-                supplied = _query_one(query, AUTH_QUERY_PARAM)
-            if not supplied or not hmac.compare_digest(supplied, expected):
-                self._json({"error": "web auth token is required"}, status=HTTPStatus.UNAUTHORIZED)
-                return False
-            return True
-
-        def _origin_allowed(self) -> bool:
-            origin = self.headers.get("Origin", "")
-            if not origin:
-                return True
-            host = self.headers.get("Host", "").lower()
-            if not host:
-                return False
-            parsed = urlparse(origin)
-            return parsed.netloc.lower() == host
-
         def _request_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or "0")
             if length <= 0:
@@ -694,7 +589,6 @@ def serve_core(config: AppConfig, host: str = "127.0.0.1", port: int = 8081) -> 
 
 
 def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -> None:
-    web_auth = web_auth_config()
     core = urlparse(core_url)
     if core.scheme not in {"http", "https"} or not core.hostname:
         raise ValueError("core_url must be an http(s) URL with host")
@@ -714,7 +608,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
         def _route(self) -> None:
             path = urlparse(self.path).path
             if path == "/" and self.command in {"GET", "HEAD"}:
-                data = index_html(web_auth).encode("utf-8")
+                data = index_html().encode("utf-8")
                 if self.command == "HEAD":
                     self._head(HTTPStatus.OK, "text/html; charset=utf-8", len(data))
                 else:
@@ -795,8 +689,6 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            if web_auth.get("enabled") and web_auth.get("configured"):
-                self.send_header("Set-Cookie", f"{AUTH_QUERY_PARAM}={web_auth.get('token')}; Path=/; SameSite=Strict")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -842,7 +734,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
     server.serve_forever()
 
 
-def index_html(web_auth: dict[str, Any] | None = None) -> str:
+def index_html() -> str:
     html = """<!doctype html>
 <html lang="ru">
 <head>
@@ -900,8 +792,6 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   font-weight: 700;
 }
 .topbar-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.topbar-auth.off { border-color: rgba(245, 158, 11, .65); color: #ffd166; }
-.topbar-auth.on { border-color: rgba(34, 197, 94, .55); color: #9ff0bd; }
 .main {
   max-width: 1240px;
   margin: 0 auto;
@@ -2383,7 +2273,6 @@ pre {
       </div>
       <div class="topbar-badges">
         <span class="topbar-version" id="app-version-badge">v-</span>
-        <span class="topbar-version topbar-auth" id="web-auth-badge">auth</span>
       </div>
     </div>
   </header>
@@ -2877,7 +2766,6 @@ const CANDIDATE_PAGE_LIMIT = LIST_PAGE_LIMIT;
 const DOMAIN_PAGE_LIMIT = LIST_PAGE_LIMIT;
 const RUN_PAGE_LIMIT = LIST_PAGE_LIMIT;
 const CUSTOM_SELECT_VALUE = 'custom';
-const WEB_AUTH = __WEB_AUTH_JSON__;
 const DISCOVERY_PROFILES = {
   quick: { name: 'quick', title: 'Быстрый', scan_level: 'quick' },
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
@@ -2936,14 +2824,14 @@ function showToast(text, tone){
   }, 2000);
 }
 async function getJson(url){
-  const response = await fetch(url, { headers: authHeaders(), credentials: 'same-origin' });
+  const response = await fetch(url, { headers: requestHeaders(), credentials: 'same-origin' });
   if (!response.ok) throw new Error(await response.text());
   return await response.json();
 }
 async function postJson(url, payload){
   const response = await fetch(url, {
     method: 'POST',
-    headers: authHeaders({'Content-Type': 'application/json'}),
+    headers: requestHeaders({'Content-Type': 'application/json'}),
     credentials: 'same-origin',
     body: JSON.stringify(payload || {})
   });
@@ -2951,16 +2839,11 @@ async function postJson(url, payload){
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
 }
-function authHeaders(headers){
-  const result = { ...(headers || {}) };
-  if (WEB_AUTH.enabled && WEB_AUTH.token) result[WEB_AUTH.header || 'X-GP-Token'] = WEB_AUTH.token;
-  return result;
+function requestHeaders(headers){
+  return { ...(headers || {}) };
 }
-function authUrl(url){
-  if (!WEB_AUTH.enabled || !WEB_AUTH.token) return url;
-  const parsed = new URL(url, window.location.origin);
-  parsed.searchParams.set(WEB_AUTH.query_param || 'gp_token', WEB_AUTH.token);
-  return parsed.pathname + parsed.search + parsed.hash;
+function requestUrl(url){
+  return url;
 }
 function friendlyDate(value){
   if (!value) return '-';
@@ -3437,7 +3320,7 @@ function persistCustomPresets(){
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
   fetch('/api/presets', {
     method: 'POST',
-    headers: authHeaders({'Content-Type': 'application/json'}),
+    headers: requestHeaders({'Content-Type': 'application/json'}),
     credentials: 'same-origin',
     body: JSON.stringify({custom: state.customPresets})
   }).catch(() => {});
@@ -3851,18 +3734,6 @@ function zapretCompactStatus(zapret){
   }).join('\\n');
   return { ok, total, ready, tooltip };
 }
-function renderWebAuthStatus(){
-  const auth = (state.status || {}).web_auth || WEB_AUTH || {};
-  const node = el('web-auth-badge');
-  if (!node) return;
-  const enabled = Boolean(auth.enabled);
-  const configured = Boolean(auth.configured);
-  node.textContent = enabled && configured ? 'auth on' : 'auth off';
-  node.className = `topbar-version topbar-auth ${enabled && configured ? 'on' : 'off'}`;
-  node.title = enabled && configured
-    ? 'Web API защищен локальным токеном'
-    : 'Web API работает без локального токена';
-}
 function testedDomainCount(){
   const domains = new Set(Array.isArray(state.testedDomains) ? state.testedDomains : []);
   (state.candidateDomains || []).forEach((item) => {
@@ -3911,7 +3782,6 @@ function renderMetrics(){
   const version = (state.status || {}).version || '-';
   const action = nextActionStatus(ready, busy, jobStatus, status);
   setText('app-version-badge', `v${version}`);
-  renderWebAuthStatus();
   const zapretValue = el('metric-zapret');
   if (zapretValue) {
     zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${ready ? 'Готова' : 'Проблема'}</span></span>`;
@@ -5182,7 +5052,7 @@ function backupCard(item){
   </article>`;
 }
 function backupDownloadUrl(snapshot, file){
-  return authUrl(`/api/backups/download?snapshot=${encodeURIComponent(snapshot)}&file=${encodeURIComponent(file)}`);
+  return requestUrl(`/api/backups/download?snapshot=${encodeURIComponent(snapshot)}&file=${encodeURIComponent(file)}`);
 }
 function formatBytes(value){
   const bytes = Number(value || 0);
@@ -6580,7 +6450,7 @@ async function uploadBackup(){
   try {
     const response = await fetch('/api/backups/upload', {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/zip' }),
+      headers: requestHeaders({ 'Content-Type': 'application/zip' }),
       credentials: 'same-origin',
       body: file
     });
@@ -7006,13 +6876,10 @@ startRealtimeFallback();
 </script>
 </body></html>
 """
-    return html.replace(
-        "__WEB_AUTH_JSON__",
-        json.dumps(_web_auth_public_payload(web_auth, include_token=True), ensure_ascii=False, separators=(",", ":")),
-    )
+    return html
 
 
-def status_payload(config: AppConfig, web_auth: dict[str, Any] | None = None) -> dict[str, Any]:
+def status_payload(config: AppConfig) -> dict[str, Any]:
     settings = read_settings(config)
     run_preferences = read_run_preferences(config)
     state = read_state(config.output.state_dir)
@@ -7029,15 +6896,14 @@ def status_payload(config: AppConfig, web_auth: dict[str, Any] | None = None) ->
             "state_dir": str(config.output.state_dir),
         },
         "zapret2": check_install_cached(),
-        "web_auth": _web_auth_public_payload(web_auth, include_token=False),
     }
 
 
-def _event_payloads(config: AppConfig, web_auth: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
-    status = status_payload(config, web_auth=web_auth)
+def _event_payloads(config: AppConfig) -> dict[str, dict[str, Any]]:
+    status = status_payload(config)
     status_event = {
         key: status[key]
-        for key in ("version", "state", "settings", "run_preferences", "release_update", "paths", "zapret2", "web_auth")
+        for key in ("version", "state", "settings", "run_preferences", "release_update", "paths", "zapret2")
         if key in status
     }
     return {

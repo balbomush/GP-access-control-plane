@@ -129,17 +129,13 @@ class InstallerTests(unittest.TestCase):
         for step in ("packages", "zapret", "app", "v2fly", "root-helper", "service", "check"):
             self.assertIn(f"step_log {step}", self.installer)
 
-    def test_installer_generates_web_auth_env_for_systemd(self) -> None:
-        self.assertIn('WEB_AUTH="${GP_WEB_AUTH:-on}"', self.installer)
-        self.assertIn("GP_WEB_TOKEN", self.installer)
-        self.assertIn("generate_web_token", self.installer)
-        self.assertIn("resolve_service_token", self.installer)
-        self.assertIn('SERVICE_TOKEN_RESOLVED="off"', self.installer)
-        self.assertIn('SERVICE_TOKEN="${GP_WEB_TOKEN:-}"', self.installer)
-        self.assertIn('SERVICE_TOKEN="$(generate_web_token)"', self.installer)
+    def test_installer_does_not_generate_deferred_web_auth_env(self) -> None:
+        self.assertNotIn("GP_WEB_AUTH", self.installer)
+        self.assertNotIn("GP_WEB_TOKEN", self.installer)
+        self.assertNotIn("generate_web_token", self.installer)
+        self.assertNotIn("resolve_service_token", self.installer)
         self.assertIn("install_web_env_file", self.installer)
-        self.assertIn("GP_WEB_AUTH=%s", self.installer)
-        self.assertIn("GP_WEB_TOKEN='%s'", self.installer)
+        self.assertIn("GP_STATE_DIR", self.installer)
 
     def test_root_helper_multidomain_runner_normalizes_empty_ip_list_before_nft(self) -> None:
         self.assertIn("gp_md_normalize_ip_list", self.helper)

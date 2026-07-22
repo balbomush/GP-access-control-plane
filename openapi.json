@@ -13,10 +13,6 @@
   ],
   "tags": [
     {
-      "name": "Auth",
-      "description": "Reserved namespace. The auth model is deferred to a separate architecture decision."
-    },
-    {
       "name": "Core Status",
       "description": "Product/core runtime state."
     },
@@ -1379,13 +1375,6 @@
     }
   },
   "components": {
-    "securitySchemes": {
-      "GpToken": {
-        "type": "http",
-        "scheme": "bearer",
-        "description": "Reserved for the future auth model. Token lifetime and login flow are intentionally not defined in this research contract."
-      }
-    },
     "parameters": {
       "Limit": {
         "name": "limit",
@@ -3042,7 +3031,6 @@
   "x-gp-contract-stage": "research-first-level",
   "x-gp-decisions": {
     "runtime": "web-service-proxies-api-to-local-core-service",
-    "auth": "deferred",
     "legacy_api_compatibility": "deferred-to-migration-stage",
     "web_ui_install_default": "install",
     "headless_install": "explicit-opt-out-from-web-ui"

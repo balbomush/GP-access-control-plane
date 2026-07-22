@@ -87,11 +87,14 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("backup-upload-file", html)
         self.assertIn("/api/backups/upload", html)
         self.assertIn("app-version-badge", html)
-        self.assertIn("web-auth-badge", html)
-        self.assertIn("WEB_AUTH", html)
-        self.assertIn("authHeaders", html)
-        self.assertIn("X-GP-Token", html)
-        self.assertIn("gp_token", html)
+        self.assertIn("requestHeaders", html)
+        self.assertIn("requestUrl", html)
+        self.assertNotIn("authHeaders", html)
+        self.assertNotIn("authUrl", html)
+        self.assertNotIn("web-auth-badge", html)
+        self.assertNotIn("WEB_AUTH", html)
+        self.assertNotIn("X-GP-Token", html)
+        self.assertNotIn("gp_token", html)
         self.assertNotIn("settings-version", html)
         self.assertIn("settings-enable-ipv6", html)
         self.assertIn("settings-debug-stdout", html)
@@ -437,7 +440,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("candidateUpdatedAt", html)
         self.assertIn("backupsLoading", html)
         self.assertIn("backupsUpdatedAt", html)
-        self.assertIn("renderWebAuthStatus", html)
+        self.assertNotIn("renderWebAuthStatus", html)
         self.assertIn("friendlyTime", html)
         self.assertIn("backups-updated-at", html)
         self.assertIn("останавливается", html)
@@ -1105,6 +1108,7 @@ class WebUiTests(unittest.TestCase):
                 openapi_contract = json.loads(body.decode("utf-8"))
                 self.assertEqual(openapi_contract["openapi"], "3.1.0")
                 self.assertNotIn("jsonSchemaDialect", openapi_contract)
+                self.assertNotIn("securitySchemes", openapi_contract["components"])
                 self.assertEqual([{"url": "/"}], [{"url": server["url"]} for server in openapi_contract["servers"]])
                 self.assertNotIn("localhost", body.decode("utf-8"))
                 self.assertNotIn("127.0.0.1:8081", body.decode("utf-8"))
@@ -1146,35 +1150,34 @@ class WebUiTests(unittest.TestCase):
             )
             core_port = _free_port()
             web_port = _free_port()
-            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "off"}):
-                core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
-                web_thread = threading.Thread(
-                    target=serve_web_proxy,
-                    args=(config, "127.0.0.1", web_port),
-                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                    daemon=True,
-                )
-                core_thread.start()
-                web_thread.start()
-                time.sleep(0.1)
+            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+            web_thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                daemon=True,
+            )
+            core_thread.start()
+            web_thread.start()
+            time.sleep(0.1)
 
-                connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
-                connection.request("GET", "/")
-                root_response = connection.getresponse()
-                root_body = root_response.read().decode("utf-8")
-                connection.close()
+            connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+            connection.request("GET", "/")
+            root_response = connection.getresponse()
+            root_body = root_response.read().decode("utf-8")
+            connection.close()
 
-                connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
-                connection.request("GET", "/api/status")
-                api_response = connection.getresponse()
-                api_body = api_response.read().decode("utf-8")
-                connection.close()
+            connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+            connection.request("GET", "/api/status")
+            api_response = connection.getresponse()
+            api_body = api_response.read().decode("utf-8")
+            connection.close()
 
             self.assertEqual(root_response.status, 200)
             self.assertIn("<!doctype html>", root_body.lower())
             self.assertEqual(api_response.status, 200)
             self.assertIn('"version"', api_body)
-            self.assertIn('"web_auth"', api_body)
+            self.assertNotIn('"web_auth"', api_body)
 
     def test_web_proxy_reports_bad_gateway_when_core_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1204,7 +1207,7 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(status, 502)
             self.assertIn("core api is unavailable", body.decode("utf-8"))
 
-    def test_web_auth_token_protects_mutating_api_when_enabled(self) -> None:
+    def test_deferred_web_auth_env_does_not_require_token(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(
@@ -1222,88 +1225,14 @@ class WebUiTests(unittest.TestCase):
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
                 connection.request("POST", "/api/settings", body=body, headers={"Content-Type": "application/json"})
                 response = connection.getresponse()
-                response.read()
-                connection.close()
-                self.assertEqual(response.status, 401)
-
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "POST",
-                    "/api/settings",
-                    body=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-GP-Token": "secret-token",
-                        "Origin": f"http://127.0.0.1:{port}",
-                    },
-                )
-                response = connection.getresponse()
                 saved = response.read().decode("utf-8")
                 connection.close()
 
-            self.assertEqual(response.status, 200)
-            self.assertIn('"curl_parallelism_max":17', saved)
-
-    def test_web_auth_rejects_cross_origin_mutating_api(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            config = AppConfig(
-                output=OutputConfig(
-                    state_dir=tmp / "state",
-                ),
-            )
-            port = _free_port()
-            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
-
-                body = json.dumps({"settings": {"curl_parallelism_max": 17}})
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "POST",
-                    "/api/settings",
-                    body=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-GP-Token": "secret-token",
-                        "Origin": "http://evil.local",
-                    },
-                )
-                response = connection.getresponse()
-                error = response.read().decode("utf-8")
-                connection.close()
-
-            self.assertEqual(response.status, 403)
-            self.assertIn("origin", error)
-
-    def test_web_auth_token_protects_sensitive_get_api_when_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            config = AppConfig(
-                output=OutputConfig(
-                    state_dir=tmp / "state",
-                ),
-            )
-            port = _free_port()
-            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
+                self.assertEqual(response.status, 200)
+                self.assertIn('"curl_parallelism_max":17', saved)
 
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
                 connection.request("GET", "/api/backups/restore-preview?snapshot=missing")
-                response = connection.getresponse()
-                response.read()
-                connection.close()
-                self.assertEqual(response.status, 401)
-
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "GET",
-                    "/api/backups/restore-preview?snapshot=missing",
-                    headers={"X-GP-Token": "secret-token"},
-                )
                 response = connection.getresponse()
                 body = response.read().decode("utf-8")
                 connection.close()

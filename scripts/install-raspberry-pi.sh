@@ -13,7 +13,6 @@ CORE_HOST="${GP_CORE_HOST:-127.0.0.1}"
 CORE_PORT="${GP_CORE_PORT:-8081}"
 CORE_URL="${GP_CORE_URL:-http://$CORE_HOST:$CORE_PORT}"
 CORE_ENV_FILE="${GP_CORE_ENV_FILE:-/etc/default/gp-control-plane-core}"
-WEB_AUTH="${GP_WEB_AUTH:-on}"
 ZAPRET_REPO_URL="${ZAPRET_REPO_URL:-https://github.com/bol-van/zapret2.git}"
 ZAPRET_BRANCH="${ZAPRET_BRANCH:-master}"
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
@@ -122,9 +121,6 @@ install_web_enabled() {
   esac
 }
 
-SERVICE_TOKEN_RESOLVED="off"
-SERVICE_TOKEN=""
-
 CURRENT_UID="$(id -u)"
 CURRENT_USER="$(id -un)"
 
@@ -189,31 +185,12 @@ install_luajit_dev_package() {
   log "LuaJIT development package was not found; continuing because zapret2 can build without LuaJIT on some platforms"
 }
 
-generate_web_token() {
-  run_as_target python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-}
-
-resolve_service_token() {
-  [ "$SERVICE_TOKEN_RESOLVED" = "on" ] && return 0
-  SERVICE_TOKEN="${GP_WEB_TOKEN:-}"
-  if [ "$WEB_AUTH" != "off" ] && [ -z "$SERVICE_TOKEN" ]; then
-    SERVICE_TOKEN="$(generate_web_token)"
-  fi
-  SERVICE_TOKEN_RESOLVED="on"
-}
-
 install_service_env_file() {
   env_file="$1"
-  resolve_service_token
   TMP_WEB_ENV="$(mktemp)"
   {
-    printf 'GP_WEB_AUTH=%s\n' "$WEB_AUTH"
     state_dir_escaped="$(printf '%s' "$INSTALL_DIR/build/state" | sed "s/'/'\\\\''/g")"
     printf "GP_STATE_DIR='%s'\n" "$state_dir_escaped"
-    if [ -n "$SERVICE_TOKEN" ]; then
-      token_escaped="$(printf '%s' "$SERVICE_TOKEN" | sed "s/'/'\\\\''/g")"
-      printf "GP_WEB_TOKEN='%s'\n" "$token_escaped"
-    fi
   } > "$TMP_WEB_ENV"
   as_root install -m 0640 -o root -g root "$TMP_WEB_ENV" "$env_file"
   rm -f "$TMP_WEB_ENV"
