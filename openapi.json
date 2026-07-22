@@ -81,6 +81,14 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CoreStatus"
+                },
+                "examples": {
+                  "idle": {
+                    "$ref": "#/components/examples/CoreStatusIdle"
+                  },
+                  "running": {
+                    "$ref": "#/components/examples/CoreStatusRunning"
+                  }
                 }
               }
             }
@@ -105,6 +113,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/StartRunRequest"
+              },
+              "examples": {
+                "multiDomain30Parallel": {
+                  "$ref": "#/components/examples/StartRunRequestMultiDomain"
+                }
               }
             }
           }
@@ -116,6 +129,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunAccepted"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/RunAccepted"
+                  }
                 }
               }
             }
@@ -146,6 +164,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ActionAccepted"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ActionAccepted"
+                  }
                 }
               }
             }
@@ -173,6 +196,14 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunProgress"
+                },
+                "examples": {
+                  "running": {
+                    "$ref": "#/components/examples/RunProgressRunning"
+                  },
+                  "idle": {
+                    "$ref": "#/components/examples/RunProgressIdle"
+                  }
                 }
               }
             }
@@ -197,6 +228,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunLogTail"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/RunLogTail"
+                  }
                 }
               }
             }
@@ -222,6 +258,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PreflightStatus"
+                },
+                "examples": {
+                  "ready": {
+                    "$ref": "#/components/examples/PreflightStatusReady"
+                  }
                 }
               }
             }
@@ -247,6 +288,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DomainListsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/DomainListsResponse"
+                  }
                 }
               }
             }
@@ -271,6 +317,14 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SaveDomainListRequest"
+              },
+              "examples": {
+                "saveUserList": {
+                  "$ref": "#/components/examples/SaveDomainListRequest"
+                },
+                "saveRequiredList": {
+                  "$ref": "#/components/examples/SaveRequiredDomainListRequest"
+                }
               }
             }
           }
@@ -282,6 +336,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DomainList"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/DomainList"
+                  }
                 }
               }
             }
@@ -306,6 +365,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/DeleteDomainListRequest"
+              },
+              "examples": {
+                "deleteUserList": {
+                  "$ref": "#/components/examples/DeleteDomainListRequest"
+                }
               }
             }
           }
@@ -317,6 +381,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResult"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/DeleteResult"
+                  }
                 }
               }
             }
@@ -341,6 +410,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResult"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/DeleteResult"
+                  }
                 }
               }
             }
@@ -366,6 +440,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/V2flyCategoriesResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/V2flyCategoriesResponse"
+                  }
                 }
               }
             }
@@ -394,7 +473,8 @@
             "schema": {
               "type": "string",
               "minLength": 1
-            }
+            },
+            "example": "youtube"
           }
         ],
         "responses": {
@@ -404,6 +484,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/V2flyCategoryDomainsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/V2flyCategoryDomainsResponse"
+                  }
                 }
               }
             }
@@ -434,6 +519,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BackupSnapshot"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/BackupSnapshot"
+                  }
                 }
               }
             }
@@ -458,6 +548,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BackupsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/BackupsResponse"
+                  }
                 }
               }
             }
@@ -482,6 +577,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BackupActionRequest"
+              },
+              "examples": {
+                "selectSnapshot": {
+                  "$ref": "#/components/examples/BackupActionRequest"
+                }
               }
             }
           }
@@ -493,6 +593,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ActionAccepted"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ActionAccepted"
+                  }
                 }
               }
             }
@@ -516,6 +621,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BackupActionRequest"
+              },
+              "examples": {
+                "selectSnapshot": {
+                  "$ref": "#/components/examples/BackupActionRequest"
+                }
               }
             }
           }
@@ -527,6 +637,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResult"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/DeleteResult"
+                  }
                 }
               }
             }
@@ -552,7 +667,8 @@
             "schema": {
               "type": "string",
               "minLength": 1
-            }
+            },
+            "example": "snapshot_20260722_173000"
           }
         ],
         "responses": {
@@ -613,6 +729,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BackupSnapshot"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/BackupSnapshot"
+                  }
                 }
               }
             }
@@ -637,6 +758,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunSettings"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/RunSettings"
+                  }
                 }
               }
             }
@@ -660,6 +786,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/RunSettings"
+              },
+              "examples": {
+                "discoverySettings": {
+                  "$ref": "#/components/examples/RunSettings"
+                }
               }
             }
           }
@@ -671,6 +802,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunSettings"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/RunSettings"
+                  }
                 }
               }
             }
@@ -696,6 +832,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunHistoryResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/RunHistoryResponse"
+                  }
                 }
               }
             }
@@ -721,7 +862,8 @@
             "schema": {
               "type": "string",
               "minLength": 1
-            }
+            },
+            "example": "run_20260722_173000"
           }
         ],
         "responses": {
@@ -731,6 +873,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunLogTail"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/RunLogTail"
+                  }
                 }
               }
             }
@@ -756,6 +903,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StrategyCandidatesResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/StrategyCandidatesResponse"
+                  }
                 }
               }
             }
@@ -780,7 +932,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "example": "evt_000123"
           }
         ],
         "responses": {
@@ -790,6 +943,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EventsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/EventsResponse"
+                  }
                 }
               }
             }
@@ -815,6 +973,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ServiceStatus"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ServiceStatus"
+                  }
                 }
               }
             }
@@ -840,6 +1003,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ServiceDiagnostics"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ServiceDiagnostics"
+                  }
                 }
               }
             }
@@ -864,6 +1032,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AvailableReleases"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/AvailableReleases"
+                  }
                 }
               }
             }
@@ -888,6 +1061,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/InstallChannel"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/InstallChannel"
+                  }
                 }
               }
             }
@@ -911,6 +1089,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/InstallChannel"
+              },
+              "examples": {
+                "stableChannel": {
+                  "$ref": "#/components/examples/InstallChannel"
+                }
               }
             }
           }
@@ -922,6 +1105,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/InstallChannel"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/InstallChannel"
+                  }
                 }
               }
             }
@@ -946,6 +1134,11 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/InstallReleaseRequest"
+              },
+              "examples": {
+                "installSelectedRelease": {
+                  "$ref": "#/components/examples/InstallReleaseRequest"
+                }
               }
             }
           }
@@ -957,6 +1150,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ActionAccepted"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ActionAccepted"
+                  }
                 }
               }
             }
@@ -984,6 +1182,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/V2flyStorageStatus"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/V2flyStorageStatus"
+                  }
                 }
               }
             }
@@ -1008,6 +1211,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ActionAccepted"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ActionAccepted"
+                  }
                 }
               }
             }
@@ -1032,6 +1240,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ActionAccepted"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ActionAccepted"
+                  }
                 }
               }
             }
@@ -1064,6 +1277,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PagedRunHistoryResponse"
+                },
+                "examples": {
+                  "page": {
+                    "$ref": "#/components/examples/PagedRunHistoryResponse"
+                  }
                 }
               }
             }
@@ -1094,7 +1312,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "example": "youtube.com"
           }
         ],
         "responses": {
@@ -1104,6 +1323,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PagedStrategyCandidatesResponse"
+                },
+                "examples": {
+                  "page": {
+                    "$ref": "#/components/examples/PagedStrategyCandidatesResponse"
+                  }
                 }
               }
             }
@@ -1128,7 +1352,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "example": "evt_000123"
           },
           {
             "$ref": "#/components/parameters/Limit"
@@ -1141,6 +1366,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EventsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/EventsResponse"
+                  }
                 }
               }
             }
@@ -1170,7 +1400,8 @@
           "minimum": 1,
           "maximum": 500,
           "default": 50
-        }
+        },
+        "example": 50
       },
       "Offset": {
         "name": "offset",
@@ -1180,7 +1411,8 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
-        }
+        },
+        "example": 0
       }
     },
     "responses": {
@@ -1190,6 +1422,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "structuredError": {
+                "$ref": "#/components/examples/ErrorResponse"
+              }
             }
           }
         }
@@ -2241,6 +2478,568 @@
           }
         },
         "additionalProperties": false
+      }
+    },
+    "examples": {
+      "CoreStatusIdle": {
+        "summary": "Сервис свободен и готов к запуску подбора",
+        "value": {
+          "state": "idle",
+          "storage": {
+            "ready": true,
+            "schema_version": 1,
+            "state_dir": "/home/pi/gp/state"
+          },
+          "updated_at": "2026-07-22T17:30:00Z"
+        }
+      },
+      "CoreStatusRunning": {
+        "summary": "Сейчас идет подбор стратегий",
+        "value": {
+          "state": "running",
+          "current_run": {
+            "run_id": "run_20260722_173000",
+            "status": "running"
+          },
+          "storage": {
+            "ready": true,
+            "schema_version": 1,
+            "state_dir": "/home/pi/gp/state"
+          },
+          "updated_at": "2026-07-22T17:40:00Z"
+        }
+      },
+      "StartRunRequestMultiDomain": {
+        "summary": "Подбор для конкретных доменов с 30 curl в параллель",
+        "value": {
+          "mode": "multi_domain",
+          "domains": [
+            "youtube.com",
+            "discord.com",
+            "airhorn.solutions"
+          ],
+          "protocols": [
+            "tcp",
+            "quic"
+          ],
+          "curl_parallelism": 30,
+          "timeout_seconds": 172800,
+          "settings": {
+            "curl_max_time": 7,
+            "curl_max_time_quic": 7,
+            "enable_ipv6": false
+          },
+          "mode_settings": {
+            "common_strategy_min_domains": 2
+          }
+        }
+      },
+      "RunAccepted": {
+        "summary": "Задача принята в работу",
+        "value": {
+          "accepted": true,
+          "run_id": "run_20260722_173000",
+          "status": "queued"
+        }
+      },
+      "ActionAccepted": {
+        "summary": "Асинхронное действие принято",
+        "value": {
+          "accepted": true,
+          "status": "queued",
+          "job_id": "job_20260722_173005"
+        }
+      },
+      "RunProgressRunning": {
+        "summary": "Прогресс активного подбора",
+        "value": {
+          "run_id": "run_20260722_173000",
+          "status": "running",
+          "stage": "strategy_discovery",
+          "current_file": "50-fake-multi.sh",
+          "domains_total": 70,
+          "domains_processed": 18,
+          "attempts_total": 4200,
+          "attempts_processed": 1080,
+          "strategies_total": 60,
+          "strategies_processed": 15,
+          "elapsed_seconds": 75600,
+          "eta_seconds": 218400,
+          "avg_attempt_seconds": 70
+        }
+      },
+      "RunProgressIdle": {
+        "summary": "Подбор не запущен",
+        "value": {
+          "status": "idle"
+        }
+      },
+      "RunLogTail": {
+        "summary": "Последние строки лога подбора",
+        "value": {
+          "run_id": "run_20260722_173000",
+          "lines": [
+            "checking youtube.com with 50-fake-multi.sh",
+            "strategy matched for discord.com",
+            "progress attempts=1080/4200"
+          ],
+          "truncated": true,
+          "updated_at": "2026-07-22T17:40:00Z"
+        }
+      },
+      "PreflightStatusReady": {
+        "summary": "Все условия для подбора выполнены",
+        "value": {
+          "ready": true,
+          "checks": [
+            {
+              "name": "zapret2",
+              "status": "ok",
+              "message": "zapret2 installed",
+              "details": {
+                "path": "/opt/zapret2"
+              }
+            },
+            {
+              "name": "v2fly",
+              "status": "ok",
+              "message": "local storage ready",
+              "details": {
+                "groups": 1890
+              }
+            }
+          ]
+        }
+      },
+      "DomainListsResponse": {
+        "summary": "Обязательный, желательный и пользовательский списки",
+        "value": {
+          "lists": [
+            {
+              "list_id": "builtin:required",
+              "kind": "required",
+              "name": "Обязательные",
+              "domains": [
+                "youtube.com",
+                "discord.com"
+              ],
+              "updated_at": "2026-07-22T17:00:00Z"
+            },
+            {
+              "list_id": "builtin:desired",
+              "kind": "desired",
+              "name": "Желательные",
+              "domains": [
+                "instagram.com",
+                "tiktok.com"
+              ],
+              "updated_at": "2026-07-22T17:00:00Z"
+            },
+            {
+              "list_id": "user:work",
+              "kind": "user",
+              "name": "Рабочие сервисы",
+              "domains": [
+                "slack.com",
+                "notion.so"
+              ],
+              "updated_at": "2026-07-22T17:05:00Z"
+            }
+          ]
+        }
+      },
+      "SaveDomainListRequest": {
+        "summary": "Сохранить пользовательский список доменов",
+        "value": {
+          "kind": "user",
+          "name": "Рабочие сервисы",
+          "domains": [
+            "slack.com",
+            "notion.so",
+            "figma.com"
+          ]
+        }
+      },
+      "SaveRequiredDomainListRequest": {
+        "summary": "Обновить обязательный список",
+        "value": {
+          "kind": "required",
+          "name": "Обязательные",
+          "domains": [
+            "youtube.com",
+            "discord.com"
+          ]
+        }
+      },
+      "DomainList": {
+        "summary": "Сохраненный список доменов",
+        "value": {
+          "list_id": "user:work",
+          "kind": "user",
+          "name": "Рабочие сервисы",
+          "domains": [
+            "slack.com",
+            "notion.so",
+            "figma.com"
+          ],
+          "updated_at": "2026-07-22T17:10:00Z"
+        }
+      },
+      "DeleteDomainListRequest": {
+        "summary": "Удалить пользовательский список",
+        "value": {
+          "list_id": "user:work"
+        }
+      },
+      "DeleteResult": {
+        "summary": "Удалена одна сущность",
+        "value": {
+          "deleted": 1
+        }
+      },
+      "V2flyCategoriesResponse": {
+        "summary": "Категории из локального v2fly-хранилища",
+        "value": {
+          "categories": [
+            {
+              "name": "geolocation-!cn",
+              "domain_count": 48211
+            },
+            {
+              "name": "youtube",
+              "domain_count": 128
+            },
+            {
+              "name": "discord",
+              "domain_count": 44
+            }
+          ],
+          "storage": {
+            "state": "ready",
+            "source_repo": "v2fly/domain-list-community",
+            "source_ref": "master",
+            "source_commit": "abc1234",
+            "prepared_at": "2026-07-22T16:00:00Z",
+            "group_count": 1890
+          }
+        }
+      },
+      "V2flyCategoryDomainsResponse": {
+        "summary": "Домены одной категории v2fly",
+        "value": {
+          "category": "youtube",
+          "domains": [
+            "youtube.com",
+            "ytimg.com",
+            "googlevideo.com"
+          ],
+          "storage": {
+            "state": "ready",
+            "source_repo": "v2fly/domain-list-community",
+            "source_ref": "master",
+            "source_commit": "abc1234",
+            "prepared_at": "2026-07-22T16:00:00Z",
+            "group_count": 1890
+          }
+        }
+      },
+      "BackupSnapshot": {
+        "summary": "Созданный бэкап",
+        "value": {
+          "snapshot_id": "snapshot_20260722_173000",
+          "created_at": "2026-07-22T17:30:00Z",
+          "schema_version": "1",
+          "filename": "snapshot_20260722_173000.zip",
+          "size_bytes": 184320,
+          "checksum": "sha256:7b1f8c...",
+          "entity_counts": {
+            "domains": 70,
+            "strategies": 1530,
+            "strategy_domain_links": 7063,
+            "domain_lists": 3,
+            "settings": 1
+          }
+        }
+      },
+      "BackupsResponse": {
+        "summary": "Список локальных бэкапов",
+        "value": {
+          "backups": [
+            {
+              "snapshot_id": "snapshot_20260722_173000",
+              "created_at": "2026-07-22T17:30:00Z",
+              "schema_version": "1",
+              "filename": "snapshot_20260722_173000.zip",
+              "size_bytes": 184320,
+              "checksum": "sha256:7b1f8c...",
+              "entity_counts": {
+                "domains": 70,
+                "strategies": 1530,
+                "strategy_domain_links": 7063,
+                "domain_lists": 3,
+                "settings": 1
+              }
+            }
+          ]
+        }
+      },
+      "BackupActionRequest": {
+        "summary": "Выбрать бэкап для действия",
+        "value": {
+          "snapshot_id": "snapshot_20260722_173000"
+        }
+      },
+      "RunSettings": {
+        "summary": "Настройки запуска подбора",
+        "value": {
+          "curl_parallelism_default": 10,
+          "curl_parallelism_max": 50,
+          "curl_max_time": 7,
+          "curl_max_time_quic": 7,
+          "curl_max_time_doh": 10,
+          "enable_ipv6": false,
+          "debug_stdout": false
+        }
+      },
+      "RunHistoryResponse": {
+        "summary": "История запусков без UI-пагинации",
+        "value": {
+          "runs": [
+            {
+              "run_id": "run_20260722_173000",
+              "mode": "multi_domain",
+              "status": "success",
+              "started_at": "2026-07-22T17:30:00Z",
+              "completed_at": "2026-07-22T19:10:00Z",
+              "domains": [
+                "youtube.com",
+                "discord.com"
+              ],
+              "settings": {
+                "curl_parallelism": 30
+              },
+              "summary": {
+                "matched_domains": 2,
+                "candidates": 14
+              }
+            }
+          ]
+        }
+      },
+      "StrategyCandidatesResponse": {
+        "summary": "Нормализованные кандидаты стратегий",
+        "value": {
+          "candidates": [
+            {
+              "strategy_id": "strategy_50_fake_multi_tcp",
+              "strategy_name": "50-fake-multi.sh tcp",
+              "domains": [
+                "youtube.com",
+                "discord.com"
+              ],
+              "domain_count": 2,
+              "protocols": [
+                "tcp"
+              ],
+              "facts": {
+                "source_file": "50-fake-multi.sh",
+                "attempts": 140
+              }
+            }
+          ]
+        }
+      },
+      "EventsResponse": {
+        "summary": "События после указанного идентификатора",
+        "value": {
+          "events": [
+            {
+              "event_id": "evt_000123",
+              "type": "run-progress",
+              "created_at": "2026-07-22T17:40:00Z",
+              "run_id": "run_20260722_173000",
+              "payload": {
+                "attempts_processed": 1080,
+                "attempts_total": 4200
+              }
+            }
+          ],
+          "next_after_id": "evt_000123"
+        }
+      },
+      "ServiceStatus": {
+        "summary": "Состояние установленного сервиса",
+        "value": {
+          "state": "active",
+          "unit": "gp-control-plane-web.service",
+          "version": {
+            "version": "0.3.5-alpha.1",
+            "installed_ref": "feature/headless-core-api-research",
+            "commit": "7c0387e"
+          },
+          "data_state": "ready",
+          "updated_at": "2026-07-22T17:30:00Z"
+        }
+      },
+      "ServiceDiagnostics": {
+        "summary": "Нормализованные факты диагностики GP",
+        "value": {
+          "version": {
+            "version": "0.3.5-alpha.1",
+            "installed_ref": "feature/headless-core-api-research",
+            "commit": "7c0387e"
+          },
+          "service": {
+            "state": "active",
+            "unit": "gp-control-plane-web.service",
+            "data_state": "ready"
+          },
+          "external_sources": [
+            {
+              "name": "v2fly",
+              "status": "ready",
+              "details": {
+                "source_commit": "abc1234"
+              }
+            }
+          ],
+          "checks": [
+            {
+              "name": "root-helper",
+              "status": "ok",
+              "details": {
+                "command": "run-multidomain"
+              }
+            }
+          ],
+          "log_tail": [
+            "gp-control-plane-web.service started"
+          ]
+        }
+      },
+      "AvailableReleases": {
+        "summary": "Доступные релизы",
+        "value": {
+          "current": {
+            "version": "0.3.5-alpha.1",
+            "installed_ref": "v0.3.5-alpha.1",
+            "commit": "0c31b84"
+          },
+          "releases": [
+            {
+              "version": "0.3.4",
+              "channel": "stable",
+              "ref": "v0.3.4",
+              "url": "https://github.com/balbomush/GP-access-control-plane/releases/tag/v0.3.4",
+              "published_at": "2026-07-19T12:00:00Z"
+            },
+            {
+              "version": "0.3.5-alpha.1",
+              "channel": "prerelease",
+              "ref": "v0.3.5-alpha.1",
+              "url": "https://github.com/balbomush/GP-access-control-plane/releases/tag/v0.3.5-alpha.1",
+              "published_at": "2026-07-19T18:00:00Z"
+            }
+          ],
+          "stable_release_url": "https://github.com/balbomush/GP-access-control-plane/releases/latest",
+          "prerelease_url": "https://github.com/balbomush/GP-access-control-plane/releases"
+        }
+      },
+      "InstallChannel": {
+        "summary": "Использовать стабильные релизы",
+        "value": {
+          "channel": "stable"
+        }
+      },
+      "InstallReleaseRequest": {
+        "summary": "Установить выбранный релиз",
+        "value": {
+          "channel": "prerelease",
+          "target_ref": "v0.3.5-alpha.1"
+        }
+      },
+      "V2flyStorageStatus": {
+        "summary": "Локальное v2fly-хранилище готово",
+        "value": {
+          "state": "ready",
+          "source_repo": "v2fly/domain-list-community",
+          "source_ref": "master",
+          "source_commit": "abc1234",
+          "prepared_at": "2026-07-22T16:00:00Z",
+          "group_count": 1890,
+          "archive_sha256": "sha256:9d8a...",
+          "catalog_sha256": "sha256:f4b2...",
+          "last_update_check": {
+            "checked_at": "2026-07-22T17:00:00Z",
+            "has_updates": false
+          }
+        }
+      },
+      "PagedRunHistoryResponse": {
+        "summary": "Страница истории запусков для Web UI",
+        "value": {
+          "runs": [
+            {
+              "run_id": "run_20260722_173000",
+              "mode": "multi_domain",
+              "status": "running",
+              "started_at": "2026-07-22T17:30:00Z",
+              "domains": [
+                "youtube.com",
+                "discord.com"
+              ],
+              "settings": {
+                "curl_parallelism": 30
+              },
+              "summary": {
+                "attempts_processed": 1080
+              }
+            }
+          ],
+          "limit": 50,
+          "offset": 0,
+          "total": 124,
+          "has_more": true
+        }
+      },
+      "PagedStrategyCandidatesResponse": {
+        "summary": "Страница кандидатов стратегий для Web UI",
+        "value": {
+          "candidates": [
+            {
+              "strategy_id": "strategy_50_fake_multi_tcp",
+              "strategy_name": "50-fake-multi.sh tcp",
+              "domains": [
+                "youtube.com",
+                "discord.com"
+              ],
+              "domain_count": 2,
+              "protocols": [
+                "tcp"
+              ],
+              "facts": {
+                "source_file": "50-fake-multi.sh"
+              }
+            }
+          ],
+          "limit": 50,
+          "offset": 0,
+          "total": 7063,
+          "has_more": true
+        }
+      },
+      "ErrorResponse": {
+        "summary": "Структурированная ошибка",
+        "value": {
+          "error": {
+            "code": "storage_not_ready",
+            "message": "Local storage is not prepared",
+            "details": {
+              "source": "v2fly"
+            },
+            "retryable": true
+          }
+        }
       }
     }
   },

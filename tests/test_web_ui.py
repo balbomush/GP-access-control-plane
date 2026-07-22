@@ -1105,6 +1105,21 @@ class WebUiTests(unittest.TestCase):
                 openapi_contract = json.loads(body.decode("utf-8"))
                 self.assertEqual(openapi_contract["openapi"], "3.1.0")
                 self.assertNotIn("jsonSchemaDialect", openapi_contract)
+                examples = openapi_contract["components"]["examples"]
+                self.assertIn("StartRunRequestMultiDomain", examples)
+                self.assertEqual(30, examples["StartRunRequestMultiDomain"]["value"]["curl_parallelism"])
+                self.assertIn("CoreStatusRunning", examples)
+                self.assertIn("PagedStrategyCandidatesResponse", examples)
+                self.assertIn(
+                    "multiDomain30Parallel",
+                    openapi_contract["paths"]["/api/core/strategy-discovery/start-run"]["post"]["requestBody"][
+                        "content"
+                    ]["application/json"]["examples"],
+                )
+                self.assertIn(
+                    "structuredError",
+                    openapi_contract["components"]["responses"]["Error"]["content"]["application/json"]["examples"],
+                )
 
                 status, headers, body = _http_request(port, "/swagger")
                 swagger_html = body.decode("utf-8")
