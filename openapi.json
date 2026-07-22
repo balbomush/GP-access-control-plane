@@ -348,9 +348,9 @@
         "tags": [
           "Core Presets"
         ],
-        "operationId": "deleteUserDomainList",
-        "summary": "Delete one user domain list",
-        "description": "Deletes a user-created list. Required and desired lists cannot be deleted by this method.",
+        "operationId": "deleteUserDomainLists",
+        "summary": "Delete selected user domain lists",
+        "description": "Deletes only explicitly listed user-created domain lists. The list_ids array must not be empty; to delete all user lists, the caller must enumerate every user list id. Required and desired lists cannot be deleted by this method.",
         "requestBody": {
           "required": true,
           "content": {
@@ -369,35 +369,6 @@
         "responses": {
           "200": {
             "description": "List deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeleteResult"
-                },
-                "examples": {
-                  "default": {
-                    "$ref": "#/components/examples/DeleteResult"
-                  }
-                }
-              }
-            }
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        }
-      }
-    },
-    "/api/core/presets/delete-user-lists": {
-      "post": {
-        "tags": [
-          "Core Presets"
-        ],
-        "operationId": "deleteUserDomainLists",
-        "summary": "Delete all user domain lists",
-        "responses": {
-          "200": {
-            "description": "User lists deleted",
             "content": {
               "application/json": {
                 "schema": {
@@ -1556,12 +1527,17 @@
       },
       "DeleteDomainListRequest": {
         "type": "object",
+        "required": [
+          "list_ids"
+        ],
         "properties": {
-          "list_id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
+          "list_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^user:.+"
+            }
           }
         },
         "additionalProperties": false
@@ -2671,9 +2647,12 @@
         }
       },
       "DeleteDomainListRequest": {
-        "summary": "Удалить пользовательский список",
+        "summary": "Удалить выбранные пользовательские списки",
         "value": {
-          "list_id": "user:work"
+          "list_ids": [
+            "user:work",
+            "user:games"
+          ]
         }
       },
       "DeleteResult": {

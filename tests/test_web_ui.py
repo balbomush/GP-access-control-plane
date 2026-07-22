@@ -1127,6 +1127,11 @@ class WebUiTests(unittest.TestCase):
                     "structuredError",
                     openapi_contract["components"]["responses"]["Error"]["content"]["application/json"]["examples"],
                 )
+                self.assertIn("/api/core/presets/delete-user-domain-list", openapi_contract["paths"])
+                self.assertNotIn("/api/core/presets/delete-user-lists", openapi_contract["paths"])
+                delete_schema = openapi_contract["components"]["schemas"]["DeleteDomainListRequest"]
+                self.assertEqual(["list_ids"], delete_schema["required"])
+                self.assertEqual(1, delete_schema["properties"]["list_ids"]["minItems"])
 
                 status, headers, body = _http_request(port, "/swagger")
                 swagger_html = body.decode("utf-8")
@@ -1172,8 +1177,8 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/core/strategy-discovery/preflight", None, {}),
                     ("GET", "/api/core/presets/domain-lists", None, {}),
                     ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "work", "domains": ["youtube.com"]}, {}),
-                    ("POST", "/api/core/presets/delete-user-domain-list", {"list_id": "user:work"}, {}),
-                    ("POST", "/api/core/presets/delete-user-lists", {"dry_run": True}, {}),
+                    ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "games", "domains": ["discord.com"]}, {}),
+                    ("POST", "/api/core/presets/delete-user-domain-list", {"list_ids": ["user:work", "user:games"]}, {}),
                     ("GET", "/api/core/presets/v2fly/categories", None, {}),
                     ("GET", "/api/core/presets/v2fly/category-domains?category=missing", None, {}),
                     ("POST", "/api/core/backups/create", {}, {}),
@@ -1219,6 +1224,59 @@ class WebUiTests(unittest.TestCase):
                         headers=request_headers,
                     )
                     self.assertNotEqual(status, 404, (method, path, response_body.decode("utf-8", errors="replace")))
+
+    def test_core_delete_user_domain_lists_requires_explicit_non_empty_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            status, _headers, _body = _http_request(
+                port,
+                "/api/core/presets/delete-user-domain-list",
+                method="POST",
+                body=json.dumps({"list_ids": []}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 400)
+
+            status, _headers, _body = _http_request(
+                port,
+                "/api/core/presets/delete-user-lists",
+                method="POST",
+                body=json.dumps({"dry_run": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 404)
+
+            for name in ("work", "games"):
+                status, _headers, body = _http_request(
+                    port,
+                    "/api/core/presets/save-domain-list",
+                    method="POST",
+                    body=json.dumps({"kind": "user", "name": name, "domains": [f"{name}.example"]}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+
+            status, _headers, body = _http_request(
+                port,
+                "/api/core/presets/delete-user-domain-list",
+                method="POST",
+                body=json.dumps({"list_ids": ["user:work", "user:games"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+            self.assertEqual({"deleted": 2}, json.loads(body.decode("utf-8")))
+
+            status, _headers, body = _http_request(port, "/api/core/presets/domain-lists")
+            self.assertEqual(status, 200)
+            list_ids = [item["list_id"] for item in json.loads(body.decode("utf-8"))["lists"]]
+            self.assertNotIn("user:work", list_ids)
+            self.assertNotIn("user:games", list_ids)
 
     def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -520,12 +520,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
-            if path == "/api/core/presets/delete-user-lists":
-                try:
-                    self._json(_delete_core_user_domain_lists_payload(config, payload))
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
             if path == "/api/core/backups/create":
                 try:
                     created = create_snapshot_if_idle(config.output.state_dir)
@@ -7548,28 +7542,21 @@ def _save_core_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -
 
 
 def _delete_core_user_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, int]:
-    name = str(payload.get("name") or "").strip()
-    list_id = str(payload.get("list_id") or "").strip()
-    if not name and list_id.startswith("user:"):
+    list_ids = _payload_string_list(payload, "list_ids")
+    if not list_ids:
+        raise ValueError("list_ids must contain at least one user list id")
+    names: list[str] = []
+    for list_id in list_ids:
+        if not list_id.startswith("user:"):
+            raise ValueError("list_ids must contain only user list ids")
         name = list_id.split(":", 1)[1].strip()
-    if not name:
-        raise ValueError("user domain list name is required")
-    delete_custom_preset(config.output.state_dir, scope="finder", name=name)
-    return {"deleted": 1}
-
-
-def _delete_core_user_domain_lists_payload(config: AppConfig, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    deleted = 0
-    index = read_custom_preset_index(config.output.state_dir)
-    dry_run = bool((payload or {}).get("dry_run"))
-    for scope, scoped in index.items():
-        names = list((scoped or {}).keys())
-        if not names:
-            continue
-        if not dry_run:
-            delete_user_presets(config.output.state_dir, scope=scope, names=names)
-        deleted += len(names)
-    return {"deleted": 0 if dry_run else deleted, "would_delete": deleted, "dry_run": dry_run}
+        if not name:
+            raise ValueError("list_ids must contain only user list ids")
+        names.append(name)
+    unique_names = sorted(set(names))
+    existing_names = set((read_custom_preset_index(config.output.state_dir).get("finder") or {}).keys())
+    delete_user_presets(config.output.state_dir, scope="finder", names=unique_names)
+    return {"deleted": len([name for name in unique_names if name in existing_names])}
 
 
 def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
