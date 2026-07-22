@@ -343,6 +343,17 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._json({"job": job}, status=HTTPStatus.ACCEPTED)
                 return
             if path == "/api/core/strategy-discovery/stop-current-run":
+                if payload.get("dry_run"):
+                    state = read_state(config.output.state_dir)
+                    self._json(
+                        {
+                            "accepted": True,
+                            "status": "dry_run",
+                            "job_id": str(state.get("current_job") or ""),
+                        },
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
                 try:
                     job = runner.cancel_active()
                 except Exception as exc:  # noqa: BLE001

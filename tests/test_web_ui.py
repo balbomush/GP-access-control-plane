@@ -1166,7 +1166,7 @@ class WebUiTests(unittest.TestCase):
                 cases = [
                     ("GET", "/api/core/status", None, {}),
                     ("POST", "/api/core/strategy-discovery/start-run", {"mode": "bad", "domains": ["youtube.com"]}, {}),
-                    ("POST", "/api/core/strategy-discovery/stop-current-run", {}, {}),
+                    ("POST", "/api/core/strategy-discovery/stop-current-run", {"dry_run": True}, {}),
                     ("GET", "/api/core/strategy-discovery/current-run-progress", None, {}),
                     ("GET", "/api/core/strategy-discovery/current-run-latest-log", None, {}),
                     ("GET", "/api/core/strategy-discovery/preflight", None, {}),
