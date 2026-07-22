@@ -26,9 +26,16 @@ from ..diagnostics import diagnostics_payload
 from ..domain_sources import (
     builtin_preset_sources,
     fetch_v2fly_category_local,
+    fetch_v2fly_revision,
     import_v2fly_preset,
     list_v2fly_categories_local,
+    parse_v2fly_domains,
+    parse_v2fly_revision,
+    prepare_v2fly_local_storage,
     preview_v2fly_preset,
+    read_v2fly_catalog_cache,
+    read_v2fly_group_manifest,
+    write_v2fly_catalog_cache,
 )
 from ..jobs import JobRunner
 from ..release_update import queue_release_update, release_update_plan, release_update_status
@@ -166,6 +173,62 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._openapi_json()
             elif path in SWAGGER_PATHS:
                 self._swagger()
+            elif path == "/api/core/status":
+                self._json(_core_status_payload(config))
+            elif path == "/api/core/strategy-discovery/current-run-progress":
+                self._json(_core_current_progress_payload(config))
+            elif path == "/api/core/strategy-discovery/current-run-latest-log":
+                self._json(_latest_log_payload(config, query))
+            elif path == "/api/core/strategy-discovery/preflight":
+                self._json(_core_preflight_payload(config))
+            elif path == "/api/core/presets/domain-lists":
+                self._json(_core_domain_lists_payload(config))
+            elif path == "/api/core/presets/v2fly/categories":
+                self._json(_core_v2fly_categories_payload(config, query))
+            elif path == "/api/core/presets/v2fly/category-domains":
+                try:
+                    self._json(_core_v2fly_category_domains_payload(config, query))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            elif path == "/api/core/backups/list":
+                self._json(_core_backups_list_payload(config))
+            elif path == "/api/core/backups/download-file":
+                core_query = {"snapshot": [_query_one(query, "snapshot_id")], "file": ["archive"]}
+                self._download_backup(config, core_query)
+            elif path == "/api/core/run-settings":
+                self._json(_core_run_settings_payload(config))
+            elif path == "/api/core/runs/history":
+                self._json(
+                    {
+                        "runs": read_runs(
+                            config.output.state_dir,
+                            limit=_query_int(query, "limit", 1000),
+                            offset=_query_int(query, "offset", 0),
+                        )
+                    }
+                )
+            elif path == "/api/core/runs/latest-log":
+                self._json(_latest_log_payload(config, query))
+            elif path == "/api/core/strategy-candidates":
+                self._json(_core_strategy_candidates_payload(config, query))
+            elif path == "/api/core/events":
+                self._json(_events_response_payload(config, query))
+            elif path == "/api/service/status":
+                self._json(_service_status_payload(config))
+            elif path == "/api/service/diagnostics":
+                self._json(_service_diagnostics_payload(config))
+            elif path == "/api/service/releases/available":
+                self._json(_available_releases_payload(config))
+            elif path == "/api/service/releases/install-channel":
+                self._json(_install_channel_payload(config))
+            elif path == "/api/service/v2fly/local-storage-status":
+                self._json(_v2fly_storage_status_payload(config))
+            elif path == "/api/web/runs/history-page":
+                self._json(_runs_page_payload(config, query))
+            elif path == "/api/web/strategy-candidates-page":
+                self._json(_candidate_page_payload(config, query))
+            elif path == "/api/web/events":
+                self._json(_events_response_payload(config, query))
             elif path == "/api/status":
                 self._json(status_payload(config))
             elif path == "/api/events":
@@ -256,9 +319,13 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def do_POST(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
-            if path == "/api/backups/upload":
+            if path in {"/api/backups/upload", "/api/core/backups/upload"}:
                 try:
-                    self._json(import_snapshot_archive(config.output.state_dir, self._request_upload_bytes()), status=HTTPStatus.ACCEPTED)
+                    imported = import_snapshot_archive(config.output.state_dir, self._request_upload_bytes())
+                    if path == "/api/core/backups/upload":
+                        self._json(_backup_snapshot_payload(imported.get("snapshot") or {}), status=HTTPStatus.CREATED)
+                    else:
+                        self._json(imported, status=HTTPStatus.ACCEPTED)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -429,6 +496,78 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
                     return
                 self._json(_run_accepted_payload(job), status=HTTPStatus.ACCEPTED)
+                return
+            if path == "/api/core/presets/save-domain-list":
+                try:
+                    self._json(_save_core_domain_list_payload(config, payload))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/core/presets/delete-user-domain-list":
+                try:
+                    self._json(_delete_core_user_domain_list_payload(config, payload))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/core/presets/delete-user-lists":
+                try:
+                    self._json(_delete_core_user_domain_lists_payload(config))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/core/backups/create":
+                try:
+                    created = create_snapshot_if_idle(config.output.state_dir)
+                    self._json(_backup_snapshot_payload(created.get("snapshot") or {}), status=HTTPStatus.CREATED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/core/backups/restore":
+                try:
+                    snapshot_id = _payload_snapshot_id(payload)
+                    restore_snapshot_if_idle(config.output.state_dir, snapshot_id)
+                    self._json({"accepted": True, "status": "success", "job_id": snapshot_id}, status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/core/backups/delete":
+                try:
+                    snapshot_id = _payload_snapshot_id(payload)
+                    delete_snapshot_if_idle(config.output.state_dir, snapshot_id)
+                    self._json({"deleted": 1})
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/core/run-settings/save":
+                self._json(_core_run_settings_payload(config, save_settings(config, payload.get("settings") or payload)))
+                return
+            if path == "/api/service/releases/set-install-channel":
+                try:
+                    self._json(_save_install_channel_payload(config, payload))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/service/releases/install":
+                try:
+                    update = _queue_release_update_payload(config, payload).get("update") or {}
+                    self._json(
+                        {"accepted": True, "status": str(update.get("status") or "queued"), "job_id": str(update.get("target_ref") or "")},
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            if path == "/api/service/v2fly/check-updates":
+                try:
+                    self._json(_v2fly_check_updates_payload(config), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/api/service/v2fly/update-local-storage":
+                try:
+                    self._json(_v2fly_update_local_storage_payload(config), status=HTTPStatus.ACCEPTED)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             if path not in jobs:
                 self._not_found()
@@ -7256,6 +7395,159 @@ def _clear_stale_current_job(config: AppConfig) -> None:
     write_state(config.output.state_dir, state)
 
 
+def _core_status_payload(config: AppConfig) -> dict[str, Any]:
+    state = read_state(config.output.state_dir)
+    current_job = str(state.get("current_job") or "")
+    current_status = str(state.get("current_job_status") or "")
+    status = "running" if current_job else "idle"
+    if current_status == "stopping":
+        status = "stopping"
+    if state.get("last_error"):
+        status = "error"
+    payload: dict[str, Any] = {
+        "state": status,
+        "storage": {
+            "ready": True,
+            "schema_version": int((candidate_storage_version(config.output.state_dir) or {}).get("version") or 0),
+            "state_dir": str(config.output.state_dir),
+        },
+        "updated_at": now_iso(),
+    }
+    if current_job:
+        payload["current_run"] = {"run_id": current_job, "status": current_status or "running"}
+    return payload
+
+
+def _core_current_progress_payload(config: AppConfig) -> dict[str, Any]:
+    state = read_state(config.output.state_dir)
+    log = latest_log_tail(config.output.state_dir, max_lines=20)
+    progress = log.get("progress") if isinstance(log.get("progress"), dict) else {}
+    current_job = str(state.get("current_job") or log.get("run_id") or "")
+    status = str(state.get("current_job_status") or log.get("status") or "")
+    if not state.get("current_job"):
+        status = "idle"
+    result: dict[str, Any] = {
+        "run_id": current_job,
+        "status": status or "idle",
+        "stage": str(progress.get("phase") or progress.get("stage") or ""),
+        "current_file": str(progress.get("current_file") or progress.get("script") or ""),
+    }
+    for target, *sources in (
+        ("domains_total", "domains_total", "total_domains"),
+        ("domains_processed", "domains_processed", "processed_domains"),
+        ("attempts_total", "attempts_total", "total_attempts"),
+        ("attempts_processed", "attempts_processed", "processed_attempts"),
+        ("strategies_total", "strategies_total", "total_strategies"),
+        ("strategies_processed", "strategies_processed", "processed_strategies"),
+        ("elapsed_seconds", "elapsed_seconds"),
+        ("eta_seconds", "eta_seconds"),
+        ("avg_attempt_seconds", "avg_attempt_seconds"),
+    ):
+        for source in sources:
+            value = progress.get(source)
+            if value is not None:
+                result[target] = value
+                break
+    return result
+
+
+def _core_preflight_payload(config: AppConfig) -> dict[str, Any]:
+    zapret = check_install_cached()
+    checks = []
+    diagnostics = zapret.get("diagnostics") if isinstance(zapret.get("diagnostics"), list) else []
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        checks.append(
+            {
+                "name": str(item.get("id") or item.get("label") or "check"),
+                "status": "ok" if item.get("ok") else "error",
+                "message": str(item.get("message") or ""),
+            }
+        )
+    if not checks:
+        ready = bool(zapret.get("ready") or zapret.get("ok"))
+        checks.append({"name": "zapret2", "status": "ok" if ready else "error", "message": str(zapret.get("message") or "")})
+    return {"ready": all(item["status"] == "ok" for item in checks), "checks": checks}
+
+
+def _core_run_settings_payload(config: AppConfig, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = settings or read_settings(config)
+    return {
+        "curl_parallelism_default": raw.get("curl_parallelism_default"),
+        "curl_parallelism_max": raw.get("curl_parallelism_max"),
+        "curl_max_time": raw.get("curl_max_time"),
+        "curl_max_time_quic": raw.get("curl_max_time_quic"),
+        "curl_max_time_doh": raw.get("curl_max_time_doh"),
+        "enable_ipv6": raw.get("enable_ipv6"),
+        "debug_stdout": raw.get("debug_stdout"),
+    }
+
+
+def _core_domain_lists_payload(config: AppConfig) -> dict[str, Any]:
+    state_dir = config.output.state_dir
+    system = read_system_presets(state_dir).get("finder", {})
+    system_meta = read_system_preset_index(state_dir).get("finder", {})
+    custom = read_custom_presets(state_dir).get("finder", {})
+    custom_meta = read_custom_preset_index(state_dir).get("finder", {})
+    lists = [
+        _domain_list_payload("required", "required", "Обязательные", system.get("required") or [], system_meta.get("required") or {}),
+        _domain_list_payload("desired", "desired", "Желательные", system.get("desired") or [], system_meta.get("desired") or {}),
+    ]
+    for name, domains in custom.items():
+        lists.append(_domain_list_payload(f"user:{name}", "user", name, domains, custom_meta.get(name) or {}))
+    return {"lists": lists}
+
+
+def _domain_list_payload(list_id: str, kind: str, name: str, domains: list[str], meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "list_id": list_id,
+        "kind": kind,
+        "name": name,
+        "domains": list(domains or []),
+        "updated_at": str(meta.get("updated_at") or ""),
+    }
+
+
+def _save_core_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    kind = str(payload.get("kind") or "").strip()
+    name = str(payload.get("name") or kind).strip()
+    domains = _payload_string_list(payload, "domains")
+    updated_at = now_iso()
+    if kind in {"required", "desired"}:
+        save_system_preset(config.output.state_dir, scope="finder", name=kind, domains=domains, updated_at=updated_at)
+        meta = read_system_preset_index(config.output.state_dir).get("finder", {}).get(kind) or {}
+        return _domain_list_payload(kind, kind, name or kind, domains, meta)
+    if kind == "user":
+        save_custom_preset(config.output.state_dir, scope="finder", name=name, domains=domains, updated_at=updated_at)
+        meta = read_custom_preset_index(config.output.state_dir).get("finder", {}).get(name) or {}
+        return _domain_list_payload(f"user:{name}", "user", name, domains, meta)
+    raise ValueError("kind must be required, desired or user")
+
+
+def _delete_core_user_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, int]:
+    name = str(payload.get("name") or "").strip()
+    list_id = str(payload.get("list_id") or "").strip()
+    if not name and list_id.startswith("user:"):
+        name = list_id.split(":", 1)[1].strip()
+    if not name:
+        raise ValueError("user domain list name is required")
+    delete_custom_preset(config.output.state_dir, scope="finder", name=name)
+    return {"deleted": 1}
+
+
+def _delete_core_user_domain_lists_payload(config: AppConfig) -> dict[str, int]:
+    deleted = 0
+    index = read_custom_preset_index(config.output.state_dir)
+    for scope, scoped in index.items():
+        names = list((scoped or {}).keys())
+        if not names:
+            continue
+        delete_user_presets(config.output.state_dir, scope=scope, names=names)
+        deleted += len(names)
+    return {"deleted": deleted}
+
+
 def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     return read_candidate_page(
         config.output.state_dir,
@@ -7364,6 +7656,216 @@ def _v2fly_import_payload(config: AppConfig, payload: dict[str, Any]) -> dict[st
         domains=_payload_string_list(payload, "domains"),
         fetcher=lambda category: fetch_v2fly_category_local(state_dir, category),
     )
+
+
+def _core_v2fly_categories_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    raw = list_v2fly_categories_local(
+        config.output.state_dir,
+        query=_query_str(query, "query", ""),
+        limit=_query_int(query, "limit", 2000),
+    )
+    return {
+        "categories": [{"name": str(category)} for category in raw.get("categories") or []],
+        "storage": _v2fly_storage_status_payload(config, raw),
+    }
+
+
+def _core_v2fly_category_domains_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    category = _query_one(query, "category")
+    if not category:
+        raise ValueError("category is required")
+    text = fetch_v2fly_category_local(config.output.state_dir, category)
+    return {
+        "category": category,
+        "domains": parse_v2fly_domains(text),
+        "storage": _v2fly_storage_status_payload(config),
+    }
+
+
+def _v2fly_storage_status_payload(config: AppConfig, raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = raw or list_v2fly_categories_local(config.output.state_dir, limit=1)
+    state = "ready" if str(payload.get("data_status") or "") == "local" else "missing"
+    if payload.get("error_kind") and state != "ready":
+        state = "error"
+    cache = read_v2fly_catalog_cache(config.output.state_dir) or {}
+    last_update_check = {}
+    if cache.get("checked_at") or cache.get("remote_revision") or cache.get("update_available") is not None:
+        last_update_check = {
+            "checked_at": str(cache.get("checked_at") or ""),
+            "has_updates": bool(cache.get("update_available")),
+            "remote_revision": str(cache.get("remote_revision") or cache.get("revision") or ""),
+        }
+    return {
+        "state": state,
+        "source_repo": "v2fly/domain-list-community",
+        "source_ref": "master",
+        "source_commit": str(payload.get("revision") or ""),
+        "prepared_at": str(payload.get("checked_at") or ""),
+        "group_count": int(payload.get("all_count") or payload.get("total") or 0),
+        "archive_sha256": "",
+        "catalog_sha256": "",
+        "last_update_check": last_update_check,
+    }
+
+
+def _v2fly_check_updates_payload(config: AppConfig) -> dict[str, Any]:
+    manifest, _error = read_v2fly_group_manifest(config.output.state_dir)
+    local_revision = str((manifest or {}).get("revision") or "")
+    remote_revision = parse_v2fly_revision(fetch_v2fly_revision())
+    checked_at = now_iso()
+    categories = list((manifest or {}).get("categories") or [])
+    write_v2fly_catalog_cache(
+        config.output.state_dir,
+        {
+            "source": "v2fly/domain-list-community",
+            "revision": local_revision,
+            "remote_revision": remote_revision,
+            "checked_at": checked_at,
+            "categories": categories,
+            "update_available": bool(remote_revision and remote_revision != local_revision),
+        },
+    )
+    storage = _v2fly_storage_status_payload(config)
+    return {"accepted": True, "status": "success", "job_id": "v2fly-check-updates", "storage": storage}
+
+
+def _v2fly_update_local_storage_payload(config: AppConfig) -> dict[str, Any]:
+    result = prepare_v2fly_local_storage(config.output.state_dir, revision_fetcher=fetch_v2fly_revision)
+    return {
+        "accepted": True,
+        "status": "success",
+        "job_id": "v2fly-update-local-storage",
+        "storage": _v2fly_storage_status_payload(config),
+        "result": result,
+    }
+
+
+def _core_strategy_candidates_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return read_candidate_page(
+        config.output.state_dir,
+        limit=_query_int(query, "limit", 1000),
+        offset=_query_int(query, "offset", 0),
+        query=_query_str(query, "query", ""),
+        view=_query_str(query, "view", "domain"),
+        domains=_query_domains(query, "domains"),
+        domain=_query_str(query, "domain", ""),
+        fragmentation_classes=_query_domains(query, "fragmentation_class"),
+    )
+
+
+def _core_backups_list_payload(config: AppConfig) -> dict[str, Any]:
+    return {"backups": [_backup_snapshot_payload(item) for item in list_snapshots(config.output.state_dir).get("snapshots") or []]}
+
+
+def _backup_snapshot_payload(item: dict[str, Any]) -> dict[str, Any]:
+    snapshot_id = str(item.get("snapshot_id") or item.get("id") or "")
+    return {
+        "snapshot_id": snapshot_id,
+        "created_at": str(item.get("created_at") or ""),
+        "schema_version": str(item.get("schema_version") or ""),
+        "filename": str(item.get("filename") or f"{snapshot_id}.zip"),
+        "size_bytes": int(item.get("size_bytes") or 0),
+        "checksum": "ok" if item.get("checksum_ok") else "",
+        "entity_counts": {
+            "strategies": int(item.get("strategy_count") or 0),
+            "domain_lists": int(item.get("preset_count") or 0),
+        },
+    }
+
+
+def _payload_snapshot_id(payload: dict[str, Any]) -> str:
+    snapshot_id = str(payload.get("snapshot_id") or payload.get("snapshot") or "").strip()
+    if not snapshot_id:
+        raise ValueError("snapshot_id is required")
+    return snapshot_id
+
+
+def _available_releases_payload(config: AppConfig) -> dict[str, Any]:
+    stable = release_channel_info(current_version=__version__, channel="stable")
+    prerelease = release_channel_info(current_version=__version__, channel="prerelease")
+    settings = read_settings(config)
+    return {
+        "current": {
+            "version": __version__,
+            "installed_ref": str(settings.get("installed_ref") or ""),
+            "commit": "",
+        },
+        "releases": [_release_item_payload(stable), _release_item_payload(prerelease)],
+        "stable_release_url": str(settings.get("stable_release_url") or ""),
+        "prerelease_url": str(settings.get("prerelease_url") or ""),
+    }
+
+
+def _release_item_payload(item: dict[str, Any]) -> dict[str, Any]:
+    version = str(item.get("available_version") or "")
+    return {
+        "version": version,
+        "channel": str(item.get("channel") or ""),
+        "ref": version,
+        "url": str(item.get("url") or ""),
+        "published_at": str(item.get("published_at") or ""),
+    }
+
+
+def _install_channel_payload(config: AppConfig) -> dict[str, str]:
+    return {"channel": str(read_settings(config).get("update_channel") or "stable")}
+
+
+def _save_install_channel_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, str]:
+    channel = str(payload.get("channel") or "").strip()
+    if channel not in {"stable", "prerelease"}:
+        raise ValueError("channel must be stable or prerelease")
+    save_settings(config, {"update_channel": channel})
+    return {"channel": channel}
+
+
+def _service_status_payload(config: AppConfig) -> dict[str, Any]:
+    state = read_state(config.output.state_dir)
+    v2fly = _v2fly_storage_status_payload(config)
+    return {
+        "state": "error" if state.get("last_error") else "active",
+        "unit": "gp-control-plane-web.service",
+        "version": {"version": __version__, "installed_ref": "", "commit": ""},
+        "data_state": str(v2fly.get("state") or "unknown"),
+        "updated_at": now_iso(),
+    }
+
+
+def _service_diagnostics_payload(config: AppConfig) -> dict[str, Any]:
+    zapret = check_install_cached()
+    v2fly = _v2fly_storage_status_payload(config)
+    checks = []
+    diagnostics = zapret.get("diagnostics") if isinstance(zapret.get("diagnostics"), list) else []
+    for item in diagnostics:
+        if isinstance(item, dict):
+            checks.append(
+                {
+                    "name": str(item.get("id") or item.get("label") or "zapret2"),
+                    "status": "ok" if item.get("ok") else "error",
+                    "details": {"message": str(item.get("message") or "")},
+                }
+            )
+    if not checks:
+        checks.append({"name": "zapret2", "status": "ok" if (zapret.get("ready") or zapret.get("ok")) else "error", "details": zapret})
+    return {
+        "version": {"version": __version__, "installed_ref": "", "commit": ""},
+        "service": _service_status_payload(config),
+        "external_sources": [{"name": "v2fly", "status": str(v2fly.get("state") or "unknown"), "details": v2fly}],
+        "checks": checks,
+        "log_tail": [],
+    }
+
+
+def _events_response_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    events = []
+    created_at = now_iso()
+    for event_type, payload in _event_payloads(config).items():
+        event_id = f"{event_type}:{_event_fingerprint(payload)}"
+        events.append({"event_id": event_id, "type": event_type, "created_at": created_at, "payload": payload})
+    after_id = _query_one(query, "after_id")
+    if after_id:
+        events = [event for event in events if str(event.get("event_id") or "") > after_id]
+    return {"events": events, "next_after_id": str(events[-1]["event_id"]) if events else after_id}
 
 
 def _query_str(query: dict[str, list[str]], key: str, default: str) -> str:

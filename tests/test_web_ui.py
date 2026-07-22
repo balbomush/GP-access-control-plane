@@ -1140,6 +1140,86 @@ class WebUiTests(unittest.TestCase):
                 self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
                 self.assertEqual(body, b"")
 
+    def test_openapi_paths_are_callable_through_web_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            web_app.save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
+            snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
+            port = _free_port()
+            release = {
+                "channel": "stable",
+                "available_version": "v0.0.0-test",
+                "url": "https://example.invalid/release",
+                "published_at": "",
+            }
+            with (
+                mock.patch.object(web_app, "release_channel_info", return_value=release),
+                mock.patch.object(web_app, "queue_release_update", return_value={"status": "queued", "target_ref": "v0.0.0-test"}),
+                mock.patch.object(web_app, "fetch_v2fly_revision", return_value="remote-test-revision"),
+                mock.patch.object(web_app, "prepare_v2fly_local_storage", return_value={"count": 0}),
+            ):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                cases = [
+                    ("GET", "/api/core/status", None, {}),
+                    ("POST", "/api/core/strategy-discovery/start-run", {"mode": "bad", "domains": ["youtube.com"]}, {}),
+                    ("POST", "/api/core/strategy-discovery/stop-current-run", {}, {}),
+                    ("GET", "/api/core/strategy-discovery/current-run-progress", None, {}),
+                    ("GET", "/api/core/strategy-discovery/current-run-latest-log", None, {}),
+                    ("GET", "/api/core/strategy-discovery/preflight", None, {}),
+                    ("GET", "/api/core/presets/domain-lists", None, {}),
+                    ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "work", "domains": ["youtube.com"]}, {}),
+                    ("POST", "/api/core/presets/delete-user-domain-list", {"list_id": "user:work"}, {}),
+                    ("POST", "/api/core/presets/delete-user-lists", {}, {}),
+                    ("GET", "/api/core/presets/v2fly/categories", None, {}),
+                    ("GET", "/api/core/presets/v2fly/category-domains?category=missing", None, {}),
+                    ("POST", "/api/core/backups/create", {}, {}),
+                    ("GET", "/api/core/backups/list", None, {}),
+                    ("POST", "/api/core/backups/restore", {"snapshot_id": "missing"}, {}),
+                    ("POST", "/api/core/backups/delete", {"snapshot_id": "missing"}, {}),
+                    ("GET", f"/api/core/backups/download-file?snapshot_id={snapshot}", None, {}),
+                    ("POST", "/api/core/backups/upload", b"not-a-zip", {"Content-Type": "application/zip"}),
+                    ("GET", "/api/core/run-settings", None, {}),
+                    ("POST", "/api/core/run-settings/save", {"curl_parallelism_default": 10, "curl_parallelism_max": 50}, {}),
+                    ("GET", "/api/core/runs/history", None, {}),
+                    ("GET", "/api/core/runs/latest-log", None, {}),
+                    ("GET", "/api/core/strategy-candidates", None, {}),
+                    ("GET", "/api/core/events", None, {}),
+                    ("GET", "/api/service/status", None, {}),
+                    ("GET", "/api/service/diagnostics", None, {}),
+                    ("GET", "/api/service/releases/available", None, {}),
+                    ("GET", "/api/service/releases/install-channel", None, {}),
+                    ("POST", "/api/service/releases/set-install-channel", {"channel": "prerelease"}, {}),
+                    ("POST", "/api/service/releases/install", {"channel": "stable"}, {}),
+                    ("GET", "/api/service/v2fly/local-storage-status", None, {}),
+                    ("POST", "/api/service/v2fly/check-updates", {}, {}),
+                    ("POST", "/api/service/v2fly/update-local-storage", {}, {}),
+                    ("GET", "/api/web/runs/history-page", None, {}),
+                    ("GET", "/api/web/strategy-candidates-page", None, {}),
+                    ("GET", "/api/web/events", None, {}),
+                ]
+                openapi = json.loads(web_app.openapi_json_bytes().decode("utf-8"))
+                expected = {(method.upper(), path) for path, ops in openapi["paths"].items() for method in ops}
+                requested = {(method, path.split("?", 1)[0]) for method, path, _body, _headers in cases}
+                self.assertEqual(expected, requested)
+
+                for method, path, body, headers in cases:
+                    raw_body = body if isinstance(body, bytes) else (json.dumps(body).encode("utf-8") if body is not None else None)
+                    request_headers = dict(headers)
+                    if raw_body is not None and "Content-Type" not in request_headers:
+                        request_headers["Content-Type"] = "application/json"
+                    status, _response_headers, response_body = _http_request(
+                        port,
+                        path,
+                        method=method,
+                        body=raw_body,
+                        headers=request_headers,
+                    )
+                    self.assertNotEqual(status, 404, (method, path, response_body.decode("utf-8", errors="replace")))
+
     def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -1634,9 +1714,16 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _http_request(port: int, path: str, *, method: str = "GET") -> tuple[int, dict[str, str], bytes]:
+def _http_request(
+    port: int,
+    path: str,
+    *,
+    method: str = "GET",
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    connection.request(method, path)
+    connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     headers = {key.lower(): value for key, value in response.getheaders()}
     body = response.read()
