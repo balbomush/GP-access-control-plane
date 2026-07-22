@@ -275,6 +275,14 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     return
                 self._json({"job": job}, status=HTTPStatus.ACCEPTED)
                 return
+            if path == "/api/core/strategy-discovery/stop-current-run":
+                try:
+                    job = runner.cancel_active()
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                    return
+                self._json(_action_accepted_payload(job), status=HTTPStatus.ACCEPTED)
+                return
             if path == "/api/backups/create":
                 try:
                     self._json(create_snapshot_if_idle(config.output.state_dir), status=HTTPStatus.ACCEPTED)
@@ -405,6 +413,23 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     stop_active_blockcheck_runtime,
                 ),
             }
+            if path == "/api/core/strategy-discovery/start-run":
+                try:
+                    name, core_payload = _core_strategy_discovery_job_payload(payload)
+                    func = (
+                        (lambda stop: _job_zapret_multi_domain_discovery(config, core_payload, stop))
+                        if name == "zapret-multi-domain-discovery"
+                        else (lambda stop: _job_zapret_standard_discovery(config, core_payload, stop))
+                    )
+                    job = runner.start(name, func, cancel_hook=stop_active_blockcheck_runtime)
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                    return
+                self._json(_run_accepted_payload(job), status=HTTPStatus.ACCEPTED)
+                return
             if path not in jobs:
                 self._not_found()
                 return
@@ -7399,6 +7424,60 @@ def _multipart_file_bytes(body: bytes, boundary: str) -> bytes:
         if payload:
             return payload
     raise ValueError("backup file is missing")
+
+
+def _run_accepted_payload(job: Any) -> dict[str, Any]:
+    return {
+        "accepted": True,
+        "run_id": str(getattr(job, "id", "")),
+        "status": str(getattr(job, "status", "")),
+    }
+
+
+def _action_accepted_payload(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "accepted": True,
+        "status": str(job.get("status") or ""),
+        "job_id": str(job.get("id") or ""),
+    }
+
+
+def _core_strategy_discovery_job_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    domains = _payload_domains(payload)
+    if not domains:
+        raise ValueError("domains are required")
+
+    mode = str(payload.get("mode") or "standard").strip().lower().replace("-", "_")
+    if mode in {"multi_domain", "common_strategy"}:
+        job_name = "zapret-multi-domain-discovery"
+    elif mode == "standard":
+        job_name = "zapret-standard-discovery"
+    else:
+        raise ValueError("unsupported strategy discovery mode")
+
+    settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+    job_payload = {str(key): value for key, value in settings.items()}
+    for key, value in payload.items():
+        if key not in {"mode", "settings", "mode_settings", "protocols"}:
+            job_payload[str(key)] = value
+    job_payload["domains"] = domains
+
+    protocols = {item.lower() for item in _payload_string_list(payload, "protocols")}
+    unknown_protocols = protocols - {"tcp", "quic"}
+    if unknown_protocols:
+        raise ValueError(f"unsupported protocols: {', '.join(sorted(unknown_protocols))}")
+    if protocols:
+        job_payload["include_quic"] = "quic" in protocols
+        if "tcp" not in protocols:
+            job_payload["enable_http"] = False
+            job_payload["enable_tls12"] = False
+            job_payload["enable_tls13"] = False
+        else:
+            job_payload.setdefault("enable_http", False)
+            job_payload.setdefault("enable_tls12", True)
+            job_payload.setdefault("enable_tls13", False)
+
+    return job_name, job_payload
 
 
 def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:

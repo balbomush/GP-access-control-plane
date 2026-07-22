@@ -1345,6 +1345,83 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(13, runner.call_args.kwargs["curl_max_time_doh"])
             self.assertEqual(2, runner.call_args.kwargs["curl_parallelism"])
 
+    def test_core_strategy_discovery_start_run_routes_swagger_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            save_settings = web_app.save_settings
+            save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
+            port = _free_port()
+            finished = threading.Event()
+
+            def fake_run(*args: object, **kwargs: object) -> dict[str, str]:
+                finished.set()
+                return {"status": "success"}
+
+            with (
+                mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=fake_run) as runner,
+                mock.patch.object(web_app, "create_snapshot_if_idle", return_value={}),
+            ):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                body = json.dumps(
+                    {
+                        "mode": "multi_domain",
+                        "domains": ["youtube.com", "discord.com", "airhorn.solutions"],
+                        "protocols": ["tcp", "quic"],
+                        "curl_parallelism": 30,
+                        "timeout_seconds": 172800,
+                        "settings": {
+                            "curl_max_time": 7,
+                            "curl_max_time_quic": 7,
+                            "enable_ipv6": False,
+                        },
+                        "mode_settings": {
+                            "common_strategy_min_domains": 2,
+                        },
+                    }
+                )
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request(
+                    "POST",
+                    "/api/core/strategy-discovery/start-run",
+                    body=body,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+                response = connection.getresponse()
+                raw_response = response.read().decode("utf-8")
+                connection.close()
+
+                self.assertEqual(response.status, 202)
+                accepted = json.loads(raw_response)
+                self.assertTrue(accepted["accepted"])
+                self.assertTrue(accepted["run_id"])
+                self.assertEqual("queued", accepted["status"])
+                self.assertTrue(finished.wait(2))
+                self.assertEqual(30, runner.call_args.kwargs["curl_parallelism"])
+                self.assertEqual(7, runner.call_args.kwargs["curl_max_time"])
+                self.assertEqual(7, runner.call_args.kwargs["curl_max_time_quic"])
+                self.assertFalse(runner.call_args.kwargs["enable_ipv6"])
+                self.assertTrue(runner.call_args.kwargs["include_quic"])
+                self.assertTrue(runner.call_args.kwargs["enable_tls12"])
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    if read_state(config.output.state_dir).get("current_job") is None:
+                        break
+                    time.sleep(0.02)
+
+    def test_core_strategy_discovery_start_run_rejects_unknown_protocols(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported protocols"):
+            web_app._core_strategy_discovery_job_payload(
+                {
+                    "mode": "multi_domain",
+                    "domains": ["youtube.com"],
+                    "protocols": ["tcp", "bad"],
+                }
+            )
+
     def test_run_preferences_endpoint_saves_last_finder_form(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
