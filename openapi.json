@@ -5,7 +5,6 @@
     "version": "0.1.0-research",
     "description": "First-level future API contract for the headless runtime and штатный Web UI. This contract is a research artifact: it defines target namespaces and payload shape before the service split is implemented."
   },
-  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "servers": [
     {
       "url": "http://localhost:8080",

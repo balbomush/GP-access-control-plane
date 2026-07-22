@@ -1102,7 +1102,9 @@ class WebUiTests(unittest.TestCase):
                 status, headers, body = _http_request(port, "/openapi.json")
                 self.assertEqual(status, 200)
                 self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-                self.assertEqual(json.loads(body.decode("utf-8"))["openapi"], "3.1.0")
+                openapi_contract = json.loads(body.decode("utf-8"))
+                self.assertEqual(openapi_contract["openapi"], "3.1.0")
+                self.assertNotIn("jsonSchemaDialect", openapi_contract)
 
                 status, headers, body = _http_request(port, "/swagger")
                 swagger_html = body.decode("utf-8")
