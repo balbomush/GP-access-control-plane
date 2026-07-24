@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -11,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.jobs import JobRunner
-from gp_control_plane.state import read_state
+from gp_control_plane.state import read_state, update_state
 
 
 class JobRunnerTests(unittest.TestCase):
@@ -152,6 +153,92 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(success["result"]["candidate_count"], 2)
             self.assertNotIn("candidates", success["result"])
             self.assertNotIn("summary", success["result"])
+
+    def test_state_dir_lock_blocks_parallel_runners(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            first = JobRunner(state_dir)
+            second = JobRunner(state_dir)
+            started = threading.Event()
+            release = threading.Event()
+
+            def long_job(_stop: threading.Event) -> dict[str, str]:
+                started.set()
+                self.assertTrue(release.wait(timeout=2))
+                return {"status": "success"}
+
+            first.start("first", long_job)
+            self.assertTrue(started.wait(timeout=1))
+            self.assertTrue((state_dir / "job-runner.lock").is_file())
+
+            with self.assertRaisesRegex(RuntimeError, "job already running in state_dir"):
+                second.start("second", lambda _stop: {"status": "success"})
+
+            release.set()
+            state = _wait_for_idle_state(state_dir)
+            self.assertEqual(state["last_job_status"], "success")
+
+    def test_job_completion_preserves_state_written_while_job_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+            started = threading.Event()
+            release = threading.Event()
+
+            def long_job(_stop: threading.Event) -> dict[str, str]:
+                started.set()
+                self.assertTrue(release.wait(timeout=2))
+                return {"status": "success"}
+
+            runner.start("state-preserve", long_job)
+            self.assertTrue(started.wait(timeout=1))
+            update_state(state_dir, lambda state: state | {"settings": {"curl_parallelism_max": 12}})
+            release.set()
+            state = _wait_for_idle_state(state_dir)
+
+            self.assertIsNone(state["current_job"])
+            self.assertEqual(state["last_job_status"], "success")
+            self.assertEqual(state["settings"], {"curl_parallelism_max": 12})
+
+    def test_state_dir_lock_reclaims_stale_foreign_pid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            lock_path = state_dir / "job-runner.lock"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text(
+                json.dumps({"pid": 99999999, "job_id": "dead-job", "job_name": "dead"}),
+                encoding="utf-8",
+            )
+
+            runner = JobRunner(state_dir)
+            runner.start("after-stale", lambda _stop: {"status": "success"})
+            state = _wait_for_idle_state(state_dir)
+
+            self.assertEqual(state["last_job_status"], "success")
+            self.assertFalse(lock_path.exists())
+
+    def test_state_dir_lock_does_not_reclaim_corrupt_or_current_pid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            lock_path = state_dir / "job-runner.lock"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            runner = JobRunner(state_dir)
+
+            lock_path.write_text("{broken", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "job already running in state_dir"):
+                runner.start("blocked", lambda _stop: {"status": "success"})
+
+            lock_path.unlink()
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "job_id": "same-pid"}), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "job already running in state_dir"):
+                runner.start("blocked", lambda _stop: {"status": "success"})
+            self.assertTrue((state_dir / "job-runner.lock").exists())
+
+            lock_path.unlink()
+            second = JobRunner(state_dir)
+            second.start("second", lambda _stop: {"status": "success"})
+            state = _wait_for_idle_state(state_dir)
+            self.assertEqual(state["last_job_status"], "success")
 
 
 def _wait_for_idle_state(state_dir: Path) -> dict[str, object]:

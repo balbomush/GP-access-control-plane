@@ -9,14 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .state import now_iso, read_state
+from .resource_budget import BACKUP_STREAM_CHUNK_BYTES
+from .settings import RUN_SETTINGS_KEY, SERVICE_SETTINGS_KEY
+from .state import has_active_runtime, now_iso, read_state, update_state
 from .strategy_safety import analyze_strategy
 from .storage import connect, db_path
 
 
 SNAPSHOT_KEEP = 5
-BACKUP_SCHEMA_VERSION = "5"
-SUPPORTED_BACKUP_SCHEMA_VERSIONS = {BACKUP_SCHEMA_VERSION}
+BACKUP_SCHEMA_VERSION = "6"
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"5", BACKUP_SCHEMA_VERSION}
 SNAPSHOT_DOWNLOAD_FILES = {
     "manifest.json",
     "checksums.sha256",
@@ -25,6 +27,7 @@ SNAPSHOT_DOWNLOAD_FILES = {
     "strategies/strategy-domain-links.ndjson",
     "presets/domain-presets.ndjson",
     "presets/preset-domains.ndjson",
+    "settings/app-settings.ndjson",
 }
 
 
@@ -41,8 +44,7 @@ def archives_dir(state_dir: Path) -> Path:
 
 
 def create_snapshot_if_idle(state_dir: Path) -> dict[str, Any]:
-    state = read_state(state_dir)
-    if state.get("current_job"):
+    if has_active_runtime(state_dir):
         return {"created": False, "queued": True, "reason": "job is running"}
     return create_snapshot(state_dir)
 
@@ -71,15 +73,13 @@ def create_snapshot(state_dir: Path, protect_ids: set[str] | None = None) -> dic
 
 
 def restore_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
-    state = read_state(state_dir)
-    if state.get("current_job"):
+    if has_active_runtime(state_dir):
         return {"restored": False, "queued": True, "reason": "job is running"}
     return restore_snapshot(state_dir, snapshot_id)
 
 
 def delete_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
-    state = read_state(state_dir)
-    if state.get("current_job"):
+    if has_active_runtime(state_dir):
         return {"deleted": False, "queued": True, "reason": "job is running"}
     return delete_snapshot(state_dir, snapshot_id)
 
@@ -115,7 +115,9 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
     backup_link_count = _int_value(manifest.get("link_count"))
     backup_preset_count = _int_value(manifest.get("preset_count"))
     backup_preset_link_count = _int_value(manifest.get("preset_link_count"))
+    backup_settings_count = _int_value(manifest.get("settings_count"))
     replaces_presets = _snapshot_replaces_presets(path, manifest)
+    replaces_settings = _snapshot_replaces_app_settings(path, manifest)
     with connect(state_dir) as conn:
         current_domain_count = _linked_domain_count(conn)
         current_strategy_count = _table_count(conn, "strategies")
@@ -124,8 +126,7 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
             conn.execute("SELECT COUNT(*) AS count FROM domain_presets WHERE kind = 'user'").fetchone()["count"]
         )
         current_preset_link_count = _table_count(conn, "preset_domains")
-    settings = read_state(state_dir).get("settings")
-    current_settings_count = 1 if isinstance(settings, dict) and settings else 0
+        current_settings_count = _table_count(conn, "app_settings")
     return {
         "snapshot": snapshot_info(state_dir, snapshot_id),
         "checksum_ok": checksum_ok,
@@ -170,8 +171,8 @@ def restore_snapshot_preview(state_dir: Path, snapshot_id: str) -> dict[str, Any
                 "key": "settings",
                 "label": "Настройки",
                 "current_count": current_settings_count,
-                "backup_count": 0,
-                "will_replace": False,
+                "backup_count": backup_settings_count,
+                "will_replace": replaces_settings,
             },
         ],
     }
@@ -235,6 +236,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     restore_presets = bool(restore_plan["restore_presets"])
     presets = restore_plan["presets"]
     preset_links = restore_plan["preset_links"]
+    restore_settings = bool(restore_plan["restore_settings"])
+    app_settings = restore_plan["app_settings"]
     restored_at = now_iso()
     with connect(state_dir) as conn:
         conn.execute("DELETE FROM strategy_domain_results")
@@ -305,6 +308,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             )
         if restore_presets:
             _restore_domain_presets(conn, presets, preset_links)
+        if restore_settings:
+            _restore_app_settings(conn, app_settings)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_snapshot", snapshot_id),
@@ -313,12 +318,15 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_at", restored_at),
         )
+    if restore_settings:
+        _sync_legacy_state_settings_after_restore(state_dir, app_settings)
     info = snapshot_info(state_dir, snapshot_id)
     return {
         "restored": True,
         "snapshot": info,
         "pre_restore_snapshot": pre_restore.get("snapshot"),
         "strategy_count": len(strategies),
+        "settings_count": len(app_settings) if restore_settings else 0,
         "restored_at": restored_at,
     }
 
@@ -443,9 +451,11 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
     (root / "domains").mkdir()
     (root / "strategies").mkdir()
     (root / "presets").mkdir()
+    (root / "settings").mkdir()
     domain_count = _export_domains(state_dir, root)
     strategy_count, link_count = _export_strategies(state_dir, root)
     preset_count, preset_link_count = _export_domain_presets(state_dir, root)
+    settings_count = _export_app_settings(state_dir, root)
     manifest = {
         "schema_version": BACKUP_SCHEMA_VERSION,
         "created_at": now_iso(),
@@ -458,6 +468,7 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
         "link_count": str(link_count),
         "preset_count": str(preset_count),
         "preset_link_count": str(preset_link_count),
+        "settings_count": str(settings_count),
         "completed": "true",
     }
     _write_json(root / "manifest.json", manifest)
@@ -556,6 +567,26 @@ def _export_domain_presets(state_dir: Path, root: Path) -> tuple[int, int]:
     return preset_count, link_count
 
 
+def _export_app_settings(state_dir: Path, root: Path) -> int:
+    count = 0
+    with connect(state_dir) as conn:
+        with (root / "settings" / "app-settings.ndjson").open("w", encoding="utf-8") as handle:
+            for row in conn.execute("SELECT key, value_json, updated_at FROM app_settings ORDER BY key ASC"):
+                value_json = str(row["value_json"] or "null")
+                try:
+                    value = json.loads(value_json)
+                except json.JSONDecodeError:
+                    value = None
+                payload = {
+                    "key": str(row["key"] or ""),
+                    "value": value,
+                    "updated_at": str(row["updated_at"] or ""),
+                }
+                count += 1
+                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    return count
+
+
 def _write_checksums(root: Path) -> None:
     rows = []
     for item in sorted(root.rglob("*")):
@@ -608,6 +639,8 @@ def _load_restore_plan(path: Path) -> dict[str, Any]:
     restore_presets = _snapshot_replaces_presets(path, manifest)
     presets = _read_ndjson(path / "presets" / "domain-presets.ndjson") if restore_presets else []
     preset_links = _read_ndjson(path / "presets" / "preset-domains.ndjson") if restore_presets else []
+    restore_settings = _snapshot_replaces_app_settings(path, manifest)
+    app_settings = _read_ndjson(path / "settings" / "app-settings.ndjson") if restore_settings else []
     for item in presets:
         if not str(item.get("scope") or "").strip() or not str(item.get("name") or "").strip():
             raise ValueError("backup contains preset row without scope/name")
@@ -616,6 +649,9 @@ def _load_restore_plan(path: Path) -> dict[str, Any]:
             raise ValueError("backup contains preset-domain link without scope/name")
         if not str(item.get("domain") or "").strip():
             raise ValueError("backup contains preset-domain link without domain")
+    for item in app_settings:
+        if not str(item.get("key") or "").strip():
+            raise ValueError("backup contains app setting row without key")
     return {
         "manifest": manifest,
         "domains": domains,
@@ -624,6 +660,8 @@ def _load_restore_plan(path: Path) -> dict[str, Any]:
         "restore_presets": restore_presets,
         "presets": presets,
         "preset_links": preset_links,
+        "restore_settings": restore_settings,
+        "app_settings": app_settings,
     }
 
 
@@ -746,8 +784,45 @@ def _restore_domain_presets(conn: Any, presets: list[dict[str, Any]], links: lis
         )
 
 
+def _restore_app_settings(conn: Any, app_settings: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM app_settings")
+    for item in app_settings:
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO app_settings(key, value_json, updated_at)
+            VALUES(?, ?, ?)
+            """,
+            (
+                key,
+                json.dumps(item.get("value"), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                str(item.get("updated_at") or ""),
+            ),
+        )
+
+
+def _sync_legacy_state_settings_after_restore(state_dir: Path, app_settings: list[dict[str, Any]]) -> None:
+    restored_settings: dict[str, Any] = {}
+    for item in app_settings:
+        key = str(item.get("key") or "").strip()
+        value = item.get("value")
+        if key in {RUN_SETTINGS_KEY, SERVICE_SETTINGS_KEY} and isinstance(value, dict):
+            restored_settings.update(value)
+
+    def sync_settings(state: dict[str, Any]) -> dict[str, Any]:
+        if not restored_settings:
+            state.pop("settings", None)
+        else:
+            state["settings"] = restored_settings
+        return state
+
+    update_state(state_dir, sync_settings)
+
+
 def _snapshot_replaces_presets(path: Path, manifest: dict[str, str]) -> bool:
-    if str(manifest.get("schema_version") or "") != BACKUP_SCHEMA_VERSION:
+    if str(manifest.get("schema_version") or "") not in SUPPORTED_BACKUP_SCHEMA_VERSIONS:
         return False
     preset_file = path / "presets" / "domain-presets.ndjson"
     preset_link_file = path / "presets" / "preset-domains.ndjson"
@@ -756,6 +831,19 @@ def _snapshot_replaces_presets(path: Path, manifest: dict[str, str]) -> bool:
     try:
         _read_ndjson(preset_file)
         _read_ndjson(preset_link_file)
+    except ValueError:
+        return False
+    return True
+
+
+def _snapshot_replaces_app_settings(path: Path, manifest: dict[str, str]) -> bool:
+    if str(manifest.get("schema_version") or "") != BACKUP_SCHEMA_VERSION:
+        return False
+    settings_file = path / "settings" / "app-settings.ndjson"
+    if not settings_file.is_file():
+        return False
+    try:
+        _read_ndjson(settings_file)
     except ValueError:
         return False
     return True
@@ -844,7 +932,7 @@ def _dir_size(path: Path) -> int:
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(BACKUP_STREAM_CHUNK_BYTES), b""):
             digest.update(chunk)
     return digest.hexdigest()
 

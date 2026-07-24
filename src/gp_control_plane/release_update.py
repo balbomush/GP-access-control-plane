@@ -8,7 +8,7 @@ from typing import Any, Callable
 from . import __version__
 from .backups import create_snapshot
 from .releases import release_channel_info
-from .state import append_jsonl, now_iso, read_state, write_state
+from .state import active_runtime_payload, append_jsonl, now_iso, read_state, update_state
 from .zapret2 import run_root_helper_command
 
 
@@ -27,20 +27,24 @@ def release_update_plan(
     fetcher: Callable[[], str] | None = None,
     tag_fetcher: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
-    release = release_channel_info(current_version=current_version, channel=channel, fetcher=fetcher, tag_fetcher=tag_fetcher)
     state = read_state(state_dir)
     _expire_stale_release_update(state_dir, state)
-    active_job = str(state.get("current_job") or "")
+    runtime = active_runtime_payload(state_dir)
+    active_job = str(runtime.get("job_id") or "")
     active_update = _active_release_update_payload(state, current_version=current_version)
     reason = ""
     if active_job:
         reason = "job is running"
     elif active_update:
         reason = "release update is already queued"
-    elif not release.get("checked"):
-        reason = str(release.get("error") or "release check failed")
-    elif not release.get("update_available"):
-        reason = "no update available"
+    release: dict[str, Any] = {}
+    if not reason:
+        release = release_channel_info(current_version=current_version, channel=channel, fetcher=fetcher, tag_fetcher=tag_fetcher)
+    if not reason:
+        if not release.get("checked"):
+            reason = str(release.get("error") or "release check failed")
+        elif not release.get("update_available"):
+            reason = "no update available"
     return {
         "release": release,
         "can_update": not reason,
@@ -69,6 +73,9 @@ def queue_release_update(
 ) -> dict[str, Any]:
     state = read_state(state_dir)
     _expire_stale_release_update(state_dir, state)
+    runtime = active_runtime_payload(state_dir)
+    if runtime.get("active"):
+        raise RuntimeError("job is running")
     active_update = _active_release_update_payload(state, current_version=current_version)
     if active_update:
         active_update = {**active_update, "deduplicated": True}
@@ -88,7 +95,9 @@ def queue_release_update(
         raise RuntimeError("release tag is missing")
 
     snapshot = create_snapshot(state_dir)
-    root = (install_dir or Path.cwd()).resolve()
+    if install_dir is None:
+        raise RuntimeError("install_dir is required")
+    root = install_dir.resolve()
     queued_at = now_iso()
     payload = {
         "queued": True,
@@ -104,19 +113,15 @@ def queue_release_update(
         "rollback_instruction": "If update verification fails, open Backups and restore the pre-update snapshot.",
         "steps": plan["steps"],
     }
-    state = read_state(state_dir)
-    state["release_update"] = payload
-    write_state(state_dir, state)
+    update_state(state_dir, lambda state: state | {"release_update": payload})
     append_jsonl(state_dir / "release-updates.jsonl", payload)
 
     runner = helper_runner or run_root_helper_command
-    result = runner(["queue-update", str(root), tag])
+    result = runner(["queue-update", str(root), tag, str(state_dir.resolve())])
     if result.returncode != 0:
         payload["status"] = "failed"
         payload["error"] = (result.stderr or result.stdout or "root-helper update queue failed").strip()
-        state = read_state(state_dir)
-        state["release_update"] = payload
-        write_state(state_dir, state)
+        update_state(state_dir, lambda state: state | {"release_update": payload})
         append_jsonl(state_dir / "release-updates.jsonl", payload)
         raise RuntimeError((result.stderr or result.stdout or "root-helper update queue failed").strip())
     helper = _parse_key_value_lines(result.stdout)
@@ -126,9 +131,7 @@ def queue_release_update(
     payload["helper"] = helper
     payload["unit"] = helper.get("unit", "")
     payload["log_path"] = helper.get("log", "")
-    state = read_state(state_dir)
-    state["release_update"] = payload
-    write_state(state_dir, state)
+    update_state(state_dir, lambda state: state | {"release_update": payload})
     append_jsonl(state_dir / "release-updates.jsonl", payload)
     return payload
 
@@ -146,8 +149,7 @@ def release_update_status(
     if _is_stale_release_update(payload):
         payload["status"] = "failed"
         payload["error"] = payload.get("error") or "release update queue timeout"
-        state["release_update"] = payload
-        write_state(state_dir, state)
+        update_state(state_dir, lambda state: state | {"release_update": payload})
         append_jsonl(state_dir / "release-updates.jsonl", payload)
         return payload
     helper = payload.get("helper") if isinstance(payload.get("helper"), dict) else {}
@@ -212,7 +214,7 @@ def _expire_stale_release_update(state_dir: Path, state: dict[str, Any]) -> None
     payload["status"] = "failed"
     payload["error"] = payload.get("error") or "release update queue timeout"
     state["release_update"] = payload
-    write_state(state_dir, state)
+    update_state(state_dir, lambda current: current | {"release_update": payload})
     append_jsonl(state_dir / "release-updates.jsonl", payload)
 
 

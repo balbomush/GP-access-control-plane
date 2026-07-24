@@ -137,8 +137,9 @@ Endpoint names должны быть человекочитаемыми. Для 
 - протоколы;
 - timeout values;
 - `curl_parallelism`;
-- общие run settings;
-- mode-specific settings.
+- явный объект `settings` для общих run settings.
+
+`start-run` принимает только top-level поля `mode`, `domains`, `protocols`, `curl_parallelism`, `timeout_seconds`, `settings`. Внутри `settings` принимаются только реальные runtime-параметры подбора: curl timeouts, protocol flags, IPv6/debug, scan level и repeats. Скрытые mode-specific поля вроде `mode_settings` не поддерживаются и не должны прокидываться в job payload.
 
 В запуск не уходит `preset id`, filter id или живая ссылка на список. Список доменов является только шаблоном заполнения пользовательского поля. История запуска хранит итоговые домены и настройки, но не хранит `source_preset`.
 
@@ -166,8 +167,7 @@ Endpoint names должны быть человекочитаемыми. Для 
 Операции:
 
 - `POST /api/core/presets/save-domain-list` - сохранить один системный или пользовательский список;
-- `POST /api/core/presets/delete-user-domain-list` - удалить один пользовательский список;
-- `POST /api/core/presets/delete-user-lists` - удалить все пользовательские списки.
+- `POST /api/core/presets/delete-user-domain-list` - удалить один или несколько пользовательских списков через непустой массив `list_ids`.
 
 Bulk-save всех пользовательских списков и включение/выключение отдельного домена внутри списка в новую схему не переносятся. Продуктовая модель простая: домен либо входит в список, либо не входит.
 
@@ -182,7 +182,7 @@ Core read-only методы:
 
 Preview/import endpoint'ы не переносятся. UI или внешний клиент читает домены категории, редактирует итоговый набор и сохраняет обычным `POST /api/core/presets/save-domain-list`.
 
-Если локальное хранилище v2fly не готово, эти Core endpoint'ы должны вернуть структурированную ошибку. Отдельный Core readiness endpoint для v2fly не нужен.
+Если локальное хранилище v2fly не готово, `categories` возвращает `200` со `storage.state=missing`, а `category-domains` для отсутствующей категории возвращает простой error payload `{"error":"..."}` со статусом `400`. Отдельный Core readiness endpoint для v2fly не нужен.
 
 ### Backups
 
@@ -222,18 +222,19 @@ UI-state вроде выбранной вкладки, раскрытых пан
 
 - история запусков - `/api/core/runs/...`;
 - run logs и latest-log - `/api/core/runs/...`;
-- кандидаты общих стратегий - `/api/core/strategy-candidates`;
+- кандидаты стратегий в JSON - `/api/core/strategy-candidates` только с фильтрами `domain/domains/strategy_id/protocol/source_mode/family/query`;
+- полная или широкая выгрузка кандидатов - `/api/core/strategy-candidates/export` как `application/x-ndjson`, одна стратегия-кандидат на строку;
 - нормализованные product events - `/api/core/events`.
 
-Пагинация и экранные срезы для штатного UI относятся к `/api/web/...`.
+Пагинация и экранные срезы для штатного UI относятся к `/api/web/...`. Core JSON endpoint не должен использовать пагинацию как основной способ защиты от больших ответов: если запрос широкий, клиент должен уточнить фильтр или перейти на потоковый export.
 
 ## Service API Контуры
 
-### Status И Diagnostics
+### Status
 
 - `GET /api/service/status` отвечает на вопрос: жив ли установленный GP service и в каком состоянии его данные/установка.
 - `GET /api/core/status` отвечает на вопрос: что сейчас делает продуктовый контур GP.
-- `GET /api/service/diagnostics` отдает нормализованные факты GP: версия, установленный ref/commit, состояние unit/service, готовность внешних источников, check-install, структурированные ошибки, ограниченный GP log tail при необходимости.
+- Широкий агрегат `GET /api/service/diagnostics` не входит в новый Core API surface. Его прежний смысл разнесен по конкретным методам: service state - `/api/service/status`, v2fly state - `/api/service/v2fly/local-storage-status`, готовность подбора и zapret2/root-helper/curl/nft checks - `/api/core/strategy-discovery/preflight`.
 
 Системные метрики платы вроде CPU/RAM/load не входят в GP API.
 
@@ -246,7 +247,7 @@ UI-state вроде выбранной вкладки, раскрытых пан
 - `POST /api/service/releases/set-install-channel`;
 - `POST /api/service/releases/install`.
 
-Отдельный update-plan endpoint не переносится. `POST /api/service/releases/install` должен либо запустить установку, либо вернуть структурированную причину отказа без запуска root-helper.
+Отдельный update-plan endpoint не переносится. `POST /api/service/releases/install` должен либо запустить установку, либо вернуть простой error payload `{"error":"..."}` без запуска root-helper.
 
 ### v2fly Local Storage
 
@@ -299,14 +300,52 @@ Compatibility-mode:
 
 ## Migration И Rollback
 
+### Durable/Ephemeral State Plan
+
+Цель: убрать долговременные пользовательские данные из `state.json`, оставив там только короткое runtime/compatibility-состояние процесса.
+
+Целевая граница:
+
+- SQLite durable: домены, стратегии, связи стратегия-домен, пользовательские и системные доменные списки, настройки запуска подбора, история запусков, backup metadata.
+- `state.json` ephemeral: `current_job`, `current_job_name`, `current_job_status`, `last_job_status`, `last_error`, короткие compatibility-поля для старых UI/API до их явной миграции.
+- Файлы логов ephemeral: stdout/stderr/progress/metrics текущего или последнего run, с ограниченным чтением через API.
+
+Очередь реализации:
+
+Статус текущего переходного этапа: пункты 1-3 реализованы. `app_settings` добавлен в SQLite schema v11; `GET /api/core/run-settings` и `POST /api/core/run-settings/save` используют SQLite как основной источник, а `state.json.settings` остается совместимой копией для rollback. Backup schema v6 переносит `app_settings`; старые snapshot schema v5 поддерживаются, но настройки не заменяют.
+
+Статус модульного split: `index_html()` вынесен в `web/ui.py`, Swagger/OpenAPI helpers - в `web/docs.py`, Web proxy - в `web/proxy.py`, Core entrypoint - в `web/core_server.py`; `web.app` сохраняет compatibility-wrapper'ы для старых импортов.
+
+Resource budget для Raspberry Pi 2 зафиксирован в `GP-access-control-plane/docs/resource-budget.md`; feature-ветки не измеряются на Pi2, фактический RSS gate выполняется после main/release-candidate.
+
+1. Добавить в SQLite таблицу `app_settings(key, value_json, updated_at)` и функции чтения/записи настроек запуска подбора.
+2. Перевести `GET /api/core/run-settings` и `POST /api/core/run-settings/save` на SQLite, но оставить fallback чтения старого `state.json.settings`.
+3. При первом успешном чтении старых `state.json.settings` записать их в SQLite, не удаляя из `state.json` в этом же релизе.
+4. После стабильного релиза удалить запись новых `settings` в `state.json`; legacy `/api/settings` должен собирать ответ из SQLite + service settings.
+5. `run_preferences` оставить в web/ephemeral state до отдельного решения, потому что это состояние формы UI, а не Core product data.
+
+Rollback:
+
+- До пункта 4 rollback безопасен: старый код продолжает читать `state.json.settings`.
+- После пункта 4 rollback требует либо предварительного backup, либо compatibility-write в `state.json.settings` на один переходный релиз.
+- Backup/restore включает `app_settings` в schema v6; старые snapshot schema v5 не трогают настройки.
+- Если SQLite migration не проходит, сервис не должен очищать `state.json`; API возвращает понятную ошибку storage/data state.
+
+Минимальные тесты:
+
+- старый `state.json.settings` мигрирует в SQLite и сохраняет значения `curl_parallelism_max`, `curl_max_time`, `enable_ipv6`;
+- `POST /api/core/run-settings/save` пишет в SQLite и не зависит от `state.json.settings`;
+- backup/restore переносит `app_settings`;
+- legacy `/api/settings` остается совместимым до отдельного удаления legacy URL.
+
 Безопасная последовательность внедрения после research:
 
 1. Добавить OpenAPI validation в локальные проверки.
 2. Добавить новые `/api/core/...`, `/api/service/...`, `/api/web/...` endpoint'ы в текущий API, не удаляя старые URL.
 3. Перевести штатный Web UI на новые endpoint'ы.
 4. Зафиксировать compatibility layer для legacy URL или явно согласовать его удаление.
-5. Выделить Core API в отдельный внутренний server module, чтобы убрать UI-зависимости из core-кода.
-6. Уточнить Web proxy под долгие SSE/download/upload сценарии и лимиты памяти.
+5. Выполнено: `index_html`, Swagger/OpenAPI helpers, Web proxy и Core entrypoint вынесены в отдельные модули.
+6. Выполнено: resource budget для Pi2 зафиксирован в `docs/resource-budget.md`, backup upload снижен до 64 MiB, streaming chunks вынесены в `resource_budget.py`.
 
 Rollback:
 

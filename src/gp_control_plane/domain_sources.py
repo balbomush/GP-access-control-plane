@@ -240,7 +240,9 @@ def _read_v2fly_catalog_cache(state_dir: Path) -> tuple[dict[str, Any] | None, d
     return {
         "source": str(payload.get("source") or "cache"),
         "revision": str(payload.get("revision") or ""),
+        "remote_revision": str(payload.get("remote_revision") or ""),
         "checked_at": str(payload.get("checked_at") or ""),
+        "update_available": bool(payload.get("update_available")),
         "categories": sorted(categories),
     }, None
 

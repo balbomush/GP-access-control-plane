@@ -139,6 +139,7 @@ TARGET_HOME="$(printf '%s\n' "$TARGET_ENTRY" | cut -d: -f6)"
 TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || true)"
 [ -n "$TARGET_GROUP" ] || fail "Cannot find primary group for user: $TARGET_USER"
 INSTALL_DIR="${GP_INSTALL_DIR:-$TARGET_HOME/gp/GP-access-control-plane}"
+STATE_DIR="${GP_STATE_DIR:-$INSTALL_DIR/build/state}"
 TARGET_BIN_DIR="$TARGET_HOME/.local/bin"
 SERVICE_PATH="$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -187,10 +188,18 @@ install_luajit_dev_package() {
 
 install_service_env_file() {
   env_file="$1"
+  if install_web_enabled; then
+    install_web_value="on"
+  else
+    install_web_value="off"
+  fi
   TMP_WEB_ENV="$(mktemp)"
   {
-    state_dir_escaped="$(printf '%s' "$INSTALL_DIR/build/state" | sed "s/'/'\\\\''/g")"
+    install_dir_escaped="$(printf '%s' "$INSTALL_DIR" | sed "s/'/'\\\\''/g")"
+    state_dir_escaped="$(printf '%s' "$STATE_DIR" | sed "s/'/'\\\\''/g")"
+    printf "GP_INSTALL_DIR='%s'\n" "$install_dir_escaped"
     printf "GP_STATE_DIR='%s'\n" "$state_dir_escaped"
+    printf "GP_INSTALL_WEB='%s'\n" "$install_web_value"
   } > "$TMP_WEB_ENV"
   as_root install -m 0640 -o root -g root "$TMP_WEB_ENV" "$env_file"
   rm -f "$TMP_WEB_ENV"
@@ -251,7 +260,7 @@ SERVICE
 }
 
 prepare_v2fly_local_catalog() {
-  run_as_target sh -c 'cd "$1" && GP_STATE_DIR="$1/build/state" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly' sh "$INSTALL_DIR"
+  run_as_target sh -c 'cd "$1" && GP_INSTALL_DIR="$1" GP_STATE_DIR="$2" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly' sh "$INSTALL_DIR" "$STATE_DIR"
 }
 
 if [ "$CURRENT_UID" -ne 0 ]; then
@@ -268,6 +277,7 @@ as_root true
 
 log "Installing for user: $TARGET_USER"
 log "Install directory: $INSTALL_DIR"
+log "State directory: $STATE_DIR"
 
 if step_log packages "Updating system packages and installing required packages"; then
   as_root apt-get update
@@ -427,7 +437,7 @@ if step_log service "Creating and starting systemd service"; then
 fi
 
 if step_log check "Checking installation"; then
-  run_as_target env GP_STATE_DIR="$INSTALL_DIR/build/state" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
+  run_as_target env GP_INSTALL_DIR="$INSTALL_DIR" GP_STATE_DIR="$STATE_DIR" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
   as_root systemctl --no-pager --full status "$CORE_SERVICE_NAME" || true
   if install_web_enabled; then
     as_root systemctl --no-pager --full status "$SERVICE_NAME" || true

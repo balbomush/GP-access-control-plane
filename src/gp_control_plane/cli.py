@@ -16,7 +16,6 @@ from .strategy_finder import (
     run_standard_discovery,
 )
 from .storage import storage_status
-from .web.app import serve, serve_core, serve_web_proxy
 from .zapret2 import check_install
 
 
@@ -26,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--state-dir",
         default=None,
-        help="Path to GP state directory. Defaults to GP_STATE_DIR or ./build/state.",
+        help="Path to GP state directory. Defaults to GP_STATE_DIR or GP_INSTALL_DIR/build/state.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -170,12 +169,18 @@ def _main(args: argparse.Namespace) -> int:
 
     if args.command == "web":
         if args.core_url:
+            from .web.proxy import serve_web_proxy
+
             serve_web_proxy(config, host=args.host, port=args.port, core_url=args.core_url)
         else:
+            from .web.app import serve
+
             serve(config, host=args.host, port=args.port)
         return 0
 
     if args.command == "core":
+        from .web.core_server import serve_core
+
         serve_core(config, host=args.host, port=args.port)
         return 0
 

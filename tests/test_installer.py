@@ -38,6 +38,12 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("/var/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertIn("write_multidomain_runner", self.helper)
         self.assertIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
+        self.assertIn("validate_state_dir()", self.helper)
+        self.assertIn('state_dir="$(validate_state_dir "${3:-$install_dir/build/state}")"', self.helper)
+        self.assertIn('log_dir="$state_dir/release-updates"', self.helper)
+        self.assertIn('echo "state_dir=$(shell_quote "$state_dir")"', self.helper)
+        self.assertIn("export GP_STATE_DIR=", self.helper)
+        self.assertIn('queue-update requires install directory, release ref and optional state directory', self.helper)
 
     def test_release_update_forces_clean_checkout_but_manual_install_keeps_dirty_guard(self) -> None:
         self.assertIn('INSTALL_FORCE_CLEAN="${GP_INSTALL_FORCE_CLEAN:-off}"', self.installer)
@@ -81,8 +87,12 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=$INSTALL_DIR", self.installer)
         self.assertIn("Environment=PATH=$SERVICE_PATH", self.installer)
         self.assertIn("WEB_ENV_FILE", self.installer)
+        self.assertIn('STATE_DIR="${GP_STATE_DIR:-$INSTALL_DIR/build/state}"', self.installer)
+        self.assertIn("GP_INSTALL_DIR", self.installer)
+        self.assertIn("GP_INSTALL_DIR='%s'", self.installer)
         self.assertIn("GP_STATE_DIR", self.installer)
         self.assertIn("GP_STATE_DIR='%s'", self.installer)
+        self.assertIn("GP_INSTALL_WEB='%s'", self.installer)
         self.assertIn('INSTALL_WEB="${GP_INSTALL_WEB:-on}"', self.installer)
         self.assertIn('CORE_SERVICE_NAME="${GP_CORE_SERVICE_NAME:-gp-control-plane-core.service}"', self.installer)
         self.assertIn('CORE_HOST="${GP_CORE_HOST:-127.0.0.1}"', self.installer)
@@ -108,7 +118,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Preparing local v2fly domain catalog", self.installer)
         self.assertIn("prepare_v2fly_local_catalog", self.installer)
         self.assertIn(
-            'cd "$1" && GP_STATE_DIR="$1/build/state" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly',
+            'cd "$1" && GP_INSTALL_DIR="$1" GP_STATE_DIR="$2" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly',
             self.installer,
         )
         self.assertIn("if ! prepare_v2fly_local_catalog", self.installer)
@@ -135,6 +145,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("generate_web_token", self.installer)
         self.assertNotIn("resolve_service_token", self.installer)
         self.assertIn("install_web_env_file", self.installer)
+        self.assertIn("GP_INSTALL_DIR", self.installer)
         self.assertIn("GP_STATE_DIR", self.installer)
 
     def test_root_helper_multidomain_runner_normalizes_empty_ip_list_before_nft(self) -> None:

@@ -20,10 +20,12 @@ from gp_control_plane.storage import (
     get_meta,
     read_custom_preset_index,
     read_custom_presets,
+    read_app_setting,
     read_preset_domains_page,
     read_run_payloads,
     read_system_preset_index,
     read_system_presets,
+    save_app_setting,
     save_custom_presets,
     save_system_preset,
     set_preset_domain_enabled,
@@ -197,7 +199,7 @@ class StorageTests(unittest.TestCase):
 
             with connect(state_dir) as conn:
                 raw = str(conn.execute("SELECT payload_json FROM runs WHERE id = 'old-run'").fetchone()["payload_json"])
-                self.assertEqual(get_meta(conn, "schema_version"), "10")
+                self.assertEqual(get_meta(conn, "schema_version"), "11")
                 self.assertEqual(get_meta(conn, "run_payloads_compacted_v7"), "1")
 
             stored = json.loads(raw)
@@ -260,9 +262,29 @@ class StorageTests(unittest.TestCase):
                     """
                 ).fetchone()[0]
 
-            self.assertEqual(schema, "10")
+            self.assertEqual(schema, "11")
             self.assertEqual(int(has_attempts_table), 0)
             self.assertEqual(removed_count, "1")
+
+    def test_app_settings_roundtrip_uses_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            saved = save_app_setting(
+                state_dir,
+                "run_settings",
+                {"curl_parallelism_max": 25, "enable_ipv6": True},
+                "2026-07-22T00:00:00Z",
+            )
+
+            self.assertEqual(saved["curl_parallelism_max"], 25)
+            self.assertEqual(
+                read_app_setting(state_dir, "run_settings"),
+                {"curl_parallelism_max": 25, "enable_ipv6": True},
+            )
+            self.assertIsNone(read_app_setting(state_dir, ""))
+            status = storage_status(state_dir)
+            self.assertEqual(status["tables"]["app_settings"], 1)
 
     def test_migration_resumes_run_payload_compaction_from_progress_marker(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

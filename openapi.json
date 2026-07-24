@@ -42,7 +42,7 @@
     },
     {
       "name": "Service Status",
-      "description": "Installed GP service state and normalized service diagnostics."
+      "description": "Installed GP service and data state."
     },
     {
       "name": "Service Releases",
@@ -165,7 +165,7 @@
               }
             }
           },
-          "404": {
+          "409": {
             "$ref": "#/components/responses/Error"
           },
           "default": {
@@ -395,7 +395,7 @@
         ],
         "operationId": "getV2flyCategories",
         "summary": "List local v2fly categories",
-        "description": "Returns categories from prepared local v2fly storage. If storage is not ready, returns a structured error.",
+        "description": "Returns local v2fly categories and storage state. If storage is not prepared, the response is still 200 with storage.state=missing.",
         "responses": {
           "200": {
             "description": "v2fly categories",
@@ -411,9 +411,6 @@
                 }
               }
             }
-          },
-          "503": {
-            "$ref": "#/components/responses/Error"
           },
           "default": {
             "$ref": "#/components/responses/Error"
@@ -456,10 +453,7 @@
               }
             }
           },
-          "404": {
-            "$ref": "#/components/responses/Error"
-          },
-          "503": {
+          "400": {
             "$ref": "#/components/responses/Error"
           },
           "default": {
@@ -857,8 +851,8 @@
           "Core Runs"
         ],
         "operationId": "getStrategyCandidates",
-        "summary": "Get full strategy candidate set",
-        "description": "Returns normalized product candidate data. UI grouping and pagination belong to /api/web/...",
+        "summary": "Get filtered strategy candidates",
+        "description": "Returns normalized product candidate data only for filtered requests. At least one filter is required. Use /api/core/strategy-candidates/export for full streaming export.",
         "responses": {
           "200": {
             "description": "Strategy candidates",
@@ -872,6 +866,185 @@
                     "$ref": "#/components/examples/StrategyCandidatesResponse"
                   }
                 }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Exact domain name. Returns candidates linked to this domain.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "youtube.com"
+          },
+          {
+            "name": "domains",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated domain names. Returns candidates linked to any listed domain.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "youtube.com,discord.com"
+          },
+          {
+            "name": "strategy_id",
+            "in": "query",
+            "required": false,
+            "description": "Exact strategy id.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "tcp-5e8f1a2b3c4d"
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "required": false,
+            "description": "Strategy protocol or transport, for example tcp, quic or tls.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "tcp"
+          },
+          {
+            "name": "source_mode",
+            "in": "query",
+            "required": false,
+            "description": "Link source: single_domain or multi_domain.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "single_domain",
+                "multi_domain"
+              ]
+            },
+            "example": "single_domain"
+          },
+          {
+            "name": "family",
+            "in": "query",
+            "required": false,
+            "description": "Normalized strategy family.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fake-multi"
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "description": "Text search across id, protocol, args, family and linked domains.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fake"
+          }
+        ]
+      }
+    },
+    "/api/core/strategy-candidates/export": {
+      "get": {
+        "tags": [
+          "Core Runs"
+        ],
+        "operationId": "exportStrategyCandidates",
+        "summary": "Stream strategy candidates as NDJSON",
+        "description": "Streams one StrategyCandidate JSON object per line. This endpoint can be called without filters for a full export; optional filters use the same semantics as /api/core/strategy-candidates. It is intended for large exports and external clients.",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Exact domain name. Returns candidates linked to this domain.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "youtube.com"
+          },
+          {
+            "name": "domains",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated domain names. Returns candidates linked to any listed domain.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "youtube.com,discord.com"
+          },
+          {
+            "name": "strategy_id",
+            "in": "query",
+            "required": false,
+            "description": "Exact strategy id.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "tcp-5e8f1a2b3c4d"
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "required": false,
+            "description": "Strategy protocol or transport, for example tcp, quic or tls.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "tcp"
+          },
+          {
+            "name": "source_mode",
+            "in": "query",
+            "required": false,
+            "description": "Link source: single_domain or multi_domain.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "single_domain",
+                "multi_domain"
+              ]
+            },
+            "example": "single_domain"
+          },
+          {
+            "name": "family",
+            "in": "query",
+            "required": false,
+            "description": "Normalized strategy family.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fake-multi"
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "description": "Text search across id, protocol, args, family and linked domains.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fake"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NDJSON stream with one strategy candidate per line",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "Newline-delimited JSON objects matching StrategyCandidate."
+                },
+                "example": "{\"id\":\"tcp-5e8f1a2b3c4d\",\"protocol\":\"tcp\",\"args\":\"--dpi-desync=fake\",\"status\":\"candidate\"}\n"
               }
             }
           },
@@ -896,7 +1069,7 @@
             "schema": {
               "type": "string"
             },
-            "example": "evt_000123"
+            "example": "core:000000000123"
           }
         ],
         "responses": {
@@ -909,7 +1082,7 @@
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/EventsResponse"
+                    "$ref": "#/components/examples/CoreEventsResponse"
                   }
                 }
               }
@@ -940,36 +1113,6 @@
                 "examples": {
                   "default": {
                     "$ref": "#/components/examples/ServiceStatus"
-                  }
-                }
-              }
-            }
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        }
-      }
-    },
-    "/api/service/diagnostics": {
-      "get": {
-        "tags": [
-          "Service Status"
-        ],
-        "operationId": "getServiceDiagnostics",
-        "summary": "Get normalized GP service diagnostics",
-        "description": "Returns normalized GP facts only. OS CPU/RAM/load metrics and UI cards are intentionally out of scope.",
-        "responses": {
-          "200": {
-            "description": "Diagnostics facts",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ServiceDiagnostics"
-                },
-                "examples": {
-                  "default": {
-                    "$ref": "#/components/examples/ServiceDiagnostics"
                   }
                 }
               }
@@ -1168,23 +1311,23 @@
         "operationId": "checkV2flyUpdates",
         "summary": "Check v2fly source updates",
         "responses": {
-          "202": {
-            "description": "Update check accepted",
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "200": {
+            "description": "Update check completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActionAccepted"
+                  "$ref": "#/components/schemas/ServiceActionResult"
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/ActionAccepted"
+                    "$ref": "#/components/examples/ServiceActionResult"
                   }
                 }
               }
             }
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
           }
         }
       }
@@ -1197,16 +1340,89 @@
         "operationId": "updateV2flyLocalStorage",
         "summary": "Update local v2fly storage",
         "responses": {
-          "202": {
-            "description": "Storage update accepted",
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "200": {
+            "description": "Storage update completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActionAccepted"
+                  "$ref": "#/components/schemas/ServiceActionResult"
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/ActionAccepted"
+                    "$ref": "#/components/examples/ServiceActionResult"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/web/run-preferences": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebRunPreferences",
+        "summary": "Get Web UI run form preferences",
+        "description": "Returns only штатный Web UI form state. Core start-run receives explicit domains and run parameters, not this saved UI state.",
+        "responses": {
+          "200": {
+            "description": "Saved Web UI run preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebRunPreferencesResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebRunPreferencesResponse"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "saveWebRunPreferences",
+        "summary": "Save Web UI run form preferences",
+        "description": "Stores штатный Web UI form state for the next browser session. This does not start discovery and does not change durable Core results.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebRunPreferencesSaveRequest"
+              },
+              "examples": {
+                "default": {
+                  "$ref": "#/components/examples/WebRunPreferencesSaveRequest"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved Web UI run preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebRunPreferencesResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebRunPreferencesResponse"
                   }
                 }
               }
@@ -1244,6 +1460,52 @@
                 "examples": {
                   "page": {
                     "$ref": "#/components/examples/PagedRunHistoryResponse"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/candidate-domain-index-page": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebCandidateDomainIndexPage",
+        "summary": "Get a paginated candidate domain index page for the Web UI",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "youtube"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated candidate domain index page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PagedCandidateDomainIndexResponse"
+                },
+                "examples": {
+                  "page": {
+                    "$ref": "#/components/examples/PagedCandidateDomainIndexResponse"
                   }
                 }
               }
@@ -1316,7 +1578,7 @@
             "schema": {
               "type": "string"
             },
-            "example": "evt_000123"
+            "example": "web:000000000123"
           },
           {
             "$ref": "#/components/parameters/Limit"
@@ -1332,7 +1594,7 @@
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/EventsResponse"
+                    "$ref": "#/components/examples/WebEventsResponse"
                   }
                 }
               }
@@ -1373,14 +1635,14 @@
     },
     "responses": {
       "Error": {
-        "description": "Structured error",
+        "description": "Error response",
         "content": {
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
             },
             "examples": {
-              "structuredError": {
+              "plainError": {
                 "$ref": "#/components/examples/ErrorResponse"
               }
             }
@@ -1639,27 +1901,7 @@
         ],
         "properties": {
           "error": {
-            "type": "object",
-            "required": [
-              "code",
-              "message"
-            ],
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              },
-              "details": {
-                "type": "object",
-                "additionalProperties": true
-              },
-              "retryable": {
-                "type": "boolean"
-              }
-            },
-            "additionalProperties": false
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -1736,8 +1978,9 @@
               "prerelease"
             ]
           },
-          "target_ref": {
-            "type": "string"
+          "dry_run": {
+            "type": "boolean",
+            "default": false
           }
         },
         "additionalProperties": false
@@ -1757,10 +2000,98 @@
         },
         "additionalProperties": false
       },
+      "CandidateDomainIndexItem": {
+        "type": "object",
+        "required": [
+          "domain",
+          "strategy_count",
+          "protocols"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "strategy_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "protocols": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateDomainProtocolCount"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CandidateDomainProtocolCount": {
+        "type": "object",
+        "required": [
+          "protocol",
+          "count"
+        ],
+        "properties": {
+          "protocol": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "CandidateDomainIndexResponse": {
+        "type": "object",
+        "required": [
+          "domains",
+          "total",
+          "strategy_total"
+        ],
+        "properties": {
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateDomainIndexItem"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "strategy_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tested_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
       "PagedRunHistoryResponse": {
         "allOf": [
           {
             "$ref": "#/components/schemas/RunHistoryResponse"
+          },
+          {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        ]
+      },
+      "PagedCandidateDomainIndexResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CandidateDomainIndexResponse"
           },
           {
             "$ref": "#/components/schemas/Pagination"
@@ -1964,24 +2295,85 @@
       "RunLogTail": {
         "type": "object",
         "required": [
-          "lines"
+          "run_id",
+          "kind",
+          "status",
+          "stdout_tail",
+          "stdout_append",
+          "stderr_tail",
+          "stderr_append",
+          "stderr_diagnostics",
+          "stdout_size",
+          "stderr_size",
+          "progress",
+          "metrics",
+          "run_settings"
         ],
         "properties": {
           "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stdout_tail": {
             "type": "string"
           },
-          "lines": {
+          "stdout_append": {
+            "type": "string"
+          },
+          "stderr_tail": {
+            "type": "string"
+          },
+          "stderr_append": {
+            "type": "string"
+          },
+          "stderr_diagnostics": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
             }
           },
-          "truncated": {
-            "type": "boolean"
+          "stdout_log": {
+            "type": "string"
           },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
+          "stderr_log": {
+            "type": "string"
+          },
+          "stdout_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "stderr_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "progress": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "run_settings": {
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "additionalProperties": false
@@ -2144,60 +2536,15 @@
         },
         "additionalProperties": false
       },
-      "ServiceDiagnostics": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "$ref": "#/components/schemas/InstalledVersion"
-          },
-          "service": {
-            "$ref": "#/components/schemas/ServiceStatus"
-          },
-          "external_sources": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ServiceFact"
-            }
-          },
-          "checks": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ServiceFact"
-            }
-          },
-          "log_tail": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "additionalProperties": false
-      },
-      "ServiceFact": {
-        "type": "object",
-        "required": [
-          "name",
-          "status"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string"
-          },
-          "details": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        },
-        "additionalProperties": false
-      },
       "ServiceStatus": {
         "type": "object",
         "required": [
-          "state"
+          "state",
+          "mode",
+          "services",
+          "version",
+          "data_state",
+          "updated_at"
         ],
         "properties": {
           "state": {
@@ -2210,14 +2557,36 @@
               "unknown"
             ]
           },
-          "unit": {
-            "type": "string"
+          "mode": {
+            "type": "string",
+            "enum": [
+              "core",
+              "monolith",
+              "web_proxy",
+              "unknown"
+            ]
+          },
+          "services": {
+            "type": "object",
+            "required": [
+              "core",
+              "web"
+            ],
+            "properties": {
+              "core": {
+                "$ref": "#/components/schemas/ServiceComponentStatus"
+              },
+              "web": {
+                "$ref": "#/components/schemas/ServiceComponentStatus"
+              }
+            },
+            "additionalProperties": false
           },
           "version": {
             "$ref": "#/components/schemas/InstalledVersion"
           },
           "data_state": {
-            "type": "string"
+            "$ref": "#/components/schemas/ServiceDataState"
           },
           "updated_at": {
             "type": "string",
@@ -2226,10 +2595,84 @@
         },
         "additionalProperties": false
       },
+      "ServiceComponentStatus": {
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "role",
+          "required"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "embedded",
+              "disabled",
+              "unknown"
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceDataState": {
+        "type": "object",
+        "required": [
+          "state",
+          "state_dir",
+          "v2fly"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "missing",
+              "preparing",
+              "error",
+              "unknown"
+            ]
+          },
+          "state_dir": {
+            "type": "string"
+          },
+          "v2fly": {
+            "type": "object",
+            "required": [
+              "state",
+              "source_commit",
+              "group_count"
+            ],
+            "properties": {
+              "state": {
+                "type": "string"
+              },
+              "source_commit": {
+                "type": "string"
+              },
+              "group_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
       "StartRunRequest": {
         "type": "object",
         "required": [
-          "mode",
           "domains"
         ],
         "properties": {
@@ -2263,11 +2706,58 @@
           },
           "settings": {
             "type": "object",
-            "additionalProperties": true
-          },
-          "mode_settings": {
-            "type": "object",
-            "additionalProperties": true
+            "properties": {
+              "curl_max_time": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "curl_max_time_quic": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "curl_max_time_doh": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "debug_stdout": {
+                "type": "boolean"
+              },
+              "enable_http": {
+                "type": "boolean"
+              },
+              "enable_ipv6": {
+                "type": "boolean"
+              },
+              "enable_tls12": {
+                "type": "boolean"
+              },
+              "enable_tls13": {
+                "type": "boolean"
+              },
+              "include_quic": {
+                "type": "boolean"
+              },
+              "repeats": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "repeat_parallel": {
+                "type": "boolean"
+              },
+              "scan_level": {
+                "type": "string",
+                "enum": [
+                  "quick",
+                  "standard",
+                  "force"
+                ]
+              },
+              "skip_dnscheck": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -2291,34 +2781,101 @@
       "StrategyCandidate": {
         "type": "object",
         "required": [
-          "strategy_id"
+          "id",
+          "protocol",
+          "args",
+          "status"
         ],
         "properties": {
-          "strategy_id": {
+          "id": {
             "type": "string"
           },
-          "strategy_name": {
+          "protocol": {
             "type": "string"
           },
+          "args": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "first_seen_at": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "type": "string"
+          },
+          "fragmentation_class": {
+            "type": "string"
+          },
+          "fragmentation_safe": {
+            "type": "boolean"
+          },
+          "fragmentation_reason": {
+            "type": "string"
+          },
+          "family": {
+            "type": "string"
+          },
+          "family_key": {
+            "type": "string"
+          },
+          "family_rank": {
+            "type": "integer"
+          },
+          "family_reason": {
+            "type": "string"
+          },
+          "seen": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StrategyCandidateSeen"
+            }
+          },
+          "common_seen": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StrategyCandidateCommonSeen"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "StrategyCandidateSeen": {
+        "type": "object",
+        "required": [
+          "domain"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string"
+          },
+          "test": {
+            "type": "string"
+          },
+          "ip_version": {
+            "type": "string"
+          },
+          "seen_at": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StrategyCandidateCommonSeen": {
+        "type": "object",
+        "required": [
+          "domains"
+        ],
+        "properties": {
           "domains": {
             "type": "array",
             "items": {
               "type": "string"
             }
-          },
-          "domain_count": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "protocols": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "facts": {
-            "type": "object",
-            "additionalProperties": true
           }
         },
         "additionalProperties": false
@@ -2326,7 +2883,9 @@
       "StrategyCandidatesResponse": {
         "type": "object",
         "required": [
-          "candidates"
+          "candidates",
+          "total",
+          "filters"
         ],
         "properties": {
           "candidates": {
@@ -2334,6 +2893,13 @@
             "items": {
               "$ref": "#/components/schemas/StrategyCandidate"
             }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "filters": {
+            "$ref": "#/components/schemas/StrategyCandidateFilters"
           }
         },
         "additionalProperties": false
@@ -2439,6 +3005,183 @@
           }
         },
         "additionalProperties": false
+      },
+      "WebRunPreferences": {
+        "type": "object",
+        "required": [
+          "domains",
+          "domain_preset",
+          "discovery_profile",
+          "run_mode"
+        ],
+        "properties": {
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "domain_preset": {
+            "type": "string"
+          },
+          "discovery_profile": {
+            "type": "string",
+            "enum": [
+              "quick",
+              "standard",
+              "force",
+              "custom"
+            ]
+          },
+          "run_mode": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "multi"
+            ]
+          },
+          "curl_parallelism": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "enable_http": {
+            "type": "boolean"
+          },
+          "enable_tls12": {
+            "type": "boolean"
+          },
+          "enable_tls13": {
+            "type": "boolean"
+          },
+          "include_quic": {
+            "type": "boolean"
+          },
+          "enable_ipv6": {
+            "type": "boolean"
+          },
+          "scan_level": {
+            "type": "string",
+            "enum": [
+              "quick",
+              "standard",
+              "force"
+            ]
+          },
+          "repeats": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "repeat_parallel": {
+            "type": "boolean"
+          },
+          "skip_dnscheck": {
+            "type": "boolean"
+          },
+          "skip_ipblock": {
+            "type": "boolean"
+          },
+          "limit_time_enabled": {
+            "type": "boolean"
+          },
+          "timeout_hours": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 24
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebRunPreferencesResponse": {
+        "type": "object",
+        "required": [
+          "run_preferences"
+        ],
+        "properties": {
+          "run_preferences": {
+            "$ref": "#/components/schemas/WebRunPreferences"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebRunPreferencesSaveRequest": {
+        "type": "object",
+        "required": [
+          "run_preferences"
+        ],
+        "properties": {
+          "run_preferences": {
+            "$ref": "#/components/schemas/WebRunPreferences"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StrategyCandidateFilters": {
+        "type": "object",
+        "properties": {
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "strategy_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "protocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_modes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "single_domain",
+                "multi_domain"
+              ]
+            }
+          },
+          "families": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceActionResult": {
+        "type": "object",
+        "required": [
+          "status",
+          "operation_id",
+          "storage"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/V2flyStorageStatus"
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
       }
     },
     "examples": {
@@ -2448,7 +3191,7 @@
           "state": "idle",
           "storage": {
             "ready": true,
-            "schema_version": 1,
+            "schema_version": 11,
             "state_dir": "/home/pi/gp/state"
           },
           "updated_at": "2026-07-22T17:30:00Z"
@@ -2464,7 +3207,7 @@
           },
           "storage": {
             "ready": true,
-            "schema_version": 1,
+            "schema_version": 11,
             "state_dir": "/home/pi/gp/state"
           },
           "updated_at": "2026-07-22T17:40:00Z"
@@ -2489,9 +3232,60 @@
             "curl_max_time": 7,
             "curl_max_time_quic": 7,
             "enable_ipv6": false
-          },
-          "mode_settings": {
-            "common_strategy_min_domains": 2
+          }
+        }
+      },
+      "WebRunPreferencesResponse": {
+        "summary": "Saved Web UI run form state",
+        "value": {
+          "run_preferences": {
+            "domains": [
+              "youtube.com",
+              "discord.com"
+            ],
+            "domain_preset": "system:required",
+            "discovery_profile": "standard",
+            "run_mode": "multi",
+            "curl_parallelism": 30,
+            "enable_http": false,
+            "enable_tls12": true,
+            "enable_tls13": false,
+            "include_quic": true,
+            "enable_ipv6": false,
+            "scan_level": "standard",
+            "repeats": 1,
+            "repeat_parallel": false,
+            "skip_dnscheck": true,
+            "skip_ipblock": true,
+            "limit_time_enabled": true,
+            "timeout_hours": 48
+          }
+        }
+      },
+      "WebRunPreferencesSaveRequest": {
+        "summary": "Save Web UI run form state",
+        "value": {
+          "run_preferences": {
+            "domains": [
+              "youtube.com",
+              "discord.com"
+            ],
+            "domain_preset": "system:required",
+            "discovery_profile": "standard",
+            "run_mode": "multi",
+            "curl_parallelism": 30,
+            "enable_http": false,
+            "enable_tls12": true,
+            "enable_tls13": false,
+            "include_quic": true,
+            "enable_ipv6": false,
+            "scan_level": "standard",
+            "repeats": 1,
+            "repeat_parallel": false,
+            "skip_dnscheck": true,
+            "skip_ipblock": true,
+            "limit_time_enabled": true,
+            "timeout_hours": 48
           }
         }
       },
@@ -2539,13 +3333,33 @@
         "summary": "Последние строки лога подбора",
         "value": {
           "run_id": "run_20260722_173000",
-          "lines": [
-            "checking youtube.com with 50-fake-multi.sh",
-            "strategy matched for discord.com",
-            "progress attempts=1080/4200"
-          ],
-          "truncated": true,
-          "updated_at": "2026-07-22T17:40:00Z"
+          "kind": "multi-domain-discovery",
+          "status": "running",
+          "stdout_tail": "checking youtube.com with 50-fake-multi.sh\nprogress attempts=1080/4200",
+          "stdout_append": "",
+          "stderr_tail": "",
+          "stderr_append": "",
+          "stderr_diagnostics": [],
+          "stdout_log": "/home/pi/gp/state/strategy-finder/logs/run_20260722_173000.stdout.log",
+          "stderr_log": "/home/pi/gp/state/strategy-finder/logs/run_20260722_173000.stderr.log",
+          "stdout_size": 8192,
+          "stderr_size": 0,
+          "progress": {
+            "phase": "running",
+            "attempted": 1080,
+            "attempt_total": 4200,
+            "eta_seconds": 3600
+          },
+          "metrics": {
+            "run_id": "run_20260722_173000",
+            "attempted": 1080,
+            "attempt_total": 4200
+          },
+          "run_settings": {
+            "domain_count": 3,
+            "curl_parallelism": 30,
+            "timeout_seconds": 172800
+          }
         }
       },
       "PreflightStatusReady": {
@@ -2791,94 +3605,121 @@
         }
       },
       "StrategyCandidatesResponse": {
-        "summary": "Нормализованные кандидаты стратегий",
+        "summary": "Фильтрованные нормализованные кандидаты стратегий",
         "value": {
           "candidates": [
             {
-              "strategy_id": "strategy_50_fake_multi_tcp",
-              "strategy_name": "50-fake-multi.sh tcp",
-              "domains": [
-                "youtube.com",
-                "discord.com"
+              "id": "tcp-5e8f1a2b3c4d",
+              "protocol": "tcp",
+              "args": "--dpi-desync=fake,multisplit --dpi-desync-split-pos=1",
+              "status": "candidate",
+              "first_seen_at": "2026-07-22T17:30:00Z",
+              "last_seen_at": "2026-07-22T17:45:00Z",
+              "fragmentation_class": "position_safe",
+              "fragmentation_safe": true,
+              "fragmentation_reason": "split position does not fragment ClientHello",
+              "family": "fake-multi",
+              "family_key": "fake-multi:tcp",
+              "family_rank": 50,
+              "family_reason": "strategy family parsed from args",
+              "seen": [
+                {
+                  "run_id": "",
+                  "domain": "youtube.com",
+                  "test": "",
+                  "ip_version": "",
+                  "seen_at": ""
+                }
               ],
-              "domain_count": 2,
-              "protocols": [
-                "tcp"
-              ],
-              "facts": {
-                "source_file": "50-fake-multi.sh",
-                "attempts": 140
-              }
+              "common_seen": [
+                {
+                  "domains": [
+                    "youtube.com",
+                    "discord.com"
+                  ]
+                }
+              ]
             }
-          ]
+          ],
+          "total": 1,
+          "filters": {
+            "domains": [
+              "youtube.com"
+            ]
+          }
         }
       },
-      "EventsResponse": {
-        "summary": "События после указанного идентификатора",
+      "CoreEventsResponse": {
+        "summary": "Core events after the requested cursor",
         "value": {
           "events": [
             {
-              "event_id": "evt_000123",
-              "type": "run-progress",
+              "event_id": "core:000000000123",
+              "type": "strategy-discovery.progress",
               "created_at": "2026-07-22T17:40:00Z",
-              "run_id": "run_20260722_173000",
               "payload": {
+                "run_id": "run_20260722_173000",
+                "status": "running",
+                "stage": "selection",
                 "attempts_processed": 1080,
                 "attempts_total": 4200
               }
             }
           ],
-          "next_after_id": "evt_000123"
+          "next_after_id": "core:000000000123"
+        }
+      },
+      "WebEventsResponse": {
+        "summary": "Web UI events after the requested cursor",
+        "value": {
+          "events": [
+            {
+              "event_id": "web:000000000123",
+              "type": "runs",
+              "created_at": "2026-07-22T17:40:00Z",
+              "payload": {
+                "count": 20,
+                "version": "sha256:184a7f8fd2b0"
+              }
+            }
+          ],
+          "next_after_id": "web:000000000123"
         }
       },
       "ServiceStatus": {
         "summary": "Состояние установленного сервиса",
         "value": {
           "state": "active",
-          "unit": "gp-control-plane-web.service",
+          "mode": "core",
+          "services": {
+            "core": {
+              "name": "gp-control-plane-core.service",
+              "state": "active",
+              "role": "current",
+              "required": true
+            },
+            "web": {
+              "name": "gp-control-plane-web.service",
+              "state": "unknown",
+              "role": "proxy",
+              "required": true
+            }
+          },
           "version": {
             "version": "0.3.5-alpha.1",
             "installed_ref": "feature/headless-core-api-research",
             "commit": "7c0387e"
           },
-          "data_state": "ready",
+          "data_state": {
+            "state": "ready",
+            "state_dir": "/home/balbomush/gp/GP-access-control-plane/build/state",
+            "v2fly": {
+              "state": "ready",
+              "source_commit": "abc1234",
+              "group_count": 1890
+            }
+          },
           "updated_at": "2026-07-22T17:30:00Z"
-        }
-      },
-      "ServiceDiagnostics": {
-        "summary": "Нормализованные факты диагностики GP",
-        "value": {
-          "version": {
-            "version": "0.3.5-alpha.1",
-            "installed_ref": "feature/headless-core-api-research",
-            "commit": "7c0387e"
-          },
-          "service": {
-            "state": "active",
-            "unit": "gp-control-plane-web.service",
-            "data_state": "ready"
-          },
-          "external_sources": [
-            {
-              "name": "v2fly",
-              "status": "ready",
-              "details": {
-                "source_commit": "abc1234"
-              }
-            }
-          ],
-          "checks": [
-            {
-              "name": "root-helper",
-              "status": "ok",
-              "details": {
-                "command": "run-multidomain"
-              }
-            }
-          ],
-          "log_tail": [
-            "gp-control-plane-web.service started"
-          ]
         }
       },
       "AvailableReleases": {
@@ -2919,7 +3760,7 @@
         "summary": "Установить выбранный релиз",
         "value": {
           "channel": "prerelease",
-          "target_ref": "v0.3.5-alpha.1"
+          "dry_run": true
         }
       },
       "V2flyStorageStatus": {
@@ -2936,6 +3777,41 @@
           "last_update_check": {
             "checked_at": "2026-07-22T17:00:00Z",
             "has_updates": false
+          }
+        }
+      },
+      "PagedCandidateDomainIndexResponse": {
+        "summary": "Web UI candidate domain index page",
+        "value": {
+          "domains": [
+            {
+              "domain": "youtube.com",
+              "strategy_count": 58,
+              "protocols": [
+                {
+                  "protocol": "tcp",
+                  "count": 42
+                },
+                {
+                  "protocol": "quic",
+                  "count": 16
+                }
+              ]
+            }
+          ],
+          "total": 70,
+          "strategy_total": 1530,
+          "limit": 50,
+          "offset": 0,
+          "has_more": true,
+          "tested_domains": [
+            "youtube.com",
+            "discord.com"
+          ],
+          "version": {
+            "strategy_count": 1530,
+            "result_count": 7063,
+            "domain_count": 70
           }
         }
       },
@@ -2971,19 +3847,32 @@
         "value": {
           "candidates": [
             {
-              "strategy_id": "strategy_50_fake_multi_tcp",
-              "strategy_name": "50-fake-multi.sh tcp",
-              "domains": [
-                "youtube.com",
-                "discord.com"
+              "id": "tcp-5e8f1a2b3c4d",
+              "protocol": "tcp",
+              "args": "--dpi-desync=fake,multisplit --dpi-desync-split-pos=1",
+              "status": "candidate",
+              "first_seen_at": "2026-07-22T17:30:00Z",
+              "last_seen_at": "2026-07-22T17:45:00Z",
+              "fragmentation_class": "position_safe",
+              "fragmentation_safe": true,
+              "fragmentation_reason": "split position does not fragment ClientHello",
+              "family": "fake-multi",
+              "family_key": "fake-multi:tcp",
+              "family_rank": 50,
+              "family_reason": "strategy family parsed from args",
+              "seen": [
+                {
+                  "domain": "youtube.com"
+                }
               ],
-              "domain_count": 2,
-              "protocols": [
-                "tcp"
-              ],
-              "facts": {
-                "source_file": "50-fake-multi.sh"
-              }
+              "common_seen": [
+                {
+                  "domains": [
+                    "youtube.com",
+                    "discord.com"
+                  ]
+                }
+              ]
             }
           ],
           "limit": 50,
@@ -2993,15 +3882,29 @@
         }
       },
       "ErrorResponse": {
-        "summary": "Структурированная ошибка",
+        "summary": "Простая ошибка",
         "value": {
-          "error": {
-            "code": "storage_not_ready",
-            "message": "Local storage is not prepared",
-            "details": {
-              "source": "v2fly"
-            },
-            "retryable": true
+          "error": "Local storage is not prepared"
+        }
+      },
+      "ServiceActionResult": {
+        "summary": "Синхронное сервисное действие выполнено",
+        "value": {
+          "status": "success",
+          "operation_id": "v2fly-check-updates",
+          "storage": {
+            "state": "ready",
+            "source_repo": "v2fly/domain-list-community",
+            "source_ref": "master",
+            "source_commit": "abc1234",
+            "prepared_at": "2026-07-22T16:00:00Z",
+            "group_count": 1890,
+            "archive_sha256": "sha256:9d8a...",
+            "catalog_sha256": "sha256:f4b2...",
+            "last_update_check": {
+              "checked_at": "2026-07-22T17:00:00Z",
+              "has_updates": false
+            }
           }
         }
       }
