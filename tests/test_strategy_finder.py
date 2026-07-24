@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from gp_control_plane import strategy_finder as strategy_finder_module
 from gp_control_plane.storage import (
     append_run,
     connect,
@@ -391,8 +392,8 @@ curl_test_https_tls12 ipv4 : nfqws2 --payload tls_client_hello --lua-desync=fake
             upsert_candidates(state_dir, parsed, {"id": "run1"})
             status = storage_status(state_dir)
 
-            self.assertEqual(status["schema_version"], "10")
-            self.assertEqual(status["expected_schema_version"], "10")
+            self.assertEqual(status["schema_version"], "11")
+            self.assertEqual(status["expected_schema_version"], "11")
             self.assertEqual(status["integrity_check"], "ok")
             self.assertGreater(status["db_size_bytes"], 0)
             self.assertEqual(status["tables"]["domains"], 1)
@@ -878,6 +879,57 @@ pktws_check_https_tls12()
             self.assertEqual(page["total"], 1)
             self.assertEqual(page["candidates"][0]["args"], "--strategy common")
 
+    def test_core_candidate_export_batches_relation_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            candidates = [
+                {
+                    "protocol": "tcp",
+                    "args": f"--strategy {index}",
+                    "status": "candidate",
+                    "seen": [{"domain": f"domain-{index}.test"}],
+                    "common_seen": [{"domains": ["youtube.com", "discord.com"]}],
+                }
+                for index in range(20)
+            ]
+            _store_candidate_rows(state_dir, candidates)
+            original_connect = strategy_finder_module.connect
+            wrappers: list[object] = []
+
+            class CountingConnection:
+                def __init__(self, conn: object) -> None:
+                    self.conn = conn
+                    self.relation_selects = 0
+
+                def __enter__(self) -> "CountingConnection":
+                    self.conn.__enter__()
+                    return self
+
+                def __exit__(self, *args: object) -> object:
+                    return self.conn.__exit__(*args)
+
+                def __getattr__(self, name: str) -> object:
+                    return getattr(self.conn, name)
+
+                def execute(self, sql: str, *args: object, **kwargs: object) -> object:
+                    normalized = " ".join(str(sql).lower().split())
+                    if "from strategy_domain_results r" in normalized:
+                        self.relation_selects += 1
+                    return self.conn.execute(sql, *args, **kwargs)
+
+            def counting_connect(*args: object, **kwargs: object) -> CountingConnection:
+                wrapper = CountingConnection(original_connect(*args, **kwargs))
+                wrappers.append(wrapper)
+                return wrapper
+
+            with patch.object(strategy_finder_module, "connect", counting_connect):
+                exported = list(strategy_finder_module.iter_strategy_candidates_filtered(state_dir, protocols=["tcp"]))
+
+            self.assertEqual(20, len(exported))
+            self.assertIn("seen", exported[0])
+            self.assertIn("common_seen", exported[0])
+            self.assertLessEqual(sum(wrapper.relation_selects for wrapper in wrappers), 2)
+
     def test_read_candidate_page_filters_single_domain(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -910,6 +962,26 @@ pktws_check_https_tls12()
 
             self.assertEqual(page["total"], 2)
             self.assertEqual({item["args"] for item in page["candidates"]}, {"--strategy youtube", "--strategy common-quic"})
+
+    def test_core_candidate_filter_rejects_overwide_json_result(self) -> None:
+        from gp_control_plane.strategy_finder import read_strategy_candidates_filtered
+
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            candidates = [
+                {
+                    "id": f"tcp-{idx}",
+                    "protocol": "tcp",
+                    "args": f"--strategy {idx}",
+                    "status": "candidate",
+                    "seen": [{"domain": f"example{idx}.com"}],
+                }
+                for idx in range(3)
+            ]
+            _store_candidate_rows(state_dir, candidates)
+
+            with self.assertRaisesRegex(ValueError, "too large"):
+                read_strategy_candidates_filtered(state_dir, protocols=["tcp"], max_results=2)
 
     def test_read_candidate_domain_index_counts_by_domain_and_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

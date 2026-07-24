@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import http.client
+import ast
+import importlib
 import json
 import os
 import socket
@@ -10,17 +12,39 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.config import AppConfig, OutputConfig
+from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
 from gp_control_plane.state import read_state, write_state
+from gp_control_plane.storage import SCHEMA_VERSION, read_app_setting
+from gp_control_plane.strategy_finder import upsert_candidates
 from gp_control_plane.web import app as web_app
-from gp_control_plane.web.app import index_html, serve
+from gp_control_plane.web import routes as web_routes
+from gp_control_plane.web.app import index_html, serve, serve_core, serve_web_proxy
+
+
+def _json_object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate OpenAPI key: {key}")
+        result[key] = value
+    return result
 
 
 class WebUiTests(unittest.TestCase):
+    def test_core_status_reports_sqlite_storage_schema_version(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+
+            payload = web_app.core_api.status_payload(config)
+
+            self.assertTrue(payload["storage"]["ready"])
+            self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
+
     def test_candidates_and_runs_use_50_item_load_more_pagination(self) -> None:
         html = index_html()
 
@@ -33,10 +57,27 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("listLoadMore('load-more-candidates'", html)
         self.assertIn("listLoadMore('load-more-candidate-domains'", html)
         self.assertIn("listLoadMore('load-more-runs'", html)
+        self.assertIn("loadMoreDomainStrategies", html)
+        self.assertIn("loadMoreCommonStrategies", html)
+        self.assertNotIn("loadAllDomainStrategies", html)
+        self.assertNotIn("loadAllCommonStrategies", html)
         self.assertIn('data-action="${esc(action)}"', html)
         self.assertIn("Загрузить еще", html)
         self.assertIn("refreshDomainIndex(false)", html)
         self.assertIn("refreshRuns(false)", html)
+        self.assertIn("const API_ENDPOINTS = Object.freeze", html)
+        self.assertIn("LEGACY_API_ALLOWLIST", html)
+        self.assertIn("function legacyEndpoint(name)", html)
+        self.assertIn("function legacyUrl(name, params)", html)
+        self.assertIn("candidateDomainIndexPage: '/api/web/candidate-domain-index-page'", html)
+        self.assertIn("strategyCandidatesPage: '/api/web/strategy-candidates-page'", html)
+        self.assertIn("runHistoryPage: '/api/web/runs/history-page'", html)
+        self.assertIn("latestLog: '/api/core/runs/latest-log'", html)
+        self.assertIn("apiUrl('web', 'candidateDomainIndexPage', params)", html)
+        self.assertIn("apiUrl('web', 'strategyCandidatesPage', candidateParams", html)
+        self.assertIn("apiUrl('web', 'runHistoryPage', runParams", html)
+        self.assertIn("apiEndpoint('core', 'latestLog')", html)
+        self.assertNotIn("getJson('/api/strategy-finder/latest-log')", html)
         self.assertNotIn(".slice(0, 12)", html)
 
     def test_refresh_does_not_prefetch_candidates_before_candidates_tab_is_opened(self) -> None:
@@ -75,23 +116,32 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Создать бекап сейчас", html)
         self.assertIn("backups-table", html)
         self.assertIn("refreshBackups", html)
-        self.assertIn("/api/backups", html)
-        self.assertIn("/api/backups/create", html)
-        self.assertIn("/api/backups/restore", html)
-        self.assertIn("/api/backups/delete", html)
+        self.assertIn("/api/core/backups/list", html)
+        self.assertIn("/api/core/backups/create", html)
+        self.assertIn("/api/core/backups/restore", html)
+        self.assertIn("/api/core/backups/delete", html)
+        self.assertIn("/api/core/backups/upload", html)
+        self.assertIn("legacyUrl('backupDownload'", html)
         self.assertIn("/api/backups/download", html)
+        self.assertIn("backupListFromPayload", html)
         self.assertIn("backup-upload-panel", html)
         self.assertIn("backup-downloads", html)
         self.assertIn("backup-archive-link", html)
         self.assertIn("backup-file-links", html)
         self.assertIn("backup-upload-file", html)
-        self.assertIn("/api/backups/upload", html)
+        self.assertNotIn("postJson('/api/backups/create'", html)
+        self.assertNotIn("postJson('/api/backups/restore'", html)
+        self.assertNotIn("postJson('/api/backups/delete'", html)
+        self.assertNotIn("fetch('/api/backups/upload'", html)
         self.assertIn("app-version-badge", html)
-        self.assertIn("web-auth-badge", html)
-        self.assertIn("WEB_AUTH", html)
-        self.assertIn("authHeaders", html)
-        self.assertIn("X-GP-Token", html)
-        self.assertIn("gp_token", html)
+        self.assertIn("requestHeaders", html)
+        self.assertIn("requestUrl", html)
+        self.assertNotIn("authHeaders", html)
+        self.assertNotIn("authUrl", html)
+        self.assertNotIn("web-auth-badge", html)
+        self.assertNotIn("WEB_AUTH", html)
+        self.assertNotIn("X-GP-Token", html)
+        self.assertNotIn("gp_token", html)
         self.assertNotIn("settings-version", html)
         self.assertIn("settings-enable-ipv6", html)
         self.assertIn("settings-debug-stdout", html)
@@ -107,23 +157,34 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("data-action=\"check-releases\"", html)
         self.assertIn("data-action=\"update-from-release\"", html)
         self.assertIn("data-action=\"toggle-update-log\"", html)
-        self.assertIn("/api/releases", html)
+        self.assertIn("/api/service/releases/available", html)
+        self.assertIn("/api/service/releases/install-channel", html)
+        self.assertIn("/api/service/releases/set-install-channel", html)
+        self.assertIn("/api/service/releases/install", html)
+        self.assertIn("legacyUrl('releaseUpdatePlan'", html)
         self.assertIn("/api/releases/update-plan", html)
-        self.assertIn("/api/releases/update", html)
+        self.assertNotIn("getJson(`/api/releases?", html)
+        self.assertNotIn("postJson('/api/releases/update'", html)
         self.assertIn("releaseUpdate", html)
         self.assertIn("checkReleases({ silent: true })", html)
         self.assertIn("Обновление поставлено в очередь", html)
         self.assertNotIn("Релизы еще не проверялись. Обновление из UI", html)
         self.assertIn("Установить выбранное обновление", html)
         self.assertIn("debug_stdout", html)
-        self.assertIn("/api/settings", html)
+        self.assertIn("/api/core/run-settings", html)
+        self.assertIn("/api/core/run-settings/save", html)
+        self.assertIn("fetchSettingsPayload", html)
+        self.assertIn("saveSettingsPayload", html)
+        self.assertNotIn("postJson('/api/settings'", html)
+        self.assertNotIn("getJson('/api/settings'", html)
         self.assertNotIn("/api/discovery-profiles", html)
         self.assertIn("discovery-profile-select", html)
         self.assertIn("DISCOVERY_PROFILES", html)
         self.assertNotIn("settings-preset-select", html)
         self.assertNotIn("settings-preset-note", html)
-        self.assertIn("/api/run-preferences", html)
+        self.assertIn("/api/web/run-preferences", html)
         self.assertIn("runPreferences", html)
+        self.assertNotIn("postJson('/api/run-preferences'", html)
         self.assertIn("useRunPreferencesOnce", html)
         self.assertIn("saveRunPreferencesNow", html)
         self.assertNotIn("scheduleRunPreferencesSave", html)
@@ -137,9 +198,12 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("saveDiscoveryProfile", html)
         self.assertNotIn("deleteDiscoveryProfile", html)
         self.assertIn("/api/domain-sources", html)
-        self.assertIn("/api/domain-sources/v2fly/categories", html)
+        self.assertIn("/api/core/presets/v2fly/categories", html)
+        self.assertIn("legacyEndpoint('v2flyPreview')", html)
+        self.assertIn("legacyEndpoint('v2flyImport')", html)
         self.assertIn("/api/domain-sources/v2fly/preview", html)
         self.assertIn("/api/domain-sources/v2fly/import", html)
+        self.assertNotIn("getJson(`/api/domain-sources/v2fly/categories?", html)
         self.assertIn("v2fly-category-search", html)
         self.assertIn("v2fly-category-status", html)
         self.assertIn("v2fly-category-matches", html)
@@ -186,6 +250,10 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/presets/save", html)
         self.assertIn("/api/presets/delete-users-lists", html)
         self.assertIn("/api/presets/domains", html)
+        self.assertIn("legacyEndpoint('presets')", html)
+        self.assertIn("legacyEndpoint('presetSave')", html)
+        self.assertIn("legacyEndpoint('presetDeleteUserLists')", html)
+        self.assertIn("legacyUrl('presetDomains'", html)
         self.assertIn("domain-preset-manager-panel", html)
         self.assertNotIn("profiles-manager-panel", html)
         self.assertNotIn("settings-presets-manager-panel", html)
@@ -250,13 +318,17 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("strategy-family-list", html)
         self.assertIn("strategy-family-reason", html)
         self.assertNotIn("appendCandidateFilters", html)
-        self.assertIn("loadAllDomainStrategies", html)
-        self.assertIn("loadAllCommonStrategies", html)
-        self.assertIn("Показать все общие стратегии", html)
+        self.assertIn("loadMoreDomainStrategies", html)
+        self.assertIn("loadMoreCommonStrategies", html)
+        self.assertNotIn("loadAllDomainStrategies", html)
+        self.assertNotIn("loadAllCommonStrategies", html)
+        self.assertIn("Загрузить еще общие стратегии", html)
         self.assertIn("domainFromStrategyListKey", html)
         self.assertIn("isCommonStrategyListKey", html)
-        self.assertIn("Показать все стратегии домена", html)
+        self.assertIn("Загрузить еще стратегии домена", html)
         self.assertIn("data-strategy-list-toggle", html)
+        self.assertIn("data-strategy-remote-more", html)
+        self.assertIn("button.dataset.strategyRemoteMore === 'true'", html)
         self.assertIn("data-strategy-code-key", html)
         self.assertIn("rememberStrategyEditorScrolls", html)
         self.assertIn("restoreStrategyEditorScrolls", html)
@@ -274,6 +346,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("candidateKnownVersion", html)
         self.assertIn("candidateCacheValid", html)
         self.assertIn("syncCandidateVersion", html)
+        self.assertIn("Object.keys(value).sort().map", html)
+        self.assertNotIn("value.mtime_ns || 0", html)
         self.assertIn("invalidateCandidateCaches", html)
         self.assertIn("common-controls", html)
         self.assertIn(".common-filter-panel .preset-grid", html)
@@ -333,7 +407,13 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("data-action=\"run-selected-discovery\"", html)
         self.assertNotIn("data-action=\"multi-domain-discovery\"", html)
         self.assertNotIn("data-action=\"standard-discovery\"", html)
-        self.assertIn("/api/jobs/zapret-multi-domain-discovery", html)
+        self.assertIn("/api/core/strategy-discovery/start-run", html)
+        self.assertIn("/api/core/strategy-discovery/stop-current-run", html)
+        self.assertIn("coreStrategyDiscoveryPayload", html)
+        self.assertIn("startStrategyDiscoveryRun", html)
+        self.assertNotIn("/api/jobs/zapret-multi-domain-discovery", html)
+        self.assertNotIn("/api/jobs/zapret-standard-discovery", html)
+        self.assertNotIn("/api/jobs/stop-current", html)
         self.assertIn("curl-parallelism", html)
         self.assertNotIn('id="curl-parallelism" type="number" min="1" max="10"', html)
         self.assertNotIn("id=\"settings-curl-max\" type=\"number\" min=\"1\" max=\"10\"", html)
@@ -411,13 +491,27 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("служба с повышенными правами", html)
         self.assertIn("metric-job-card", html)
         self.assertIn("/api/events", html)
-        self.assertIn("new EventSource('/api/events')", html)
+        self.assertIn("new EventSource(legacyEndpoint('events'))", html)
         self.assertIn("startRealtimeEvents", html)
         self.assertIn("startRealtimeFallback", html)
         self.assertIn("stdout_size", html)
         self.assertIn("mergeLogPayload", html)
         self.assertIn("30000", html)
+        self.assertIn("refresh({ light: true, silent: true })", html)
+        self.assertIn("function refreshRequestMap(light)", html)
+        self.assertIn("Promise.allSettled", html)
+        self.assertIn("const status = settledValue(results, 'status');", html)
+        self.assertIn("if (status) mergeStatusPayload(status);", html)
+        self.assertIn("const finderRuns = settledValue(results, 'finderRuns');", html)
+        self.assertIn("if (finderRuns) mergeRunPage(finderRuns, true);", html)
+        self.assertIn("refreshFailureMessages(results)", html)
+        self.assertIn("'Частичная ошибка обновления'", html)
+        self.assertIn("renderAll({ skipCandidates: true })", html)
         self.assertNotIn("setInterval(refresh, 5000)", html)
+        self.assertNotIn(
+            "const [status, finderRuns, finderLog, domainSets, presets, settings, domainSources] = await Promise.all",
+            html,
+        )
         self.assertIn("statusCheck", html)
         self.assertIn("zapretDiagnostics", html)
         self.assertIn("status-check-message", html)
@@ -437,7 +531,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("candidateUpdatedAt", html)
         self.assertIn("backupsLoading", html)
         self.assertIn("backupsUpdatedAt", html)
-        self.assertIn("renderWebAuthStatus", html)
+        self.assertNotIn("renderWebAuthStatus", html)
         self.assertIn("friendlyTime", html)
         self.assertIn("backups-updated-at", html)
         self.assertIn("останавливается", html)
@@ -838,7 +932,17 @@ class WebUiTests(unittest.TestCase):
         self.assertIn('aria-selected="true"', html)
         self.assertIn('aria-controls="tab-panel-finder"', html)
         self.assertIn('role="tabpanel"', html)
+        self.assertIn('tabindex="-1"', html)
         self.assertIn("syncActiveTabUi", html)
+        self.assertIn("TAB_NAVIGATION_KEYS", html)
+        self.assertIn("function handleTabControlKeydown", html)
+        self.assertIn("function activateTabControl", html)
+        self.assertIn("ArrowRight", html)
+        self.assertIn("ArrowLeft", html)
+        self.assertIn("Home", html)
+        self.assertIn("End", html)
+        self.assertIn("button.tabIndex = active ? 0 : -1;", html)
+        self.assertIn("if (handleTabControlKeydown(event)) return;", html)
 
     def test_progress_and_focus_have_accessibility_contract(self) -> None:
         html = index_html()
@@ -997,6 +1101,23 @@ class WebUiTests(unittest.TestCase):
 
             self.assertIsNone(read_state(config.output.state_dir)["current_job"])
 
+    def test_serve_does_not_clear_current_job_when_runtime_lock_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            write_state(config.output.state_dir, {"current_job": "active-job", "last_error": None})
+            config.output.state_dir.mkdir(parents=True, exist_ok=True)
+            (config.output.state_dir / "job-runner.lock").write_text(
+                json.dumps({"pid": os.getpid(), "job_id": "active-job"}),
+                encoding="utf-8",
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            _wait_for_server(port, "/openapi.json")
+
+            self.assertEqual(read_state(config.output.state_dir)["current_job"], "active-job")
+
     def test_diagnostics_endpoint_returns_runtime_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -1052,13 +1173,912 @@ class WebUiTests(unittest.TestCase):
             connection.close()
 
             self.assertEqual(response.status, 200)
-            self.assertIn('"candidate_version"', body)
-            self.assertIn('"size"', body)
-            self.assertIn('"mtime_ns"', body)
+            payload = json.loads(body)
+            self.assertIn("candidate_version", payload)
+            self.assertEqual(
+                {"strategy_count", "result_count", "domain_count", "strategy_signature", "result_signature"},
+                set(payload["candidate_version"]),
+            )
             self.assertIn('"release_update"', body)
             self.assertIn('"status":"success"', body)
 
-    def test_web_auth_token_protects_mutating_api_when_enabled(self) -> None:
+    def test_core_mode_serves_api_without_web_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/")
+            root_response = connection.getresponse()
+            root_body = root_response.read().decode("utf-8")
+            connection.close()
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("GET", "/api/status")
+            api_response = connection.getresponse()
+            api_body = api_response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(root_response.status, 404)
+            self.assertIn("web ui is disabled", root_body)
+            self.assertNotIn("<!doctype html>", root_body.lower())
+            self.assertEqual(api_response.status, 200)
+            self.assertIn('"version"', api_body)
+
+    def test_openapi_and_swagger_are_served_by_monolith_and_core_mode(self) -> None:
+        for target in (serve, serve_core):
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                port = _free_port()
+                thread = threading.Thread(target=target, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                status, headers, body = _http_request(port, "/openapi.json")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+                openapi_contract = json.loads(
+                    body.decode("utf-8"),
+                    object_pairs_hook=_json_object_without_duplicate_keys,
+                )
+                self.assertEqual(openapi_contract["openapi"], "3.1.0")
+                openapi_operations = {
+                    (path, method.upper())
+                    for path, operations in openapi_contract["paths"].items()
+                    for method in operations
+                }
+                self.assertEqual(openapi_operations, web_routes.openapi_operations())
+                self.assertNotIn("jsonSchemaDialect", openapi_contract)
+                self.assertNotIn("securitySchemes", openapi_contract["components"])
+                self.assertEqual([{"url": "/"}], [{"url": server["url"]} for server in openapi_contract["servers"]])
+                self.assertNotIn("localhost", body.decode("utf-8"))
+                self.assertNotIn("127.0.0.1:8081", body.decode("utf-8"))
+                examples = openapi_contract["components"]["examples"]
+                self.assertIn("StartRunRequestMultiDomain", examples)
+                self.assertEqual(30, examples["StartRunRequestMultiDomain"]["value"]["curl_parallelism"])
+                self.assertNotIn("mode_settings", examples["StartRunRequestMultiDomain"]["value"])
+                start_schema = openapi_contract["components"]["schemas"]["StartRunRequest"]
+                self.assertEqual(["domains"], start_schema["required"])
+                self.assertNotIn("mode_settings", start_schema["properties"])
+                self.assertFalse(start_schema["properties"]["settings"]["additionalProperties"])
+                self.assertIn("curl_max_time", start_schema["properties"]["settings"]["properties"])
+                self.assertNotIn("mode_settings", start_schema["properties"]["settings"]["properties"])
+                error_schema = openapi_contract["components"]["schemas"]["ErrorResponse"]
+                self.assertEqual("string", error_schema["properties"]["error"]["type"])
+                self.assertEqual(
+                    {"error": "Local storage is not prepared"},
+                    examples["ErrorResponse"]["value"],
+                )
+                self.assertIn(
+                    "409",
+                    openapi_contract["paths"]["/api/core/strategy-discovery/stop-current-run"]["post"]["responses"],
+                )
+                self.assertNotIn(
+                    "404",
+                    openapi_contract["paths"]["/api/core/strategy-discovery/stop-current-run"]["post"]["responses"],
+                )
+                category_responses = openapi_contract["paths"]["/api/core/presets/v2fly/category-domains"]["get"]["responses"]
+                self.assertIn("400", category_responses)
+                self.assertNotIn("404", category_responses)
+                self.assertNotIn("503", category_responses)
+                categories_responses = openapi_contract["paths"]["/api/core/presets/v2fly/categories"]["get"]["responses"]
+                self.assertNotIn("503", categories_responses)
+                install_schema = openapi_contract["components"]["schemas"]["InstallReleaseRequest"]
+                self.assertIn("dry_run", install_schema["properties"])
+                self.assertNotIn("target_ref", install_schema["properties"])
+                self.assertIn("CoreStatusRunning", examples)
+                self.assertIn("PagedStrategyCandidatesResponse", examples)
+                self.assertIn("PagedCandidateDomainIndexResponse", examples)
+                self.assertIn("WebRunPreferencesResponse", examples)
+                self.assertIn("WebRunPreferencesSaveRequest", examples)
+                self.assertIn("WebRunPreferencesResponse", openapi_contract["components"]["schemas"])
+                self.assertIn("WebRunPreferencesSaveRequest", openapi_contract["components"]["schemas"])
+                self.assertIn("PagedCandidateDomainIndexResponse", openapi_contract["components"]["schemas"])
+                self.assertIn("/api/web/candidate-domain-index-page", openapi_contract["paths"])
+                self.assertNotIn("/api/service/diagnostics", openapi_contract["paths"])
+                self.assertNotIn("ServiceDiagnostics", openapi_contract["components"]["schemas"])
+                self.assertNotIn("ServiceDiagnostics", examples)
+                log_tail_schema = openapi_contract["components"]["schemas"]["RunLogTail"]
+                self.assertIn("stdout_tail", log_tail_schema["required"])
+                self.assertIn("stderr_tail", log_tail_schema["required"])
+                self.assertIn("progress", log_tail_schema["required"])
+                self.assertNotIn("lines", log_tail_schema["properties"])
+                self.assertNotIn("lines", examples["RunLogTail"]["value"])
+                self.assertIn(
+                    "multiDomain30Parallel",
+                    openapi_contract["paths"]["/api/core/strategy-discovery/start-run"]["post"]["requestBody"][
+                        "content"
+                    ]["application/json"]["examples"],
+                )
+                self.assertIn(
+                    "plainError",
+                    openapi_contract["components"]["responses"]["Error"]["content"]["application/json"]["examples"],
+                )
+                self.assertIn("/api/core/presets/delete-user-domain-list", openapi_contract["paths"])
+                self.assertNotIn("/api/core/presets/delete-user-lists", openapi_contract["paths"])
+                delete_schema = openapi_contract["components"]["schemas"]["DeleteDomainListRequest"]
+                self.assertEqual(["list_ids"], delete_schema["required"])
+                self.assertEqual(1, delete_schema["properties"]["list_ids"]["minItems"])
+
+                status, headers, body = _http_request(port, "/swagger")
+                swagger_html = body.decode("utf-8")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
+                self.assertIn("SwaggerUIBundle", swagger_html)
+                self.assertIn("url: '/openapi.json'", swagger_html)
+
+                status, headers, body = _http_request(port, "/swagger", method="HEAD")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
+                self.assertEqual(body, b"")
+
+    def test_route_registry_defines_runtime_boundaries(self) -> None:
+        self.assertEqual("core", web_routes.route_for("GET", "/api/core/status").namespace)
+        self.assertEqual("service", web_routes.route_for("POST", "/api/service/releases/install").namespace)
+        self.assertEqual("web", web_routes.route_for("GET", "/api/web/run-preferences").namespace)
+        self.assertEqual("web", web_routes.route_for("GET", "/api/web/candidate-domain-index-page").namespace)
+        self.assertEqual("legacy", web_routes.route_for("GET", "/api/status").namespace)
+        self.assertFalse(web_routes.route_for("GET", "/").allowed_in_core)
+        self.assertEqual(
+            {"/"},
+            {spec.path for spec in web_routes.ROUTES if not spec.allowed_in_core},
+        )
+        self.assertTrue(
+            all(spec.allowed_in_core for spec in web_routes.ROUTES if spec.namespace in {"core", "service", "web"} and spec.path != "/")
+        )
+        self.assertFalse(
+            any(spec.openapi for spec in web_routes.ROUTES if spec.namespace == "legacy")
+        )
+        self.assertIn("/api/core/status", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertIn("/api/service/status", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertIn("/api/web/run-preferences", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertIn("/api/web/candidate-domain-index-page", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertNotIn("/api/status", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertIn("/api/status", web_routes.JSON_HEAD_ROUTE_PATHS)
+        self.assertIn("/api/core/strategy-discovery/start-run", web_routes.JSON_POST_ROUTE_PATHS)
+        self.assertEqual({"/api/backups/upload", "/api/core/backups/upload"}, web_routes.UPLOAD_ROUTE_PATHS)
+
+    def test_app_api_literals_are_registered_routes(self) -> None:
+        source_path = Path(web_app.__file__)
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        api_literals = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("/api/")
+        }
+        registered = {spec.path for spec in web_routes.ROUTES if spec.path.startswith("/api/")}
+        self.assertFalse(api_literals - registered)
+
+    def test_core_server_does_not_import_web_app_runtime(self) -> None:
+        from gp_control_plane.web import core_server
+
+        source = Path(core_server.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("from .app import", source)
+        self.assertNotIn("gp_control_plane.web.app", source)
+
+    def test_core_server_uses_api_server_entrypoint(self) -> None:
+        from gp_control_plane.web import api_server, core_server
+
+        config = AppConfig(output=OutputConfig(state_dir=Path("unused-state")))
+        with mock.patch.object(api_server, "serve") as serve_mock:
+            core_server.serve_core(config, host="127.0.0.1", port=18081)
+
+        serve_mock.assert_called_once_with(config, host="127.0.0.1", port=18081, ui_enabled=False)
+
+    def test_web_app_is_api_server_compatibility_alias(self) -> None:
+        app_module = importlib.import_module("gp_control_plane.web.app")
+        api_module = importlib.import_module("gp_control_plane.web.api_server")
+
+        self.assertIs(app_module, api_module)
+
+    def test_openapi_paths_are_callable_through_web_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            web_app.save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
+            snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
+            port = _free_port()
+            release = {
+                "channel": "stable",
+                "available_version": "v0.0.0-test",
+                "url": "https://example.invalid/release",
+                "published_at": "",
+            }
+            with (
+                mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
+                mock.patch.object(web_app.service_api, "queue_release_update", return_value={"status": "queued", "target_ref": "v0.0.0-test"}),
+                mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
+                mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
+            ):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                cases = [
+                    ("GET", "/api/core/status", None, {}),
+                    ("POST", "/api/core/strategy-discovery/start-run", {"mode": "bad", "domains": ["youtube.com"]}, {}),
+                    ("POST", "/api/core/strategy-discovery/stop-current-run", {"dry_run": True}, {}),
+                    ("GET", "/api/core/strategy-discovery/current-run-progress", None, {}),
+                    ("GET", "/api/core/strategy-discovery/current-run-latest-log", None, {}),
+                    ("GET", "/api/core/strategy-discovery/preflight", None, {}),
+                    ("GET", "/api/core/presets/domain-lists", None, {}),
+                    ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "work", "domains": ["youtube.com"]}, {}),
+                    ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "games", "domains": ["discord.com"]}, {}),
+                    ("POST", "/api/core/presets/delete-user-domain-list", {"list_ids": ["user:work", "user:games"]}, {}),
+                    ("GET", "/api/core/presets/v2fly/categories", None, {}),
+                    ("GET", "/api/core/presets/v2fly/category-domains?category=missing", None, {}),
+                    ("POST", "/api/core/backups/create", {}, {}),
+                    ("GET", "/api/core/backups/list", None, {}),
+                    ("POST", "/api/core/backups/restore", {"snapshot_id": "missing"}, {}),
+                    ("POST", "/api/core/backups/delete", {"snapshot_id": "missing"}, {}),
+                    ("GET", f"/api/core/backups/download-file?snapshot_id={snapshot}", None, {}),
+                    ("POST", "/api/core/backups/upload", b"not-a-zip", {"Content-Type": "application/zip"}),
+                    ("GET", "/api/core/run-settings", None, {}),
+                    ("POST", "/api/core/run-settings/save", {"curl_parallelism_default": 10, "curl_parallelism_max": 50}, {}),
+                    ("GET", "/api/core/runs/history", None, {}),
+                    ("GET", "/api/core/runs/latest-log", None, {}),
+                    ("GET", "/api/core/strategy-candidates?domain=youtube.com", None, {}),
+                    ("GET", "/api/core/strategy-candidates/export", None, {}),
+                    ("GET", "/api/core/events", None, {}),
+                    ("GET", "/api/service/status", None, {}),
+                    ("GET", "/api/service/releases/available", None, {}),
+                    ("GET", "/api/service/releases/install-channel", None, {}),
+                    ("POST", "/api/service/releases/set-install-channel", {"channel": "prerelease"}, {}),
+                    ("POST", "/api/service/releases/install", {"channel": "stable", "dry_run": True}, {}),
+                    ("GET", "/api/service/v2fly/local-storage-status", None, {}),
+                    ("POST", "/api/service/v2fly/check-updates", {}, {}),
+                    ("POST", "/api/service/v2fly/update-local-storage", {"dry_run": True}, {}),
+                    ("GET", "/api/web/run-preferences", None, {}),
+                    ("POST", "/api/web/run-preferences", {"run_preferences": {"domains": ["youtube.com"], "run_mode": "multi"}}, {}),
+                    ("GET", "/api/web/runs/history-page", None, {}),
+                    ("GET", "/api/web/candidate-domain-index-page", None, {}),
+                    ("GET", "/api/web/strategy-candidates-page", None, {}),
+                    ("GET", "/api/web/events", None, {}),
+                ]
+                openapi = json.loads(web_app.openapi_json_bytes().decode("utf-8"))
+                expected = {(method.upper(), path) for path, ops in openapi["paths"].items() for method in ops}
+                requested = {(method, path.split("?", 1)[0]) for method, path, _body, _headers in cases}
+                self.assertEqual(expected, requested)
+
+                expected_json_fields = {
+                    ("GET", "/api/core/status"): {"state", "storage", "updated_at"},
+                    ("POST", "/api/core/strategy-discovery/stop-current-run"): {"accepted", "status", "job_id"},
+                    ("GET", "/api/core/strategy-discovery/current-run-progress"): {"run_id", "status", "stage", "current_file"},
+                    ("GET", "/api/core/strategy-discovery/current-run-latest-log"): {"stdout_tail", "stderr_tail", "progress"},
+                    ("GET", "/api/core/strategy-discovery/preflight"): {"ready", "checks"},
+                    ("GET", "/api/core/presets/domain-lists"): {"lists"},
+                    ("POST", "/api/core/presets/save-domain-list"): {"list_id", "kind", "name", "domains", "updated_at"},
+                    ("POST", "/api/core/presets/delete-user-domain-list"): {"deleted"},
+                    ("GET", "/api/core/presets/v2fly/categories"): {"categories", "storage"},
+                    ("POST", "/api/core/backups/create"): {"snapshot_id", "created_at", "filename", "size_bytes"},
+                    ("GET", "/api/core/backups/list"): {"backups"},
+                    ("GET", "/api/core/run-settings"): {
+                        "curl_parallelism_default",
+                        "curl_parallelism_max",
+                        "curl_max_time",
+                        "curl_max_time_quic",
+                        "curl_max_time_doh",
+                        "enable_ipv6",
+                        "debug_stdout",
+                    },
+                    ("POST", "/api/core/run-settings/save"): {
+                        "curl_parallelism_default",
+                        "curl_parallelism_max",
+                        "curl_max_time",
+                        "curl_max_time_quic",
+                        "curl_max_time_doh",
+                        "enable_ipv6",
+                        "debug_stdout",
+                    },
+                    ("GET", "/api/core/runs/history"): {"runs"},
+                    ("GET", "/api/core/runs/latest-log"): {"stdout_tail", "stderr_tail", "progress"},
+                    ("GET", "/api/core/strategy-candidates"): {"candidates", "total", "filters"},
+                    ("GET", "/api/core/events"): {"events", "next_after_id"},
+                    ("GET", "/api/service/status"): {"state", "mode", "services", "version", "data_state", "updated_at"},
+                    ("GET", "/api/service/releases/available"): {"current", "releases", "stable_release_url", "prerelease_url"},
+                    ("GET", "/api/service/releases/install-channel"): {"channel"},
+                    ("POST", "/api/service/releases/set-install-channel"): {"channel"},
+                    ("POST", "/api/service/releases/install"): {"accepted", "status", "job_id"},
+                    ("GET", "/api/service/v2fly/local-storage-status"): {
+                        "state",
+                        "source_repo",
+                        "source_ref",
+                        "source_commit",
+                        "prepared_at",
+                        "group_count",
+                        "last_update_check",
+                    },
+                    ("POST", "/api/service/v2fly/check-updates"): {"status", "operation_id", "storage"},
+                    ("POST", "/api/service/v2fly/update-local-storage"): {"status", "operation_id", "storage"},
+                    ("GET", "/api/web/run-preferences"): {"run_preferences"},
+                    ("POST", "/api/web/run-preferences"): {"run_preferences"},
+                    ("GET", "/api/web/runs/history-page"): {"runs", "total", "limit", "offset", "has_more"},
+                    ("GET", "/api/web/candidate-domain-index-page"): {"domains", "total", "strategy_total", "limit", "offset", "has_more"},
+                    ("GET", "/api/web/strategy-candidates-page"): {"candidates", "total", "limit", "offset", "has_more"},
+                    ("GET", "/api/web/events"): {"events", "next_after_id"},
+                }
+
+                for method, path, body, headers in cases:
+                    raw_body = body if isinstance(body, bytes) else (json.dumps(body).encode("utf-8") if body is not None else None)
+                    request_headers = dict(headers)
+                    if raw_body is not None and "Content-Type" not in request_headers:
+                        request_headers["Content-Type"] = "application/json"
+                    status, _response_headers, response_body = _http_request(
+                        port,
+                        path,
+                        method=method,
+                        body=raw_body,
+                        headers=request_headers,
+                    )
+                    message = (method, path, response_body.decode("utf-8", errors="replace"))
+                    self.assertNotEqual(status, 404, message)
+                    base_path = path.split("?", 1)[0]
+                    if base_path == "/api/core/backups/download-file":
+                        self.assertEqual(status, 200, message)
+                        continue
+                    if base_path == "/api/core/strategy-candidates/export":
+                        self.assertEqual(status, 200, message)
+                        self.assertEqual(_response_headers.get("content-type"), "application/x-ndjson; charset=utf-8", message)
+                        continue
+                    self.assertEqual(_response_headers.get("content-type"), "application/json; charset=utf-8", message)
+                    response_payload = json.loads(response_body.decode("utf-8"))
+                    if status >= 400:
+                        self.assertIn("error", response_payload, message)
+                        continue
+                    for field in expected_json_fields.get((method, base_path), set()):
+                        self.assertIn(field, response_payload, message)
+
+    def test_openapi_paths_are_callable_through_split_core_and_web_proxy_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            web_app.save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
+            snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
+            core_port = _free_port()
+            web_port = _free_port()
+            release = {
+                "channel": "stable",
+                "available_version": "v0.0.0-test",
+                "url": "https://example.invalid/release",
+                "published_at": "",
+            }
+
+            with (
+                mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}),
+                mock.patch.object(web_app, "run_standard_discovery", return_value={"status": "success"}),
+                mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
+                mock.patch.object(web_app.service_api, "queue_release_update", return_value={"status": "queued", "target_ref": "v0.0.0-test"}),
+                mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
+                mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
+            ):
+                core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+                web_thread = threading.Thread(
+                    target=serve_web_proxy,
+                    args=(config, "127.0.0.1", web_port),
+                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                    daemon=True,
+                )
+                core_thread.start()
+                web_thread.start()
+                _wait_for_server(core_port, "/openapi.json")
+                _wait_for_server(web_port, "/openapi.json")
+
+                openapi_contract = json.loads(
+                    web_app.openapi_json_bytes().decode("utf-8"),
+                    object_pairs_hook=_json_object_without_duplicate_keys,
+                )
+                expected = {(method.upper(), path) for path, ops in openapi_contract["paths"].items() for method in ops}
+                checked: set[tuple[str, str]] = set()
+                for port in (core_port, web_port):
+                    for path, operations in openapi_contract["paths"].items():
+                        for raw_method, operation in operations.items():
+                            method = raw_method.upper()
+                            request_path, raw_body, request_headers = _openapi_test_request(
+                                openapi_contract,
+                                path,
+                                method,
+                                operation,
+                                snapshot,
+                            )
+                            status, headers, response_body = _http_request(
+                                port,
+                                request_path,
+                                method=method,
+                                body=raw_body,
+                                headers=request_headers,
+                            )
+                            message = (port, method, request_path, status, response_body.decode("utf-8", errors="replace")[:500])
+                            checked.add((method, path))
+                            self.assertNotEqual(status, 404, message)
+                            if path == "/api/core/backups/download-file" and status == 200:
+                                self.assertGreater(len(response_body), 0, message)
+                                continue
+                            if path == "/api/core/strategy-candidates/export" and status == 200:
+                                self.assertEqual(headers.get("content-type"), "application/x-ndjson; charset=utf-8", message)
+                                continue
+                            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8", message)
+                            response_payload = json.loads(response_body.decode("utf-8"))
+                            if status >= 400:
+                                self.assertIn("error", response_payload, message)
+                                self.assertIsInstance(response_payload["error"], str, message)
+
+                self.assertEqual(expected, checked)
+
+    def test_core_delete_user_domain_lists_requires_explicit_non_empty_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            time.sleep(0.1)
+
+            status, _headers, _body = _http_request(
+                port,
+                "/api/core/presets/delete-user-domain-list",
+                method="POST",
+                body=json.dumps({"list_ids": []}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 400)
+
+            status, _headers, _body = _http_request(
+                port,
+                "/api/core/presets/delete-user-lists",
+                method="POST",
+                body=json.dumps({"dry_run": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 404)
+
+            for name in ("work", "games"):
+                status, _headers, body = _http_request(
+                    port,
+                    "/api/core/presets/save-domain-list",
+                    method="POST",
+                    body=json.dumps({"kind": "user", "name": name, "domains": [f"{name}.example"]}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+
+            status, _headers, body = _http_request(
+                port,
+                "/api/core/presets/delete-user-domain-list",
+                method="POST",
+                body=json.dumps({"list_ids": ["user:work", "user:games"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+            self.assertEqual({"deleted": 2}, json.loads(body.decode("utf-8")))
+
+            status, _headers, body = _http_request(port, "/api/core/presets/domain-lists")
+            self.assertEqual(status, 200)
+            list_ids = [item["list_id"] for item in json.loads(body.decode("utf-8"))["lists"]]
+            self.assertNotIn("user:work", list_ids)
+            self.assertNotIn("user:games", list_ids)
+
+    def test_core_error_contract_returns_plain_error_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            port = _free_port()
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            _wait_for_server(port, "/openapi.json")
+
+            status, headers, body = _http_request(
+                port,
+                "/api/core/strategy-discovery/stop-current-run",
+                method="POST",
+                body=json.dumps({}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(status, 409)
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual({"error": "no active job"}, payload)
+            self.assertIsInstance(payload["error"], str)
+
+            status, headers, body = _http_request(port, "/api/core/presets/v2fly/category-domains?category=missing")
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(status, 400)
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertIn("группа v2fly не найдена", payload["error"])
+            self.assertIsInstance(payload["error"], str)
+
+    def test_core_and_service_v2fly_storage_status_use_same_formatter(self) -> None:
+        from gp_control_plane.domain_sources import write_v2fly_catalog_cache
+
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            write_v2fly_catalog_cache(
+                config.output.state_dir,
+                {
+                    "checked_at": "2026-07-23T10:00:00Z",
+                    "remote_revision": "remote-revision",
+                    "update_available": True,
+                    "categories": ["youtube"],
+                },
+            )
+            raw_status = {
+                "data_status": "local",
+                "revision": "local-revision",
+                "checked_at": "2026-07-22T10:00:00Z",
+                "all_count": 12,
+            }
+
+            core_payload = web_app.core_api.v2fly_storage_status_payload(config, raw_status)
+            service_payload = web_app.service_api.v2fly_storage_status_payload(config, raw_status)
+
+            self.assertIs(web_app.core_api.v2fly_storage_status_payload, web_app.service_api.v2fly_storage_status_payload)
+            self.assertEqual(core_payload, service_payload)
+            self.assertEqual(core_payload["state"], "ready")
+            self.assertEqual(core_payload["source_commit"], "local-revision")
+            self.assertEqual(core_payload["last_update_check"]["remote_revision"], "remote-revision")
+
+    def test_service_release_install_uses_config_install_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            install_dir = tmp / "install"
+            wrong_cwd = tmp / "wrong-cwd"
+            config = AppConfig(
+                output=OutputConfig(state_dir=tmp / "state"),
+                install=InstallConfig(root_dir=install_dir),
+            )
+            calls: list[dict[str, Any]] = []
+
+            def fake_queue(config_arg: AppConfig, settings: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+                calls.append({"config": config_arg, "settings": settings, "payload": payload})
+                return {"update": {"status": "queued", "target_ref": "v0.4.0"}}
+
+            port = _free_port()
+            with mock.patch.object(web_app.service_api, "queue_release_update_payload", fake_queue), mock.patch(
+                "pathlib.Path.cwd", return_value=wrong_cwd
+            ):
+                thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                _wait_for_server(port, "/openapi.json")
+
+                status, _headers, body = _http_request(
+                    port,
+                    "/api/service/releases/install",
+                    method="POST",
+                    body=json.dumps({"channel": "stable"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(status, 202)
+            self.assertEqual(payload["status"], "queued")
+            self.assertIs(calls[0]["config"], config)
+            self.assertEqual(calls[0]["settings"]["update_channel"], "stable")
+            self.assertEqual(calls[0]["payload"], {"channel": "stable"})
+
+    def test_service_api_queues_release_update_with_config_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(state_dir=tmp / "state"),
+                install=InstallConfig(root_dir=tmp / "install"),
+            )
+            calls: list[dict[str, Any]] = []
+
+            def fake_queue_release_update(state_dir: Path, **kwargs: Any) -> dict[str, Any]:
+                calls.append({"state_dir": state_dir, "kwargs": kwargs})
+                return {"status": "queued", "target_ref": "v0.4.0"}
+
+            with mock.patch.object(web_app.service_api, "queue_release_update", fake_queue_release_update), mock.patch(
+                "pathlib.Path.cwd", side_effect=AssertionError("Path.cwd must not be used")
+            ):
+                result = web_app.service_api.queue_release_update_payload(config, {"update_channel": "stable"}, {"channel": "prerelease"})
+
+            self.assertEqual(result["update"]["status"], "queued")
+            self.assertEqual(calls[0]["state_dir"], config.output.state_dir)
+            self.assertEqual(calls[0]["kwargs"]["channel"], "prerelease")
+            self.assertEqual(calls[0]["kwargs"]["install_dir"], config.install.root_dir)
+
+    def test_service_v2fly_update_conflicts_when_runtime_lock_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            config.output.state_dir.mkdir(parents=True, exist_ok=True)
+            (config.output.state_dir / "job-runner.lock").write_text(
+                json.dumps({"pid": os.getpid(), "job_id": "lock-only"}),
+                encoding="utf-8",
+            )
+            port = _free_port()
+            with mock.patch.object(
+                web_app.service_api,
+                "prepare_v2fly_local_storage",
+                side_effect=AssertionError("storage update must not run while runtime lock exists"),
+            ):
+                thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                _wait_for_server(port, "/openapi.json")
+
+                status, headers, body = _http_request(
+                    port,
+                    "/api/service/v2fly/update-local-storage",
+                    method="POST",
+                    body=json.dumps({}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                dry_status, _dry_headers, dry_body = _http_request(
+                    port,
+                    "/api/service/v2fly/update-local-storage",
+                    method="POST",
+                    body=json.dumps({"dry_run": True}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+
+            payload = json.loads(body.decode("utf-8"))
+            dry_payload = json.loads(dry_body.decode("utf-8"))
+            self.assertEqual(status, 409)
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertIn("blocked", payload["error"])
+            self.assertEqual(dry_status, 200)
+            self.assertEqual(dry_payload["status"], "dry_run")
+            self.assertEqual(dry_payload["operation_id"], "v2fly-update-local-storage")
+            self.assertNotIn("accepted", dry_payload)
+
+    def test_core_start_run_conflicts_when_state_idle_but_runner_lock_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            config.output.state_dir.mkdir(parents=True, exist_ok=True)
+            (config.output.state_dir / "job-runner.lock").write_text(
+                json.dumps({"pid": os.getpid(), "job_id": "lock-only"}),
+                encoding="utf-8",
+            )
+            port = _free_port()
+            thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            _wait_for_server(port, "/openapi.json")
+
+            status, headers, body = _http_request(
+                port,
+                "/api/core/strategy-discovery/start-run",
+                method="POST",
+                body=json.dumps({"domains": ["youtube.com"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            payload = json.loads(body.decode("utf-8"))
+
+            self.assertEqual(status, 409)
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertIn("job already running in state_dir", payload["error"])
+            self.assertIsNone(read_state(config.output.state_dir)["current_job"])
+
+    def test_ingress_budget_rejects_oversize_json_without_mutating_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            port = _free_port()
+            with mock.patch.object(web_app, "MAX_JSON_REQUEST_BYTES", 10):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                _wait_for_server(port, "/openapi.json")
+
+                status, headers, body = _http_request(
+                    port,
+                    "/api/settings",
+                    method="POST",
+                    body=b'{"settings":{"curl_parallelism_max":99}}',
+                    headers={"Content-Type": "application/json"},
+                )
+
+            self.assertEqual(status, 413)
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual({"error": "request body is too large"}, json.loads(body.decode("utf-8")))
+            self.assertNotIn("settings", read_state(config.output.state_dir))
+
+    def test_backup_upload_rejects_oversize_before_import(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            port = _free_port()
+            with (
+                mock.patch.object(web_app, "MAX_BACKUP_UPLOAD_BYTES", 10),
+                mock.patch.object(web_app, "import_snapshot_archive") as import_mock,
+            ):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                _wait_for_server(port, "/openapi.json")
+
+                status, _headers, body = _http_request(
+                    port,
+                    "/api/backups/upload",
+                    method="POST",
+                    body=b"01234567890",
+                    headers={"Content-Type": "application/zip"},
+                )
+
+            self.assertEqual(status, 413)
+            self.assertEqual({"error": "backup upload is too large"}, json.loads(body.decode("utf-8")))
+            import_mock.assert_not_called()
+
+    def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(
+                output=OutputConfig(
+                    state_dir=tmp / "state",
+                ),
+            )
+            core_port = _free_port()
+            web_port = _free_port()
+            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+            web_thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                daemon=True,
+            )
+            core_thread.start()
+            web_thread.start()
+            _wait_for_server(core_port, "/openapi.json")
+            _wait_for_server(web_port, "/openapi.json")
+
+            connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+            connection.request("GET", "/")
+            root_response = connection.getresponse()
+            root_body = root_response.read().decode("utf-8")
+            connection.close()
+
+            connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
+            connection.request("GET", "/api/status")
+            api_response = connection.getresponse()
+            api_body = api_response.read().decode("utf-8")
+            connection.close()
+
+            self.assertEqual(root_response.status, 200)
+            self.assertIn("<!doctype html>", root_body.lower())
+            self.assertEqual(api_response.status, 200)
+            self.assertIn('"version"', api_body)
+            self.assertNotIn('"web_auth"', api_body)
+
+    def test_web_proxy_forwards_post_body_and_query_to_core(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            core_port = _free_port()
+            web_port = _free_port()
+            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+            web_thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                daemon=True,
+            )
+            core_thread.start()
+            web_thread.start()
+            _wait_for_server(core_port, "/openapi.json")
+            _wait_for_server(web_port, "/openapi.json")
+
+            status, headers, body = _http_request(
+                web_port,
+                "/api/core/run-settings/save",
+                method="POST",
+                body=json.dumps({"curl_parallelism_default": 17, "curl_parallelism_max": 50}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual(17, json.loads(body.decode("utf-8"))["curl_parallelism_default"])
+
+            status, _headers, body = _http_request(web_port, "/api/web/runs/history-page?limit=1&offset=2")
+            self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+            page = json.loads(body.decode("utf-8"))
+            self.assertEqual(1, page["limit"])
+            self.assertEqual(2, page["offset"])
+
+    def test_web_proxy_rejects_oversize_api_body_without_forwarding_to_core(self) -> None:
+        from gp_control_plane.web import proxy as proxy_module
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            core_port = _free_port()
+            web_port = _free_port()
+            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+            with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 10):
+                web_thread = threading.Thread(
+                    target=serve_web_proxy,
+                    args=(config, "127.0.0.1", web_port),
+                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                    daemon=True,
+                )
+                core_thread.start()
+                web_thread.start()
+                _wait_for_server(core_port, "/openapi.json")
+                _wait_for_server(web_port, "/openapi.json")
+
+                status, headers, body = _http_request(
+                    web_port,
+                    "/api/core/run-settings/save",
+                    method="POST",
+                    body=b'{"curl_parallelism_default":17}',
+                    headers={"Content-Type": "application/json"},
+                )
+
+            self.assertEqual(status, 413)
+            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual({"error": "request body is too large"}, json.loads(body.decode("utf-8")))
+            self.assertNotIn("settings", read_state(config.output.state_dir))
+
+    def test_web_proxy_serves_head_requests_without_body(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            web_port = _free_port()
+            thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": "http://127.0.0.1:1"},
+                daemon=True,
+            )
+            thread.start()
+            _wait_for_server(web_port, "/openapi.json")
+
+            root_status, root_headers, root_body = _http_request(web_port, "/", method="HEAD")
+            openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json", method="HEAD")
+
+            self.assertEqual(root_status, 200)
+            self.assertEqual(root_headers.get("content-type"), "text/html; charset=utf-8")
+            self.assertGreater(int(root_headers.get("content-length") or "0"), 0)
+            self.assertEqual(root_body, b"")
+            self.assertEqual(openapi_status, 200)
+            self.assertEqual(openapi_headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertGreater(int(openapi_headers.get("content-length") or "0"), 0)
+            self.assertEqual(openapi_body, b"")
+
+    def test_web_proxy_rejects_invalid_core_url_before_listening(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+
+            with self.assertRaisesRegex(ValueError, "core_url must be an http\\(s\\) URL with host"):
+                serve_web_proxy(config, "127.0.0.1", _free_port(), core_url="127.0.0.1:8081")
+
+    def test_web_proxy_reports_bad_gateway_when_core_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            unused_core_port = _free_port()
+            web_port = _free_port()
+            thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": f"http://127.0.0.1:{unused_core_port}"},
+                daemon=True,
+            )
+            thread.start()
+            _wait_for_server(web_port, "/openapi.json")
+
+            openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json")
+            swagger_status, swagger_headers, swagger_body = _http_request(web_port, "/swagger")
+            status, _, body = _http_request(web_port, "/api/status")
+
+            self.assertEqual(openapi_status, 200)
+            self.assertEqual(openapi_headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual(json.loads(openapi_body.decode("utf-8"))["openapi"], "3.1.0")
+            self.assertEqual(swagger_status, 200)
+            self.assertEqual(swagger_headers.get("content-type"), "text/html; charset=utf-8")
+            self.assertIn("SwaggerUIBundle", swagger_body.decode("utf-8"))
+            self.assertEqual(status, 502)
+            self.assertIn("core api is unavailable", body.decode("utf-8"))
+
+    def test_deferred_web_auth_env_does_not_require_token(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(
@@ -1076,88 +2096,14 @@ class WebUiTests(unittest.TestCase):
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
                 connection.request("POST", "/api/settings", body=body, headers={"Content-Type": "application/json"})
                 response = connection.getresponse()
-                response.read()
-                connection.close()
-                self.assertEqual(response.status, 401)
-
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "POST",
-                    "/api/settings",
-                    body=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-GP-Token": "secret-token",
-                        "Origin": f"http://127.0.0.1:{port}",
-                    },
-                )
-                response = connection.getresponse()
                 saved = response.read().decode("utf-8")
                 connection.close()
 
-            self.assertEqual(response.status, 200)
-            self.assertIn('"curl_parallelism_max":17', saved)
-
-    def test_web_auth_rejects_cross_origin_mutating_api(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            config = AppConfig(
-                output=OutputConfig(
-                    state_dir=tmp / "state",
-                ),
-            )
-            port = _free_port()
-            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
-
-                body = json.dumps({"settings": {"curl_parallelism_max": 17}})
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "POST",
-                    "/api/settings",
-                    body=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-GP-Token": "secret-token",
-                        "Origin": "http://evil.local",
-                    },
-                )
-                response = connection.getresponse()
-                error = response.read().decode("utf-8")
-                connection.close()
-
-            self.assertEqual(response.status, 403)
-            self.assertIn("origin", error)
-
-    def test_web_auth_token_protects_sensitive_get_api_when_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            config = AppConfig(
-                output=OutputConfig(
-                    state_dir=tmp / "state",
-                ),
-            )
-            port = _free_port()
-            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
+                self.assertEqual(response.status, 200)
+                self.assertIn('"curl_parallelism_max":17', saved)
 
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
                 connection.request("GET", "/api/backups/restore-preview?snapshot=missing")
-                response = connection.getresponse()
-                response.read()
-                connection.close()
-                self.assertEqual(response.status, 401)
-
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "GET",
-                    "/api/backups/restore-preview?snapshot=missing",
-                    headers={"X-GP-Token": "secret-token"},
-                )
                 response = connection.getresponse()
                 body = response.read().decode("utf-8")
                 connection.close()
@@ -1190,6 +2136,70 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(first_line, "event: status")
             self.assertTrue(second_line.startswith("data:"))
 
+    def test_core_and_web_events_have_separate_payloads_and_cursors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with web_app._EVENT_CURSOR_LOCK:
+                web_app._EVENT_CURSOR_STATE.clear()
+
+            core_events = web_app._events_response_payload(config, {}, stream="core")
+            web_events = web_app._events_response_payload(config, {}, stream="web")
+
+            core_types = {event["type"] for event in core_events["events"]}
+            web_types = {event["type"] for event in web_events["events"]}
+            self.assertIn("core.status", core_types)
+            self.assertIn("strategy-discovery.progress", core_types)
+            self.assertIn("strategy-candidates", core_types)
+            self.assertNotIn("status", core_types)
+            self.assertIn("status", web_types)
+            self.assertIn("runs", web_types)
+            self.assertIn("candidates", web_types)
+            self.assertNotIn("core.status", web_types)
+            self.assertTrue(all(str(event["event_id"]).startswith("core:") for event in core_events["events"]))
+            self.assertTrue(all(str(event["event_id"]).startswith("web:") for event in web_events["events"]))
+
+            unchanged = web_app._events_response_payload(
+                config,
+                {"after_id": [str(core_events["next_after_id"])]},
+                stream="core",
+            )
+            self.assertEqual([], unchanged["events"])
+            self.assertEqual(core_events["next_after_id"], unchanged["next_after_id"])
+
+            web_app.save_run_settings(config, {"curl_parallelism_default": 17})
+            changed = web_app._events_response_payload(
+                config,
+                {"after_id": [str(core_events["next_after_id"])]},
+                stream="core",
+            )
+
+            self.assertEqual(["run-settings"], [event["type"] for event in changed["events"]])
+            self.assertTrue(str(changed["events"][0]["event_id"]).startswith("core:"))
+
+            upsert_candidates(
+                config.output.state_dir,
+                {
+                    "candidates": [
+                        {
+                            "protocol": "tcp",
+                            "args": "--dpi-desync=fake",
+                            "domain": "youtube.com",
+                            "test": "https",
+                            "ip_version": "4",
+                        }
+                    ],
+                    "common_candidates": [],
+                },
+                {"id": "run_1"},
+            )
+            candidate_changed = web_app._events_response_payload(
+                config,
+                {"after_id": [str(changed["next_after_id"])]},
+                stream="core",
+            )
+
+            self.assertEqual(["strategy-candidates"], [event["type"] for event in candidate_changed["events"]])
+
     def test_settings_endpoint_saves_runtime_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -1213,6 +2223,7 @@ class WebUiTests(unittest.TestCase):
                         "curl_max_time": 1,
                         "curl_max_time_quic": 3,
                         "curl_max_time_doh": 4,
+                        "update_channel": "prerelease",
                     }
                 }
             )
@@ -1229,6 +2240,98 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"curl_max_time":1', saved)
             self.assertIn('"curl_max_time_quic":3', saved)
             self.assertIn('"curl_max_time_doh":4', saved)
+            self.assertIn('"update_channel":"prerelease"', saved)
+            stored = read_app_setting(config.output.state_dir, "run_settings")
+            service_stored = read_app_setting(config.output.state_dir, "service_settings")
+            legacy = read_state(config.output.state_dir).get("settings")
+            self.assertIsInstance(stored, dict)
+            self.assertIsInstance(service_stored, dict)
+            self.assertEqual(stored["curl_parallelism_max"], 25)
+            self.assertNotIn("update_channel", stored)
+            self.assertEqual(service_stored["update_channel"], "prerelease")
+            self.assertEqual(legacy["curl_parallelism_max"], 25)
+            self.assertEqual(legacy["update_channel"], "prerelease")
+
+    def test_read_settings_migrates_legacy_state_settings_to_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            config = AppConfig(output=OutputConfig(state_dir=state_dir))
+            write_state(
+                state_dir,
+                {"settings": {"curl_parallelism_max": 33, "enable_ipv6": True, "update_channel": "prerelease"}},
+            )
+
+            settings = web_app.read_settings(config)
+
+            self.assertEqual(settings["curl_parallelism_max"], 33)
+            self.assertTrue(settings["enable_ipv6"])
+            self.assertEqual(settings["update_channel"], "prerelease")
+            stored = read_app_setting(state_dir, "run_settings")
+            service_stored = read_app_setting(state_dir, "service_settings")
+            self.assertIsInstance(stored, dict)
+            self.assertIsInstance(service_stored, dict)
+            self.assertEqual(stored["curl_parallelism_max"], 33)
+            self.assertNotIn("update_channel", stored)
+            self.assertEqual(service_stored["update_channel"], "prerelease")
+            self.assertIn("settings", read_state(state_dir))
+
+    def test_core_run_settings_save_ignores_service_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+
+            saved = web_app.save_run_settings(
+                config,
+                {"curl_parallelism_max": 44, "curl_parallelism_default": 12, "update_channel": "prerelease"},
+            )
+
+            stored = read_app_setting(config.output.state_dir, "run_settings")
+            service_stored = read_app_setting(config.output.state_dir, "service_settings")
+            legacy = read_state(config.output.state_dir).get("settings")
+            self.assertEqual(saved["curl_parallelism_max"], 44)
+            self.assertEqual(saved["curl_parallelism_default"], 12)
+            self.assertNotIn("update_channel", saved)
+            self.assertNotIn("update_channel", stored)
+            self.assertIsNone(service_stored)
+            self.assertEqual(legacy["curl_parallelism_max"], 44)
+            self.assertEqual(legacy["update_channel"], "stable")
+
+    def test_service_settings_save_ignores_run_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+
+            saved = web_app.save_service_settings(
+                config,
+                {"update_channel": "prerelease", "curl_parallelism_max": 44},
+            )
+
+            stored = read_app_setting(config.output.state_dir, "service_settings")
+            run_stored = read_app_setting(config.output.state_dir, "run_settings")
+            legacy = read_state(config.output.state_dir).get("settings")
+            self.assertEqual(saved["update_channel"], "prerelease")
+            self.assertNotIn("curl_parallelism_max", saved)
+            self.assertEqual(stored["update_channel"], "prerelease")
+            self.assertIsNone(run_stored)
+            self.assertEqual(legacy["update_channel"], "prerelease")
+            self.assertEqual(legacy["curl_parallelism_max"], web_app.DEFAULT_SETTINGS["curl_parallelism_max"])
+
+    def test_resource_budget_constants_are_wired_to_runtime_limits(self) -> None:
+        from gp_control_plane import backups as backup_module
+        from gp_control_plane import resource_budget
+        from gp_control_plane.web import proxy as proxy_module
+
+        self.assertEqual(web_app.MAX_BACKUP_UPLOAD_BYTES, resource_budget.BACKUP_UPLOAD_MAX_BYTES)
+        self.assertEqual(web_app.MAX_JSON_REQUEST_BYTES, resource_budget.JSON_REQUEST_MAX_BYTES)
+        self.assertEqual(proxy_module.JSON_REQUEST_MAX_BYTES, resource_budget.JSON_REQUEST_MAX_BYTES)
+        self.assertEqual(proxy_module.BACKUP_UPLOAD_MAX_BYTES, resource_budget.BACKUP_UPLOAD_MAX_BYTES)
+        self.assertEqual(resource_budget.JSON_REQUEST_MAX_BYTES, 1 * 1024 * 1024)
+        self.assertEqual(resource_budget.BACKUP_UPLOAD_MAX_BYTES, 64 * 1024 * 1024)
+        self.assertEqual(backup_module.BACKUP_STREAM_CHUNK_BYTES, resource_budget.BACKUP_STREAM_CHUNK_BYTES)
+        self.assertEqual(proxy_module.PROXY_STREAM_CHUNK_BYTES, resource_budget.PROXY_STREAM_CHUNK_BYTES)
+        self.assertEqual(
+            web_app.DEFAULT_SETTINGS["curl_parallelism_max"],
+            resource_budget.RASPBERRY_PI2_CURL_PARALLELISM_SAFE_MAX,
+        )
+        self.assertFalse(resource_budget.DIAGNOSTICS_INCLUDE_HOST_METRICS)
 
     def test_standard_discovery_job_uses_launch_timeout_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1269,6 +2372,209 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(12, runner.call_args.kwargs["curl_max_time_quic"])
             self.assertEqual(13, runner.call_args.kwargs["curl_max_time_doh"])
             self.assertEqual(2, runner.call_args.kwargs["curl_parallelism"])
+
+    def test_core_strategy_discovery_start_run_routes_swagger_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            save_settings = web_app.save_settings
+            save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
+            port = _free_port()
+            finished = threading.Event()
+
+            def fake_run(*args: object, **kwargs: object) -> dict[str, str]:
+                finished.set()
+                return {"status": "success"}
+
+            with (
+                mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=fake_run) as runner,
+                mock.patch.object(web_app, "create_snapshot_if_idle", return_value={}),
+            ):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                time.sleep(0.1)
+
+                body = json.dumps(
+                    {
+                        "mode": "multi_domain",
+                        "domains": ["youtube.com", "discord.com", "airhorn.solutions"],
+                        "protocols": ["tcp", "quic"],
+                        "curl_parallelism": 30,
+                        "timeout_seconds": 172800,
+                        "settings": {
+                            "curl_max_time": 7,
+                            "curl_max_time_quic": 7,
+                            "enable_ipv6": False,
+                            "skip_ipblock": False,
+                        },
+                    }
+                )
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                connection.request(
+                    "POST",
+                    "/api/core/strategy-discovery/start-run",
+                    body=body,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+                response = connection.getresponse()
+                raw_response = response.read().decode("utf-8")
+                connection.close()
+
+                self.assertEqual(response.status, 202)
+                accepted = json.loads(raw_response)
+                self.assertTrue(accepted["accepted"])
+                self.assertTrue(accepted["run_id"])
+                self.assertEqual("queued", accepted["status"])
+                self.assertTrue(finished.wait(2))
+                self.assertEqual(30, runner.call_args.kwargs["curl_parallelism"])
+                self.assertEqual(7, runner.call_args.kwargs["curl_max_time"])
+                self.assertEqual(7, runner.call_args.kwargs["curl_max_time_quic"])
+                self.assertFalse(runner.call_args.kwargs["enable_ipv6"])
+                self.assertFalse(runner.call_args.kwargs["skip_ipblock"])
+                self.assertTrue(runner.call_args.kwargs["include_quic"])
+                self.assertTrue(runner.call_args.kwargs["enable_tls12"])
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    if read_state(config.output.state_dir).get("current_job") is None:
+                        break
+                    time.sleep(0.02)
+
+    def test_core_strategy_discovery_start_run_rejects_unknown_protocols(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported protocols"):
+            web_app._core_strategy_discovery_job_payload(
+                {
+                    "mode": "multi_domain",
+                    "domains": ["youtube.com"],
+                    "protocols": ["tcp", "bad"],
+                }
+            )
+
+    def test_core_strategy_discovery_start_run_quic_only_disables_tcp_protocols(self) -> None:
+        job_name, job_payload = web_app._core_strategy_discovery_job_payload(
+            {
+                "mode": "multi_domain",
+                "domains": ["youtube.com"],
+                "protocols": ["quic"],
+                "settings": {
+                    "curl_max_time_quic": 7,
+                    "enable_ipv6": False,
+                },
+            }
+        )
+
+        self.assertEqual("zapret-multi-domain-discovery", job_name)
+        self.assertEqual(["youtube.com"], job_payload["domains"])
+        self.assertTrue(job_payload["include_quic"])
+        self.assertFalse(job_payload["enable_http"])
+        self.assertFalse(job_payload["enable_tls12"])
+        self.assertFalse(job_payload["enable_tls13"])
+        self.assertEqual(7, job_payload["curl_max_time_quic"])
+        self.assertFalse(job_payload["enable_ipv6"])
+
+    def test_core_strategy_discovery_start_run_rejects_empty_domain_list(self) -> None:
+        with self.assertRaisesRegex(ValueError, "domains are required"):
+            web_app._core_strategy_discovery_job_payload(
+                {
+                    "mode": "multi_domain",
+                    "domains": ["", "   "],
+                    "protocols": ["tcp"],
+                }
+            )
+
+    def test_core_strategy_discovery_start_run_rejects_unknown_top_level_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported start-run fields: mode_settings"):
+            web_app._core_strategy_discovery_job_payload(
+                {
+                    "mode": "multi_domain",
+                    "domains": ["youtube.com"],
+                    "mode_settings": {"common_strategy_min_domains": 2},
+                }
+            )
+
+    def test_core_strategy_discovery_start_run_rejects_unknown_settings_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported start-run settings: mode_settings"):
+            web_app._core_strategy_discovery_job_payload(
+                {
+                    "mode": "multi_domain",
+                    "domains": ["youtube.com"],
+                    "settings": {"mode_settings": {"common_strategy_min_domains": 2}},
+                }
+            )
+
+    def test_core_strategy_candidates_require_filter_and_export_streams_full_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            config = AppConfig(output=OutputConfig(state_dir=state_dir))
+            upsert_candidates(
+                state_dir,
+                {
+                    "candidates": [
+                        {"protocol": "tcp", "args": "--dpi-desync=fake", "domain": "youtube.com"},
+                        {"protocol": "quic", "args": "--dpi-desync=fake", "domain": "discord.com"},
+                    ]
+                },
+                {"id": "run-1"},
+            )
+
+            with self.assertRaisesRegex(ValueError, "filter is required"):
+                web_app.core_api.strategy_candidates_payload(config, {})
+
+            payload = web_app.core_api.strategy_candidates_payload(config, {"domain": ["youtube.com"]})
+            exported = [
+                json.loads(line.decode("utf-8"))
+                for line in web_app.core_api.iter_strategy_candidates_export_lines(config, {})
+            ]
+
+            self.assertEqual(len(payload["candidates"]), 1)
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["filters"], {"domains": ["youtube.com"]})
+            self.assertEqual(payload["candidates"][0]["seen"][0]["domain"], "youtube.com")
+            self.assertEqual(len(exported), 2)
+            self.assertEqual({item["protocol"] for item in exported}, {"tcp", "quic"})
+            self.assertNotIn("has_more", payload)
+            self.assertIn("id", payload["candidates"][0])
+            self.assertIn("protocol", payload["candidates"][0])
+            self.assertIn("seen", payload["candidates"][0])
+
+    def test_service_status_reports_installation_shape_without_web_unit_hardcode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.dict(os.environ, {"GP_INSTALL_WEB": "off"}, clear=False):
+                payload = web_app.service_api.service_status_payload(
+                    config,
+                    current_version="0.test",
+                    runtime_role="core",
+                )
+
+            self.assertEqual(payload["state"], "active")
+            self.assertEqual(payload["mode"], "core")
+            self.assertNotIn("unit", payload)
+            self.assertEqual(payload["services"]["core"]["name"], "gp-control-plane-core.service")
+            self.assertEqual(payload["services"]["core"]["state"], "active")
+            self.assertEqual(payload["services"]["web"]["state"], "disabled")
+            self.assertFalse(payload["services"]["web"]["required"])
+            self.assertIsInstance(payload["data_state"], dict)
+            self.assertIn("v2fly", payload["data_state"])
+
+    def test_service_status_reports_missing_v2fly_as_data_state_not_runtime_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.object(
+                web_app.service_api,
+                "v2fly_storage_status_payload",
+                return_value={"state": "missing", "source_commit": "", "group_count": 0},
+            ):
+                payload = web_app.service_api.service_status_payload(
+                    config,
+                    current_version="0.test",
+                    runtime_role="core",
+                    web_enabled=True,
+                )
+
+            self.assertEqual(payload["state"], "active")
+            self.assertEqual(payload["data_state"]["state"], "missing")
+            self.assertEqual(payload["data_state"]["v2fly"]["state"], "missing")
+            self.assertEqual(payload["data_state"]["v2fly"]["group_count"], 0)
 
     def test_run_preferences_endpoint_saves_last_finder_form(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1480,6 +2786,93 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _openapi_test_request(
+    openapi_contract: dict[str, Any],
+    path: str,
+    method: str,
+    operation: dict[str, Any],
+    snapshot_id: str,
+) -> tuple[str, bytes | None, dict[str, str]]:
+    request_path = path
+    if path == "/api/core/backups/download-file":
+        request_path = f"{path}?snapshot_id={snapshot_id}"
+    elif path == "/api/core/presets/v2fly/category-domains":
+        request_path = f"{path}?category=missing"
+    elif path == "/api/core/strategy-candidates":
+        request_path = f"{path}?domain=youtube.com"
+
+    if method != "POST":
+        return request_path, None, {}
+    content = ((operation.get("requestBody") or {}).get("content") or {})
+    if "application/zip" in content:
+        return request_path, b"not-a-zip", {"Content-Type": "application/zip"}
+    if "multipart/form-data" in content:
+        return request_path, b"not-a-zip", {"Content-Type": "application/zip"}
+    json_body = content.get("application/json")
+    if not isinstance(json_body, dict):
+        return request_path, None, {}
+    payload = _openapi_first_example_value(openapi_contract, json_body.get("examples") or {})
+    if payload is None:
+        payload = {}
+    return request_path, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
+
+
+def _openapi_first_example_value(openapi_contract: dict[str, Any], examples: dict[str, Any]) -> Any:
+    if not examples:
+        return None
+    example = next(iter(examples.values()))
+    if isinstance(example, dict) and "$ref" in example:
+        example = _openapi_resolve_ref(openapi_contract, str(example["$ref"]))
+    if isinstance(example, dict) and "value" in example:
+        return example["value"]
+    return None
+
+
+def _openapi_resolve_ref(openapi_contract: dict[str, Any], ref: str) -> Any:
+    if not ref.startswith("#/"):
+        raise ValueError(f"unsupported OpenAPI ref: {ref}")
+    node: Any = openapi_contract
+    for part in ref[2:].split("/"):
+        node = node[part]
+    return node
+
+
+def _http_request(
+    port: int,
+    path: str,
+    *,
+    method: str = "GET",
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 5,
+) -> tuple[int, dict[str, str], bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        response_headers = {key.lower(): value for key, value in response.getheaders()}
+        response_body = response.read()
+        return response.status, response_headers, response_body
+    finally:
+        connection.close()
+
+
+def _wait_for_server(port: int, path: str = "/openapi.json", *, timeout: float = 2.0) -> None:
+    deadline = time.time() + timeout
+    last_error: BaseException | None = None
+    while time.time() < deadline:
+        try:
+            status, _headers, _body = _http_request(port, path, timeout=0.5)
+        except OSError as exc:
+            last_error = exc
+        else:
+            if status < 500:
+                return
+            last_error = AssertionError(f"{path} returned HTTP {status}")
+        time.sleep(0.02)
+    raise AssertionError(f"server on 127.0.0.1:{port} did not become ready: {last_error}")
 
 
 if __name__ == "__main__":

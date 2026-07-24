@@ -73,6 +73,13 @@ validate_install_dir() {
   printf '%s\n' "$install_dir"
 }
 
+validate_state_dir() {
+  [ "$#" -ge 1 ] || fail "state directory is required"
+  state_dir="$(real_path "$1")"
+  [ -d "$state_dir" ] || fail "state directory does not exist: $state_dir"
+  printf '%s\n' "$state_dir"
+}
+
 shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
@@ -322,13 +329,14 @@ run_multidomain_target() {
 queue_update() {
   install_dir="$(validate_install_dir "$1")"
   ref="$(validate_update_ref "$2")"
+  state_dir="$(validate_state_dir "${3:-$install_dir/build/state}")"
   service_name="${GP_SERVICE_NAME:-gp-control-plane-web.service}"
   case "$service_name" in
     gp-control-plane-web.service|gp-control-plane-web@*.service) ;;
     *) fail "unsupported service name: $service_name" ;;
   esac
 
-  log_dir="$install_dir/build/state/release-updates"
+  log_dir="$state_dir/release-updates"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   unit="gp-control-plane-update-$stamp"
   script="$log_dir/$unit.sh"
@@ -345,8 +353,10 @@ umask 022
 exec > $(shell_quote "$log_file") 2>&1
 echo "gp-control-plane update queued at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "install_dir=$(shell_quote "$install_dir")"
+echo "state_dir=$(shell_quote "$state_dir")"
 echo "ref=$(shell_quote "$ref")"
 export GP_INSTALL_DIR=$(shell_quote "$install_dir")
+export GP_STATE_DIR=$(shell_quote "$state_dir")
 export GP_INSTALL_USER=$(shell_quote "$install_user")
 export GP_BRANCH=$(shell_quote "$ref")
 export GP_REPO_URL=$(shell_quote "$repo_url")
@@ -460,7 +470,7 @@ case "$command" in
     run_multidomain_target "$@"
     ;;
   queue-update)
-    [ "$#" -eq 2 ] || fail "queue-update requires install directory and release ref"
+    [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || fail "queue-update requires install directory, release ref and optional state directory"
     queue_update "$@"
     ;;
   kill)

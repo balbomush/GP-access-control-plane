@@ -7,9 +7,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .state import has_active_runtime
 from .strategy_safety import analyze_strategy
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 SCHEMA_MIGRATIONS = (
     (1, "base_candidate_storage"),
     (2, "normalized_domain_strategy_model"),
@@ -21,6 +22,7 @@ SCHEMA_MIGRATIONS = (
     (8, "trim_strategy_attempt_diagnostics"),
     (9, "minimal_sqlite_working_model"),
     (10, "strategy_analysis_metadata"),
+    (11, "app_settings"),
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
@@ -151,6 +153,7 @@ _STORAGE_STATUS_TABLES = (
     "strategy_domain_results",
     "domain_presets",
     "preset_domains",
+    "app_settings",
 )
 
 _STORAGE_STATUS_VIEWS = ("domain_stats", "strategy_stats")
@@ -253,6 +256,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(domain_id) REFERENCES domains(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_preset_domains_domain ON preset_domains(domain_id);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT ''
+        );
 
         CREATE VIEW IF NOT EXISTS domain_stats AS
         SELECT d.id AS domain_id,
@@ -905,14 +914,7 @@ def _run_deferred_vacuum(conn: sqlite3.Connection, state_dir: Path) -> None:
 
 
 def _state_has_active_job(state_dir: Path) -> bool:
-    path = state_dir / "state.json"
-    if not path.is_file():
-        return False
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return True
-    return isinstance(payload, dict) and bool(payload.get("current_job"))
+    return has_active_runtime(state_dir)
 
 
 def _args_hash(args: str) -> str:
@@ -1230,6 +1232,39 @@ def upsert_candidate_event_conn(
         seen_at=seen_at,
         common=common,
     )
+
+
+def read_app_setting(state_dir: Path, key: str) -> Any | None:
+    clean_key = str(key or "").strip()
+    if not clean_key:
+        return None
+    with connect(state_dir) as conn:
+        row = conn.execute("SELECT value_json FROM app_settings WHERE key = ?", (clean_key,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(str(row["value_json"] or "null"))
+    except json.JSONDecodeError:
+        return None
+
+
+def save_app_setting(state_dir: Path, key: str, value: Any, updated_at: str) -> Any:
+    clean_key = str(key or "").strip()
+    if not clean_key:
+        raise ValueError("setting key is required")
+    value_json = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    with connect(state_dir) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings(key, value_json, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            """,
+            (clean_key, value_json, str(updated_at or "")),
+        )
+    return value
 
 
 def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:

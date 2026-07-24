@@ -4,10 +4,15 @@ set -Eeuo pipefail
 REPO_URL="${GP_REPO_URL:-https://github.com/balbomush/GP-access-control-plane.git}"
 BRANCH="${GP_BRANCH:-v0.3.4}"
 SERVICE_NAME="${GP_SERVICE_NAME:-gp-control-plane-web.service}"
+CORE_SERVICE_NAME="${GP_CORE_SERVICE_NAME:-gp-control-plane-core.service}"
+INSTALL_WEB="${GP_INSTALL_WEB:-on}"
 WEB_HOST="${GP_WEB_HOST:-0.0.0.0}"
 WEB_PORT="${GP_WEB_PORT:-8080}"
 WEB_ENV_FILE="${GP_WEB_ENV_FILE:-/etc/default/gp-control-plane-web}"
-WEB_AUTH="${GP_WEB_AUTH:-on}"
+CORE_HOST="${GP_CORE_HOST:-127.0.0.1}"
+CORE_PORT="${GP_CORE_PORT:-8081}"
+CORE_URL="${GP_CORE_URL:-http://$CORE_HOST:$CORE_PORT}"
+CORE_ENV_FILE="${GP_CORE_ENV_FILE:-/etc/default/gp-control-plane-core}"
 ZAPRET_REPO_URL="${ZAPRET_REPO_URL:-https://github.com/bol-van/zapret2.git}"
 ZAPRET_BRANCH="${ZAPRET_BRANCH:-master}"
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
@@ -25,6 +30,10 @@ Usage: install-raspberry-pi.sh [--step STEP] [--steps a,b,c]
 
 Default is --steps all. Available steps:
   packages,zapret,app,v2fly,root-helper,service,check
+
+Runtime:
+  GP_INSTALL_WEB=on   installs Core service and штатный Web UI proxy service.
+  GP_INSTALL_WEB=off  installs only API-only Core service on GP_CORE_HOST:GP_CORE_PORT.
 USAGE
 }
 
@@ -104,6 +113,14 @@ force_clean_enabled() {
   esac
 }
 
+install_web_enabled() {
+  case "$INSTALL_WEB" in
+    1|true|TRUE|yes|YES|on|ON|web|WEB|ui|UI) return 0 ;;
+    0|false|FALSE|no|NO|off|OFF|headless|HEADLESS|core|CORE) return 1 ;;
+    *) fail "Unsupported GP_INSTALL_WEB value: $INSTALL_WEB" ;;
+  esac
+}
+
 CURRENT_UID="$(id -u)"
 CURRENT_USER="$(id -un)"
 
@@ -122,6 +139,7 @@ TARGET_HOME="$(printf '%s\n' "$TARGET_ENTRY" | cut -d: -f6)"
 TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || true)"
 [ -n "$TARGET_GROUP" ] || fail "Cannot find primary group for user: $TARGET_USER"
 INSTALL_DIR="${GP_INSTALL_DIR:-$TARGET_HOME/gp/GP-access-control-plane}"
+STATE_DIR="${GP_STATE_DIR:-$INSTALL_DIR/build/state}"
 TARGET_BIN_DIR="$TARGET_HOME/.local/bin"
 SERVICE_PATH="$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -168,31 +186,81 @@ install_luajit_dev_package() {
   log "LuaJIT development package was not found; continuing because zapret2 can build without LuaJIT on some platforms"
 }
 
-generate_web_token() {
-  run_as_target python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-}
-
-install_web_env_file() {
-  token="${GP_WEB_TOKEN:-}"
-  if [ "$WEB_AUTH" != "off" ] && [ -z "$token" ]; then
-    token="$(generate_web_token)"
+install_service_env_file() {
+  env_file="$1"
+  if install_web_enabled; then
+    install_web_value="on"
+  else
+    install_web_value="off"
   fi
   TMP_WEB_ENV="$(mktemp)"
   {
-    printf 'GP_WEB_AUTH=%s\n' "$WEB_AUTH"
-    state_dir_escaped="$(printf '%s' "$INSTALL_DIR/build/state" | sed "s/'/'\\\\''/g")"
+    install_dir_escaped="$(printf '%s' "$INSTALL_DIR" | sed "s/'/'\\\\''/g")"
+    state_dir_escaped="$(printf '%s' "$STATE_DIR" | sed "s/'/'\\\\''/g")"
+    printf "GP_INSTALL_DIR='%s'\n" "$install_dir_escaped"
     printf "GP_STATE_DIR='%s'\n" "$state_dir_escaped"
-    if [ -n "$token" ]; then
-      token_escaped="$(printf '%s' "$token" | sed "s/'/'\\\\''/g")"
-      printf "GP_WEB_TOKEN='%s'\n" "$token_escaped"
-    fi
+    printf "GP_INSTALL_WEB='%s'\n" "$install_web_value"
   } > "$TMP_WEB_ENV"
-  as_root install -m 0640 -o root -g root "$TMP_WEB_ENV" "$WEB_ENV_FILE"
+  as_root install -m 0640 -o root -g root "$TMP_WEB_ENV" "$env_file"
   rm -f "$TMP_WEB_ENV"
 }
 
+install_web_env_file() {
+  install_service_env_file "$WEB_ENV_FILE"
+}
+
+install_systemd_service() {
+  service_name="$1"
+  description="$2"
+  command_name="$3"
+  host="$4"
+  port="$5"
+  env_file="$6"
+  extra_args="${7:-}"
+  after_extra="${8:-}"
+  wants_extra="${9:-}"
+  after_line="network-online.target"
+  wants_line="network-online.target"
+  [ -z "$after_extra" ] || after_line="$after_line $after_extra"
+  [ -z "$wants_extra" ] || wants_line="$wants_line $wants_extra"
+  exec_start="$INSTALL_DIR/.venv/bin/gp-control-plane $command_name --host $host --port $port"
+  [ -z "$extra_args" ] || exec_start="$exec_start $extra_args"
+  privileged_env=""
+  if [ "$command_name" = "core" ]; then
+    privileged_env="Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
+Environment=GP_ZAPRET_DIR=$ZAPRET_DIR"
+  fi
+  TMP_SERVICE="$(mktemp)"
+  cat > "$TMP_SERVICE" <<SERVICE
+[Unit]
+Description=$description
+After=$after_line
+Wants=$wants_line
+
+[Service]
+Type=simple
+User=$TARGET_USER
+WorkingDirectory=$INSTALL_DIR
+Environment=HOME=$TARGET_HOME
+Environment=PATH=$SERVICE_PATH
+$privileged_env
+EnvironmentFile=-$env_file
+ExecStart=$exec_start
+MemoryAccounting=true
+MemoryHigh=$SERVICE_MEMORY_HIGH
+MemoryMax=$SERVICE_MEMORY_MAX
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+  as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$service_name"
+  rm -f "$TMP_SERVICE"
+}
+
 prepare_v2fly_local_catalog() {
-  run_as_target sh -c 'cd "$1" && GP_STATE_DIR="$1/build/state" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly' sh "$INSTALL_DIR"
+  run_as_target sh -c 'cd "$1" && GP_INSTALL_DIR="$1" GP_STATE_DIR="$2" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly' sh "$INSTALL_DIR" "$STATE_DIR"
 }
 
 if [ "$CURRENT_UID" -ne 0 ]; then
@@ -209,6 +277,7 @@ as_root true
 
 log "Installing for user: $TARGET_USER"
 log "Install directory: $INSTALL_DIR"
+log "State directory: $STATE_DIR"
 
 if step_log packages "Updating system packages and installing required packages"; then
   as_root apt-get update
@@ -351,49 +420,35 @@ if step_log root-helper "Installing GP root helper"; then
 fi
 
 if step_log service "Creating and starting systemd service"; then
-  install_web_env_file
-  TMP_SERVICE="$(mktemp)"
-  cat > "$TMP_SERVICE" <<SERVICE
-[Unit]
-Description=GP Strategy Finder Web UI
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$TARGET_USER
-WorkingDirectory=$INSTALL_DIR
-Environment=HOME=$TARGET_HOME
-Environment=PATH=$SERVICE_PATH
-Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
-Environment=GP_ZAPRET_DIR=$ZAPRET_DIR
-EnvironmentFile=-$WEB_ENV_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/gp-control-plane web --host $WEB_HOST --port $WEB_PORT
-MemoryAccounting=true
-MemoryHigh=$SERVICE_MEMORY_HIGH
-MemoryMax=$SERVICE_MEMORY_MAX
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-  as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$SERVICE_NAME"
-  rm -f "$TMP_SERVICE"
-
+  install_service_env_file "$CORE_ENV_FILE"
+  install_systemd_service "$CORE_SERVICE_NAME" "GP Strategy Finder Core API" "core" "$CORE_HOST" "$CORE_PORT" "$CORE_ENV_FILE"
   as_root systemctl daemon-reload
-  as_root systemctl enable "$SERVICE_NAME"
-  as_root systemctl restart "$SERVICE_NAME"
+  as_root systemctl enable "$CORE_SERVICE_NAME"
+  as_root systemctl restart "$CORE_SERVICE_NAME"
+  if install_web_enabled; then
+    install_service_env_file "$WEB_ENV_FILE"
+    install_systemd_service "$SERVICE_NAME" "GP Strategy Finder Web UI" "web" "$WEB_HOST" "$WEB_PORT" "$WEB_ENV_FILE" "--core-url $CORE_URL" "$CORE_SERVICE_NAME" "$CORE_SERVICE_NAME"
+    as_root systemctl daemon-reload
+    as_root systemctl enable "$SERVICE_NAME"
+    as_root systemctl restart "$SERVICE_NAME"
+  else
+    as_root systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
 fi
 
 if step_log check "Checking installation"; then
-  run_as_target env GP_STATE_DIR="$INSTALL_DIR/build/state" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
-  as_root systemctl --no-pager --full status "$SERVICE_NAME" || true
+  run_as_target env GP_INSTALL_DIR="$INSTALL_DIR" GP_STATE_DIR="$STATE_DIR" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
+  as_root systemctl --no-pager --full status "$CORE_SERVICE_NAME" || true
+  if install_web_enabled; then
+    as_root systemctl --no-pager --full status "$SERVICE_NAME" || true
+  fi
 fi
 
 IP_ADDRESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
-if [ -n "${IP_ADDRESS:-}" ]; then
+if install_web_enabled && [ -n "${IP_ADDRESS:-}" ]; then
   printf '\nDone. Open: http://%s:%s/\n' "$IP_ADDRESS" "$WEB_PORT"
-else
+elif install_web_enabled; then
   printf '\nDone. Open Raspberry Pi address on port %s.\n' "$WEB_PORT"
+else
+  printf '\nDone. Core API: http://%s:%s/\n' "$CORE_HOST" "$CORE_PORT"
 fi

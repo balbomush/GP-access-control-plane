@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import threading
 import uuid
 from collections.abc import Callable
@@ -7,7 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .state import append_jsonl, now_iso, read_state, write_state
+from .state import (
+    JOB_RUNNER_LOCK_FILE_NAME,
+    append_jsonl,
+    is_stale_process_payload,
+    now_iso,
+    read_job_lock_payload,
+    update_state,
+)
 from .storage import compact_run_payload
 
 
@@ -31,6 +40,7 @@ class JobRunner:
         self._active_name: str | None = None
         self._active_cancel: threading.Event | None = None
         self._active_cancel_hook: Callable[[], Any] | None = None
+        self._active_state_lock: _StateDirJobLock | None = None
 
     def start(
         self,
@@ -43,16 +53,22 @@ class JobRunner:
                 raise RuntimeError(f"job already running: {self._active}")
             job_id = uuid.uuid4().hex[:12]
             cancel_event = threading.Event()
+            state_lock = _StateDirJobLock.acquire(self.state_dir, job_id, name)
             self._active = job_id
             self._active_name = name
             self._active_cancel = cancel_event
             self._active_cancel_hook = cancel_hook
+            self._active_state_lock = state_lock
         created_at = now_iso()
         job = Job(id=job_id, name=name, status="queued", created_at=created_at)
-        self._record(job_id, name, "queued", created_at)
-        self._set_current_job(job_id, name, "queued")
-        thread = threading.Thread(target=self._run, args=(job_id, name, func, cancel_event), daemon=True)
-        thread.start()
+        try:
+            self._record(job_id, name, "queued", created_at)
+            self._set_current_job(job_id, name, "queued")
+            thread = threading.Thread(target=self._run, args=(job_id, name, func, cancel_event), daemon=True)
+            thread.start()
+        except Exception:
+            self._clear_active_job(job_id, release_state_lock=True)
+            raise
         return job
 
     def cancel_active(self) -> dict[str, str]:
@@ -92,24 +108,51 @@ class JobRunner:
             last_error = str(exc)
             last_job_status = "failed"
         finally:
-            with self._lock:
-                state = read_state(self.state_dir)
-                state["last_error"] = last_error
-                state["last_job_status"] = last_job_status
-                state["current_job"] = None
-                state["current_job_name"] = None
-                state["current_job_status"] = None
-                write_state(self.state_dir, state)
-                if self._active == job_id:
-                    self._active = None
-                    self._active_name = None
-                    self._active_cancel = None
-                    self._active_cancel_hook = None
+            state_lock = None
+            try:
+                with self._lock:
+                    if self._active == job_id:
+                        state_lock = self._active_state_lock
+                    try:
+                        def mark_finished(state: dict[str, Any]) -> dict[str, Any]:
+                            state["last_error"] = last_error
+                            state["last_job_status"] = last_job_status
+                            state["current_job"] = None
+                            state["current_job_name"] = None
+                            state["current_job_status"] = None
+                            return state
+
+                        update_state(self.state_dir, mark_finished)
+                    finally:
+                        if self._active == job_id:
+                            self._active = None
+                            self._active_name = None
+                            self._active_cancel = None
+                            self._active_cancel_hook = None
+                            self._active_state_lock = None
+            finally:
+                if state_lock:
+                    state_lock.release()
             if self._on_idle:
                 try:
                     self._on_idle()
                 except Exception:
                     return
+
+    def _clear_active_job(self, job_id: str, *, release_state_lock: bool) -> None:
+        state_lock = None
+        with self._lock:
+            if self._active != job_id:
+                return
+            if release_state_lock:
+                state_lock = self._active_state_lock
+            self._active = None
+            self._active_name = None
+            self._active_cancel = None
+            self._active_cancel_hook = None
+            self._active_state_lock = None
+        if state_lock:
+            state_lock.release()
 
     def _record(self, job_id: str, name: str, status: str, timestamp: str, **extra: Any) -> None:
         payload = {
@@ -136,11 +179,68 @@ class JobRunner:
             self._set_current_job_locked(job_id, name, status)
 
     def _set_current_job_locked(self, job_id: str, name: str, status: str) -> None:
-        state = read_state(self.state_dir)
-        state["current_job"] = job_id
-        state["current_job_name"] = name
-        state["current_job_status"] = status
-        write_state(self.state_dir, state)
+        def mark_running(state: dict[str, Any]) -> dict[str, Any]:
+            state["current_job"] = job_id
+            state["current_job_name"] = name
+            state["current_job_status"] = status
+            return state
+
+        update_state(self.state_dir, mark_running)
+
+
+class _StateDirJobLock:
+    _LOCK_FILE_NAME = JOB_RUNNER_LOCK_FILE_NAME
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._released = False
+
+    @classmethod
+    def acquire(cls, state_dir: Path, job_id: str, job_name: str) -> "_StateDirJobLock":
+        state_dir.mkdir(parents=True, exist_ok=True)
+        path = state_dir / cls._LOCK_FILE_NAME
+        payload = {
+            "pid": os.getpid(),
+            "job_id": job_id,
+            "job_name": job_name,
+            "created_at": now_iso(),
+        }
+        for _attempt in range(2):
+            try:
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                existing = read_job_lock_payload(state_dir)
+                if is_stale_process_payload(existing):
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise RuntimeError(cls._busy_message(existing)) from exc
+                    continue
+                raise RuntimeError(cls._busy_message(existing))
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=True)
+            return cls(path)
+        raise RuntimeError(cls._busy_message(read_job_lock_payload(state_dir)))
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            self._path.unlink()
+        except FileNotFoundError:
+            return
+
+    @staticmethod
+    def _busy_message(payload: dict[str, Any]) -> str:
+        job_id = str(payload.get("job_id") or "").strip()
+        pid = payload.get("pid")
+        details = f": {job_id}" if job_id else ""
+        if isinstance(pid, int) and pid > 0:
+            details = f"{details} pid={pid}"
+        return f"job already running in state_dir{details}"
 
 
 def _status_from_result(result: Any) -> str:

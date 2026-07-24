@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -10,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.release_update import queue_release_update, release_update_plan, release_update_status
 from gp_control_plane.releases import parse_git_tags, parse_github_releases, release_channel_info
-from gp_control_plane.state import read_state, write_state
+from gp_control_plane.state import read_state, update_state, write_state
 
 
 class ReleaseTests(unittest.TestCase):
@@ -146,10 +148,40 @@ bbbb refs/tags/v0.3.2-alpha.2
             state_dir = Path(raw) / "state"
             write_state(state_dir, {"current_job": "job-1"})
 
-            plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=lambda: payload)
+            def unexpected_fetch() -> str:
+                raise AssertionError("release lookup must not run while job is active")
+
+            plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=unexpected_fetch)
 
             self.assertFalse(plan["can_update"])
             self.assertEqual(plan["blocked_reason"], "job is running")
+
+    def test_release_update_plan_blocks_runtime_lock_before_release_lookup(self) -> None:
+        payload = """
+[
+  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
+]
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = state_dir / "job-runner.lock"
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "job_id": "lock-only"}), encoding="utf-8")
+
+            def unexpected_fetch() -> str:
+                raise AssertionError("release lookup must not run while runtime lock is active")
+
+            plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=unexpected_fetch)
+
+            self.assertFalse(plan["can_update"])
+            self.assertEqual(plan["blocked_reason"], "job is running")
+            self.assertEqual(plan["active_job"], "lock-only")
+
+            lock_path.write_text(json.dumps({"pid": 99999999, "job_id": "stale"}), encoding="utf-8")
+            plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=lambda: payload)
+
+            self.assertTrue(plan["can_update"])
+            self.assertFalse(lock_path.exists())
 
     def test_release_update_plan_blocks_active_update(self) -> None:
         payload = """
@@ -228,13 +260,31 @@ bbbb refs/tags/v0.3.2-alpha.2
             )
 
             self.assertTrue(result["queued"])
-            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1"])
+            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1", str(state_dir.resolve())])
             self.assertIn("snapshot", result)
             self.assertIn("queued=true", result["helper_stdout"])
             self.assertEqual(result["status"], "queued")
             self.assertEqual(result["target_ref"], "v0.3.1")
             self.assertIn("pre-update", result["rollback_instruction"])
             self.assertTrue(any("restore" in step for step in result["steps"]))
+
+    def test_queue_release_update_requires_explicit_install_dir(self) -> None:
+        payload = """
+[
+  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
+]
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+
+            with self.assertRaisesRegex(RuntimeError, "install_dir is required"):
+                queue_release_update(
+                    state_dir,
+                    channel="stable",
+                    current_version="0.3.0",
+                    fetcher=lambda: payload,
+                    helper_runner=lambda args: subprocess.CompletedProcess(args, 0, "", ""),
+                )
 
     def test_queue_release_update_deduplicates_active_update(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -292,7 +342,7 @@ bbbb refs/tags/v0.3.1
             )
 
             self.assertEqual(result["release"]["source"], "git-tags")
-            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1"])
+            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1", str(state_dir.resolve())])
 
     def test_queue_release_update_prewrites_state_before_root_helper(self) -> None:
         payload = """
@@ -322,6 +372,35 @@ bbbb refs/tags/v0.3.1
             )
 
             self.assertEqual(result["status"], "queued")
+
+    def test_queue_release_update_preserves_concurrent_state_fields(self) -> None:
+        payload = """
+[
+  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
+]
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            install_dir = Path(raw) / "repo"
+            install_dir.mkdir()
+
+            def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
+                update_state(state_dir, lambda state: state | {"run_preferences": {"domains": ["youtube.com"]}})
+                return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
+
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=lambda: payload,
+                install_dir=install_dir,
+                helper_runner=fake_helper,
+            )
+            state = read_state(state_dir)
+
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(state["release_update"]["status"], "queued")
+            self.assertEqual(state["run_preferences"], {"domains": ["youtube.com"]})
 
     def test_release_update_status_reads_helper_log(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

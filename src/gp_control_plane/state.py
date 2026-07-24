@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,10 @@ REMOVED_STATE_KEYS = {
     "last_render_at",
     "selected_strategy",
 }
+
+JOB_RUNNER_LOCK_FILE_NAME = "job-runner.lock"
+STATE_UPDATE_LOCK_FILE_NAME = "state-update.lock"
+STATE_UPDATE_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 def now_iso() -> str:
@@ -59,6 +65,188 @@ def write_state(state_dir: Path, state: dict[str, Any]) -> None:
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+
+
+def update_state(state_dir: Path, updater: Callable[[dict[str, Any]], dict[str, Any] | None]) -> dict[str, Any]:
+    with _StateUpdateLock.acquire(state_dir):
+        state = read_state(state_dir)
+        updated = updater(dict(state))
+        next_state = state if updated is None else updated
+        write_state(state_dir, next_state)
+        return next_state
+
+
+def active_runtime_payload(state_dir: Path) -> dict[str, Any]:
+    state = read_state(state_dir)
+    lock = active_job_lock_payload(state_dir, cleanup_stale=True)
+    current_job = str(state.get("current_job") or lock.get("job_id") or "").strip()
+    if not current_job and lock:
+        current_job = "job-lock"
+    current_name = str(state.get("current_job_name") or lock.get("job_name") or "").strip()
+    current_status = str(state.get("current_job_status") or ("running" if lock else "") or "").strip()
+    return {
+        "active": bool(current_job or lock),
+        "job_id": current_job,
+        "job_name": current_name,
+        "status": current_status,
+        "source": "state" if state.get("current_job") else ("lock" if lock else ""),
+        "lock": lock,
+    }
+
+
+def has_active_runtime(state_dir: Path) -> bool:
+    return bool(active_runtime_payload(state_dir).get("active"))
+
+
+def job_lock_path(state_dir: Path) -> Path:
+    return state_dir / JOB_RUNNER_LOCK_FILE_NAME
+
+
+def read_job_lock_payload(state_dir: Path) -> dict[str, Any]:
+    path = job_lock_path(state_dir)
+    try:
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def active_job_lock_payload(state_dir: Path, *, cleanup_stale: bool = False) -> dict[str, Any]:
+    path = job_lock_path(state_dir)
+    if not path.exists():
+        return {}
+    payload = read_job_lock_payload(state_dir)
+    if not payload:
+        return {"job_id": "", "job_name": "", "corrupt": True}
+    if is_stale_process_payload(payload):
+        if cleanup_stale:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return {}
+            except OSError:
+                return payload
+        return {}
+    return payload
+
+
+def is_stale_process_payload(payload: dict[str, Any]) -> bool:
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return False
+    return not _pid_is_running(pid)
+
+
+class _StateUpdateLock:
+    def __init__(self, path: Path, handle: Any):
+        self._path = path
+        self._handle = handle
+        self._released = False
+
+    @classmethod
+    def acquire(cls, state_dir: Path) -> "_StateUpdateLock":
+        state_dir.mkdir(parents=True, exist_ok=True)
+        path = state_dir / STATE_UPDATE_LOCK_FILE_NAME
+        payload = {"pid": os.getpid(), "created_at": now_iso()}
+        deadline = time.monotonic() + STATE_UPDATE_LOCK_TIMEOUT_SECONDS
+        handle = path.open("a+", encoding="utf-8")
+        while True:
+            try:
+                _try_lock_file(handle)
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise TimeoutError("state update lock is busy")
+                time.sleep(0.01)
+                continue
+            handle.seek(0)
+            handle.truncate()
+            json.dump(payload, handle, ensure_ascii=True)
+            handle.flush()
+            return cls(path, handle)
+
+    def __enter__(self) -> "_StateUpdateLock":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            _unlock_file(self._handle)
+        finally:
+            self._handle.close()
+
+
+def _try_lock_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_lock_payload(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _pid_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_pid_is_running(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    import ctypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:

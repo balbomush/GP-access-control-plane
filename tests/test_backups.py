@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -23,8 +24,8 @@ from gp_control_plane.backups import (
     snapshot_file_path,
     _write_checksums,
 )
-from gp_control_plane.state import write_state
-from gp_control_plane.storage import read_custom_presets, save_custom_presets
+from gp_control_plane.state import read_state, write_state
+from gp_control_plane.storage import read_app_setting, read_custom_presets, save_app_setting, save_custom_presets
 from gp_control_plane.strategy_finder import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
 
 
@@ -65,6 +66,38 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertFalse(result["created"])
             self.assertTrue(result["queued"])
             self.assertEqual(list_snapshots(state_dir)["snapshots"], [])
+
+    def test_backup_actions_skip_when_runtime_guard_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            parsed = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            upsert_candidates(state_dir, parsed, {"id": "run-1"})
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            lock_path = state_dir / "job-runner.lock"
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "job_id": "lock-only"}), encoding="utf-8")
+
+            create_result = create_snapshot_if_idle(state_dir)
+            delete_result = delete_snapshot_if_idle(state_dir, snapshot_id)
+            restore_result = restore_snapshot_if_idle(state_dir, snapshot_id)
+
+            self.assertFalse(create_result["created"])
+            self.assertTrue(create_result["queued"])
+            self.assertFalse(delete_result["deleted"])
+            self.assertTrue(delete_result["queued"])
+            self.assertFalse(restore_result["restored"])
+            self.assertTrue(restore_result["queued"])
+            self.assertEqual(list_snapshots(state_dir)["snapshots"][0]["id"], snapshot_id)
+
+            lock_path.write_text(json.dumps({"pid": 99999999, "job_id": "stale"}), encoding="utf-8")
+            create_result = create_snapshot_if_idle(state_dir)
+
+            self.assertTrue(create_result["created"])
+            self.assertFalse(lock_path.exists())
 
     def test_delete_snapshot_removes_files_and_archive(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -178,6 +211,50 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             pre_restore_domains = pre_restore_strategy_file.read_text(encoding="utf-8")
             self.assertIn("discord.com", pre_restore_domains)
 
+    def test_snapshot_restore_transfers_app_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            save_app_setting(
+                state_dir,
+                "run_settings",
+                {"curl_parallelism_max": 25, "enable_ipv6": True},
+                "2026-07-22T00:00:00Z",
+            )
+            save_app_setting(
+                state_dir,
+                "service_settings",
+                {"update_channel": "prerelease"},
+                "2026-07-22T00:00:01Z",
+            )
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            save_app_setting(
+                state_dir,
+                "run_settings",
+                {"curl_parallelism_max": 7, "enable_ipv6": False},
+                "2026-07-22T01:00:00Z",
+            )
+            save_app_setting(
+                state_dir,
+                "service_settings",
+                {"update_channel": "stable"},
+                "2026-07-22T01:00:01Z",
+            )
+            write_state(state_dir, {"settings": {"curl_parallelism_max": 7, "enable_ipv6": False, "update_channel": "stable"}})
+
+            result = restore_snapshot(state_dir, snapshot_id)
+
+            restored = read_app_setting(state_dir, "run_settings")
+            service_restored = read_app_setting(state_dir, "service_settings")
+            legacy = read_state(state_dir).get("settings")
+            self.assertTrue(result["restored"])
+            self.assertEqual(result["settings_count"], 2)
+            self.assertEqual(restored["curl_parallelism_max"], 25)
+            self.assertTrue(restored["enable_ipv6"])
+            self.assertEqual(service_restored["update_channel"], "prerelease")
+            self.assertEqual(legacy["curl_parallelism_max"], 25)
+            self.assertTrue(legacy["enable_ipv6"])
+            self.assertEqual(legacy["update_channel"], "prerelease")
+
     def test_restore_preview_reports_replaced_and_preserved_entities(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
@@ -217,7 +294,7 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             self.assertTrue(entities["user_presets"]["will_replace"])
             self.assertIn("preset_domain_links", entities)
             self.assertTrue(entities["preset_domain_links"]["will_replace"])
-            self.assertFalse(entities["settings"]["will_replace"])
+            self.assertTrue(entities["settings"]["will_replace"])
 
     def test_snapshot_excludes_derived_strategy_stats(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -255,6 +332,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
 
             self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "archive").is_file())
             self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "domains/domains.ndjson").is_file())
+            self.assertTrue(snapshot_file_path(state_dir, snapshot_id, "settings/app-settings.ndjson").is_file())
             with self.assertRaises(FileNotFoundError):
                 snapshot_file_path(state_dir, snapshot_id, "../manifest.json")
             with self.assertRaises(FileNotFoundError):
@@ -295,13 +373,53 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
             manifest_path = snapshot_path / "manifest.json"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "5"', '"schema_version": "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "6"', '"schema_version": "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
 
             with self.assertRaisesRegex(ValueError, "unsupported backup schema_version"):
                 restore_snapshot(state_dir, snapshot_id)
+
+    def test_restore_schema_5_snapshot_keeps_current_app_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            save_custom_presets(
+                state_dir,
+                {"finder": {"backup-list": ["youtube.com"]}, "common": {}},
+                "2026-06-25T00:00:00Z",
+            )
+            save_app_setting(
+                state_dir,
+                "run_settings",
+                {"curl_parallelism_max": 25},
+                "2026-07-22T00:00:00Z",
+            )
+            snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+            manifest_path = snapshot_path / "manifest.json"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "6"', '"schema_version": "5"'),
+                encoding="utf-8",
+            )
+            _write_checksums(snapshot_path)
+            save_custom_presets(
+                state_dir,
+                {"finder": {"current-list": ["discord.com"]}, "common": {}},
+                "2026-06-25T01:00:00Z",
+            )
+            save_app_setting(
+                state_dir,
+                "run_settings",
+                {"curl_parallelism_max": 7},
+                "2026-07-22T01:00:00Z",
+            )
+
+            result = restore_snapshot(state_dir, snapshot_id)
+
+            self.assertTrue(result["restored"])
+            self.assertEqual(read_custom_presets(state_dir)["finder"], {"backup-list": ["youtube.com"]})
+            self.assertEqual(read_app_setting(state_dir, "run_settings")["curl_parallelism_max"], 7)
 
     def test_restore_validates_snapshot_before_creating_pre_restore_backup(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -371,7 +489,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
             manifest_path = snapshot_path / "manifest.json"
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "5"', '"schema_version": "999"'),
+                manifest_path.read_text(encoding="utf-8").replace('"schema_version": "6"', '"schema_version": "999"'),
                 encoding="utf-8",
             )
             _write_checksums(snapshot_path)
