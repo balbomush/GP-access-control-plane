@@ -15,7 +15,7 @@ from .storage import (
     read_system_presets,
     save_custom_preset,
     save_system_preset,
-    storage_status,
+    storage_runtime_status,
 )
 from .strategy_finder import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_strategy_candidates_filtered
 from .v2fly_payloads import v2fly_storage_status_payload
@@ -51,7 +51,7 @@ STRATEGY_DISCOVERY_START_RUN_SETTINGS_KEYS = {
 
 def status_payload(config: AppConfig) -> dict[str, Any]:
     state = read_state(config.output.state_dir)
-    storage = storage_status(config.output.state_dir)
+    storage = storage_runtime_status(config.output.state_dir)
     current_job = str(state.get("current_job") or "")
     current_status = str(state.get("current_job_status") or "")
     status = "running" if current_job else "idle"
@@ -62,7 +62,7 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "state": status,
         "storage": {
-            "ready": str(storage.get("integrity_check") or "") == "ok",
+            "ready": bool(storage.get("ready")),
             "schema_version": int(storage.get("schema_version") or 0),
             "state_dir": str(config.output.state_dir),
         },

@@ -117,6 +117,21 @@ def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Conne
     return conn
 
 
+def storage_runtime_status(state_dir: Path) -> dict[str, Any]:
+    path = db_path(state_dir)
+    with connect(state_dir) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    schema_version = str(row["value"] or "") if row else ""
+    expected_schema_version = str(SCHEMA_VERSION)
+    return {
+        "db_path": str(path),
+        "schema_version": schema_version,
+        "expected_schema_version": expected_schema_version,
+        "integrity_check": "not_checked",
+        "ready": schema_version == expected_schema_version,
+        "db_size_bytes": _file_size(path),
+    }
+
 def storage_status(state_dir: Path) -> dict[str, Any]:
     path = db_path(state_dir)
     with connect(state_dir) as conn:

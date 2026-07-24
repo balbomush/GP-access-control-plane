@@ -45,6 +45,26 @@ class WebUiTests(unittest.TestCase):
             self.assertTrue(payload["storage"]["ready"])
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
 
+
+    def test_core_status_uses_lightweight_storage_runtime_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.object(
+                web_app.core_api,
+                "storage_runtime_status",
+                return_value={
+                    "ready": True,
+                    "schema_version": str(SCHEMA_VERSION),
+                    "expected_schema_version": str(SCHEMA_VERSION),
+                    "integrity_check": "not_checked",
+                },
+            ) as storage_status:
+                payload = web_app.core_api.status_payload(config)
+
+            storage_status.assert_called_once_with(config.output.state_dir)
+            self.assertTrue(payload["storage"]["ready"])
+            self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
+
     def test_candidates_and_runs_use_50_item_load_more_pagination(self) -> None:
         html = index_html()
 
