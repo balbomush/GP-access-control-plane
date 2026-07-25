@@ -3706,7 +3706,7 @@
             }
           },
           "version": {
-            "version": "0.3.5-alpha.1",
+            "version": "0.3.5-alpha.2",
             "installed_ref": "feature/headless-core-api-research",
             "commit": "7c0387e"
           },
@@ -3726,8 +3726,8 @@
         "summary": "Доступные релизы",
         "value": {
           "current": {
-            "version": "0.3.5-alpha.1",
-            "installed_ref": "v0.3.5-alpha.1",
+            "version": "0.3.5-alpha.2",
+            "installed_ref": "v0.3.5-alpha.2",
             "commit": "0c31b84"
           },
           "releases": [
@@ -3739,10 +3739,10 @@
               "published_at": "2026-07-19T12:00:00Z"
             },
             {
-              "version": "0.3.5-alpha.1",
+              "version": "0.3.5-alpha.2",
               "channel": "prerelease",
-              "ref": "v0.3.5-alpha.1",
-              "url": "https://github.com/balbomush/GP-access-control-plane/releases/tag/v0.3.5-alpha.1",
+              "ref": "v0.3.5-alpha.2",
+              "url": "https://github.com/balbomush/GP-access-control-plane/releases/tag/v0.3.5-alpha.2",
               "published_at": "2026-07-19T18:00:00Z"
             }
           ],
