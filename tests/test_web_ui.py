@@ -796,7 +796,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("interruptedRunWarning", html)
         self.assertIn("Предыдущий подбор был прерван перезагрузкой", html)
         self.assertIn("Активный подбор не восстанавливается после перезагрузки", html)
-        self.assertIn("!['running', 'queued', 'stopping'].includes(status)", html)
+        self.assertIn("function latestLogSettlesRun(row)", html)
+        self.assertIn("if (!isActiveRunStatus(row.status)) return '';", html)
+        self.assertIn("if (latestLogSettlesRun(row)) return '';", html)
 
     def test_terminal_tab_keeps_raw_log_as_secondary_debug_block(self) -> None:
         html = index_html()

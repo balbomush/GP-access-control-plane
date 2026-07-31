@@ -2311,6 +2311,31 @@ function setActiveTab(tabName){
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
 }
+function runIdentifier(row){
+  return String((row || {}).id || (row || {}).run_id || '');
+}
+function runTimestamp(row){
+  return String((row || {}).timestamp || (row || {}).started_at || '');
+}
+function normalizedRunStatus(status){
+  return String(status || '').toLowerCase();
+}
+function isActiveRunStatus(status){
+  return ['running', 'queued', 'stopping'].includes(normalizedRunStatus(status));
+}
+function isTerminalRunStatus(status){
+  return ['success', 'failed', 'error', 'stopped', 'timeout'].includes(normalizedRunStatus(status));
+}
+function latestLogSettlesRun(row){
+  const log = state.finderLog || {};
+  if (!isTerminalRunStatus(log.status)) return false;
+  const logId = runIdentifier(log);
+  const rowId = runIdentifier(row);
+  if (logId && rowId && logId === rowId) return true;
+  const logTimestamp = runTimestamp(log);
+  const rowTimestamp = runTimestamp(row);
+  return Boolean(logTimestamp && rowTimestamp && logTimestamp >= rowTimestamp);
+}
 function isBusy(){
   const board = (state.status || {}).state || {};
   return Boolean(board.current_job);
@@ -4499,8 +4524,8 @@ function interruptedRunWarning(){
   if (isBusy()) return '';
   const row = latestRun();
   if (!row) return '';
-  const status = String(row.status || '').toLowerCase();
-  if (!['running', 'queued', 'stopping'].includes(status)) return '';
+  if (!isActiveRunStatus(row.status)) return '';
+  if (latestLogSettlesRun(row)) return '';
   return 'Предыдущий подбор был прерван перезагрузкой';
 }
 function liveRunStatusText(){
