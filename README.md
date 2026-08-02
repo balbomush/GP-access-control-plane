@@ -1,339 +1,199 @@
 # GP Access Control Plane
 
-Веб-интерфейс для Raspberry Pi, который помогает подбирать рабочие стратегии `zapret2` через `blockcheck2.sh`.
+GP Access Control Plane - управляющий контур для Linux-хоста, который подбирает рабочие стратегии `zapret2` через `blockcheck2.sh` и дает локальную web panel для оператора.
+
+`Control plane` здесь означает отдельный управляющий слой: GP собирает данные, запускает проверки и хранит результаты, а пользовательский трафик остается в `data plane` на роутере или другом целевом устройстве.
 
 ## Установка
 
-Самый простой вариант для Raspberry Pi OS:
+### 1. Обновите систему
+
+Перед первой установкой на чистую систему лучше отдельно обновить пакеты и перезагрузить хост:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
+sudo apt update
+sudo apt upgrade -y
+sudo reboot
+```
+
+На уже настроенной системе этот шаг остается вашим решением. Установщик GP не делает полный `apt upgrade` сам.
+
+### 2. Запустите установщик
+
+Обычная установка с Core service и Web UI:
+
+```bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | GP_INSTALL_WEB=off bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | GP_INSTALL_WEB=off bash
 ```
 
-Обычная установка запускает два systemd-сервиса: `gp-control-plane-core.service` на `127.0.0.1:8081` и `gp-control-plane-web.service` на `0.0.0.0:8080`. Web service отдает штатный интерфейс и проксирует `/api/*` в Core service. В headless-режиме systemd запускает только API-only Core service. Внешний bind для Core API задается явно через `GP_CORE_HOST` и `GP_CORE_PORT`.
+Bootstrap-скрипт ставит минимальные зависимости для загрузки (`ca-certificates`, `curl`, `git`), находит последний стабильный git tag и запускает установщик из этого tag. Если `sudo` нужен, скрипт запросит его сам.
 
-API-контракт можно открыть в браузере:
+Установка проверяется на Debian/Ubuntu-like системах с `apt-get` и `systemd`.
 
-- Swagger UI: `http://<board>:8080/swagger`;
-- raw OpenAPI JSON: `http://<board>:8080/openapi.json`.
-
-В headless-only режиме эти же маршруты доступны на локальном Core API: `http://127.0.0.1:8081/swagger` и `http://127.0.0.1:8081/openapi.json`.
-
-Что сделает скрипт:
-
-- обновит систему через `apt`;
-- установит нужные пакеты: `git`, `python3`, `venv`, `curl`, `nftables`, `dnsutils` и другие;
-- установит `zapret2` в `/opt/zapret2`;
-- скачает этот проект в `~/gp/GP-access-control-plane`;
-- создаст Python-окружение;
-- установит команду `gp-control-plane`;
-- подготовит локальный каталог групп `v2fly/domain-list-community` для импорта доменных списков без live-запросов из web UI;
-- установит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
-- создаст и включит systemd-сервисы;
-- по умолчанию запустит Core service и штатный Web UI proxy автоматически сейчас и при каждой загрузке Raspberry Pi; при `GP_INSTALL_WEB=off` запустит только API-only Core service.
-
-Установка рассчитана на Raspberry Pi OS. Скрипт можно запускать из-под любого пользователя с правом `sudo`.
-
-После установки откройте в браузере:
+После установки откройте:
 
 ```text
-http://<ip-raspberry-pi>:8080/
+http://<ip-board>:8080/
 ```
 
-По умолчанию проект ставится в домашний каталог пользователя, от имени которого запущена установка.
+API-контракт доступен здесь:
 
-Если запустить через `sudo`, установщик возьмет исходного пользователя из `SUDO_USER` и поставит проект ему, а не в `/root`:
+- Swagger UI: `http://<ip-board>:8080/swagger`;
+- raw OpenAPI JSON: `http://<ip-board>:8080/openapi.json`.
+
+В headless-only режиме эти маршруты доступны на локальном Core API: `http://127.0.0.1:8081/swagger` и `http://127.0.0.1:8081/openapi.json`. Web/monolith OpenAPI показывает полный контракт, а headless Core OpenAPI показывает только callable Core/Service/OpenAPI операции.
+
+### Конфиг Установки
+
+Для нестандартных параметров создайте env-файл и передайте его через `GP_INSTALL_CONFIG`:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | sudo bash
+cat > gp-install.env <<'EOF'
+GP_INSTALL_WEB=on
+GP_INSTALL_DIR="$HOME/gp/GP-access-control-plane"
+GP_SERVICE_MEMORY_HIGH=768M
+GP_SERVICE_MEMORY_MAX=1500M
+EOF
+
+export GP_INSTALL_CONFIG="$PWD/gp-install.env"
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | bash
 ```
 
-Если нужно явно выбрать пользователя:
+Без конфига проект ставится в `~/gp/GP-access-control-plane`, а данные хранятся в `~/gp/GP-access-control-plane/build/state`.
+
+Что делает установщик:
+
+- ставит нужные пакеты через `apt-get install`;
+- устанавливает `zapret2` в `/opt/zapret2`;
+- скачивает GP и создает Python-окружение;
+- устанавливает команду `gp-control-plane`;
+- готовит локальный каталог `v2fly/domain-list-community`;
+- ставит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
+- создает и запускает systemd-сервисы.
+
+## Проверки После Установки
+
+Проверить root-helper и `zapret2`:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | sudo env GP_INSTALL_USER=pi bash
+gp-control-plane zapret2 check-install
 ```
 
-Путь установки можно поменять через `GP_INSTALL_DIR`, но выбранный пользователь должен иметь право записи в этот каталог. Для обычной установки лучше оставить путь по умолчанию: `~/gp/GP-access-control-plane`.
+В выводе должны быть `root_helper_found: true` и `root_helper_ready: true`.
 
-Установщик добавляет systemd-ограничители памяти для web-сервиса:
-
-```text
-MemoryHigh=512M
-MemoryMax=1G
-```
-
-Если для вашей платы нужны другие значения, задайте их при установке:
+Проверить Web UI:
 
 ```bash
-GP_SERVICE_MEMORY_HIGH=768M GP_SERVICE_MEMORY_MAX=1500M curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
+curl -I http://127.0.0.1:8080/
 ```
 
-Если репозиторий приватный, сначала настройте SSH-доступ к GitHub. Затем запустите установку через `git clone`:
+Проверить сервисы:
 
 ```bash
-GP_REPO_URL=git@github.com:balbomush/GP-access-control-plane.git bash -lc 'SUDO=sudo; [ "$(id -u)" -eq 0 ] && SUDO=; $SUDO apt-get update && $SUDO apt-get install -y git && tmp="$(mktemp -d)" && git clone "$GP_REPO_URL" "$tmp" && bash "$tmp/scripts/install-raspberry-pi.sh"'
+sudo systemctl status gp-control-plane-core.service
+sudo systemctl status gp-control-plane-web.service
 ```
 
-## Установка zapret2 отдельно
+## Управление Сервисом
 
-Полный установщик выше уже ставит `zapret2` автоматически. Если нужно установить только `zapret2` без установки веб-интерфейса, выполните:
+Старт:
 
 ```bash
-bash -lc 'SUDO=sudo; [ "$(id -u)" -eq 0 ] && SUDO=; $SUDO apt-get update && $SUDO apt-get install -y git bsdextrautils && if [ -d /opt/zapret2/.git ]; then $SUDO git -C /opt/zapret2 pull --ff-only; else $SUDO git clone https://github.com/bol-van/zapret2.git /opt/zapret2; fi && cd /opt/zapret2 && $SUDO ./install_bin.sh'
+sudo systemctl start gp-control-plane-core.service
+sudo systemctl start gp-control-plane-web.service
 ```
 
-После этого должны появиться файлы:
+Перезапуск:
+
+```bash
+sudo systemctl restart gp-control-plane-core.service
+sudo systemctl restart gp-control-plane-web.service
+```
+
+Остановка:
+
+```bash
+sudo systemctl stop gp-control-plane-web.service
+sudo systemctl stop gp-control-plane-core.service
+```
+
+Логи:
+
+```bash
+journalctl -u gp-control-plane-core.service -u gp-control-plane-web.service -f
+```
+
+Для headless-установки используйте только `gp-control-plane-core.service`.
+
+## Установка zapret2 Отдельно
+
+Полный установщик GP уже ставит `zapret2`. Если нужен только `zapret2`, запустите отдельный короткий скрипт:
+
+```bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/install-zapret2.sh | bash
+```
+
+После установки должны появиться:
 
 ```text
 /opt/zapret2/blockcheck2.sh
 /opt/zapret2/nfq2/nfqws2
 ```
 
-## Проверка zapret2
+## Как Пользоваться
 
-Установщик сам скачивает `zapret2` из `https://github.com/bol-van/zapret2.git` и кладет его в:
-
-```text
-/opt/zapret2
-```
-
-Также он создает wrappers в `~/.local/bin`, чтобы системе были доступны команды:
-
-```bash
-blockcheck2.sh
-nfqws2
-```
-
-Проверка после установки:
-
-```bash
-gp-control-plane zapret2 check-install
-```
-
-В выводе должны быть `root_helper_found: true` и `root_helper_ready: true`. Это важно: подбор запускается из web-сервиса без терминала, поэтому он не может вводить sudo-пароль. Установщик решает это через отдельный root-helper:
-
-```text
-/usr/local/libexec/gp-control-plane/gp-root-helper
-/etc/sudoers.d/gp-control-plane-root-helper
-```
-
-Проверка сценария после истечения sudo-сессии:
-
-```bash
-sudo -k
-curl -I http://127.0.0.1:8080/
-```
-
-После этого запуск подбора из web UI должен стартовать без ошибки `sudo: a terminal is required`.
-
-## Что умеет текущая версия
-
-- запускать веб-интерфейс на Raspberry Pi;
-- запускать обычный подбор стратегий через штатный `blockcheck2.sh`;
-- запускать экспериментальный режим, где одна стратегия проверяется сразу на нескольких доменах;
-- ограничивать количество параллельных `curl`;
-- включать и выключать проверки HTTP, TLS 1.2, TLS 1.3, HTTP3/QUIC;
-- использовать встроенные пресеты доменов: критичные, покрытие, Google/YouTube, Discord, Cloudflare, Amazon/AWS;
-- воспринимать сервисные пресеты как публично известный проверяемый набор доменов, а не как гарантию полного покрытия сервиса;
-- показывать прогресс, live-лог и историю запусков;
-- сохранять найденные стратегии в локальную SQLite-БД;
-- показывать стратегии по доменам и общие стратегии для выбранных доменов;
-- быстро подгружать большие списки кандидатов частями, без полной загрузки всего списка в браузер;
-- останавливать долгий подбор без потери уже найденных успешных стратегий;
-- хранить пользовательские пресеты доменов на backend, а не только в браузере;
-- создавать файловые бекапы доменов, стратегий, связей стратегия-домен, пользовательских списков и настроек приложения;
-- скачивать бекапы через раздел `Бекапы и восстановление` в настройках;
-- перед восстановлением показывать, какие данные будут заменены;
-- восстанавливать стратегии, связи стратегия-домен, пользовательские списки и настройки из актуального бекапа, когда подбор не запущен.
-
-Проект не меняет настройки роутера и не применяет стратегии автоматически.
-
-## Как пользоваться
-
-1. Откройте веб-интерфейс: `http://<ip-raspberry-pi>:8080/`.
+1. Откройте web panel: `http://<ip-board>:8080/`.
 2. Во вкладке `Подбор` выберите домены.
-3. Нажмите обычный поиск или экспериментальный поиск.
+3. Запустите обычный или экспериментальный поиск.
 4. Во вкладке `Терминал` смотрите ход работы.
 5. Во вкладке `Кандидаты` смотрите найденные стратегии.
-6. В разделе `Настройки` -> `Бекапы и восстановление` скачайте архив или восстановите данные из бекапа, если нужно откатиться.
+6. В `Настройки` -> `Бекапы и восстановление` скачайте архив, если нужен откат.
 7. Скопируйте подходящую стратегию вручную и проверьте ее там, где планируете использовать.
 
 Подбор может длиться несколько часов. Кнопка остановки сохраняет найденные к этому моменту стратегии.
 
-## Управление сервисом
+## Что Умеет Текущая Версия
 
-Проверить состояние:
-
-```bash
-sudo systemctl status gp-control-plane-web.service
-```
-
-Перезапустить:
-
-```bash
-sudo systemctl restart gp-control-plane-web.service
-```
-
-Остановить:
-
-```bash
-sudo systemctl stop gp-control-plane-web.service
-```
-
-Посмотреть логи сервиса:
-
-```bash
-journalctl -u gp-control-plane-web.service -f
-```
+- запускать локальную web panel;
+- запускать подбор стратегий через штатный `blockcheck2.sh`;
+- проверять одну стратегию сразу на нескольких доменах;
+- ограничивать количество параллельных `curl`;
+- включать и выключать проверки HTTP, TLS 1.2, TLS 1.3, HTTP3/QUIC;
+- использовать встроенные пресеты доменов;
+- показывать прогресс, live-лог и историю запусков;
+- сохранять найденные стратегии в локальную SQLite-БД;
+- показывать стратегии по доменам и общие стратегии для выбранных доменов;
+- останавливать долгий подбор без потери уже найденных успешных стратегий;
+- создавать и восстанавливать локальные бекапы через UI.
 
 ## Обновление
 
-Повторно запустите установщик:
+Повторно запустите bootstrap:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.3.4/scripts/install-raspberry-pi.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | bash
 ```
 
-Он установит текущий стабильный релиз `v0.3.4`, обновит Python-окружение и перезапустит сервис. Если нужно явно поставить другую ветку или тег, задайте `GP_BRANCH`, например `GP_BRANCH=main`.
+Он установит последний стабильный git tag, обновит Python-окружение и перезапустит сервисы. Для явной установки ветки или tag задайте `GP_BRANCH`.
 
-Тестовые alpha/prerelease-сборки не ставятся этой командой. Для них используйте вкладку `Настройки` в web UI:
+## Данные И Бекапы
 
-1. Выберите канал `Предрелизы`.
-2. Проверьте доступную версию.
-3. Запустите обновление только если понимаете, что это тестовая сборка.
-
-Перед обновлением web UI создает pre-update бекап. После установки он показывает статус из update-log: поставлено в очередь, идет установка, успешно или ошибка. Если проверка версии не прошла, восстановите pre-update бекап в разделе `Настройки` -> `Бекапы и восстановление`.
-
-## Где лежат данные
-
-Проект хранит локальные данные здесь:
+По умолчанию локальные данные лежат здесь:
 
 ```text
 ~/gp/GP-access-control-plane/build/state/
 ```
 
-Основное рабочее хранилище:
-
-- `strategy-finder/state.sqlite3` - SQLite-БД со стратегиями, связями стратегия-домен, историей запусков, пользовательскими пресетами и настройками приложения;
-- `strategy-finder/logs/` - stdout/stderr/progress логи `blockcheck2`.
-
-Внутри SQLite данные разделены на сущности:
-
-- `domains` - домены;
-- `strategies` - уникальные стратегии;
-- `strategy_domain_results` - результат "стратегия работает на домене";
-- `domain_presets` и `preset_domains` - пользовательские пресеты доменов;
-- `runs` - история запусков;
-- `app_settings` - настройки запуска подбора (`run_settings`) и сервисные настройки (`service_settings`).
-
-Списки кандидатов, стратегии домена и общие стратегии считаются SQL-запросами по этим таблицам, без полного обхода всех стратегий в Python.
-
-Старые файлы `strategy-finder/candidates.json`, `strategy-finder/runs.jsonl`, `strategy-finder/available.ndjson` могут остаться после обновления. При первом чтении они импортируются в SQLite для совместимости, после чего legacy-файлы очищаются, устаревшая таблица попыток удаляется, а SQLite сжимается при необходимости.
-
-Логи подбора в `strategy-finder/logs/` ротируются: активные stdout/debug-файлы ограничены по размеру, а старые крупные runtime-логи удаляются перед новым запуском по лимиту количества и суммарного размера.
-
-Файловые бекапы лежат отдельно:
+Файловые бекапы лежат здесь:
 
 ```text
 ~/gp/GP-access-control-plane/build/backups/
 ```
 
-Структура сохранений:
-
-```text
-build/backups/
-  latest.txt
-  snapshots/
-    <date>/
-      manifest.json
-      checksums.sha256
-      domains/
-      strategies/
-      presets/
-      settings/
-  archives/
-```
-
-Актуальный бекап `schema_version=6` содержит домены, стратегии, связи стратегия-домен, пользовательские списки доменов и `settings/app-settings.ndjson`. При восстановлении такого бекапа заменяются и `app_settings`. Старые бекапы `schema_version=5` остаются совместимыми, но настройки не заменяют.
-
-Каталог состояния можно переопределить через переменную окружения `GP_STATE_DIR` или аргумент `--state-dir`. По умолчанию используется `./build/state` относительно рабочего каталога GP.
-
-Хранятся последние 5 успешных snapshot-ов. Более старые удаляются автоматически только после успешного создания новой копии. Snapshot создается только в простое, когда подбор не запущен.
-
-## Ручное восстановление из архива
-
-Обычный способ - раздел `Настройки` -> `Бекапы и восстановление`. Если web UI недоступен, восстановить архив можно из терминала:
-
-```bash
-cd ~/gp/GP-access-control-plane
-. .venv/bin/activate
-sudo systemctl stop gp-control-plane-web.service
-python - <<'PY'
-from pathlib import Path
-from gp_control_plane.backups import import_snapshot_archive, restore_snapshot, restore_snapshot_preview
-from gp_control_plane.config import build_config
-
-config = build_config()
-archive = Path("/path/to/backup.zip")
-snapshot = import_snapshot_archive(config.output.state_dir, archive.read_bytes())["snapshot"]["id"]
-print(restore_snapshot_preview(config.output.state_dir, snapshot))
-restore_snapshot(config.output.state_dir, snapshot)
-PY
-sudo systemctl start gp-control-plane-web.service
-```
-
-Перед restore автоматически создается pre-restore бекап текущего состояния. Восстановление актуального бекапа заменяет домены со стратегиями, стратегии, связи стратегия-домен, пользовательские списки и настройки приложения. Старые бекапы `schema_version=5` пользовательские списки восстанавливают, но текущие настройки приложения сохраняют.
-
-Эти данные остаются на Raspberry Pi и никуда не публикуются.
-
-## Ручная установка
-
-Если не хотите запускать установщик одной командой:
-
-```bash
-sudo apt update
-sudo apt upgrade -y
-sudo apt install -y git python3 python3-venv python3-pip curl nftables iproute2 iptables ipset dnsutils ca-certificates
-
-mkdir -p ~/gp
-cd ~/gp
-git clone https://github.com/balbomush/GP-access-control-plane.git
-cd GP-access-control-plane
-
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e .
-
-gp-control-plane core --state-dir ./build/state --host 127.0.0.1 --port 8081
-gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080 --core-url http://127.0.0.1:8081
-```
-
-Для API-only headless runtime без штатного Web UI:
-
-```bash
-gp-control-plane core --state-dir ./build/state --host 127.0.0.1 --port 8081
-```
-
-Старый монолитный режим остается для совместимости:
-
-```bash
-gp-control-plane web --state-dir ./build/state --host 0.0.0.0 --port 8080
-```
-
-Ручная установка выше не показывает все шаги установки `zapret2` и автозапуска. Для обычного использования проще и надежнее запускать `scripts/install-raspberry-pi.sh`.
-
-## Тесты для разработчика
-
-```bash
-cd ~/gp/GP-access-control-plane
-. .venv/bin/activate
-python -m unittest discover -s tests
-```
+Каталог состояния можно переопределить через `GP_STATE_DIR` или `--state-dir`. Данные остаются на хосте и никуда не публикуются.

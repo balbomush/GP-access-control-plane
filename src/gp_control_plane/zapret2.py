@@ -105,7 +105,7 @@ def _install_diagnostics(payload: dict[str, object]) -> list[dict[str, object]]:
             "message": (
                 "готов"
                 if payload.get("root_helper_ready")
-                else str(payload.get("root_helper_error") or "не готов; запустите установщик Raspberry Pi")
+                else str(payload.get("root_helper_error") or "не готов; запустите Linux-установщик")
             ),
         },
         {
@@ -177,7 +177,7 @@ def require_root_helper_ready() -> None:
     if bool(status["ready"]):
         return
     error = str(status["error"]) or "root-helper is not configured"
-    raise RuntimeError(f"{error}. Run scripts/install-raspberry-pi.sh to install the root helper.")
+    raise RuntimeError(f"{error}. Run scripts/install-linux.sh to install the root helper.")
 
 
 def root_helper_status() -> dict[str, str | bool]:

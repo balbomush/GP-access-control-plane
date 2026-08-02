@@ -69,7 +69,9 @@ validate_install_dir() {
   [ "$#" -ge 1 ] || fail "install directory is required"
   install_dir="$(real_path "$1")"
   [ -d "$install_dir/.git" ] || fail "install directory is not a git repository: $install_dir"
-  [ -x "$install_dir/scripts/install-raspberry-pi.sh" ] || fail "installer is not executable: $install_dir/scripts/install-raspberry-pi.sh"
+  if [ ! -f "$install_dir/scripts/install-linux.sh" ] && [ ! -f "$install_dir/scripts/install-raspberry-pi.sh" ]; then
+    fail "installer was not found: $install_dir/scripts/install-linux.sh"
+  fi
   printf '%s\n' "$install_dir"
 }
 
@@ -378,6 +380,8 @@ run_as_install_user() {
 repo_git() {
   run_as_install_user git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") "\$@"
 }
+installer_script=$(shell_quote "$install_dir/scripts/install-linux.sh")
+[ -f "\$installer_script" ] || installer_script=$(shell_quote "$install_dir/scripts/install-raspberry-pi.sh")
 if [ -n "\$(repo_git status --short)" ]; then
   echo "Repository has local changes; release update will discard worktree changes before checkout"
   repo_git reset --hard
@@ -397,7 +401,7 @@ else
   repo_git checkout --detach "\$GP_BRANCH"
   repo_git reset --hard "\$GP_BRANCH"
 fi
-if bash $(shell_quote "$install_dir/scripts/install-raspberry-pi.sh"); then
+if bash "\$installer_script"; then
   installed_ref="\$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") describe --tags --exact-match 2>/dev/null || git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   installed_commit="\$(git -c safe.directory=$(shell_quote "$install_dir") -C $(shell_quote "$install_dir") rev-parse --short HEAD 2>/dev/null || true)"
   installed_version="\$($(shell_quote "$install_dir/.venv/bin/gp-control-plane") --version 2>/dev/null | awk '{print \$NF}' || true)"

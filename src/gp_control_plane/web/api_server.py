@@ -16,13 +16,10 @@ from ..backups import (
     create_snapshot_if_idle,
     delete_snapshot_if_idle,
     import_snapshot_archive,
-    list_snapshots,
     restore_snapshot_if_idle,
-    restore_snapshot_preview,
     snapshot_file_path,
 )
 from ..config import AppConfig
-from ..diagnostics import diagnostics_payload
 from ..domain_sources import (
     builtin_preset_sources,
     fetch_v2fly_category_local,
@@ -54,7 +51,7 @@ from ..settings import (
     save_service_settings,
     save_settings,
 )
-from ..state import active_job_lock_payload, now_iso, read_state, update_state
+from ..state import active_job_lock_payload, has_active_runtime, now_iso, read_state, update_state
 from ..storage import (
     delete_custom_preset,
     delete_user_presets,
@@ -87,7 +84,6 @@ from .docs import (
     SWAGGER_HTML_CONTENT_TYPE,
     SWAGGER_PATHS,
     openapi_json_bytes,
-    openapi_json_path,
     swagger_ui_html,
 )
 from .routes import JSON_GET_ROUTE_PATHS, JSON_HEAD_ROUTE_PATHS, JSON_POST_ROUTE_PATHS
@@ -103,6 +99,10 @@ _EVENT_CURSOR_STATE: dict[str, dict[str, Any]] = {}
 
 
 class RequestBodyTooLarge(ValueError):
+    pass
+
+
+class RuntimeBusyError(RuntimeError):
     pass
 
 
@@ -123,7 +123,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def handle_one_request(self) -> None:
             try:
                 super().handle_one_request()
-            except ConnectionResetError:
+            except (ConnectionAbortedError, ConnectionResetError):
                 return
 
         def do_GET(self) -> None:  # noqa: N802
@@ -143,51 +143,14 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._stream_strategy_candidates_export(config, query)
             elif path in JSON_GET_ROUTE_PATHS:
                 self._dispatch_json_get(path, query)
-            elif path == "/api/core/backups/download-file":
+            elif path == "/api/core/backups/download-archive":
                 core_query = {"snapshot": [_query_one(query, "snapshot_id")], "file": ["archive"]}
                 self._download_backup(config, core_query)
-            elif path == "/api/status":
-                self._json(status_payload(config))
-            elif path == "/api/events":
+            elif path == "/api/web/events/stream":
+                if not ui_enabled:
+                    self._not_found()
+                    return
                 self._events()
-            elif path == "/api/settings":
-                self._json({"settings": read_settings(config)})
-            elif path == "/api/run-preferences":
-                self._json({"run_preferences": read_run_preferences(config)})
-            elif path == "/api/releases":
-                self._json(_release_info_payload(config, query))
-            elif path == "/api/releases/update-plan":
-                self._json(_release_update_plan_payload(config, query))
-            elif path == "/api/diagnostics":
-                self._json(diagnostics_payload(config.output.state_dir))
-            elif path == "/api/strategy-finder/domains":
-                self._json(domain_sets())
-            elif path == "/api/strategy-finder/candidate-domains":
-                self._json(_candidate_domain_index_payload(config, query))
-            elif path == "/api/strategy-finder/candidates":
-                self._json(_candidate_page_payload(config, query))
-            elif path == "/api/strategy-finder/runs":
-                self._json(_runs_page_payload(config, query))
-            elif path == "/api/strategy-finder/latest-log":
-                self._json(_latest_log_payload(config, query))
-            elif path == "/api/backups":
-                self._json(list_snapshots(config.output.state_dir))
-            elif path == "/api/backups/restore-preview":
-                snapshot_id = _query_one(query, "snapshot")
-                try:
-                    self._json(restore_snapshot_preview(config.output.state_dir, snapshot_id))
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-            elif path == "/api/presets":
-                self._json(_presets_payload(config, query))
-            elif path == "/api/presets/domains":
-                self._json(_preset_domains_payload(config, query))
-            elif path == "/api/domain-sources":
-                self._json({"builtin": builtin_preset_sources()})
-            elif path == "/api/domain-sources/v2fly/categories":
-                self._json(_v2fly_categories_payload(config, query))
-            elif path == "/api/backups/download":
-                self._download_backup(config, query)
             else:
                 self._not_found()
 
@@ -216,15 +179,20 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     read_service_settings(config), current_version=__version__
                 ),
                 "/api/service/releases/install-channel": lambda: service_api.install_channel_payload(read_service_settings(config)),
+                "/api/service/releases/install-plan": lambda: _release_update_plan_payload(config, query),
                 "/api/service/v2fly/local-storage-status": lambda: service_api.v2fly_storage_status_payload(config),
-                "/api/web/run-preferences": lambda: {"run_preferences": read_run_preferences(config)},
-                "/api/web/runs/history-page": lambda: _runs_page_payload(config, query),
-                "/api/web/candidate-domain-index-page": lambda: _candidate_domain_index_payload(config, query),
-                "/api/web/strategy-candidates-page": lambda: _candidate_page_payload(config, query),
-                "/api/web/events": lambda: _events_response_payload(config, query, stream="web"),
             }
 
         def _dispatch_json_get(self, path: str, query: dict[str, list[str]]) -> None:
+            if path.startswith("/api/web/"):
+                if not ui_enabled:
+                    self._not_found()
+                    return
+                try:
+                    self._json(web_json_get_payload(config, path, query))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
             try:
                 self._json(self._json_get_routes(query)[path]())
             except Exception as exc:  # noqa: BLE001
@@ -248,8 +216,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._head(HTTPStatus.OK, SWAGGER_HTML_CONTENT_TYPE, len(data))
             elif path == "/api/core/strategy-candidates/export":
                 self._head(HTTPStatus.OK, NDJSON_CONTENT_TYPE, 0)
-            elif path == "/api/events":
+            elif path == "/api/web/events/stream" and ui_enabled:
                 self._head(HTTPStatus.OK, "text/event-stream; charset=utf-8", 0)
+            elif path.startswith("/api/web/") and not ui_enabled:
+                self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
             elif path in JSON_HEAD_ROUTE_PATHS:
                 self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
             else:
@@ -258,17 +228,21 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def do_POST(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
-            if path in {"/api/backups/upload", "/api/core/backups/upload"}:
+            if path == "/api/core/backups/upload":
                 try:
+                    if has_active_runtime(config.output.state_dir):
+                        raise RuntimeBusyError()
                     imported = import_snapshot_archive(config.output.state_dir, self._request_upload_bytes())
-                    if path == "/api/core/backups/upload":
-                        self._json(core_api.backup_snapshot_payload(imported.get("snapshot") or {}), status=HTTPStatus.CREATED)
-                    else:
-                        self._json(imported, status=HTTPStatus.ACCEPTED)
+                    self._json(core_api.backup_snapshot_payload(imported.get("snapshot") or {}), status=HTTPStatus.CREATED)
+                except RuntimeBusyError:
+                    self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
                 except RequestBodyTooLarge as exc:
                     self._json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path not in JSON_POST_ROUTE_PATHS:
+                self._not_found()
                 return
             try:
                 payload = self._request_json()
@@ -279,157 +253,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             post_routes = self._json_post_routes(payload)
-            if path in JSON_POST_ROUTE_PATHS:
-                self._dispatch_json_post(post_routes[path])
-                return
-            if path == "/api/jobs/stop-current":
-                try:
-                    job = runner.cancel_active()
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                    return
-                self._json({"job": job}, status=HTTPStatus.ACCEPTED)
-                return
-            if path == "/api/backups/create":
-                try:
-                    self._json(create_snapshot_if_idle(config.output.state_dir), status=HTTPStatus.ACCEPTED)
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                return
-            if path == "/api/backups/restore":
-                try:
-                    snapshot_id = str(payload.get("snapshot") or "").strip()
-                    if not snapshot_id:
-                        raise ValueError("snapshot is required")
-                    self._json(restore_snapshot_if_idle(config.output.state_dir, snapshot_id), status=HTTPStatus.ACCEPTED)
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                return
-            if path == "/api/backups/delete":
-                try:
-                    snapshot_id = str(payload.get("snapshot") or "").strip()
-                    if not snapshot_id:
-                        raise ValueError("snapshot is required")
-                    self._json(delete_snapshot_if_idle(config.output.state_dir, snapshot_id), status=HTTPStatus.ACCEPTED)
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                return
-            if path == "/api/presets":
-                saved = save_custom_presets(config.output.state_dir, payload.get("custom") or payload, now_iso())
-                self._json({"custom": saved, "metadata": read_custom_preset_index(config.output.state_dir)})
-                return
-            if path == "/api/presets/save":
-                try:
-                    scope = str(payload.get("scope") or "")
-                    name = str(payload.get("name") or "")
-                    kind = str(payload.get("kind") or "user")
-                    domains = _payload_string_list(payload, "domains")
-                    if kind == "system":
-                        save_system_preset(
-                            config.output.state_dir,
-                            scope=scope,
-                            name=name,
-                            domains=domains,
-                            updated_at=now_iso(),
-                        )
-                    else:
-                        save_custom_preset(
-                            config.output.state_dir,
-                            scope=scope,
-                            name=name,
-                            domains=domains,
-                            updated_at=now_iso(),
-                        )
-                    self._json(_presets_payload(config, {"include_domains": ["1"]}))
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            if path == "/api/presets/delete-users-lists":
-                try:
-                    names = _payload_string_list(payload, "names")
-                    if not names and payload.get("name"):
-                        names = [str(payload.get("name") or "")]
-                    metadata = delete_user_presets(
-                        config.output.state_dir,
-                        scope=str(payload.get("scope") or ""),
-                        names=names,
-                    )
-                    self._json(_presets_payload(config, {"include_domains": ["1"]}) | {"metadata": metadata})
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            if path == "/api/presets/delete":
-                try:
-                    metadata = delete_custom_preset(
-                        config.output.state_dir,
-                        scope=str(payload.get("scope") or ""),
-                        name=str(payload.get("name") or ""),
-                    )
-                    self._json(_presets_payload(config, {"include_domains": ["1"]}) | {"metadata": metadata})
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            if path == "/api/presets/domain-enabled":
-                try:
-                    result = set_preset_domain_enabled(
-                        config.output.state_dir,
-                        scope=str(payload.get("scope") or ""),
-                        name=str(payload.get("name") or ""),
-                        domain=str(payload.get("domain") or ""),
-                        enabled=bool(payload.get("enabled")),
-                        updated_at=now_iso(),
-                        kind=str(payload.get("kind") or "user"),
-                    )
-                    self._json(_presets_payload(config, {"include_domains": ["1"]}) | {"domain": result})
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            if path == "/api/settings":
-                self._json({"settings": save_settings(config, payload.get("settings") or payload)})
-                return
-            if path == "/api/run-preferences":
-                self._json({"run_preferences": save_run_preferences(config, payload.get("run_preferences") or payload)})
-                return
-            if path == "/api/releases/update":
-                try:
-                    self._json(_queue_release_update_payload(config, payload), status=HTTPStatus.ACCEPTED)
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                return
-            if path == "/api/domain-sources/v2fly/preview":
-                try:
-                    self._json(_v2fly_preview_payload(config, payload))
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            if path == "/api/domain-sources/v2fly/import":
-                try:
-                    self._json(_v2fly_import_payload(config, payload), status=HTTPStatus.ACCEPTED)
-                except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            jobs: dict[str, Any] = {
-                "/api/jobs/zapret-standard-discovery": (
-                    "zapret-standard-discovery",
-                    lambda stop: _job_zapret_standard_discovery(config, payload, stop),
-                    stop_active_blockcheck_runtime,
-                ),
-                "/api/jobs/zapret-multi-domain-discovery": (
-                    "zapret-multi-domain-discovery",
-                    lambda stop: _job_zapret_multi_domain_discovery(config, payload, stop),
-                    stop_active_blockcheck_runtime,
-                ),
-            }
-            if path not in jobs:
+            if path.startswith("/api/web/") and not ui_enabled:
                 self._not_found()
                 return
-            name, func, cancel_hook = jobs[path]
-            try:
-                job = runner.start(name, func, cancel_hook=cancel_hook)
-            except Exception as exc:  # noqa: BLE001
-                self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-                return
-            self._json({"job": job.__dict__}, status=HTTPStatus.ACCEPTED)
+            self._dispatch_json_post(post_routes[path])
 
         def _json_post_routes(self, payload: dict[str, Any]) -> dict[str, Any]:
             def stop_current_run() -> tuple[dict[str, Any], HTTPStatus]:
@@ -458,16 +285,22 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
 
             def create_core_backup() -> tuple[dict[str, Any], HTTPStatus]:
                 created = create_snapshot_if_idle(config.output.state_dir)
+                if created.get("queued"):
+                    raise RuntimeBusyError()
                 return core_api.backup_snapshot_payload(created.get("snapshot") or {}), HTTPStatus.CREATED
 
             def restore_core_backup() -> tuple[dict[str, Any], HTTPStatus]:
                 snapshot_id = core_api.payload_snapshot_id(payload)
-                restore_snapshot_if_idle(config.output.state_dir, snapshot_id)
+                restored = restore_snapshot_if_idle(config.output.state_dir, snapshot_id)
+                if restored.get("queued"):
+                    raise RuntimeBusyError()
                 return {"accepted": True, "status": "success", "job_id": snapshot_id}, HTTPStatus.ACCEPTED
 
             def delete_core_backup() -> tuple[dict[str, Any], HTTPStatus]:
                 snapshot_id = core_api.payload_snapshot_id(payload)
-                delete_snapshot_if_idle(config.output.state_dir, snapshot_id)
+                deleted = delete_snapshot_if_idle(config.output.state_dir, snapshot_id)
+                if deleted.get("queued"):
+                    raise RuntimeBusyError()
                 return {"deleted": 1}, HTTPStatus.OK
 
             def set_install_channel() -> tuple[dict[str, Any], HTTPStatus]:
@@ -541,7 +374,17 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     HTTPStatus.BAD_REQUEST,
                 ),
                 "/api/web/run-preferences": (
-                    lambda: ({"run_preferences": save_run_preferences(config, payload.get("run_preferences") or payload)}, HTTPStatus.OK),
+                    lambda: web_json_post_response(config, "/api/web/run-preferences", payload),
+                    HTTPStatus.BAD_REQUEST,
+                    HTTPStatus.BAD_REQUEST,
+                ),
+                "/api/web/presets/save": (
+                    lambda: web_json_post_response(config, "/api/web/presets/save", payload),
+                    HTTPStatus.BAD_REQUEST,
+                    HTTPStatus.BAD_REQUEST,
+                ),
+                "/api/web/presets/delete-user-lists": (
+                    lambda: web_json_post_response(config, "/api/web/presets/delete-user-lists", payload),
                     HTTPStatus.BAD_REQUEST,
                     HTTPStatus.BAD_REQUEST,
                 ),
@@ -551,6 +394,9 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             handler, error_status, value_error_status = route
             try:
                 payload, status = handler()
+            except RuntimeBusyError:
+                self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
+                return
             except ValueError as exc:
                 self._json({"error": str(exc)}, status=value_error_status)
                 return
@@ -576,7 +422,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
 
         def _openapi_json(self) -> None:
             try:
-                data = openapi_json_bytes()
+                data = openapi_json_bytes(core_only=not ui_enabled)
             except OSError as exc:
                 self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -614,12 +460,12 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                         self.wfile.flush()
                         heartbeat_at = now
                     time.sleep(1)
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                     return
                 except Exception as exc:  # noqa: BLE001
                     try:
                         self._event("event-error", {"error": "event-loop", "message": str(exc)})
-                    except (BrokenPipeError, ConnectionResetError):
+                    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                         return
                     time.sleep(1)
 
@@ -695,7 +541,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 for line in iterator:
                     self.wfile.write(line)
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 return
 
         def _bytes(self, data: bytes, content_type: str, *, cache_control: str | None = None) -> None:
@@ -717,11 +563,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
 
         def _head_openapi_json(self) -> None:
             try:
-                size = openapi_json_path().stat().st_size
+                data = openapi_json_bytes(core_only=not ui_enabled)
             except OSError:
                 self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
                 return
-            self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, size)
+            self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, len(data))
 
         def _not_found(self) -> None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -759,6 +605,70 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
     from .proxy import serve_web_proxy as _serve_web_proxy
 
     _serve_web_proxy(config, host=host, port=port, core_url=core_url)
+
+
+def web_json_get_payload(config: AppConfig, path: str, query: dict[str, list[str]]) -> dict[str, Any]:
+    routes = {
+        "/api/web/run-preferences": lambda: {"run_preferences": read_run_preferences(config)},
+        "/api/web/runs/history-page": lambda: _runs_page_payload(config, query),
+        "/api/web/candidate-domain-index-page": lambda: _candidate_domain_index_payload(config, query),
+        "/api/web/strategy-candidates-page": lambda: _candidate_page_payload(config, query),
+        "/api/web/presets": lambda: _web_presets_payload(config, query),
+        "/api/web/presets/domains": lambda: _preset_domains_payload(config, query),
+        "/api/web/events": lambda: _events_response_payload(config, query, stream="web"),
+    }
+    if path not in routes:
+        raise KeyError(path)
+    return routes[path]()
+
+
+def web_json_post_response(config: AppConfig, path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+    if path == "/api/web/run-preferences":
+        return {"run_preferences": save_run_preferences(config, payload.get("run_preferences") or payload)}, HTTPStatus.OK
+    if path == "/api/web/presets/save":
+        scope = str(payload.get("scope") or "")
+        name = str(payload.get("name") or "")
+        kind = str(payload.get("kind") or "user")
+        domains = _payload_string_list(payload, "domains")
+        if kind == "system":
+            save_system_preset(
+                config.output.state_dir,
+                scope=scope,
+                name=name,
+                domains=domains,
+                updated_at=now_iso(),
+            )
+        else:
+            save_custom_preset(
+                config.output.state_dir,
+                scope=scope,
+                name=name,
+                domains=domains,
+                updated_at=now_iso(),
+            )
+        return _web_presets_payload(config, {"include_domains": ["1"]}), HTTPStatus.OK
+    if path == "/api/web/presets/delete-user-lists":
+        names = _payload_string_list(payload, "names")
+        if not names and payload.get("name"):
+            names = [str(payload.get("name") or "")]
+        metadata = delete_user_presets(
+            config.output.state_dir,
+            scope=str(payload.get("scope") or ""),
+            names=names,
+        )
+        return _web_presets_payload(config, {"include_domains": ["1"]}) | {"metadata": metadata}, HTTPStatus.OK
+    raise KeyError(path)
+
+
+def web_event_changes(config: AppConfig, previous_fingerprints: dict[str, str]) -> list[tuple[str, dict[str, Any]]]:
+    changes: list[tuple[str, dict[str, Any]]] = []
+    for event_name, payload in _web_event_payloads(config).items():
+        fingerprint = _event_fingerprint(payload)
+        if previous_fingerprints.get(event_name) == fingerprint:
+            continue
+        previous_fingerprints[event_name] = fingerprint
+        changes.append((event_name, payload))
+    return changes
 
 
 def status_payload(config: AppConfig) -> dict[str, Any]:
@@ -1139,6 +1049,13 @@ def _presets_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str
     else:
         payload["custom"] = {"finder": {}, "common": {}}
     return payload
+
+
+def _web_presets_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _presets_payload(config, query) | {
+        "domain_sets": domain_sets(),
+        "builtin": builtin_preset_sources(),
+    }
 
 
 def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:

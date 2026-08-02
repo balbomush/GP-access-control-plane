@@ -31,8 +31,14 @@ def route_paths(*, method: str | None = None, namespace: str | None = None, disp
     }
 
 
-def openapi_operations() -> set[tuple[str, str]]:
-    return {(spec.path, method) for spec in ROUTES if spec.openapi for method in spec.methods if method != "HEAD"}
+def openapi_operations(*, core_only: bool = False) -> set[tuple[str, str]]:
+    return {
+        (spec.path, method)
+        for spec in ROUTES
+        if spec.openapi and (not core_only or spec.allowed_in_core)
+        for method in spec.methods
+        if method != "HEAD"
+    }
 
 
 def _route(
@@ -76,7 +82,7 @@ ROUTES = (
     _route("/api/core/backups/list", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/backups/restore", {"POST"}, "core", "json-post", openapi=True),
     _route("/api/core/backups/delete", {"POST"}, "core", "json-post", openapi=True),
-    _route("/api/core/backups/download-file", {"GET"}, "core", "download", openapi=True),
+    _route("/api/core/backups/download-archive", {"GET"}, "core", "download", openapi=True),
     _route("/api/core/backups/upload", {"POST"}, "core", "upload", openapi=True),
     _route("/api/core/run-settings", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/run-settings/save", {"POST"}, "core", "json-post", openapi=True),
@@ -89,48 +95,21 @@ ROUTES = (
     _route("/api/service/releases/available", {"GET"}, "service", "json-get", openapi=True),
     _route("/api/service/releases/install-channel", {"GET"}, "service", "json-get", openapi=True),
     _route("/api/service/releases/set-install-channel", {"POST"}, "service", "json-post", openapi=True),
+    _route("/api/service/releases/install-plan", {"GET"}, "service", "json-get", openapi=True),
     _route("/api/service/releases/install", {"POST"}, "service", "json-post", openapi=True),
     _route("/api/service/v2fly/local-storage-status", {"GET"}, "service", "json-get", openapi=True),
     _route("/api/service/v2fly/check-updates", {"POST"}, "service", "json-post", openapi=True),
     _route("/api/service/v2fly/update-local-storage", {"POST"}, "service", "json-post", openapi=True),
-    _route("/api/web/run-preferences", {"GET", "POST", "HEAD"}, "web", "json-get-post", openapi=True),
-    _route("/api/web/runs/history-page", {"GET"}, "web", "json-get", openapi=True),
-    _route("/api/web/candidate-domain-index-page", {"GET"}, "web", "json-get", openapi=True),
-    _route("/api/web/strategy-candidates-page", {"GET"}, "web", "json-get", openapi=True),
-    _route("/api/web/events", {"GET"}, "web", "json-get", openapi=True),
-    _route("/api/status", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/events", {"GET", "HEAD"}, "legacy", "sse"),
-    _route("/api/settings", {"GET", "POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/run-preferences", {"GET", "POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/releases", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/releases/update-plan", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/releases/update", {"POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/diagnostics", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/strategy-finder/domains", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/strategy-finder/candidate-domains", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/strategy-finder/candidates", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/strategy-finder/runs", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/strategy-finder/latest-log", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/backups", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/backups/create", {"POST"}, "legacy", "manual-json"),
-    _route("/api/backups/restore", {"POST"}, "legacy", "manual-json"),
-    _route("/api/backups/delete", {"POST"}, "legacy", "manual-json"),
-    _route("/api/backups/upload", {"POST"}, "legacy", "upload"),
-    _route("/api/backups/restore-preview", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/backups/download", {"GET"}, "legacy", "download"),
-    _route("/api/presets", {"GET", "POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/presets/domains", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/presets/save", {"POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/presets/delete", {"POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/presets/delete-users-lists", {"POST", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/presets/domain-enabled", {"POST"}, "legacy", "manual-json"),
-    _route("/api/domain-sources", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/domain-sources/v2fly/categories", {"GET", "HEAD"}, "legacy", "manual-json"),
-    _route("/api/domain-sources/v2fly/preview", {"POST"}, "legacy", "manual-json"),
-    _route("/api/domain-sources/v2fly/import", {"POST"}, "legacy", "manual-json"),
-    _route("/api/jobs/stop-current", {"POST"}, "legacy", "manual-json"),
-    _route("/api/jobs/zapret-standard-discovery", {"POST"}, "legacy", "job"),
-    _route("/api/jobs/zapret-multi-domain-discovery", {"POST"}, "legacy", "job"),
+    _route("/api/web/run-preferences", {"GET", "POST", "HEAD"}, "web", "json-get-post", openapi=True, allowed_in_core=False),
+    _route("/api/web/runs/history-page", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
+    _route("/api/web/candidate-domain-index-page", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
+    _route("/api/web/strategy-candidates-page", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
+    _route("/api/web/presets", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
+    _route("/api/web/presets/domains", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
+    _route("/api/web/presets/save", {"POST"}, "web", "json-post", openapi=True, allowed_in_core=False),
+    _route("/api/web/presets/delete-user-lists", {"POST"}, "web", "json-post", openapi=True, allowed_in_core=False),
+    _route("/api/web/events", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
+    _route("/api/web/events/stream", {"GET", "HEAD"}, "web", "sse", openapi=True, allowed_in_core=False),
 )
 
 _ROUTE_INDEX = {(method, spec.path): spec for spec in ROUTES for method in spec.methods}

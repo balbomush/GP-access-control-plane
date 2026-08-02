@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "GP Access Control Plane Core API",
-    "version": "0.1.0-research",
-    "description": "First-level future API contract for the headless runtime and штатный Web UI. This contract is a research artifact: it defines target namespaces and payload shape before the service split is implemented."
+    "title": "GP Control Plane API",
+    "version": "0.1.0-alpha",
+    "description": "Alpha Core/Web split API contract for the headless runtime and штатный Web UI. The contract contains the registered /api/core, /api/service, /api/web and /openapi.json routes; legacy root-level APIs are removed before 1.0."
   },
   "servers": [
     {
@@ -485,6 +485,9 @@
               }
             }
           },
+          "409": {
+            "$ref": "#/components/responses/RuntimeBusy"
+          },
           "default": {
             "$ref": "#/components/responses/Error"
           }
@@ -561,6 +564,9 @@
           },
           "default": {
             "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/RuntimeBusy"
           }
         }
       }
@@ -605,16 +611,19 @@
           },
           "default": {
             "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/RuntimeBusy"
           }
         }
       }
     },
-    "/api/core/backups/download-file": {
+    "/api/core/backups/download-archive": {
       "get": {
         "tags": [
           "Core Backups"
         ],
-        "operationId": "downloadBackupFile",
+        "operationId": "downloadBackupArchive",
         "summary": "Download a backup archive",
         "parameters": [
           {
@@ -697,6 +706,9 @@
           },
           "default": {
             "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/RuntimeBusy"
           }
         }
       }
@@ -1226,6 +1238,52 @@
         }
       }
     },
+    "/api/service/releases/install-plan": {
+      "get": {
+        "tags": [
+          "Service Releases"
+        ],
+        "operationId": "getReleaseInstallPlan",
+        "summary": "Get release installation plan",
+        "description": "Checks the selected release channel and reports whether the service can queue an installer-backed update now.",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "prerelease"
+              ],
+              "default": "stable"
+            },
+            "example": "stable"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release install plan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseInstallPlanResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/ReleaseInstallPlanResponse"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/service/releases/install": {
       "post": {
         "tags": [
@@ -1563,6 +1621,238 @@
         }
       }
     },
+    "/api/web/presets": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebPresets",
+        "summary": "Get Web UI preset metadata and lists",
+        "description": "Returns штатный Web UI preset metadata plus built-in domain set labels. Domains for custom presets are included only when requested.",
+        "parameters": [
+          {
+            "name": "include_domains",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "example": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Web UI presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebPresetsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebPresetsResponse"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/presets/domains": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebPresetDomains",
+        "summary": "Get a paginated Web UI preset domain page",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WebPresetScope"
+            },
+            "example": "finder"
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "required"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/WebPresetKind"
+            },
+            "example": "system"
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "youtube"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 200
+            },
+            "example": 200
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "name": "include_disabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "example": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preset domains page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebPresetDomainsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebPresetDomainsResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/presets/save": {
+      "post": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "saveWebPreset",
+        "summary": "Save a Web UI preset domain list",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebPresetSaveRequest"
+              },
+              "examples": {
+                "default": {
+                  "$ref": "#/components/examples/WebPresetSaveRequest"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated Web UI presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebPresetsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebPresetsResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/web/presets/delete-user-lists": {
+      "post": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "deleteWebUserPresetLists",
+        "summary": "Delete Web UI user preset lists",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebPresetDeleteUserListsRequest"
+              },
+              "examples": {
+                "default": {
+                  "$ref": "#/components/examples/WebPresetDeleteUserListsRequest"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated Web UI presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebPresetsResponse"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebPresetsResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/web/events": {
       "get": {
         "tags": [
@@ -1605,6 +1895,36 @@
           }
         }
       }
+    },
+    "/api/web/events/stream": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "streamWebEvents",
+        "summary": "Stream штатный Web UI events",
+        "description": "Server-sent event stream for live Web UI refreshes. Event names match the Web UI event types returned by /api/web/events.",
+        "responses": {
+          "200": {
+            "description": "Live Web UI event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "default": {
+                    "$ref": "#/components/examples/WebEventsStream"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1634,6 +1954,23 @@
       }
     },
     "responses": {
+      "RuntimeBusy": {
+        "description": "Runtime is busy",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "runtimeBusy": {
+                "value": {
+                  "error": "runtime_busy"
+                }
+              }
+            }
+          }
+        }
+      },
       "Error": {
         "description": "Error response",
         "content": {
@@ -1981,6 +2318,151 @@
           "dry_run": {
             "type": "boolean",
             "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleaseInstallPlanResponse": {
+        "type": "object",
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/ReleaseInstallPlan"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleaseInstallPlan": {
+        "type": "object",
+        "required": [
+          "release",
+          "can_update",
+          "blocked_reason",
+          "active_job",
+          "steps"
+        ],
+        "properties": {
+          "release": {
+            "$ref": "#/components/schemas/ReleaseUpdateInfo"
+          },
+          "can_update": {
+            "type": "boolean"
+          },
+          "blocked_reason": {
+            "type": "string"
+          },
+          "active_job": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleaseUpdateInfo": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "prerelease"
+            ]
+          },
+          "current_version": {
+            "type": "string"
+          },
+          "available_version": {
+            "type": "string"
+          },
+          "available_name": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseUpdateAsset"
+            }
+          },
+          "published_at": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "checked": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "update_available": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "error_kind": {
+            "type": "string"
+          },
+          "error_stage": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseUpdateError"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "ReleaseUpdateAsset": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleaseUpdateError": {
+        "type": "object",
+        "required": [
+          "stage",
+          "kind",
+          "message"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "format",
+              "git",
+              "network",
+              "unexpected"
+            ]
+          },
+          "message": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -3116,6 +3598,305 @@
         },
         "additionalProperties": false
       },
+      "WebPresetScope": {
+        "type": "string",
+        "enum": [
+          "finder",
+          "common"
+        ]
+      },
+      "WebPresetKind": {
+        "type": "string",
+        "enum": [
+          "user",
+          "system"
+        ],
+        "default": "user"
+      },
+      "WebPresetMetadata": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "label",
+          "enabled_count",
+          "total_count",
+          "updated_at"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WebPresetKind"
+          },
+          "label": {
+            "type": "string"
+          },
+          "enabled_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebPresetMetadataScope": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/WebPresetMetadata"
+        }
+      },
+      "WebPresetMetadataMap": {
+        "type": "object",
+        "required": [
+          "finder",
+          "common"
+        ],
+        "properties": {
+          "finder": {
+            "$ref": "#/components/schemas/WebPresetMetadataScope"
+          },
+          "common": {
+            "$ref": "#/components/schemas/WebPresetMetadataScope"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebPresetDomainMapScope": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "WebPresetDomainMap": {
+        "type": "object",
+        "required": [
+          "finder",
+          "common"
+        ],
+        "properties": {
+          "finder": {
+            "$ref": "#/components/schemas/WebPresetDomainMapScope"
+          },
+          "common": {
+            "$ref": "#/components/schemas/WebPresetDomainMapScope"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebBuiltinPresetSource": {
+        "type": "object",
+        "required": [
+          "type",
+          "source",
+          "coverage_note",
+          "key",
+          "url"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "coverage_note": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebPresetsResponse": {
+        "type": "object",
+        "required": [
+          "metadata",
+          "system_metadata",
+          "system",
+          "custom",
+          "domain_sets",
+          "builtin"
+        ],
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/WebPresetMetadataMap"
+          },
+          "system_metadata": {
+            "$ref": "#/components/schemas/WebPresetMetadataMap"
+          },
+          "system": {
+            "$ref": "#/components/schemas/WebPresetDomainMap"
+          },
+          "custom": {
+            "$ref": "#/components/schemas/WebPresetDomainMap"
+          },
+          "domain_sets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "builtin": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WebBuiltinPresetSource"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebPresetSaveRequest": {
+        "type": "object",
+        "required": [
+          "scope",
+          "name",
+          "domains"
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/WebPresetScope"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WebPresetKind"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebPresetDeleteUserListsRequest": {
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/WebPresetScope"
+          },
+          "names": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "names"
+            ]
+          },
+          {
+            "required": [
+              "name"
+            ]
+          }
+        ],
+        "additionalProperties": false
+      },
+      "WebPresetDomainItem": {
+        "type": "object",
+        "required": [
+          "domain",
+          "position",
+          "enabled"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebPresetDomainsResponse": {
+        "type": "object",
+        "required": [
+          "scope",
+          "name",
+          "kind",
+          "query",
+          "limit",
+          "offset",
+          "total",
+          "has_more",
+          "domains"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebPresetDomainItem"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "StrategyCandidateFilters": {
         "type": "object",
         "properties": {
@@ -3287,6 +4068,132 @@
             "limit_time_enabled": true,
             "timeout_hours": 48
           }
+        }
+      },
+      "WebPresetsResponse": {
+        "summary": "Web UI preset metadata and built-in domain sets",
+        "value": {
+          "metadata": {
+            "finder": {
+              "work": {
+                "name": "work",
+                "kind": "user",
+                "label": "work",
+                "enabled_count": 2,
+                "total_count": 2,
+                "updated_at": ""
+              }
+            },
+            "common": {}
+          },
+          "system_metadata": {
+            "finder": {
+              "required": {
+                "name": "required",
+                "kind": "system",
+                "label": "Обязательные домены",
+                "enabled_count": 2,
+                "total_count": 2,
+                "updated_at": ""
+              },
+              "desired": {
+                "name": "desired",
+                "kind": "system",
+                "label": "Желательные домены",
+                "enabled_count": 1,
+                "total_count": 1,
+                "updated_at": ""
+              }
+            },
+            "common": {}
+          },
+          "system": {
+            "finder": {
+              "required": [
+                "youtube.com",
+                "discord.com"
+              ],
+              "desired": [
+                "instagram.com"
+              ]
+            },
+            "common": {}
+          },
+          "custom": {
+            "finder": {
+              "work": [
+                "slack.com",
+                "notion.so"
+              ]
+            },
+            "common": {}
+          },
+          "domain_sets": {
+            "critical": [
+              "youtube.com",
+              "discord.com"
+            ],
+            "discord": [
+              "discord.com"
+            ]
+          },
+          "builtin": {
+            "critical": {
+              "type": "manual",
+              "source": "gp-control-plane built-in preset",
+              "coverage_note": "Curated list used by GP control plane.",
+              "key": "critical",
+              "url": "src/gp_control_plane/strategy_finder.py"
+            }
+          }
+        }
+      },
+      "WebPresetDomainsResponse": {
+        "summary": "Paginated domains for one Web UI preset",
+        "value": {
+          "scope": "finder",
+          "name": "required",
+          "kind": "system",
+          "query": "you",
+          "limit": 200,
+          "offset": 0,
+          "total": 2,
+          "has_more": false,
+          "domains": [
+            {
+              "domain": "youtube.com",
+              "position": 0,
+              "enabled": true
+            },
+            {
+              "domain": "ytimg.com",
+              "position": 1,
+              "enabled": true
+            }
+          ]
+        }
+      },
+      "WebPresetSaveRequest": {
+        "summary": "Save one Web UI preset domain list",
+        "value": {
+          "scope": "finder",
+          "name": "work",
+          "kind": "user",
+          "domains": [
+            "slack.com",
+            "notion.so",
+            "figma.com"
+          ]
+        }
+      },
+      "WebPresetDeleteUserListsRequest": {
+        "summary": "Delete selected Web UI user preset lists",
+        "value": {
+          "scope": "finder",
+          "names": [
+            "work",
+            "games"
+          ]
         }
       },
       "RunAccepted": {
@@ -3686,6 +4593,10 @@
           "next_after_id": "web:000000000123"
         }
       },
+      "WebEventsStream": {
+        "summary": "Server-sent Web UI event stream",
+        "value": "event: status\ndata: {\"state\":\"idle\",\"version\":{\"version\":\"0.3.5-alpha.2\"}}\n\nevent: presets\ndata: {\"version\":\"sha256:184a7f8fd2b0\"}\n\n: keepalive\n\n"
+      },
       "ServiceStatus": {
         "summary": "Состояние установленного сервиса",
         "value": {
@@ -3707,7 +4618,7 @@
           },
           "version": {
             "version": "0.3.5-alpha.2",
-            "installed_ref": "feature/headless-core-api-research",
+            "installed_ref": "feature/split-core-web-alpha",
             "commit": "7c0387e"
           },
           "data_state": {
@@ -3761,6 +4672,41 @@
         "value": {
           "channel": "prerelease",
           "dry_run": true
+        }
+      },
+      "ReleaseInstallPlanResponse": {
+        "summary": "Release update can be queued",
+        "value": {
+          "plan": {
+            "release": {
+              "channel": "prerelease",
+              "current_version": "0.3.5-alpha.2",
+              "available_version": "v0.3.6-alpha.1",
+              "available_name": "0.3.6 alpha 1",
+              "body": "Release notes summary",
+              "assets": [],
+              "published_at": "2026-07-22T18:00:00Z",
+              "url": "https://github.com/balbomush/GP-access-control-plane/releases/tag/v0.3.6-alpha.1",
+              "checked": true,
+              "source": "github",
+              "update_available": true,
+              "error": "",
+              "error_kind": "",
+              "error_stage": "",
+              "errors": []
+            },
+            "can_update": true,
+            "blocked_reason": "",
+            "active_job": "",
+            "steps": [
+              "check selected release channel",
+              "create backup before code change",
+              "queue installer through root-helper",
+              "verify installed ref/version after installer finishes",
+              "if verification fails, restore the pre-update backup from Backups",
+              "service will come back on the selected release"
+            ]
+          }
         }
       },
       "V2flyStorageStatus": {
@@ -3910,10 +4856,10 @@
       }
     }
   },
-  "x-gp-contract-stage": "research-first-level",
+  "x-gp-contract-stage": "alpha-split-no-legacy-root-apis",
   "x-gp-decisions": {
     "runtime": "web-service-proxies-api-to-local-core-service",
-    "legacy_api_compatibility": "deferred-to-migration-stage",
+    "legacy_api_compatibility": "legacy-root-apis-removed-in-alpha",
     "web_ui_install_default": "install",
     "headless_install": "explicit-opt-out-from-web-ui"
   }
