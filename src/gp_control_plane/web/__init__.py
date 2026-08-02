@@ -1,1 +1,1 @@
-"""Minimal local web UI for Raspberry Pi control plane."""
+"""Minimal local web UI for GP control plane."""

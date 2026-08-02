@@ -1,19 +1,65 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 
 OPENAPI_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 SWAGGER_HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 SWAGGER_PATHS = {"/swagger", "/swagger/"}
+CORE_ONLY_OPENAPI_INFO = {
+    "title": "GP Control Plane Core API",
+    "description": (
+        "Callable Core/Service/OpenAPI operations for the headless GP runtime. "
+        "This core-only contract contains registered /api/core, /api/service and /openapi.json routes."
+    ),
+}
 
 
 def openapi_json_path() -> Path:
     return Path(__file__).resolve().parents[3] / "openapi.json"
 
 
-def openapi_json_bytes() -> bytes:
-    return openapi_json_path().read_bytes()
+def openapi_json_bytes(*, core_only: bool = False) -> bytes:
+    data = openapi_json_path().read_bytes()
+    if not core_only:
+        return data
+
+    from .routes import openapi_operations
+
+    contract = json.loads(data.decode("utf-8"))
+    contract["info"] = {**contract.get("info", {}), **CORE_ONLY_OPENAPI_INFO}
+    allowed = openapi_operations(core_only=True)
+    contract["paths"] = {
+        path: {
+            method: operation
+            for method, operation in operations.items()
+            if (path, method.upper()) in allowed
+        }
+        for path, operations in contract.get("paths", {}).items()
+    }
+    contract["paths"] = {path: operations for path, operations in contract["paths"].items() if operations}
+    used_tags = {
+        tag
+        for operations in contract["paths"].values()
+        for operation in operations.values()
+        for tag in operation.get("tags", [])
+    }
+    contract["tags"] = [tag for tag in contract.get("tags", []) if tag.get("name") in used_tags]
+    contract = _without_api_web_mentions(contract)
+    return json.dumps(contract, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _without_api_web_mentions(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_api_web_mentions(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_api_web_mentions(item) for item in value]
+    if isinstance(value, str) and "/api/web" in value:
+        sentences = [sentence.strip() for sentence in value.split(".")]
+        return ". ".join(sentence for sentence in sentences if "/api/web" not in sentence).strip()
+    return value
 
 
 def swagger_ui_html() -> str:

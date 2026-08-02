@@ -1,14 +1,14 @@
-# Headless Runtime / Core API Research
+# Headless Runtime / Core API
 
-Статус: результат research-этапа и текущая целевая схема реализации. В feature-ветке добавлены API-only команда `gp-control-plane core`, proxy-режим `gp-control-plane web --core-url ...` и installer-flow, который по умолчанию поднимает Core service и Web proxy service.
+Статус: alpha-этап split-runtime. В feature-ветке добавлены API-only команда `gp-control-plane core`, proxy-режим `gp-control-plane web --core-url ...` и installer-flow, который по умолчанию поднимает Core service и Web proxy service.
 
 Постоянный API-контракт первого уровня находится в [`../openapi.json`](../openapi.json). При изменении API этот файл должен обновляться вместе с кодом.
 
-Для человека контракт доступен через Swagger UI: `/swagger`. Raw JSON отдается через `/openapi.json`. При обычной установке оба маршрута открываются через Web service на `http://<board>:8080`, в headless-only режиме через локальный Core API на `http://127.0.0.1:8081`.
+Для человека контракт доступен через Swagger UI: `/swagger`. Raw JSON отдается через `/openapi.json`. При обычной установке оба маршрута открываются через Web service на `http://<board>:8080` и показывают полный Web/Core/Service контракт. В headless-only режиме локальный Core API `http://127.0.0.1:8081/openapi.json` показывает только callable Core/Service/OpenAPI операции.
 
 ## Решение По Runtime
 
-Выбран вариант А: штатный Web UI остается доступен пользователю по одному внешнему адресу, а будущий Web service проксирует API-запросы в локальный Core service.
+Выбран вариант А: штатный Web UI остается доступен пользователю по одному внешнему адресу, а Web service проксирует зарегистрированные Core/Service routes в локальный Core service. `/openapi.json` Web service отдает локально как полный контракт.
 
 Реализуемая схема:
 
@@ -19,7 +19,8 @@ Browser / штатный Web UI
         v
 gp-control-plane-web.service
         |
-        | proxy /api/* -> http://127.0.0.1:8081
+        | proxy registered /api/core and /api/service routes -> http://127.0.0.1:8081
+        | local /api/web/*
         v
 gp-control-plane-core.service
         |
@@ -37,21 +38,21 @@ Headless-сценарий устанавливает только `gp-control-pl
 - Дать продвинутому пользователю возможность поставить сервис без штатного Web UI и подключить собственный UI/дашборд.
 - Не ломать текущие установки и текущую команду `gp-control-plane web` до отдельного решения о миграции.
 
-## Не Цели Research-Этапа
+## Не Цели Alpha-Этапа
 
 - Не разделять текущий процесс на два systemd-сервиса в коде.
 - Не удалять штатный Web UI.
 - Не вводить новую auth-модель.
 - Не раскрывать Core API наружу без явной настройки пользователя и отдельного решения по авторизации.
 - Не делать два разных формата состояния для headless и web.
-- Не удалять legacy `/api/*` endpoint'ы без отдельного этапа совместимости.
+- Legacy root-level `/api/...` endpoint'ы удалены в alpha-этапе `WEB-LEGACY-001`; фактический контракт - Swagger/OpenAPI (`/swagger`, `/openapi.json`). Compatibility layer и таблица old-to-new mapping до 1.0 не поддерживаются.
 
 ## Текущее Состояние Compatibility-Mode
 
 `gp-control-plane web` без `--core-url` остается compatibility-mode и запускает единый HTTP-сервер. В нем находятся:
 
 - HTML/CSS/JS штатного интерфейса.
-- API `/api/*`.
+- namespaced API `/api/core/*`, `/api/service/*`, `/api/web/*`.
 - Запуск/остановка подбора.
 - Чтение storage, backups, candidates, runs, settings, release metadata.
 - Вызов `gp-root-helper` для привилегированных операций.
@@ -80,8 +81,10 @@ Core service не должен отдавать готовые UI-карточк
 `gp-control-plane-web.service` владеет штатным Web UI:
 
 - отдает статические ресурсы интерфейса;
-- проксирует `/api/*` в локальный Core API;
-- может иметь `/api/web/...` для UI-оптимизированных срезов данных, если они нужны штатному UI;
+- проксирует только зарегистрированные Core/Service routes в локальный Core API;
+- отдает `/openapi.json` локально как полный контракт, включая `/api/web/*`;
+- обслуживает `/api/web/...` локально для UI-оптимизированных срезов данных, если они нужны штатному UI;
+- возвращает локальный 404 для legacy/unknown API без чтения body и без forwarding;
 - не владеет продуктовой логикой, storage и job-runner.
 
 `/api/web/...` допускается только там, где штатному UI нужен отдельный экранный срез: пагинация, ограниченная выборка, сортировка или формат списка под конкретную вкладку. Если данные являются полным продуктовым фактом, они должны идти через `/api/core/...` или `/api/service/...`.
@@ -103,8 +106,9 @@ Core API вызывает root-helper через явные команды. Web 
 
 - `gp-control-plane-web.service`: `0.0.0.0:8080` или другой явно заданный Web bind/port. Это внешний адрес пользователя.
 - `gp-control-plane-core.service`: `127.0.0.1:8081` по умолчанию при установленном Web service.
-- Web service проксирует все `/api/*` в Core service.
-- Headless/non-interactive install может не ставить Web service. Внешний bind для Core API включается только явной настройкой пользователя и после решения auth-модели.
+- Web service проксирует только зарегистрированные `/api/core/*` и `/api/service/*` routes в Core service; `/api/web/*` и `/openapi.json` обслуживаются Web локально.
+- Legacy/unknown API возвращают локальный 404 без body parsing/forwarding.
+- Headless/non-interactive install может не ставить Web service. Внешний bind для Core API включается только явной настройкой пользователя и после отдельного post-alpha/stable решения auth-модели.
 
 Причина такого выбора: пользователь продолжает работать по одному адресу платы, CORS не появляется, Web UI не требует знания второго порта, а headless-сценарий остается возможным.
 
@@ -112,12 +116,11 @@ Core API вызывает root-helper через явные команды. Web 
 
 | Namespace | Смысл |
 | --- | --- |
-| `/api/auth/...` | Будущая авторизация. В этом research-этапе namespace зарезервирован, механика не решается. |
 | `/api/core/...` | Основной функционал продукта и внутренние данные GP. |
 | `/api/service/...` | Состояние установленного GP, релизы, service/unit, внешние источники и репозитории. |
 | `/api/web/...` | UI-оптимизированные срезы для штатного Web UI. |
 
-Разделение `/api/core/public/...` и `/api/core/private/...` не используется. Граница доступа должна определяться будущей auth/token-моделью, а не названием URL.
+Auth не входит в текущий alpha-контракт: OpenAPI/Swagger сейчас без auth routes и security scheme. Auth/token/password модель будет отдельным post-alpha/stable gate. Разделение `/api/core/public/...` и `/api/core/private/...` не используется; будущая граница доступа должна определяться auth/token-моделью, а не названием URL.
 
 Endpoint names должны быть человекочитаемыми. Для action endpoint'ов сохраняется прагматичный POST-action стиль: `POST /save-domain-list`, `POST /delete-user-domain-list`, `POST /check-updates`.
 
@@ -192,7 +195,7 @@ Backup/export/import/restore внутренних данных GP относит
 - `GET /api/core/backups/list`;
 - `POST /api/core/backups/restore`;
 - `POST /api/core/backups/delete`;
-- `GET /api/core/backups/download-file`;
+- `GET /api/core/backups/download-archive`;
 - `POST /api/core/backups/upload`.
 
 Отдельный restore-preview endpoint не переносится. Штатный UI перед восстановлением показывает простое окно подтверждения выбранного snapshot.
@@ -245,9 +248,10 @@ UI-state вроде выбранной вкладки, раскрытых пан
 - `GET /api/service/releases/available`;
 - `GET /api/service/releases/install-channel`;
 - `POST /api/service/releases/set-install-channel`;
+- `GET /api/service/releases/install-plan`;
 - `POST /api/service/releases/install`.
 
-Отдельный update-plan endpoint не переносится. `POST /api/service/releases/install` должен либо запустить установку, либо вернуть простой error payload `{"error":"..."}` без запуска root-helper.
+`GET /api/service/releases/install-plan` показывает, можно ли поставить выбранный канал без запуска root-helper. `POST /api/service/releases/install` должен либо запустить установку, либо вернуть простой error payload `{"error":"..."}` без запуска root-helper.
 
 ### v2fly Local Storage
 
@@ -263,7 +267,7 @@ Interactive install:
 
 1. Default: установить штатный Web UI.
 2. При default-установке создаются два сервиса: `gp-control-plane-core.service` и `gp-control-plane-web.service`.
-3. Web service запускается с `--core-url http://127.0.0.1:8081` и проксирует `/api/*` в Core service.
+3. Web service запускается с `--core-url http://127.0.0.1:8081` и проксирует зарегистрированные Core/Service routes в Core service; `/api/web/*` и полный `/openapi.json` остаются локальным Web API.
 4. Если пользователь выбирает headless, создается только Core service.
 
 Headless/non-interactive install:
@@ -289,7 +293,9 @@ Headless/non-interactive install:
 - `gp-control-plane-web.service`
   - зависит от Core service;
   - отдает штатный UI;
-  - проксирует `/api/*` в Core;
+  - проксирует зарегистрированные Core/Service routes в Core;
+  - отдает полный `/openapi.json` локально;
+  - обслуживает `/api/web/*` локально и возвращает локальный 404 для legacy/unknown API;
   - может быть не установлен в headless-сценарии.
 
 Compatibility-mode:
@@ -321,7 +327,7 @@ Resource budget для Raspberry Pi 2 зафиксирован в `GP-access-con
 1. Добавить в SQLite таблицу `app_settings(key, value_json, updated_at)` и функции чтения/записи настроек запуска подбора.
 2. Перевести `GET /api/core/run-settings` и `POST /api/core/run-settings/save` на SQLite, но оставить fallback чтения старого `state.json.settings`.
 3. При первом успешном чтении старых `state.json.settings` записать их в SQLite, не удаляя из `state.json` в этом же релизе.
-4. После стабильного релиза удалить запись новых `settings` в `state.json`; legacy `/api/settings` должен собирать ответ из SQLite + service settings.
+4. После стабильного релиза удалить запись новых `settings` в `state.json`; HTTP compatibility для legacy `/api/settings` в alpha уже удалена.
 5. `run_preferences` оставить в web/ephemeral state до отдельного решения, потому что это состояние формы UI, а не Core product data.
 
 Rollback:
@@ -336,14 +342,14 @@ Rollback:
 - старый `state.json.settings` мигрирует в SQLite и сохраняет значения `curl_parallelism_max`, `curl_max_time`, `enable_ipv6`;
 - `POST /api/core/run-settings/save` пишет в SQLite и не зависит от `state.json.settings`;
 - backup/restore переносит `app_settings`;
-- legacy `/api/settings` остается совместимым до отдельного удаления legacy URL.
+- legacy HTTP `/api/settings` удален; миграция старых `state.json.settings` остается покрытой без сохранения старого URL.
 
 Безопасная последовательность внедрения после research:
 
 1. Добавить OpenAPI validation в локальные проверки.
-2. Добавить новые `/api/core/...`, `/api/service/...`, `/api/web/...` endpoint'ы в текущий API, не удаляя старые URL.
+2. Добавить новые `/api/core/...`, `/api/service/...`, `/api/web/...` endpoint'ы в текущий API.
 3. Перевести штатный Web UI на новые endpoint'ы.
-4. Зафиксировать compatibility layer для legacy URL или явно согласовать его удаление.
+4. Выполнено: legacy root-level `/api/...` URL удалены; proxy отклоняет legacy/unknown API как 404 и не ведет old-to-new mapping table.
 5. Выполнено: `index_html`, Swagger/OpenAPI helpers, Web proxy и Core entrypoint вынесены в отдельные модули.
 6. Выполнено: resource budget для Pi2 зафиксирован в `docs/resource-budget.md`, backup upload снижен до 64 MiB, streaming chunks вынесены в `resource_budget.py`.
 
@@ -365,12 +371,11 @@ Rollback:
 - постоянный API-контракт - `openapi.json`;
 - `api_inventory.md` является временным черновиком исследования.
 
-Не решено в этом research-блоке:
+Вне текущего alpha-решения:
 
 - точная auth/token/password модель;
 - время жизни токена;
 - список endpoint'ов, доступных без авторизации;
-- сроки удаления legacy URL;
 - внешнее раскрытие Core API в LAN.
 
 Эти решения должны попасть в отдельные planned/ordinary-блоки перед production-разделением сервисов.
@@ -381,8 +386,8 @@ Rollback:
 
 - валидный `openapi.json`;
 - список endpoint'ов первого implementation-этапа;
-- решение по compatibility layer старых URL;
-- план тестов для API aliasing;
+- alpha-решение по старым URL зафиксировано: legacy root-level `/api/...` удалены, compatibility layer/aliasing до 1.0 не добавляется;
+- тесты для legacy/unknown API 404 без old-to-new mapping;
 - installer/systemd сценарии для default Web UI и headless install;
 - rollback сценарий без потери state-dir;
 - оценку нагрузки на слабой плате только как архитектурную проверку, без релизного использования feature-ветки на контрольной плате.

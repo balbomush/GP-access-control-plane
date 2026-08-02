@@ -35,7 +35,9 @@ def build_config(state_dir: str | Path | None = None, install_dir: str | Path | 
 def default_install_dir() -> Path:
     current = Path(__file__).resolve()
     for parent in current.parents:
-        if (parent / "pyproject.toml").is_file() and (parent / "scripts" / "install-raspberry-pi.sh").is_file():
+        scripts_dir = parent / "scripts"
+        has_installer = (scripts_dir / "install-linux.sh").is_file() or (scripts_dir / "install-raspberry-pi.sh").is_file()
+        if (parent / "pyproject.toml").is_file() and has_installer:
             return parent
     return current.parents[2]
 

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..config import AppConfig
 from ..resource_budget import BACKUP_UPLOAD_MAX_BYTES, JSON_REQUEST_MAX_BYTES, PROXY_STREAM_CHUNK_BYTES
@@ -16,8 +17,9 @@ from .docs import (
     openapi_json_bytes,
     swagger_ui_html,
 )
-from .routes import UPLOAD_ROUTE_PATHS
+from .routes import UPLOAD_ROUTE_PATHS, route_for
 from .ui import index_html
+from . import api_server as api_runtime
 
 
 PROXY_SKIP_HEADERS = {
@@ -31,6 +33,9 @@ PROXY_SKIP_HEADERS = {
     "upgrade",
 }
 
+
+PROXY_CORE_NAMESPACES = frozenset({"core", "service"})
+
 def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -> None:
     core = urlparse(core_url)
     if core.scheme not in {"http", "https"} or not core.hostname:
@@ -42,7 +47,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
         def handle_one_request(self) -> None:
             try:
                 super().handle_one_request()
-            except ConnectionResetError:
+            except (ConnectionAbortedError, ConnectionResetError):
                 return
 
         def do_GET(self) -> None:  # noqa: N802
@@ -63,9 +68,6 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 else:
                     self._html(data)
                 return
-            if path == "/openapi.json" and self.command in {"GET", "HEAD"}:
-                self._openapi_json()
-                return
             if path in SWAGGER_PATHS and self.command in {"GET", "HEAD"}:
                 data = swagger_ui_html().encode("utf-8")
                 if self.command == "HEAD":
@@ -73,8 +75,84 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 else:
                     self._bytes(data, SWAGGER_HTML_CONTENT_TYPE, cache_control="no-store")
                 return
-            if path.startswith("/api/"):
+            if path == "/openapi.json" and self.command in {"GET", "HEAD"}:
+                try:
+                    data = openapi_json_bytes()
+                except OSError as exc:
+                    self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                    return
+                if self.command == "HEAD":
+                    self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, len(data))
+                else:
+                    self._bytes(data, OPENAPI_JSON_CONTENT_TYPE, cache_control="no-store")
+                return
+            if path.startswith("/api/web/"):
+                self._serve_web_api()
+                return
+            if self._is_core_proxy_path(self.command, path):
                 self._proxy_to_core()
+                return
+            if path.startswith("/api/"):
+                self._api_not_found()
+                return
+            self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+        @staticmethod
+        def _is_core_proxy_path(method: str, path: str) -> bool:
+            route = route_for(method, path)
+            if not route:
+                return False
+            return route.namespace in PROXY_CORE_NAMESPACES or (
+                route.namespace == "openapi" and path != "/openapi.json"
+            )
+
+        def _serve_web_api(self) -> None:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+            if path == "/api/web/events/stream":
+                if self.command == "HEAD":
+                    self._head(HTTPStatus.OK, "text/event-stream; charset=utf-8", 0)
+                elif self.command == "GET":
+                    self._events()
+                else:
+                    self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            if self.command == "HEAD":
+                route = route_for("HEAD", path)
+                if route and route.namespace == "web":
+                    self._head(HTTPStatus.OK, "application/json; charset=utf-8", 0)
+                else:
+                    self._head(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", 0)
+                return
+            if self.command == "GET":
+                route = route_for("GET", path)
+                if not route or route.namespace != "web":
+                    self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    self._json(api_runtime.web_json_get_payload(config, path, query))
+                except KeyError:
+                    self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if self.command == "POST":
+                route = route_for("POST", path)
+                if not route or route.namespace != "web":
+                    self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    payload = self._request_json()
+                    response, status = api_runtime.web_json_post_response(config, path, payload)
+                except api_runtime.RequestBodyTooLarge as exc:
+                    self._json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                except KeyError:
+                    self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                else:
+                    self._json(response, status=status)
                 return
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -90,7 +168,12 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 return
             limit = self._request_body_limit(parsed.path)
             if length > limit:
-                self._json({"error": "request body is too large"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                self._json(
+                    {"error": "request body is too large"},
+                    status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    close_connection=True,
+                )
+                self._discard_request_body()
                 return
             body = self.rfile.read(length) if length > 0 else None
             headers = {
@@ -130,7 +213,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                         return
                     self.wfile.write(chunk)
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 return
             finally:
                 connection.close()
@@ -145,17 +228,6 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-
-        def _openapi_json(self) -> None:
-            try:
-                data = openapi_json_bytes()
-            except OSError as exc:
-                self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
-                return
-            if self.command == "HEAD":
-                self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, len(data))
-            else:
-                self._bytes(data, OPENAPI_JSON_CONTENT_TYPE, cache_control="no-store")
 
         def _bytes(self, data: bytes, content_type: str, *, cache_control: str | None = None) -> None:
             self.send_response(HTTPStatus.OK)
@@ -174,13 +246,88 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.send_header("Content-Length", str(content_length))
             self.end_headers()
 
-        def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        def _json(
+            self,
+            payload: dict[str, Any],
+            status: HTTPStatus = HTTPStatus.OK,
+            *,
+            close_connection: bool = False,
+        ) -> None:
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            if close_connection:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            self.wfile.flush()
+
+        def _api_not_found(self) -> None:
+            self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND, close_connection=True)
+            self._discard_request_body()
+
+        def _discard_request_body(self) -> None:
+            try:
+                remaining = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                return
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, PROXY_STREAM_CHUNK_BYTES))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+
+        def _events(self) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            previous: dict[str, str] = {}
+            heartbeat_at = 0.0
+            while True:
+                try:
+                    for event_name, payload in api_runtime.web_event_changes(config, previous):
+                        self._event(event_name, payload)
+                    now = time.monotonic()
+                    if now - heartbeat_at >= 15:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        heartbeat_at = now
+                    time.sleep(1)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        self._event("event-error", {"error": "event-loop", "message": str(exc)})
+                    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                        return
+                    time.sleep(1)
+
+        def _event(self, event_name: str, payload: dict[str, Any]) -> None:
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            self.wfile.write(f"event: {event_name}\n".encode("utf-8"))
+            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        def _request_json(self) -> dict[str, Any]:
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError as exc:
+                raise ValueError("invalid request body size") from exc
+            if length <= 0:
+                return {}
+            if length > JSON_REQUEST_MAX_BYTES:
+                raise api_runtime.RequestBodyTooLarge("request body is too large")
+            raw = self.rfile.read(length).decode("utf-8")
+            if not raw.strip():
+                return {}
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError("request body must be a JSON object")
+            return parsed
 
         @staticmethod
         def _request_body_limit(path: str) -> int:

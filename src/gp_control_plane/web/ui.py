@@ -7,7 +7,7 @@ def index_html() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GP Strategy Finder</title>
+<title>GP Control Plane</title>
 <style>
 :root {
   color-scheme: dark;
@@ -895,23 +895,6 @@ details.preset-panel > summary:focus-visible {
   background: var(--blue-strong);
   border-color: var(--blue-strong);
 }
-.backup-file-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.backup-file-links a {
-  color: var(--blue-strong);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  padding: 6px 8px;
-  text-decoration: none;
-  background: var(--surface-code);
-  font-size: 13px;
-}
-.backup-file-links a:hover {
-  border-color: var(--blue);
-}
 .domain-group {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1536,7 +1519,7 @@ pre {
     <div class="topbar-inner">
       <div class="brand">
         <h1>Подбор стратегий zapret2</h1>
-        <div class="subtitle">Raspberry Pi · проверка стратегий · live-лог</div>
+        <div class="subtitle">GP Control Plane · локальная web panel · Linux host</div>
       </div>
       <div class="topbar-badges">
         <span class="topbar-version" id="app-version-badge">v-</span>
@@ -2062,22 +2045,26 @@ state.backupsUpdatedAt = '';
 
 const API_ENDPOINTS = Object.freeze({
   core: Object.freeze({
+    status: '/api/core/status',
     startStrategyDiscoveryRun: '/api/core/strategy-discovery/start-run',
     stopCurrentStrategyDiscoveryRun: '/api/core/strategy-discovery/stop-current-run',
     backupsList: '/api/core/backups/list',
     backupsCreate: '/api/core/backups/create',
     backupsRestore: '/api/core/backups/restore',
     backupsDelete: '/api/core/backups/delete',
+    backupsDownloadArchive: '/api/core/backups/download-archive',
     backupsUpload: '/api/core/backups/upload',
     runSettings: '/api/core/run-settings',
     saveRunSettings: '/api/core/run-settings/save',
     latestLog: '/api/core/runs/latest-log',
-    v2flyCategories: '/api/core/presets/v2fly/categories'
+    v2flyCategories: '/api/core/presets/v2fly/categories',
+    v2flyCategoryDomains: '/api/core/presets/v2fly/category-domains'
   }),
   service: Object.freeze({
     releasesAvailable: '/api/service/releases/available',
     installChannel: '/api/service/releases/install-channel',
     setInstallChannel: '/api/service/releases/set-install-channel',
+    installPlan: '/api/service/releases/install-plan',
     installRelease: '/api/service/releases/install',
     v2flyLocalStorageStatus: '/api/service/v2fly/local-storage-status'
   }),
@@ -2085,24 +2072,15 @@ const API_ENDPOINTS = Object.freeze({
     runPreferences: '/api/web/run-preferences',
     runHistoryPage: '/api/web/runs/history-page',
     candidateDomainIndexPage: '/api/web/candidate-domain-index-page',
-    strategyCandidatesPage: '/api/web/strategy-candidates-page'
-  }),
-  legacy: Object.freeze({
-    events: '/api/events',
-    status: '/api/status',
-    strategyFinderDomains: '/api/strategy-finder/domains',
-    presets: '/api/presets',
-    presetDomains: '/api/presets/domains',
-    presetSave: '/api/presets/save',
-    presetDeleteUserLists: '/api/presets/delete-users-lists',
-    domainSources: '/api/domain-sources',
-    v2flyPreview: '/api/domain-sources/v2fly/preview',
-    v2flyImport: '/api/domain-sources/v2fly/import',
-    releaseUpdatePlan: '/api/releases/update-plan',
-    backupDownload: '/api/backups/download'
+    strategyCandidatesPage: '/api/web/strategy-candidates-page',
+    presets: '/api/web/presets',
+    presetDomains: '/api/web/presets/domains',
+    presetSave: '/api/web/presets/save',
+    presetDeleteUserLists: '/api/web/presets/delete-user-lists',
+    events: '/api/web/events',
+    eventsStream: '/api/web/events/stream'
   })
 });
-const LEGACY_API_ALLOWLIST = Object.freeze(new Set(Object.values(API_ENDPOINTS.legacy)));
 
 function el(id){ return document.getElementById(id); }
 function esc(value){
@@ -2146,8 +2124,14 @@ async function postJson(url, payload){
     credentials: 'same-origin',
     body: JSON.stringify(payload || {})
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || data.message || response.statusText);
+    error.status = response.status;
+    error.code = data.error || '';
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 function requestHeaders(headers){
@@ -2164,17 +2148,6 @@ function apiEndpoint(namespace, name){
 }
 function apiUrl(namespace, name, params){
   const endpoint = apiEndpoint(namespace, name);
-  if (!params) return endpoint;
-  const query = params instanceof URLSearchParams ? params.toString() : String(params || '');
-  return query ? `${endpoint}?${query}` : endpoint;
-}
-function legacyEndpoint(name){
-  const endpoint = apiEndpoint('legacy', name);
-  if (!LEGACY_API_ALLOWLIST.has(endpoint)) throw new Error(`Legacy API endpoint is not allowlisted: ${name}`);
-  return endpoint;
-}
-function legacyUrl(name, params){
-  const endpoint = legacyEndpoint(name);
   if (!params) return endpoint;
   const query = params instanceof URLSearchParams ? params.toString() : String(params || '');
   return query ? `${endpoint}?${query}` : endpoint;
@@ -2693,12 +2666,6 @@ function loadCustomPresets(){
 }
 function persistCustomPresets(){
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
-  fetch(legacyEndpoint('presets'), {
-    method: 'POST',
-    headers: requestHeaders({'Content-Type': 'application/json'}),
-    credentials: 'same-origin',
-    body: JSON.stringify({custom: state.customPresets})
-  }).catch(() => {});
 }
 function mergeCustomPresets(remote, metadata){
   const result = { finder: {}, common: {} };
@@ -2794,8 +2761,11 @@ function hasSystemPreset(target, name){
   return Boolean(systemPresetMeta(target, name) || (state.systemPresets[target] || {})[name]);
 }
 function mergePresetResponse(data){
-  mergeCustomPresets((data || {}).custom || {}, (data || {}).metadata || {});
-  mergeSystemPresets((data || {}).system || {}, (data || {}).system_metadata || {});
+  const payload = data || {};
+  mergeCustomPresets(payload.custom || {}, payload.metadata || {});
+  mergeSystemPresets(payload.system || {}, payload.system_metadata || {});
+  if (payload.domain_sets && typeof payload.domain_sets === 'object') state.domainSets = payload.domain_sets;
+  if (payload.builtin && typeof payload.builtin === 'object') state.domainSources = { builtin: payload.builtin };
 }
 function builtInPresets(target){
   const groups = presetGroups(target);
@@ -2963,7 +2933,7 @@ async function fetchStoredPresetDomains(sourceScope, name, kind){
     params.set('include_disabled', '0');
     params.set('limit', '500');
     params.set('offset', String(offset));
-    const data = await getJson(legacyUrl('presetDomains', params));
+    const data = await getJson(apiUrl('web', 'presetDomains', params));
     const rows = Array.isArray(data.domains) ? data.domains : [];
     domains = domains.concat(rows.map((row) => row.domain).filter(Boolean));
     hasMore = Boolean(data.has_more);
@@ -3036,7 +3006,7 @@ async function savePreset(target){
     return;
   }
   try {
-    const data = await postJson(legacyEndpoint('presetSave'), { scope: target, name, domains });
+    const data = await postJson(apiEndpoint('web', 'presetSave'), { scope: target, name, domains });
     mergePresetResponse(data);
     state.customPresets[target][name] = domains;
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
@@ -3061,7 +3031,7 @@ async function deletePreset(target){
   }
   const name = selected.slice('custom:'.length);
   try {
-    const data = await postJson(legacyEndpoint('presetDeleteUserLists'), { scope: target, name });
+    const data = await postJson(apiEndpoint('web', 'presetDeleteUserLists'), { scope: target, name });
     delete state.customPresets[target][name];
     mergePresetResponse(data);
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
@@ -4401,8 +4371,6 @@ function renderBackups(){
 }
 function backupCard(item){
   const id = String(item.id || '');
-  const files = Array.isArray(item.files) ? item.files : [];
-  const visibleFiles = files.filter((file) => !String(file.path || '').endsWith('checksums.sha256') && String(file.path || '') !== 'manifest.json');
   return `<article class="backup-card">
     <div class="domain-header">
       <div>
@@ -4416,17 +4384,9 @@ function backupCard(item){
       <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
     </div>
     <div class="backup-card-actions">
-      <a class="backup-archive-link" href="${backupDownloadUrl(id, 'archive')}">Скачать архив</a>
+      <a class="backup-archive-link" href="${backupDownloadUrl(id)}">Скачать архив</a>
       <button class="secondary danger" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
       <button class="secondary danger" data-backup-delete="${esc(id)}" type="button">Удалить бекап</button>
-    </div>
-    <div class="backup-downloads">
-      <div class="backup-download-block">
-        <div class="backup-section-title">Файлы бекапа</div>
-        <div class="backup-file-links">
-          ${visibleFiles.map((file) => `<a href="${backupDownloadUrl(id, file.path)}">${esc(file.path)}</a>`).join('')}
-        </div>
-      </div>
     </div>
   </article>`;
 }
@@ -4438,19 +4398,17 @@ function normalizeBackupSnapshot(item){
     id: snapshotId,
     checksum_ok: Object.prototype.hasOwnProperty.call(item, 'checksum_ok') ? Boolean(item.checksum_ok) : item.checksum === 'ok',
     strategy_count: Number(item.strategy_count ?? counts.strategies ?? 0),
-    preset_count: Number(item.preset_count ?? counts.domain_lists ?? 0),
-    files: Array.isArray(item.files) ? item.files : []
+    preset_count: Number(item.preset_count ?? counts.domain_lists ?? 0)
   };
 }
 function backupListFromPayload(data){
   const items = Array.isArray((data || {}).snapshots) ? data.snapshots : (Array.isArray((data || {}).backups) ? data.backups : []);
   return items.map((item) => normalizeBackupSnapshot(item || {})).filter((item) => item.id);
 }
-function backupDownloadUrl(snapshot, file){
+function backupDownloadUrl(snapshot){
   const params = new URLSearchParams();
-  params.set('snapshot', snapshot);
-  params.set('file', file);
-  return requestUrl(legacyUrl('backupDownload', params));
+  params.set('snapshot_id', snapshot);
+  return requestUrl(apiUrl('core', 'backupsDownloadArchive', params));
 }
 function formatBytes(value){
   const bytes = Number(value || 0);
@@ -4972,7 +4930,7 @@ async function updateFromRelease(){
   try {
     const planParams = new URLSearchParams();
     planParams.set('channel', channel);
-    const planData = await getJson(legacyUrl('releaseUpdatePlan', planParams));
+    const planData = await getJson(apiUrl('service', 'installPlan', planParams));
     const plan = (planData || {}).plan || {};
     state.releaseInfo = plan.release || state.releaseInfo;
     if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
@@ -5233,7 +5191,7 @@ async function savePresetEditor(){
     const preview = await buildPresetEditorPreview();
     if (!preview) return;
     const domains = presetEditorDomains();
-    const data = await postJson(legacyEndpoint('presetSave'), { scope: preview.scope, name: preview.name, kind: preview.kind, domains });
+    const data = await postJson(apiEndpoint('web', 'presetSave'), { scope: preview.scope, name: preview.name, kind: preview.kind, domains });
     mergePresetResponse(data);
     if (preview.kind === 'system') {
       if (!state.systemPresets[preview.scope]) state.systemPresets[preview.scope] = {};
@@ -5265,7 +5223,7 @@ async function deletePresetEditor(){
     return;
   }
   try {
-    const data = await postJson(legacyEndpoint('presetDeleteUserLists'), { scope, name });
+    const data = await postJson(apiEndpoint('web', 'presetDeleteUserLists'), { scope, name });
     if (state.customPresets[scope]) delete state.customPresets[scope][name];
     mergePresetResponse(data);
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
@@ -5305,7 +5263,7 @@ async function savePresetNew(){
     return;
   }
   try {
-    const data = await postJson(legacyEndpoint('presetSave'), { scope, name, domains });
+    const data = await postJson(apiEndpoint('web', 'presetSave'), { scope, name, domains });
     mergePresetResponse(data);
     if (!state.customPresets[scope]) state.customPresets[scope] = {};
     state.customPresets[scope][name] = domains;
@@ -5369,6 +5327,40 @@ async function loadV2flyCategories(refreshCatalog){
     setV2flyLocalError(`Не удалось прочитать локальный каталог v2fly: ${error.message}`);
   }
 }
+async function fetchV2flyCategoryDomains(categories){
+  let domains = [];
+  for (const category of categories) {
+    const params = new URLSearchParams();
+    params.set('category', category);
+    const data = await getJson(apiUrl('core', 'v2flyCategoryDomains', params));
+    domains = domains.concat(Array.isArray(data.domains) ? data.domains : []);
+  }
+  return uniqueDomains(domains);
+}
+async function buildV2flyClientPreview(payload, domains){
+  const cleanDomains = uniqueDomains(domains);
+  let existing = [];
+  if (payload.name && hasCustomPreset('finder', payload.name)) {
+    existing = await fetchAllPresetDomains('finder', payload.name);
+  }
+  const existingSet = new Set(existing);
+  const incomingSet = new Set(cleanDomains);
+  return {
+    scope: 'finder',
+    preset: payload.name,
+    kind: 'user',
+    coverage_note: true,
+    categories: payload.categories,
+    sources: {},
+    skipped: {},
+    domains: cleanDomains,
+    count: cleanDomains.length,
+    existing_count: existing.length,
+    added: cleanDomains.filter((domain) => !existingSet.has(domain)),
+    removed: existing.filter((domain) => !incomingSet.has(domain)),
+    unchanged_count: existing.filter((domain) => incomingSet.has(domain)).length
+  };
+}
 async function previewV2flyPreset(){
   const payload = v2flyPayload();
   if (!payload.name) {
@@ -5386,10 +5378,11 @@ async function previewV2flyPreset(){
   state.v2flyPreview = { loading: true, message: 'Загружаю домены выбранной группы...' };
   renderV2flyPreview();
   try {
-    const data = await postJson(legacyEndpoint('v2flyPreview'), payload);
-    state.v2flyPreview = data;
-    if (Array.isArray(data.domains)) {
-      el('v2fly-domains').value = data.domains.join('\\n');
+    const domains = await fetchV2flyCategoryDomains(payload.categories);
+    const preview = await buildV2flyClientPreview(payload, domains);
+    state.v2flyPreview = preview;
+    if (Array.isArray(preview.domains)) {
+      el('v2fly-domains').value = preview.domains.join('\\n');
       updateEditorLineNumbers('v2fly-domains');
     }
     renderV2flyPreview();
@@ -5415,22 +5408,25 @@ async function importV2flyPreset(){
   state.v2flyPreview = { loading: true, message: 'Сохраняю доменный пресет...' };
   renderV2flyPreview();
   try {
-    const data = await postJson(legacyEndpoint('v2flyImport'), payload);
-    state.v2flyPreview = data;
+    const domains = payload.domains.length ? payload.domains : await fetchV2flyCategoryDomains(payload.categories);
+    const preview = await buildV2flyClientPreview(payload, domains);
+    const data = await postJson(apiEndpoint('web', 'presetSave'), { scope: 'finder', name: payload.name, domains: preview.domains });
+    state.v2flyPreview = preview;
     mergePresetResponse(data);
-    if (data.preset) {
-      state.presetManager.scope = 'finder';
-      state.presetManager.name = data.preset;
-    }
+    if (!state.customPresets.finder) state.customPresets.finder = {};
+    state.customPresets.finder[payload.name] = preview.domains;
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(state.customPresets));
+    state.presetManager.scope = 'finder';
+    state.presetManager.name = payload.name;
     renderPresetSelects();
     renderPresetManager();
-    if (Array.isArray(data.domains)) {
-      el('v2fly-domains').value = data.domains.join('\\n');
+    if (Array.isArray(preview.domains)) {
+      el('v2fly-domains').value = preview.domains.join('\\n');
       updateEditorLineNumbers('v2fly-domains');
     }
     renderV2flyPreview();
-    if (data.preset) await loadPresetEditorFromSelection({ silent: true });
-    setMessage(`Пресет сохранен: ${data.count || 0} доменов`, 'good');
+    await loadPresetEditorFromSelection({ silent: true });
+    setMessage(`Пресет сохранен: ${preview.count || 0} доменов`, 'good');
   } catch (error) {
     setV2flyLocalError(`Ошибка сохранения v2fly: ${error.message}`);
   }
@@ -5746,7 +5742,7 @@ async function refreshLog(incremental = false){
 }
 async function refreshPresets(){
   try {
-    const presets = await getJson(legacyEndpoint('presets'));
+    const presets = await getJson(apiEndpoint('web', 'presets'));
     mergePresetResponse(presets);
     renderPresetSelects();
     renderPresetManager();
@@ -5773,7 +5769,7 @@ function startRealtimeEvents(){
     return;
   }
   if (realtimeSource) realtimeSource.close();
-  realtimeSource = new EventSource(legacyEndpoint('events'));
+  realtimeSource = new EventSource(apiEndpoint('web', 'eventsStream'));
   realtimeSource.addEventListener('open', () => {
     realtimeConnected = true;
   });
@@ -5798,15 +5794,13 @@ function startRealtimeFallback(){
 function refreshRequestMap(light){
   const bootstrap = !light || !state.status;
   const requests = {
-    status: getJson(legacyEndpoint('status')),
+    status: getJson(apiEndpoint('core', 'status')),
     finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0))),
     finderLog: getJson(apiEndpoint('core', 'latestLog'))
   };
   if (bootstrap) {
-    requests.domainSets = getJson(legacyEndpoint('strategyFinderDomains'));
-    requests.presets = getJson(legacyEndpoint('presets'));
+    requests.presets = getJson(apiEndpoint('web', 'presets'));
     requests.settings = fetchSettingsPayload();
-    requests.domainSources = getJson(legacyEndpoint('domainSources'));
   }
   return { bootstrap, requests };
 }
@@ -5839,10 +5833,6 @@ async function refresh(options = {}){
       if (finderLog.progress) finderLog.progress.received_at_ms = Date.now();
       state.finderLog = finderLog;
     }
-    const domainSets = settledValue(results, 'domainSets');
-    if (domainSets) state.domainSets = domainSets;
-    const domainSources = settledValue(results, 'domainSources');
-    if (domainSources) state.domainSources = domainSources;
     const presets = settledValue(results, 'presets');
     if (presets) mergePresetResponse(presets);
     if (bootstrap) renderAll({ skipCandidates: true });
@@ -5890,6 +5880,10 @@ async function createBackup(){
     }
     await refreshBackups();
   } catch (error) {
+    if (isRuntimeBusyError(error)) {
+      setMessage(backupBusyMessage('create'), 'warn');
+      return;
+    }
     setMessage(`Ошибка создания бекапа: ${error.message}`, 'bad');
   }
 }
@@ -5911,6 +5905,10 @@ async function restoreBackup(snapshotId){
       if (state.activeTab === 'candidates') ensureCandidateViewLoaded();
     }
   } catch (error) {
+    if (isRuntimeBusyError(error)) {
+      setMessage(backupBusyMessage('restore'), 'warn');
+      return;
+    }
     setMessage(`Ошибка восстановления бекапа: ${error.message}`, 'bad');
   }
 }
@@ -5930,8 +5928,21 @@ async function deleteBackup(snapshotId){
       await refreshBackups();
     }
   } catch (error) {
+    if (isRuntimeBusyError(error)) {
+      setMessage(backupBusyMessage('delete'), 'warn');
+      return;
+    }
     setMessage(`Ошибка удаления бекапа: ${error.message}`, 'bad');
   }
+}
+function isRuntimeBusyError(error){
+  return Boolean(error && error.status === 409 && (error.code === 'runtime_busy' || error.message === 'runtime_busy'));
+}
+function backupBusyMessage(action){
+  if (action === 'restore') return 'Подбор идет. Восстановление можно выполнить после остановки или завершения';
+  if (action === 'delete') return 'Подбор идет. Бекап можно удалить после остановки или завершения';
+  if (action === 'upload') return 'Подбор идет. Загрузку бекапа можно выполнить после остановки или завершения';
+  return 'Подбор идет. Бекап можно создать после остановки или завершения';
 }
 async function uploadBackup(){
   const input = el('backup-upload-file');
@@ -5948,7 +5959,13 @@ async function uploadBackup(){
       body: file
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || response.statusText);
+    if (!response.ok) {
+      if (response.status === 409 && data.error === 'runtime_busy') {
+        setMessage(backupBusyMessage('upload'), 'warn');
+        return;
+      }
+      throw new Error(data.error || data.message || response.statusText);
+    }
     setMessage('Бекап загружен и проверен', 'good');
     input.value = '';
     await refreshBackups();

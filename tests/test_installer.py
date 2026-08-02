@@ -8,7 +8,11 @@ class InstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        cls.installer = (root / "scripts" / "install-raspberry-pi.sh").read_text(encoding="utf-8")
+        cls.installer = (root / "scripts" / "install-linux.sh").read_text(encoding="utf-8")
+        cls.bootstrap = (root / "scripts" / "bootstrap-linux.sh").read_text(encoding="utf-8")
+        cls.legacy_installer = (root / "scripts" / "install-raspberry-pi.sh").read_text(encoding="utf-8")
+        cls.legacy_bootstrap = (root / "scripts" / "bootstrap-raspberry-pi.sh").read_text(encoding="utf-8")
+        cls.zapret_installer = (root / "scripts" / "install-zapret2.sh").read_text(encoding="utf-8")
         cls.helper = (root / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
 
     def test_installer_configures_root_helper(self) -> None:
@@ -26,6 +30,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("GP_INSTALL_FORCE_CLEAN", self.helper)
         self.assertIn("safe.directory", self.helper)
         self.assertIn("repo_git", self.installer)
+        self.assertIn("install-linux.sh", self.helper)
+        self.assertIn("install-raspberry-pi.sh", self.helper)
         self.assertIn('installed_ref="\\$(git', self.helper)
         self.assertIn('echo "installed_ref=\\$installed_ref"', self.helper)
         self.assertIn("awk '{print \\$NF}'", self.helper)
@@ -37,7 +43,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertNotIn("/var/tmp/*/gp-multidomain-blockcheck.sh", self.helper)
         self.assertIn("write_multidomain_runner", self.helper)
-        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-latest-stable}"', self.installer)
         self.assertIn("validate_state_dir()", self.helper)
         self.assertIn('state_dir="$(validate_state_dir "${3:-$install_dir/build/state}")"', self.helper)
         self.assertIn('log_dir="$state_dir/release-updates"', self.helper)
@@ -70,17 +76,29 @@ class InstallerTests(unittest.TestCase):
         self.assertLess(bootstrap_pos, installer_pos)
 
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
-        self.assertIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
+        self.assertIn('BRANCH="${GP_BRANCH:-latest-stable}"', self.installer)
+        self.assertIn("resolve_install_ref()", self.installer)
+        self.assertIn('latest|stable|latest-stable)', self.installer)
+        self.assertIn('git ls-remote --tags --refs "$REPO_URL" "v*"', self.installer)
+        self.assertIn("grep -E '^v[0-9]+([.][0-9]+)*$'", self.installer)
+        self.assertIn("Latest stable GP release: $BRANCH", self.installer)
         self.assertNotIn('BRANCH="${GP_BRANCH:-main}"', self.installer)
+        self.assertNotIn('BRANCH="${GP_BRANCH:-v0.3.4}"', self.installer)
         self.assertIn('repo_git fetch origin "$BRANCH" || true', self.installer)
         self.assertIn('repo_git fetch origin "+refs/tags/$BRANCH:refs/tags/$BRANCH" || true', self.installer)
         self.assertIn('repo_git checkout -B "$BRANCH" "origin/$BRANCH"', self.installer)
         self.assertIn('repo_git checkout --detach "$BRANCH"', self.installer)
         self.assertIn('fail "Cannot find branch or tag: $BRANCH"', self.installer)
 
+    def test_legacy_raspberry_script_names_forward_to_linux_scripts(self) -> None:
+        self.assertIn("install-linux.sh", self.legacy_installer)
+        self.assertIn("bootstrap-linux.sh", self.legacy_bootstrap)
+
     def test_installer_service_uses_install_dir_state_and_memory_limits(self) -> None:
         self.assertIn("GP_SERVICE_MEMORY_HIGH", self.installer)
         self.assertIn("GP_SERVICE_MEMORY_MAX", self.installer)
+        self.assertIn("GP_INSTALL_CONFIG", self.installer)
+        self.assertIn("set -a", self.installer)
         self.assertIn("MemoryAccounting=true", self.installer)
         self.assertIn("MemoryHigh=$SERVICE_MEMORY_HIGH", self.installer)
         self.assertIn("MemoryMax=$SERVICE_MEMORY_MAX", self.installer)
@@ -131,6 +149,38 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("install_luajit_dev_package", self.installer)
         self.assertIn("LuaJIT development package was not found", self.installer)
         self.assertNotIn("apt-get install -y libluajit2-5.1-dev \\", self.installer)
+
+    def test_installer_does_not_run_full_apt_upgrade(self) -> None:
+        for script in (self.installer, self.bootstrap):
+            self.assertNotIn("GP_APT_UPGRADE", script)
+            self.assertNotIn("APT_UPGRADE", script)
+            self.assertNotIn("apt_upgrade_enabled()", script)
+            self.assertNotIn("apt-get -y upgrade", script)
+            self.assertNotIn("apt-get upgrade", script)
+        self.assertIn("as_root apt-get update", self.installer)
+        self.assertIn("apt-get install -y", self.installer)
+
+    def test_bootstrap_installs_minimal_dependencies_and_runs_stable_installer(self) -> None:
+        self.assertIn('INSTALL_REF="${GP_BRANCH:-latest-stable}"', self.bootstrap)
+        self.assertIn("GP_INSTALL_CONFIG", self.bootstrap)
+        self.assertIn("set -a", self.bootstrap)
+        self.assertIn('RAW_BASE_URL="${GP_RAW_BASE_URL:-https://github.com/balbomush/GP-access-control-plane/raw}"', self.bootstrap)
+        self.assertIn("as_root apt-get update", self.bootstrap)
+        self.assertIn("apt-get install -y ca-certificates curl git", self.bootstrap)
+        self.assertIn('git ls-remote --tags --refs "$REPO_URL" "v*"', self.bootstrap)
+        self.assertIn("grep -E '^v[0-9]+([.][0-9]+)*$'", self.bootstrap)
+        self.assertIn('export GP_BRANCH="$INSTALL_REF"', self.bootstrap)
+        self.assertIn('installer_url="$RAW_BASE_URL/$INSTALL_REF/scripts/install-linux.sh"', self.bootstrap)
+        self.assertIn('legacy_installer_url="$RAW_BASE_URL/$INSTALL_REF/scripts/install-raspberry-pi.sh"', self.bootstrap)
+        self.assertIn('curl -LfsS "$installer_url" -o "$tmp_installer"', self.bootstrap)
+        self.assertIn('curl -LfsS "$legacy_installer_url" -o "$tmp_installer"', self.bootstrap)
+        self.assertIn('bash "$tmp_installer" "$@"', self.bootstrap)
+
+    def test_zapret2_installer_is_short_standalone_script(self) -> None:
+        self.assertIn('ZAPRET_REPO_URL="${ZAPRET_REPO_URL:-https://github.com/bol-van/zapret2.git}"', self.zapret_installer)
+        self.assertIn("apt-get install -y git bsdextrautils", self.zapret_installer)
+        self.assertIn('git clone --branch "$ZAPRET_BRANCH" "$ZAPRET_REPO_URL" "$ZAPRET_DIR"', self.zapret_installer)
+        self.assertIn("./install_bin.sh", self.zapret_installer)
 
     def test_installer_supports_one_command_and_individual_steps(self) -> None:
         self.assertIn('REQUESTED_STEPS="${GP_INSTALL_STEPS:-all}"', self.installer)
