@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .. import __version__, core_api, service_api
+from ..auth import AuthenticationError, PasswordValidationError, change_password, health_payload, login, require_bearer_token
 from ..backups import (
     create_snapshot_if_idle,
     delete_snapshot_if_idle,
@@ -86,7 +87,7 @@ from .docs import (
     openapi_json_bytes,
     swagger_ui_html,
 )
-from .routes import JSON_GET_ROUTE_PATHS, JSON_HEAD_ROUTE_PATHS, JSON_POST_ROUTE_PATHS
+from .routes import JSON_GET_ROUTE_PATHS, JSON_HEAD_ROUTE_PATHS, JSON_POST_ROUTE_PATHS, route_for
 
 
 MAX_BACKUP_UPLOAD_BYTES = BACKUP_UPLOAD_MAX_BYTES
@@ -129,6 +130,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def do_GET(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
+            if not self._authorize_api(path):
+                return
             query = parse_qs(parsed_url.query)
             if path == "/":
                 if ui_enabled:
@@ -156,6 +159,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
 
         def _json_get_routes(self, query: dict[str, list[str]]) -> dict[str, Any]:
             return {
+                "/api/health": health_payload,
                 "/api/core/status": lambda: core_api.status_payload(config),
                 "/api/core/strategy-discovery/current-run-progress": lambda: core_api.current_progress_payload(config),
                 "/api/core/strategy-discovery/current-run-latest-log": lambda: _latest_log_payload(config, query),
@@ -203,6 +207,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
 
         def do_HEAD(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
+            if not self._authorize_api(path):
+                return
             if path == "/":
                 if ui_enabled:
                     data = index_html().encode("utf-8")
@@ -228,6 +234,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def do_POST(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
             path = parsed_url.path
+            if not self._authorize_api(path):
+                return
             if path == "/api/core/backups/upload":
                 try:
                     if has_active_runtime(config.output.state_dir):
@@ -341,6 +349,16 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 )
 
             return {
+                "/api/auth/login": (
+                    lambda: (login(config.output.state_dir, payload), HTTPStatus.OK),
+                    HTTPStatus.UNAUTHORIZED,
+                    HTTPStatus.BAD_REQUEST,
+                ),
+                "/api/auth/change-password": (
+                    lambda: (change_password(config.output.state_dir, payload), HTTPStatus.OK),
+                    HTTPStatus.UNAUTHORIZED,
+                    HTTPStatus.BAD_REQUEST,
+                ),
                 "/api/core/strategy-discovery/stop-current-run": (stop_current_run, HTTPStatus.CONFLICT, HTTPStatus.CONFLICT),
                 "/api/core/strategy-discovery/start-run": (start_strategy_discovery, HTTPStatus.CONFLICT, HTTPStatus.BAD_REQUEST),
                 "/api/core/presets/save-domain-list": (
@@ -394,6 +412,12 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             handler, error_status, value_error_status = route
             try:
                 payload, status = handler()
+            except AuthenticationError as exc:
+                self._auth_error(exc)
+                return
+            except PasswordValidationError as exc:
+                self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
             except RuntimeBusyError:
                 self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
                 return
@@ -434,18 +458,22 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
+            authorization = self.headers.get("Authorization")
             previous: dict[str, str] = {}
             heartbeat_at = 0.0
             while True:
                 try:
+                    self._require_stream_authorization(authorization)
                     for event_name, payload in _event_payloads(config).items():
                         try:
                             fingerprint = _event_fingerprint(payload)
                             if previous.get(event_name) == fingerprint:
                                 continue
                             previous[event_name] = fingerprint
+                            self._require_stream_authorization(authorization)
                             self._event(event_name, payload)
                         except (TypeError, ValueError) as exc:
+                            self._require_stream_authorization(authorization)
                             self._event(
                                 "event-error",
                                 {
@@ -456,16 +484,25 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                             )
                     now = time.monotonic()
                     if now - heartbeat_at >= 15:
+                        self._require_stream_authorization(authorization)
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                         heartbeat_at = now
                     time.sleep(1)
                 except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                     return
+                except AuthenticationError:
+                    self.close_connection = True
+                    return
                 except Exception as exc:  # noqa: BLE001
                     try:
+                        self._require_stream_authorization(authorization)
                         self._event("event-error", {"error": "event-loop", "message": str(exc)})
-                    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    except (AuthenticationError, BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                        self.close_connection = True
+                        return
+                    except Exception:  # noqa: BLE001
+                        self.close_connection = True
                         return
                     time.sleep(1)
 
@@ -475,6 +512,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
             self.wfile.flush()
 
+        @staticmethod
+        def _require_stream_authorization(authorization: str | None) -> None:
+            require_bearer_token(config.output.state_dir, authorization)
+
         def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
@@ -482,6 +523,29 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _authorize_api(self, path: str) -> bool:
+            if not path.startswith("/api/"):
+                return True
+            route = route_for(self.command, path)
+            if route and not route.auth_required:
+                return True
+            try:
+                require_bearer_token(config.output.state_dir, self.headers.get("Authorization"))
+            except AuthenticationError as exc:
+                self._auth_error(exc)
+                return False
+            return True
+
+        def _auth_error(self, error: AuthenticationError) -> None:
+            data = json.dumps({"error": str(error)}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.send_response(HTTPStatus.UNAUTHORIZED)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
 
         def _request_upload_bytes(self) -> bytes:
             try:

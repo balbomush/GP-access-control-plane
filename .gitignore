@@ -18,6 +18,7 @@ build/
 bin/
 dist/
 tmp/
+.venv/
 __pycache__/
 .pytest_cache/
 *.egg-info/

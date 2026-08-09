@@ -35,6 +35,24 @@ def index_html() -> str:
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
 .shell { min-height: 100vh; }
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-card {
+  width: min(100%, 400px);
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .3);
+}
+.login-card h1 { font-size: 22px; }
+.login-error { min-height: 20px; color: var(--red); font-size: 13px; }
 .topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
 .topbar-inner {
   max-width: 1240px;
@@ -1514,7 +1532,25 @@ pre {
 </style>
 </head>
 <body>
-<div class="shell">
+<section class="login-screen" id="login-screen" aria-labelledby="login-title" hidden>
+  <form class="login-card" id="login-form">
+    <div class="brand">
+      <h1 id="login-title">GP Control Plane</h1>
+      <div class="subtitle">???????, ????? ?????????? ?????? ? ???????.</div>
+    </div>
+    <div class="field">
+      <label for="login-username">?????</label>
+      <input id="login-username" name="username" autocomplete="username" value="admin" required>
+    </div>
+    <div class="field">
+      <label for="login-password">??????</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" value="admin" required>
+    </div>
+    <div class="login-error" id="login-error" role="alert" aria-live="polite"></div>
+    <button type="submit">?????</button>
+  </form>
+</section>
+<div class="shell" id="app-shell" hidden>
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">
@@ -1524,6 +1560,7 @@ pre {
       <div class="topbar-badges">
         <span class="topbar-version" id="app-version-badge">v-</span>
       </div>
+        <button class="secondary" data-action="logout" type="button">?????</button>
     </div>
   </header>
   <main class="main">
@@ -1929,6 +1966,25 @@ pre {
               <input id="settings-curl-max" type="number" min="1" value="10">
               <div class="setting-note">Верхняя граница для запуска параллельных проверочных запросов. Можно ставить любое число от 1, если плата и сеть справляются.</div>
             </div>
+        <form class="preset-panel settings-password-panel" id="change-password-form">
+          <div class="panel-header">
+            <h2>?????? ??????????????</h2>
+          </div>
+          <div class="preset-grid">
+            <div class="field">
+              <label for="settings-current-password">??????? ??????</label>
+              <input id="settings-current-password" name="current_password" type="password" autocomplete="current-password" required>
+            </div>
+            <div class="field">
+              <label for="settings-new-password">????? ??????</label>
+              <input id="settings-new-password" name="new_password" type="password" autocomplete="new-password" required>
+              <div class="setting-note">??????????? ????? ? 8 ???????? ????????? ??????.</div>
+            </div>
+          </div>
+          <div class="button-row">
+            <button data-action="change-password" type="submit">???????? ??????</button>
+          </div>
+        </form>
           </div>
           <div class="button-row">
             <button data-action="save-settings" type="button">Сохранить настройки</button>
@@ -2029,11 +2085,14 @@ const jobNames = {
   'multi-domain-discovery': 'Все домены на одной стратегии'
 };
 const statusTone = { success: 'good', failed: 'bad', error: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
+const AUTH_TOKEN_KEY = 'gp-control-plane-auth-token';
 let toastTimer = null;
 let refreshInFlight = false;
 let realtimeSource = null;
 let realtimeConnected = false;
 let realtimeFallbackTimer = null;
+let realtimeReconnectTimer = null;
+let realtimeReconnectDelay = 1000;
 let logDirty = false;
 let candidateRefreshTimer = null;
 let candidateRequestSeq = 0;
@@ -2113,15 +2172,14 @@ function showToast(text, tone){
   }, 2000);
 }
 async function getJson(url){
-  const response = await fetch(url, { headers: requestHeaders(), credentials: 'same-origin' });
+  const response = await authFetch(url);
   if (!response.ok) throw new Error(await response.text());
   return await response.json();
 }
 async function postJson(url, payload){
-  const response = await fetch(url, {
+  const response = await authFetch(url, {
     method: 'POST',
     headers: requestHeaders({'Content-Type': 'application/json'}),
-    credentials: 'same-origin',
     body: JSON.stringify(payload || {})
   });
   const data = await response.json().catch(() => ({}));
@@ -2134,13 +2192,120 @@ async function postJson(url, payload){
   }
   return data;
 }
+function authToken(){
+  return localStorage.getItem(AUTH_TOKEN_KEY) || '';
+}
 function requestHeaders(headers){
-  return { ...(headers || {}) };
+  const token = authToken();
+  return {
+    ...(headers || {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
+  };
 }
 function requestUrl(url){
   return url;
 }
-function apiEndpoint(namespace, name){
+function storeAuthToken(payload){
+  const token = String((payload || {}).access_token || (payload || {}).token || '').trim();
+  if (!token) throw new Error('The server did not return an authorization token');
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+  return token;
+}
+function showLogin(message){
+  el('app-shell').hidden = true;
+  el('login-screen').hidden = false;
+  el('login-error').textContent = message || '';
+  requestAnimationFrame(() => el('login-username').focus());
+}
+function showApplication(){
+  el('login-screen').hidden = true;
+  el('app-shell').hidden = false;
+}
+function stopRealtimeEvents(){
+  if (realtimeReconnectTimer) clearTimeout(realtimeReconnectTimer);
+  realtimeReconnectTimer = null;
+  if (realtimeSource) realtimeSource.abort();
+  realtimeSource = null;
+  realtimeConnected = false;
+}
+function renewRealtimeEvents(){
+  stopRealtimeEvents();
+  realtimeReconnectDelay = 1000;
+  startRealtimeEvents({ alreadyStopped: true });
+}function stopRealtimeFallback(){
+  if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);
+  realtimeFallbackTimer = null;
+}
+function handleUnauthorized(){
+  if (!authToken()) return;
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  stopRealtimeEvents();
+  stopRealtimeFallback();
+  showLogin('Your session has expired. Sign in again.');
+}
+function logout(){
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  stopRealtimeEvents();
+  stopRealtimeFallback();
+  showLogin();
+}
+async function authFetch(url, options){
+  const request = options || {};
+  const response = await fetch(url, {
+    ...request,
+    headers: requestHeaders(request.headers),
+    credentials: 'same-origin'
+  });
+  if (response.status === 401) handleUnauthorized();
+  return response;
+}
+function startAuthenticatedUi(){
+  showApplication();
+  refresh();
+  startRealtimeEvents();
+  startRealtimeFallback();
+}
+async function submitLogin(event){
+  event.preventDefault();
+  const errorNode = el('login-error');
+  const form = el('login-form');
+  const button = form.querySelector('button[type="submit"]');
+  errorNode.textContent = '';
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ username: el('login-username').value, password: el('login-password').value })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || data.message || 'Unable to sign in');
+    storeAuthToken(data);
+    startAuthenticatedUi();
+  } catch (error) {
+    errorNode.textContent = error.message || 'Unable to sign in';
+  } finally {
+    button.disabled = false;
+  }
+}
+async function changePassword(){
+  const currentPassword = el('settings-current-password').value;
+  const newPassword = el('settings-new-password').value;
+  try {
+    const data = await postJson('/api/auth/change-password', {
+      current_password: currentPassword,
+      new_password: newPassword
+    });
+    storeAuthToken(data);
+    renewRealtimeEvents();
+    el('settings-current-password').value = '';
+    el('settings-new-password').value = '';
+    setMessage('Password changed. Session refreshed.', 'good');
+  } catch (error) {
+    setMessage(`Password change failed: ${error.message}`, 'bad');
+  }
+}function apiEndpoint(namespace, name){
   const group = API_ENDPOINTS[namespace] || {};
   const endpoint = group[name];
   if (!endpoint) throw new Error(`Unknown API endpoint: ${namespace}.${name}`);
@@ -4384,7 +4549,7 @@ function backupCard(item){
       <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
     </div>
     <div class="backup-card-actions">
-      <a class="backup-archive-link" href="${backupDownloadUrl(id)}">Скачать архив</a>
+      <button class="backup-archive-link" data-backup-download="${esc(id)}" type="button">Download archive</button>
       <button class="secondary danger" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
       <button class="secondary danger" data-backup-delete="${esc(id)}" type="button">Удалить бекап</button>
     </div>
@@ -4410,7 +4575,27 @@ function backupDownloadUrl(snapshot){
   params.set('snapshot_id', snapshot);
   return requestUrl(apiUrl('core', 'backupsDownloadArchive', params));
 }
-function formatBytes(value){
+async function downloadBackup(url, snapshotId){
+  const id = String(snapshotId || '').trim();
+  try {
+    const response = await authFetch(url);
+    if (!response.ok) throw new Error((await response.text()) || response.statusText);
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const filenameMatch = /filename="?([^";]+)"?/i.exec(disposition);
+    const filename = filenameMatch ? filenameMatch[1] : `gp-backup-${id || 'archive'}.zip`;
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  } catch (error) {
+    setMessage(`Archive download failed: ${error.message}`, 'bad');
+  }
+}function formatBytes(value){
   const bytes = Number(value || 0);
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 Б';
   if (bytes < 1024) return `${bytes} Б`;
@@ -5763,27 +5948,87 @@ function handleLogEvent(){
 function handleStatusEvent(payload){
   mergeStatusPayload(payload);
 }
-function startRealtimeEvents(){
-  if (!('EventSource' in window)) {
-    realtimeConnected = false;
-    return;
+function parseSseEvent(frame){
+  let event = 'message';
+  const data = [];
+  for (const line of frame.split(/\\r?\\n/)) {
+    if (!line || line.startsWith(':')) continue;
+    const separator = line.indexOf(':');
+    const field = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
+    if (field === 'event') event = value;
+    if (field === 'data') data.push(value);
   }
-  if (realtimeSource) realtimeSource.close();
-  realtimeSource = new EventSource(apiEndpoint('web', 'eventsStream'));
-  realtimeSource.addEventListener('open', () => {
+  return { event, data: data.join('\\n') };
+}
+function sseJson(data){
+  try { return JSON.parse(data || '{}'); }
+  catch (_error) { return {}; }
+}
+function handleRealtimeEvent(event, data){
+  if (event === 'status') handleStatusEvent(sseJson(data));
+  if (event === 'runs') refreshRuns();
+  if (event === 'log') handleLogEvent();
+  if (event === 'candidates') handleCandidateEvent(sseJson(data));
+  if (event === 'settings' && state.status) renderSettings();
+  if (event === 'presets') refreshPresets();
+}
+async function readRealtimeStream(response, signal){
+  if (!response.body) throw new Error('SSE stream is unavailable');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (!signal.aborted) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const frames = buffer.split(/\\r?\\n\\r?\\n/);
+      buffer = frames.pop() || '';
+      for (const frame of frames) {
+        const parsed = parseSseEvent(frame);
+        if (parsed.data) handleRealtimeEvent(parsed.event, parsed.data);
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+function scheduleRealtimeReconnect(){
+  if (!authToken() || realtimeReconnectTimer) return;
+  const delay = realtimeReconnectDelay;
+  realtimeReconnectDelay = Math.min(realtimeReconnectDelay * 2, 30000);
+  realtimeReconnectTimer = setTimeout(() => {
+    realtimeReconnectTimer = null;
+    startRealtimeEvents();
+  }, delay);
+}
+async function connectRealtimeEvents(controller){
+  try {
+    const response = await authFetch(apiEndpoint('web', 'eventsStream'), {
+      headers: { Accept: 'text/event-stream' },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(response.statusText || 'SSE connection failed');
+    if (controller.signal.aborted) return;
     realtimeConnected = true;
-  });
-  realtimeSource.addEventListener('error', () => {
+    realtimeReconnectDelay = 1000;
+    await readRealtimeStream(response, controller.signal);
+  } catch (error) {
+    if (!controller.signal.aborted) console.warn('Realtime connection stopped', error);
+  } finally {
+    if (realtimeSource === controller) realtimeSource = null;
     realtimeConnected = false;
-  });
-  realtimeSource.addEventListener('status', (event) => handleStatusEvent(JSON.parse(event.data || '{}')));
-  realtimeSource.addEventListener('runs', () => refreshRuns());
-  realtimeSource.addEventListener('log', () => handleLogEvent());
-  realtimeSource.addEventListener('candidates', (event) => handleCandidateEvent(JSON.parse(event.data || '{}')));
-  realtimeSource.addEventListener('settings', () => {
-    if (state.status) renderSettings();
-  });
-  realtimeSource.addEventListener('presets', () => refreshPresets());
+    if (!controller.signal.aborted) scheduleRealtimeReconnect();
+  }
+}
+function startRealtimeEvents(options){
+  const alreadyStopped = Boolean(options && options.alreadyStopped);
+  if (!alreadyStopped) stopRealtimeEvents();
+  if (!authToken()) return;
+  const controller = new AbortController();
+  realtimeSource = controller;
+  connectRealtimeEvents(controller);
 }
 function startRealtimeFallback(){
   if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);
@@ -5952,7 +6197,7 @@ async function uploadBackup(){
     return;
   }
   try {
-    const response = await fetch(apiEndpoint('core', 'backupsUpload'), {
+    const response = await authFetch(apiEndpoint('core', 'backupsUpload'), {
       method: 'POST',
       headers: requestHeaders({ 'Content-Type': 'application/zip' }),
       credentials: 'same-origin',
@@ -6033,7 +6278,16 @@ async function stopCurrentJob(){
     await refresh();
   }
 }
-document.addEventListener('click', (event) => {
+document.addEventListener('submit', (event) => {
+  if (event.target && event.target.id === 'login-form') {
+    submitLogin(event);
+    return;
+  }
+  if (event.target && event.target.id === 'change-password-form') {
+    event.preventDefault();
+    changePassword();
+  }
+});document.addEventListener('click', (event) => {
   const domainSummary = event.target.closest('details.domain-group[data-domain] > summary');
   if (domainSummary) {
     event.preventDefault();
@@ -6051,9 +6305,18 @@ document.addEventListener('click', (event) => {
     }
     return;
   }
-  const button = event.target.closest('button');
+const button = event.target.closest('button');
   if (!button) return;
   const action = button.dataset.action || '';
+  if (button.dataset.backupDownload) {
+    const snapshotId = button.dataset.backupDownload;
+    downloadBackup(backupDownloadUrl(snapshotId), snapshotId);
+    return;
+  }
+  if (action === 'logout') {
+    logout();
+    return;
+  }
   const protectedMutation = MUTATING_ACTIONS.has(action) || Boolean(button.dataset.backupRestore) || Boolean(button.dataset.backupDelete);
   if (protectedMutation && !requireNoActiveRun()) return;
   if (button.dataset.commonDomainSuggestion) {
@@ -6394,9 +6657,8 @@ document.addEventListener('toggle', (event) => {
     state.openRunDomains[details.dataset.runDomains] = details.open;
   }
 }, true);
-refresh();
-startRealtimeEvents();
-startRealtimeFallback();
+if (authToken()) startAuthenticatedUi();
+else showLogin();
 </script>
 </body></html>
 """

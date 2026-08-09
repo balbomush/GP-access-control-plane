@@ -197,9 +197,10 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("postJson('/api/backups/delete'", html)
         self.assertNotIn("fetch('/api/backups/upload'", html)
         self.assertIn("app-version-badge", html)
-        self.assertIn("requestHeaders", html)
+        self.assertIn("authFetch", html)
+        self.assertIn("Authorization: `Bearer ${token}`", html)
         self.assertIn("requestUrl", html)
-        self.assertNotIn("authHeaders", html)
+        self.assertIn("AUTH_TOKEN_KEY", html)
         self.assertNotIn("authUrl", html)
         self.assertNotIn("web-auth-badge", html)
         self.assertNotIn("WEB_AUTH", html)
@@ -553,7 +554,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("служба с повышенными правами", html)
         self.assertIn("metric-job-card", html)
         self.assertIn("/api/web/events/stream", html)
-        self.assertIn("new EventSource(apiEndpoint('web', 'eventsStream'))", html)
+        self.assertIn("authFetch(apiEndpoint('web', 'eventsStream')", html)
+        self.assertIn("response.body.getReader()", html)
+        self.assertNotIn("new EventSource(", html)
         self.assertIn("startRealtimeEvents", html)
         self.assertIn("startRealtimeFallback", html)
         self.assertIn("stdout_size", html)
@@ -1194,7 +1197,7 @@ class WebUiTests(unittest.TestCase):
             time.sleep(0.1)
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.request("GET", "/api/diagnostics")
+            connection.request("GET", "/api/diagnostics", headers=_authenticated_headers(port))
             response = connection.getresponse()
             body = response.read().decode("utf-8")
             connection.close()
@@ -1228,7 +1231,7 @@ class WebUiTests(unittest.TestCase):
             time.sleep(0.1)
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.request("GET", "/api/web/events")
+            connection.request("GET", "/api/web/events", headers=_authenticated_headers(port))
             response = connection.getresponse()
             body = response.read().decode("utf-8")
             connection.close()
@@ -1322,7 +1325,13 @@ class WebUiTests(unittest.TestCase):
                     openapi_contract["paths"]["/api/core/backups/download-archive"]["get"]["operationId"],
                 )
                 self.assertNotIn("jsonSchemaDialect", openapi_contract)
-                self.assertNotIn("securitySchemes", openapi_contract["components"])
+                self.assertEqual(
+                    {"type": "http", "scheme": "bearer", "bearerFormat": "opaque"},
+                    openapi_contract["components"]["securitySchemes"]["bearerAuth"],
+                )
+                self.assertEqual([{"bearerAuth": []}], openapi_contract["security"])
+                self.assertEqual([], openapi_contract["paths"]["/api/health"]["get"]["security"])
+                self.assertEqual([], openapi_contract["paths"]["/api/auth/login"]["post"]["security"])
                 self.assertEqual([{"url": "/"}], [{"url": server["url"]} for server in openapi_contract["servers"]])
                 self.assertNotIn("localhost", openapi_text)
                 self.assertNotIn("127.0.0.1:8081", openapi_text)
@@ -1535,6 +1544,7 @@ class WebUiTests(unittest.TestCase):
                         else:
                             raw_body = None
                         request_headers = dict(headers)
+                        request_headers.setdefault("Authorization", _bearer_authorization_for_state(config.output.state_dir))
                         if raw_body is not None and "Content-Type" not in request_headers:
                             request_headers["Content-Type"] = "application/json"
                         status, response_headers, body = _http_request(
@@ -1599,6 +1609,9 @@ class WebUiTests(unittest.TestCase):
                 time.sleep(0.1)
 
                 cases = [
+                    ("GET", "/api/health", None, {}),
+                    ("POST", "/api/auth/login", {"username": "admin", "password": "admin"}, {}),
+                    ("POST", "/api/auth/change-password", {"current_password": "admin", "new_password": "short"}, {}),
                     ("GET", "/api/core/status", None, {}),
                     ("POST", "/api/core/strategy-discovery/start-run", {"mode": "bad", "domains": ["youtube.com"]}, {}),
                     ("POST", "/api/core/strategy-discovery/stop-current-run", {"dry_run": True}, {}),
@@ -2192,6 +2205,7 @@ class WebUiTests(unittest.TestCase):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             port = _free_port()
+            authorization = _bearer_authorization_for_state(config.output.state_dir)
             with mock.patch.object(web_app, "MAX_JSON_REQUEST_BYTES", 10):
                 thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
                 thread.start()
@@ -2202,7 +2216,7 @@ class WebUiTests(unittest.TestCase):
                     "/api/core/run-settings/save",
                     method="POST",
                     body=b'{"settings":{"curl_parallelism_max":99}}',
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": authorization},
                 )
 
             self.assertEqual(status, 413)
@@ -2373,6 +2387,7 @@ class WebUiTests(unittest.TestCase):
             core_port = _free_port()
             web_port = _free_port()
             core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+            authorization = _bearer_authorization_for_state(config.output.state_dir)
             with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 10):
                 web_thread = threading.Thread(
                     target=serve_web_proxy,
@@ -2390,7 +2405,7 @@ class WebUiTests(unittest.TestCase):
                     "/api/core/run-settings/save",
                     method="POST",
                     body=b'{"curl_parallelism_default":17}',
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": authorization},
                 )
 
             self.assertEqual(status, 413)
@@ -2449,13 +2464,14 @@ class WebUiTests(unittest.TestCase):
             )
             thread.start()
             _wait_for_server(web_port, "/")
+            protected_headers = {"Authorization": _bearer_authorization_for_state(config.output.state_dir)}
 
             openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json")
             swagger_status, swagger_headers, swagger_body = _http_request(web_port, "/swagger")
-            core_status, _, core_body = _http_request(web_port, "/api/core/status")
-            web_status, web_headers, web_body = _http_request(web_port, "/api/web/run-preferences")
-            legacy_status, legacy_headers, legacy_body = _http_request(web_port, "/api/status")
-            unknown_status, unknown_headers, unknown_body = _http_request(web_port, "/api/unknown")
+            core_status, _, core_body = _http_request(web_port, "/api/core/status", headers=protected_headers)
+            web_status, web_headers, web_body = _http_request(web_port, "/api/web/run-preferences", headers=protected_headers)
+            legacy_status, legacy_headers, legacy_body = _http_request(web_port, "/api/status", headers=protected_headers)
+            unknown_status, unknown_headers, unknown_body = _http_request(web_port, "/api/unknown", headers=protected_headers)
 
             self.assertEqual(openapi_status, 200)
             self.assertEqual(openapi_headers.get("content-type"), "application/json; charset=utf-8")
@@ -2483,6 +2499,7 @@ class WebUiTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             unused_core_port = _free_port()
             web_port = _free_port()
+            authorization = _bearer_authorization_for_state(config.output.state_dir)
             with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 8):
                 thread = threading.Thread(
                     target=serve_web_proxy,
@@ -2502,6 +2519,7 @@ class WebUiTests(unittest.TestCase):
                     ("POST", "/api/service/not-a-route", b'{"oversized":true}', {"Content-Type": "application/json"}),
                 )
                 for method, path, request_body, request_headers in cases:
+                    request_headers["Authorization"] = authorization
                     status, response_headers, response_body = _http_request(
                         web_port,
                         path,
@@ -2516,39 +2534,27 @@ class WebUiTests(unittest.TestCase):
                     self.assertNotIn("core api is unavailable", response_body.decode("utf-8"), message)
                     self.assertNotIn("request body is too large", response_body.decode("utf-8"), message)
 
-    def test_deferred_web_auth_env_does_not_require_token(self) -> None:
+    def test_protected_api_requires_bearer_token_before_app_logic(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            config = AppConfig(
-                output=OutputConfig(
-                    state_dir=tmp / "state",
-                ),
-            )
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             port = _free_port()
-            with mock.patch.dict(os.environ, {"GP_WEB_AUTH": "on", "GP_WEB_TOKEN": "secret-token"}):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
+            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+            thread.start()
+            _wait_for_server(port, "/api/health")
 
-                body = json.dumps({"settings": {"curl_parallelism_max": 17}})
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request("POST", "/api/core/run-settings/save", body=body, headers={"Content-Type": "application/json"})
-                response = connection.getresponse()
-                saved = response.read().decode("utf-8")
-                connection.close()
+            anonymous_status, anonymous_headers, anonymous_body = _http_request(
+                port,
+                "/api/core/backups/list",
+                authenticated=False,
+            )
+            self.assertEqual(anonymous_status, 401)
+            self.assertEqual(anonymous_headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertEqual({"error": "missing bearer token"}, json.loads(anonymous_body.decode("utf-8")))
 
-                self.assertEqual(response.status, 200)
-                self.assertIn('"curl_parallelism_max":17', saved)
-
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request("GET", "/api/core/backups/list")
-                response = connection.getresponse()
-                body = response.read().decode("utf-8")
-                connection.close()
-
-            self.assertEqual(response.status, 200)
-            self.assertIn('"backups"', body)
-
+            status, _headers, body = _http_request(port, "/api/core/backups/list")
+            self.assertEqual(status, 200)
+            self.assertIn('"backups"', body.decode("utf-8"))
     def test_web_events_stream_endpoint_streams_sse_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -2557,22 +2563,22 @@ class WebUiTests(unittest.TestCase):
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            server = _start_captured_server(serve, config)
+            connection = response = None
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+                connection.request("GET", "/api/web/events/stream", headers=_authenticated_headers(server.port))
+                response = connection.getresponse()
+                first_line = response.readline().decode("utf-8").strip()
+                second_line = response.readline().decode("utf-8").strip()
 
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.request("GET", "/api/web/events/stream")
-            response = connection.getresponse()
-            first_line = response.readline().decode("utf-8").strip()
-            second_line = response.readline().decode("utf-8").strip()
-            connection.close()
-
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
-            self.assertEqual(first_line, "event: status")
-            self.assertTrue(second_line.startswith("data:"))
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+                self.assertEqual(first_line, "event: status")
+                self.assertTrue(second_line.startswith("data:"))
+            finally:
+                _close_sse_stream(connection, response)
+                server.close()
 
     def test_core_and_web_events_have_separate_payloads_and_cursors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2664,7 +2670,7 @@ class WebUiTests(unittest.TestCase):
                     }
                 }
             )
-            connection.request("POST", "/api/core/run-settings/save", body=body, headers={"Content-Type": "application/json"})
+            connection.request("POST", "/api/core/run-settings/save", body=body, headers=_authenticated_headers(port, {"Content-Type": "application/json"}))
             response = connection.getresponse()
             saved = response.read().decode("utf-8")
             connection.close()
@@ -2685,7 +2691,7 @@ class WebUiTests(unittest.TestCase):
                 "POST",
                 "/api/service/releases/set-install-channel",
                 body=service_body,
-                headers={"Content-Type": "application/json"},
+                headers=_authenticated_headers(port, {"Content-Type": "application/json"}),
             )
             service_response = connection.getresponse()
             service_saved = service_response.read().decode("utf-8")
@@ -2866,7 +2872,7 @@ class WebUiTests(unittest.TestCase):
                     "POST",
                     "/api/core/strategy-discovery/start-run",
                     body=body,
-                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    headers=_authenticated_headers(port, {"Content-Type": "application/json", "Accept": "application/json"}),
                 )
                 response = connection.getresponse()
                 raw_response = response.read().decode("utf-8")
@@ -3066,7 +3072,7 @@ class WebUiTests(unittest.TestCase):
                     }
                 }
             )
-            connection.request("POST", "/api/web/run-preferences", body=body, headers={"Content-Type": "application/json"})
+            connection.request("POST", "/api/web/run-preferences", body=body, headers=_authenticated_headers(port, {"Content-Type": "application/json"}))
             response = connection.getresponse()
             saved = response.read().decode("utf-8")
             connection.close()
@@ -3079,7 +3085,7 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn('"settings_preset"', saved)
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.request("GET", "/api/web/run-preferences")
+            connection.request("GET", "/api/web/run-preferences", headers=_authenticated_headers(port))
             response = connection.getresponse()
             status = response.read().decode("utf-8")
             connection.close()
@@ -3105,7 +3111,7 @@ class WebUiTests(unittest.TestCase):
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps({"scope": "finder", "name": "mine", "domains": ["youtube.com", "discord.com", "discordcdn.com"]})
-            connection.request("POST", "/api/web/presets/save", body=body, headers={"Content-Type": "application/json"})
+            connection.request("POST", "/api/web/presets/save", body=body, headers=_authenticated_headers(port, {"Content-Type": "application/json"}))
             response = connection.getresponse()
             saved = response.read().decode("utf-8")
             connection.close()
@@ -3113,7 +3119,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"mine"', saved)
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.request("GET", "/api/web/presets/domains?scope=finder&name=mine&limit=2")
+            connection.request("GET", "/api/web/presets/domains?scope=finder&name=mine&limit=2", headers=_authenticated_headers(port))
             response = connection.getresponse()
             page = response.read().decode("utf-8")
             connection.close()
@@ -3136,7 +3142,7 @@ class WebUiTests(unittest.TestCase):
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps({"scope": "finder", "name": "required", "kind": "system", "domains": []})
-            connection.request("POST", "/api/web/presets/save", body=body, headers={"Content-Type": "application/json"})
+            connection.request("POST", "/api/web/presets/save", body=body, headers=_authenticated_headers(port, {"Content-Type": "application/json"}))
             response = connection.getresponse()
             saved = response.read().decode("utf-8")
             connection.close()
@@ -3148,7 +3154,7 @@ class WebUiTests(unittest.TestCase):
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps({"scope": "finder", "name": "mine", "domains": ["youtube.com"]})
-            connection.request("POST", "/api/web/presets/save", body=body, headers={"Content-Type": "application/json"})
+            connection.request("POST", "/api/web/presets/save", body=body, headers=_authenticated_headers(port, {"Content-Type": "application/json"}))
             response = connection.getresponse()
             response.read()
             connection.close()
@@ -3160,7 +3166,7 @@ class WebUiTests(unittest.TestCase):
                 "POST",
                 "/api/web/presets/delete-user-lists",
                 body=body,
-                headers={"Content-Type": "application/json"},
+                headers=_authenticated_headers(port, {"Content-Type": "application/json"}),
             )
             response = connection.getresponse()
             deleted = response.read().decode("utf-8")
@@ -3207,7 +3213,7 @@ class WebUiTests(unittest.TestCase):
                     }
                 }
             )
-            connection.request("POST", "/api/discovery-profiles", body=body, headers={"Content-Type": "application/json"})
+            connection.request("POST", "/api/discovery-profiles", body=body, headers=_authenticated_headers(port, {"Content-Type": "application/json"}))
             response = connection.getresponse()
             saved = response.read().decode("utf-8")
             connection.close()
@@ -3215,6 +3221,73 @@ class WebUiTests(unittest.TestCase):
             self.assertIn(response.status, {404, 405})
             self.assertNotIn('"night-test"', saved)
             self.assertNotIn("Changed built-in", saved)
+
+
+class _CapturedTestServer:
+    def __init__(self, port: int, server: Any, thread: threading.Thread) -> None:
+        self.port = port
+        self._server = server
+        self._thread = thread
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise AssertionError(f"server thread did not stop on port {self.port}")
+
+
+def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _CapturedTestServer:
+    port = _free_port()
+    module = sys.modules[function.__module__]
+    server_type = getattr(module, "ThreadingHTTPServer")
+    server_created = threading.Event()
+    server_holder: dict[str, Any] = {}
+    startup_errors: list[BaseException] = []
+
+    class CapturingThreadingHTTPServer(server_type):
+        def __init__(self, *args: Any, **server_kwargs: Any) -> None:
+            super().__init__(*args, **server_kwargs)
+            server_holder["server"] = self
+            server_created.set()
+
+    def run() -> None:
+        try:
+            function(config, "127.0.0.1", port, **kwargs)
+        except BaseException as error:
+            startup_errors.append(error)
+            server_created.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    with mock.patch.object(module, "ThreadingHTTPServer", CapturingThreadingHTTPServer):
+        thread.start()
+        if not server_created.wait(timeout=5):
+            raise AssertionError(f"server on port {port} did not construct")
+
+    if startup_errors:
+        raise AssertionError(f"server on port {port} failed during startup") from startup_errors[0]
+    server = server_holder.get("server")
+    if server is None:
+        raise AssertionError(f"server on port {port} was not captured")
+    captured = _CapturedTestServer(port, server, thread)
+    try:
+        _wait_for_server(port, "/api/health")
+    except BaseException:
+        captured.close()
+        raise
+    return captured
+
+
+def _close_sse_stream(
+    connection: http.client.HTTPConnection | None, response: http.client.HTTPResponse | None
+) -> None:
+    try:
+        if response is not None:
+            response.close()
+    finally:
+        if connection is not None:
+            connection.close()
+
 
 
 def _free_port() -> int:
@@ -3284,17 +3357,20 @@ def _http_request(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
     timeout: float = 5,
+    authenticated: bool = True,
 ) -> tuple[int, dict[str, str], bytes]:
+    request_headers = dict(headers or {})
+    if authenticated and _requires_bearer_token(path):
+        request_headers = _authenticated_headers(port, request_headers)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request(method, path, body=body, headers=headers or {})
+        connection.request(method, path, body=body, headers=request_headers)
         response = connection.getresponse()
         response_headers = {key.lower(): value for key, value in response.getheaders()}
         response_body = response.read()
         return response.status, response_headers, response_body
     finally:
         connection.close()
-
 
 def _http_sse_first_event(
     port: int,
@@ -3304,7 +3380,11 @@ def _http_sse_first_event(
 ) -> tuple[int, dict[str, str], str, str]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request("GET", path, headers={"Accept": "text/event-stream"})
+        connection.request(
+            "GET",
+            path,
+            headers={"Accept": "text/event-stream", "Authorization": _bearer_authorization(port, timeout=timeout)},
+        )
         response = connection.getresponse()
         response_headers = {key.lower(): value for key, value in response.getheaders()}
         first_line = response.readline().decode("utf-8").strip()
@@ -3312,6 +3392,49 @@ def _http_sse_first_event(
         return response.status, response_headers, first_line, second_line
     finally:
         connection.close()
+
+
+def _requires_bearer_token(path: str) -> bool:
+    return path.split("?", 1)[0] not in {"/", "/swagger", "/swagger/", "/openapi.json", "/api/health", "/api/auth/login"}
+
+
+_BEARER_AUTHORIZATION_BY_PORT: dict[int, str] = {}
+
+
+def _authenticated_headers(port: int, headers: dict[str, str] | None = None) -> dict[str, str]:
+    request_headers = dict(headers or {})
+    if "Authorization" not in request_headers:
+        request_headers["Authorization"] = _bearer_authorization(port)
+    return request_headers
+
+
+def _bearer_authorization_for_state(state_dir: Path) -> str:
+    from gp_control_plane.auth import login
+
+    token = login(state_dir, {"username": "admin", "password": "admin"})["access_token"]
+    return f"Bearer {token}"
+
+
+def _bearer_authorization(port: int, *, timeout: float = 5) -> str:
+    if token := _BEARER_AUTHORIZATION_BY_PORT.get(port):
+        return token
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request(
+            "POST",
+            "/api/auth/login",
+            body=b'{"username":"admin","password":"admin"}',
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        body = response.read()
+    finally:
+        connection.close()
+    if response.status != 200:
+        raise AssertionError(f"test login failed with HTTP {response.status}: {body.decode('utf-8', errors='replace')}")
+    authorization = f"Bearer {json.loads(body)['access_token']}"
+    _BEARER_AUTHORIZATION_BY_PORT[port] = authorization
+    return authorization
 
 
 def _wait_for_server(port: int, path: str = "/openapi.json", *, timeout: float = 2.0) -> None:

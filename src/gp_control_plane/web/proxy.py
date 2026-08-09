@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ..config import AppConfig
+from ..auth import AuthenticationError, require_bearer_token
 from ..resource_budget import BACKUP_UPLOAD_MAX_BYTES, JSON_REQUEST_MAX_BYTES, PROXY_STREAM_CHUNK_BYTES
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
@@ -34,7 +35,7 @@ PROXY_SKIP_HEADERS = {
 }
 
 
-PROXY_CORE_NAMESPACES = frozenset({"core", "service"})
+PROXY_CORE_NAMESPACES = frozenset({"auth", "core", "service"})
 
 def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -> None:
     core = urlparse(core_url)
@@ -85,6 +86,8 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                     self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, len(data))
                 else:
                     self._bytes(data, OPENAPI_JSON_CONTENT_TYPE, cache_control="no-store")
+                return
+            if not self._authorize_api(path):
                 return
             if path.startswith("/api/web/"):
                 self._serve_web_api()
@@ -264,6 +267,28 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.wfile.write(data)
             self.wfile.flush()
 
+        def _authorize_api(self, path: str) -> bool:
+            if not path.startswith("/api/"):
+                return True
+            route = route_for(self.command, path)
+            if route and not route.auth_required:
+                return True
+            try:
+                require_bearer_token(config.output.state_dir, self.headers.get("Authorization"))
+            except AuthenticationError as exc:
+                self._auth_error(exc)
+                return False
+            return True
+
+        def _auth_error(self, error: AuthenticationError) -> None:
+            data = json.dumps({"error": str(error)}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.send_response(HTTPStatus.UNAUTHORIZED)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
         def _api_not_found(self) -> None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND, close_connection=True)
             self._discard_request_body()
@@ -285,24 +310,36 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
+            authorization = self.headers.get("Authorization")
             previous: dict[str, str] = {}
             heartbeat_at = 0.0
             while True:
                 try:
+                    self._require_stream_authorization(authorization)
                     for event_name, payload in api_runtime.web_event_changes(config, previous):
+                        self._require_stream_authorization(authorization)
                         self._event(event_name, payload)
                     now = time.monotonic()
                     if now - heartbeat_at >= 15:
+                        self._require_stream_authorization(authorization)
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                         heartbeat_at = now
                     time.sleep(1)
                 except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                     return
+                except AuthenticationError:
+                    self.close_connection = True
+                    return
                 except Exception as exc:  # noqa: BLE001
                     try:
+                        self._require_stream_authorization(authorization)
                         self._event("event-error", {"error": "event-loop", "message": str(exc)})
-                    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    except (AuthenticationError, BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                        self.close_connection = True
+                        return
+                    except Exception:  # noqa: BLE001
+                        self.close_connection = True
                         return
                     time.sleep(1)
 
@@ -311,6 +348,10 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             self.wfile.write(f"event: {event_name}\n".encode("utf-8"))
             self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
             self.wfile.flush()
+
+        @staticmethod
+        def _require_stream_authorization(authorization: str | None) -> None:
+            require_bearer_token(config.output.state_dir, authorization)
 
         def _request_json(self) -> dict[str, Any]:
             try:

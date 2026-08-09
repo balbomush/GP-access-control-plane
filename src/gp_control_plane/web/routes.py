@@ -14,6 +14,7 @@ class RouteSpec:
     dispatch: str
     openapi: bool = False
     allowed_in_core: bool = True
+    auth_required: bool = True
 
 
 def route_for(method: str, path: str) -> RouteSpec | None:
@@ -49,6 +50,7 @@ def _route(
     *,
     openapi: bool = False,
     allowed_in_core: bool = True,
+    auth_required: bool = True,
 ) -> RouteSpec:
     return RouteSpec(
         path=path,
@@ -57,6 +59,7 @@ def _route(
         dispatch=dispatch,
         openapi=openapi,
         allowed_in_core=allowed_in_core,
+        auth_required=auth_required,
     )
 
 
@@ -67,6 +70,9 @@ ROUTES = (
         _route(path, {"GET", "HEAD"}, "openapi", "swagger-ui")
         for path in sorted(SWAGGER_PATHS)
     ),
+    _route("/api/health", {"GET", "HEAD"}, "auth", "json-get", openapi=True, auth_required=False),
+    _route("/api/auth/login", {"POST"}, "auth", "json-post", openapi=True, auth_required=False),
+    _route("/api/auth/change-password", {"POST"}, "auth", "json-post", openapi=True),
     _route("/api/core/status", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-discovery/start-run", {"POST"}, "core", "json-post", openapi=True),
     _route("/api/core/strategy-discovery/stop-current-run", {"POST"}, "core", "json-post", openapi=True),
@@ -120,6 +126,6 @@ JSON_POST_ROUTE_PATHS = frozenset(
     spec.path for spec in ROUTES if "POST" in spec.methods and spec.dispatch in {"json-post", "json-get-post"}
 )
 JSON_HEAD_ROUTE_PATHS = frozenset(
-    spec.path for spec in ROUTES if "HEAD" in spec.methods and spec.dispatch in {"manual-json", "json-get-post"}
+    spec.path for spec in ROUTES if "HEAD" in spec.methods and spec.dispatch in {"json-get", "manual-json", "json-get-post"}
 )
 UPLOAD_ROUTE_PATHS = frozenset(spec.path for spec in ROUTES if spec.dispatch == "upload")

@@ -49,6 +49,31 @@ API-контракт доступен здесь:
 
 В headless-only режиме эти маршруты доступны на локальном Core API: `http://127.0.0.1:8081/swagger` и `http://127.0.0.1:8081/openapi.json`. Web/monolith OpenAPI показывает полный контракт, а headless Core OpenAPI показывает только callable Core/Service/OpenAPI операции.
 
+### Безопасность и вход
+
+При первом запуске используйте учетные данные `admin` / `admin`. Сразу после входа обязательно смените пароль: начальные учетные данные известны всем, кто читает эту документацию.
+
+`POST /api/auth/login` выдает Bearer-токен сроком на 24 часа. Например:
+
+```bash
+curl -X POST "$BASE_URL/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}'
+```
+
+Сохраните значение `access_token` из ответа и передайте его при смене пароля:
+
+```bash
+curl -X POST "$BASE_URL/api/auth/change-password" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"current_password":"admin","new_password":"новый-надежный-пароль"}'
+```
+
+Среди API без токена доступны только `GET /api/health` и `POST /api/auth/login`; для всех остальных API-операций требуется заголовок `Authorization: Bearer <access_token>`.
+
+Swagger UI и raw OpenAPI можно открыть без токена. Чтобы выполнить защищенный метод через **Try it out**, сначала укажите Bearer-токен через кнопку **Authorize** в Swagger UI.
+
 ### Конфиг Установки
 
 Для нестандартных параметров создайте env-файл и передайте его через `GP_INSTALL_CONFIG`:

@@ -23,12 +23,12 @@ def openapi_json_path() -> Path:
 
 def openapi_json_bytes(*, core_only: bool = False) -> bytes:
     data = openapi_json_path().read_bytes()
+    contract = _with_bearer_auth_contract(json.loads(data.decode("utf-8")))
     if not core_only:
-        return data
+        return json.dumps(contract, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     from .routes import openapi_operations
 
-    contract = json.loads(data.decode("utf-8"))
     contract["info"] = {**contract.get("info", {}), **CORE_ONLY_OPENAPI_INFO}
     allowed = openapi_operations(core_only=True)
     contract["paths"] = {
@@ -121,3 +121,99 @@ def swagger_ui_html() -> str:
 </html>
 """
 
+
+
+def _with_bearer_auth_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    components = contract.setdefault("components", {})
+    security_schemes = components.setdefault("securitySchemes", {})
+    security_schemes["bearerAuth"] = {"type": "http", "scheme": "bearer", "bearerFormat": "opaque"}
+    schemas = components.setdefault("schemas", {})
+    schemas.update(
+        {
+            "HealthResponse": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {"status": {"type": "string", "example": "ok"}},
+            },
+            "LoginRequest": {
+                "type": "object",
+                "required": ["username", "password"],
+                "properties": {
+                    "username": {"type": "string", "example": "admin"},
+                    "password": {"type": "string", "format": "password"},
+                },
+            },
+            "ChangePasswordRequest": {
+                "type": "object",
+                "required": ["current_password", "new_password"],
+                "properties": {
+                    "current_password": {"type": "string", "format": "password"},
+                    "new_password": {"type": "string", "format": "password", "minLength": 8},
+                },
+            },
+            "BearerToken": {
+                "type": "object",
+                "required": ["access_token", "token_type", "expires_in"],
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "token_type": {"type": "string", "example": "Bearer"},
+                    "expires_in": {"type": "integer", "format": "int32", "example": 86400},
+                },
+            },
+        }
+    )
+    error_response = {"$ref": "#/components/responses/Error"}
+    json_response = lambda schema: {
+        "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{schema}"}}}
+    }
+    paths = contract.setdefault("paths", {})
+    paths.update(
+        {
+            "/api/health": {
+                "get": {
+                    "operationId": "getHealth",
+                    "summary": "Get API health",
+                    "security": [],
+                    "responses": {"200": {"description": "Healthy", **json_response("HealthResponse")}},
+                }
+            },
+            "/api/auth/login": {
+                "post": {
+                    "operationId": "login",
+                    "summary": "Create a bearer token",
+                    "security": [],
+                    "requestBody": {
+                        "required": True,
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}},
+                    },
+                    "responses": {
+                        "200": {"description": "Authenticated", **json_response("BearerToken")},
+                        "401": error_response,
+                    },
+                }
+            },
+            "/api/auth/change-password": {
+                "post": {
+                    "operationId": "changePassword",
+                    "summary": "Change the admin password and rotate bearer tokens",
+                    "requestBody": {
+                        "required": True,
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChangePasswordRequest"}}},
+                    },
+                    "responses": {
+                        "200": {"description": "Password changed", **json_response("BearerToken")},
+                        "400": error_response,
+                        "401": error_response,
+                    },
+                }
+            },
+        }
+    )
+    contract["security"] = [{"bearerAuth": []}]
+    public_operations = {("/api/health", "get"), ("/api/auth/login", "post")}
+    for path, operations in paths.items():
+        for method, operation in operations.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options", "trace"}:
+                continue
+            operation["security"] = [] if (path, method.lower()) in public_operations else [{"bearerAuth": []}]
+    return contract

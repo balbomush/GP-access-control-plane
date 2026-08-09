@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import hashlib
 import threading
@@ -27,6 +28,9 @@ SCHEMA_MIGRATIONS = (
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
 _OMITTED = object()
+_PRIVATE_DIRECTORY_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+_SQLITE_SIDECAR_SUFFIXES = ("", "-wal", "-shm")
 _RUN_PAYLOAD_DROP_KEYS = {
     "summary",
     "common",
@@ -83,17 +87,62 @@ SYSTEM_DOMAIN_PRESET_NAMES = {
 
 
 class ClosingConnection(sqlite3.Connection):
+    def __init__(self, database: str | Path, *args: Any, **kwargs: Any) -> None:
+        super().__init__(database, *args, **kwargs)
+        self._database_path = Path(database)
+
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         try:
             return bool(super().__exit__(exc_type, exc_value, traceback))
         finally:
             self.close()
 
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            _secure_sqlite_files(self._database_path)
+
+
+def _set_private_mode(path: Path, mode: int) -> None:
+    """Restrict a state path on POSIX without changing Windows ACL handling."""
+    if os.name != "posix":
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        # Existing state directories may be managed by another account or filesystem.
+        # Continue operating there rather than breaking an existing installation.
+        pass
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIRECTORY_MODE)
+    _set_private_mode(path, _PRIVATE_DIRECTORY_MODE)
+
+
+def _secure_sqlite_files(path: Path) -> None:
+    _set_private_mode(path.parent, _PRIVATE_DIRECTORY_MODE)
+    for suffix in _SQLITE_SIDECAR_SUFFIXES:
+        _set_private_mode(path.with_name(f"{path.name}{suffix}"), _PRIVATE_FILE_MODE)
+
+
+def _prepare_sqlite_path(path: Path) -> None:
+    if os.name == "posix":
+        # SQLite otherwise creates the database using the process umask. Pre-creating
+        # it ensures its first inode is owner-only even when that umask is permissive.
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, _PRIVATE_FILE_MODE)
+        os.close(descriptor)
+    _secure_sqlite_files(path)
+
 
 def db_path(state_dir: Path) -> Path:
+    _ensure_private_directory(state_dir)
     root = state_dir / "strategy-finder"
-    root.mkdir(parents=True, exist_ok=True)
-    return root / "state.sqlite3"
+    _ensure_private_directory(root)
+    path = root / "state.sqlite3"
+    _prepare_sqlite_path(path)
+    return path
 
 
 def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -111,9 +160,11 @@ def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Conne
             _ensure_system_domain_presets_conn(conn)
             _run_deferred_vacuum(conn, state_dir)
             _MIGRATED_DB_PATHS.add(migration_key)
+            _secure_sqlite_files(path)
             return conn
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
+    _secure_sqlite_files(path)
     return conn
 
 
@@ -1259,6 +1310,27 @@ def read_app_setting(state_dir: Path, key: str) -> Any | None:
         return None
     try:
         return json.loads(str(row["value_json"] or "null"))
+    except json.JSONDecodeError:
+        return None
+
+
+def read_or_create_app_setting(state_dir: Path, key: str, value: Any, updated_at: str) -> Any:
+    clean_key = str(key or "").strip()
+    if not clean_key:
+        raise ValueError("setting key is required")
+    value_json = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    with connect(state_dir) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings(key, value_json, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (clean_key, value_json, str(updated_at or "")),
+        )
+        row = conn.execute("SELECT value_json FROM app_settings WHERE key = ?", (clean_key,)).fetchone()
+    try:
+        return json.loads(str(row["value_json"] or "null")) if row else None
     except json.JSONDecodeError:
         return None
 

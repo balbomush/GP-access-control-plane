@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import sqlite3
+import stat
 import sys
 import tempfile
 import unittest
@@ -34,6 +36,46 @@ from gp_control_plane.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX permission modes are not available on Windows")
+    def test_sqlite_state_paths_are_owner_only_after_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            path = db_path(state_dir)
+
+            with connect(state_dir) as conn:
+                conn.execute("INSERT INTO meta(key, value) VALUES('permission_test', 'created')")
+                conn.commit()
+
+                self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+                for candidate in (path, *(path.with_name(f"{path.name}{suffix}") for suffix in ("-wal", "-shm"))):
+                    self.assertTrue(candidate.exists(), f"SQLite file was not created: {candidate.name}")
+                    self.assertEqual(stat.S_IMODE(candidate.stat().st_mode), 0o600)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission modes are not available on Windows")
+    def test_existing_sqlite_state_paths_are_restricted_on_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            path = db_path(state_dir)
+            with connect(state_dir) as conn:
+                conn.execute("INSERT INTO meta(key, value) VALUES('permission_test', 'existing')")
+                conn.commit()
+                sqlite_files = (path, *(path.with_name(f"{path.name}{suffix}") for suffix in ("-wal", "-shm")))
+                for candidate in sqlite_files:
+                    self.assertTrue(candidate.exists(), f"SQLite file was not created: {candidate.name}")
+
+                state_dir.chmod(0o755)
+                path.parent.chmod(0o755)
+                for candidate in sqlite_files:
+                    candidate.chmod(0o644)
+
+                save_app_setting(state_dir, "permission_test", {"secret": "value"}, "2026-08-09T00:00:00Z")
+
+                self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+                for candidate in sqlite_files:
+                    self.assertEqual(stat.S_IMODE(candidate.stat().st_mode), 0o600)
+
     def test_heavy_query_indexes_exist(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
