@@ -13,16 +13,85 @@ release_update_enabled() {
   esac
 }
 
+read_trusted_env_value() {
+  trusted_env_file="$1"
+  trusted_env_key="$2"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    trusted_env_reader=(awk)
+  else
+    trusted_env_reader=(sudo awk)
+  fi
+
+  "${trusted_env_reader[@]}" -v key="$trusted_env_key" '
+    function decode_single_quoted(value,    length_value, position, character, decoded) {
+      length_value = length(value)
+      if (length_value < 2 || substr(value, 1, 1) != "\047") return ""
+
+      for (position = 2; position <= length_value; position++) {
+        character = substr(value, position, 1)
+        if (character == "\047") {
+          if (position == length_value) {
+            decoded_value = decoded
+            return "ok"
+          }
+          if (substr(value, position + 1, 3) != "\\\047\047") return ""
+          decoded = decoded "\047"
+          position += 3
+        } else {
+          decoded = decoded character
+        }
+      }
+      return ""
+    }
+
+    {
+      sub(/\r$/, "")
+      if (index($0, key "=") != 1) next
+      matches++
+      if (decode_single_quoted(substr($0, length(key) + 2)) != "ok") invalid = 1
+    }
+
+    END {
+      if (invalid || matches > 1) exit 2
+      if (matches == 0) exit 3
+      print decoded_value
+    }
+  ' "$trusted_env_file"
+}
+
+load_trusted_env_values() {
+  trusted_env_file="$1"
+  shift
+
+  for trusted_env_key in "$@"; do
+    case "$trusted_env_key" in
+      GP_INSTALL_USER|GP_INSTALL_DIR|GP_STATE_DIR|GP_SERVICE_NAME|GP_CORE_SERVICE_NAME|GP_INSTALL_WEB|GP_WEB_HOST|GP_WEB_PORT|GP_WEB_ENV_FILE|GP_CORE_HOST|GP_CORE_PORT|GP_CORE_URL|GP_CORE_ENV_FILE|GP_ZAPRET_DIR|GP_ROOT_HELPER_PATH|GP_ROOT_HELPER_CONFIG|GP_ROOT_HELPER_RUN_DIR|GP_SUDOERS_PATH|GP_SERVICE_MEMORY_HIGH|GP_SERVICE_MEMORY_MAX) ;;
+      *) return 2 ;;
+    esac
+
+    if trusted_env_value="$(read_trusted_env_value "$trusted_env_file" "$trusted_env_key")"; then
+      printf -v "$trusted_env_key" '%s' "$trusted_env_value"
+      export "$trusted_env_key"
+    else
+      trusted_env_status=$?
+      [ "$trusted_env_status" -eq 3 ] || return "$trusted_env_status"
+    fi
+  done
+}
+
 if release_update_enabled; then
   if [ -e "$INSTALL_PROFILE" ] || [ -L "$INSTALL_PROFILE" ]; then
     [ -f "$INSTALL_PROFILE" ] && [ ! -L "$INSTALL_PROFILE" ] || { printf '\nERROR: install profile is not a regular file: %s\n' "$INSTALL_PROFILE" >&2; exit 1; }
     profile_uid="$(stat -c '%u' "$INSTALL_PROFILE" 2>/dev/null || true)"
     profile_mode="$(stat -c '%a' "$INSTALL_PROFILE" 2>/dev/null || true)"
     [ "$profile_uid" = "0" ] && [ -n "$profile_mode" ] && [ $((8#$profile_mode & 022)) -eq 0 ] || { printf '\nERROR: install profile must be root-owned and not group/world-writable: %s\n' "$INSTALL_PROFILE" >&2; exit 1; }
-    set -a
-    # shellcheck disable=SC1090
-    . "$INSTALL_PROFILE"
-    set +a
+    load_trusted_env_values "$INSTALL_PROFILE" \
+      GP_INSTALL_USER GP_INSTALL_DIR GP_STATE_DIR GP_SERVICE_NAME GP_CORE_SERVICE_NAME GP_INSTALL_WEB \
+      GP_WEB_HOST GP_WEB_PORT GP_WEB_ENV_FILE GP_CORE_HOST GP_CORE_PORT GP_CORE_URL GP_CORE_ENV_FILE \
+      GP_ZAPRET_DIR GP_ROOT_HELPER_PATH GP_ROOT_HELPER_CONFIG GP_ROOT_HELPER_RUN_DIR GP_SUDOERS_PATH \
+      GP_SERVICE_MEMORY_HIGH GP_SERVICE_MEMORY_MAX \
+      || { printf '\nERROR: cannot safely parse install profile: %s\n' "$INSTALL_PROFILE" >&2; exit 1; }
   else
     LEGACY_PROFILE_CAPTURE=on
   fi
@@ -351,11 +420,14 @@ unit_option() {
 }
 
 load_trusted_service_env() {
-  trusted_root_file "$1" || fail "Cannot safely read service environment: $1"
-  set -a
-  # shellcheck disable=SC1090
-  . "$1"
-  set +a
+  service_env_file="$1"
+  trusted_root_file "$service_env_file" || fail "Cannot safely read service environment: $service_env_file"
+
+  # The legacy EnvironmentFile is root-owned and can be 0640, so read only the
+  # values this installer needs through sudo.  Do not source it: EnvironmentFile
+  # contents are data, not installer shell code.
+  load_trusted_env_values "$service_env_file" GP_INSTALL_DIR GP_STATE_DIR GP_INSTALL_WEB \
+    || fail "Cannot safely parse service environment: $service_env_file"
 }
 
 capture_legacy_install_profile() {

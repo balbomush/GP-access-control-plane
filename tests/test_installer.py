@@ -212,10 +212,13 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('profile_uid="$(stat -c \'%u\' "$INSTALL_PROFILE"', self.installer)
         self.assertIn('profile_mode="$(stat -c \'%a\' "$INSTALL_PROFILE"', self.installer)
         self.assertIn('$((8#$profile_mode & 022)) -eq 0', self.installer)
-        self.assertIn('. "$INSTALL_PROFILE"', self.installer)
+        self.assertIn('load_trusted_env_values "$INSTALL_PROFILE"', self.installer)
+        self.assertIn('read_trusted_env_value()', self.installer)
+        self.assertIn('trusted_env_reader=(sudo awk)', self.installer)
+        self.assertNotIn('. "$INSTALL_PROFILE"', self.installer)
         self.assertNotIn('INSTALL_PROFILE="${GP_INSTALL_PROFILE', self.installer)
 
-        profile_load_pos = self.installer.index('. "$INSTALL_PROFILE"')
+        profile_load_pos = self.installer.index('load_trusted_env_values "$INSTALL_PROFILE"')
         defaults_pos = self.installer.index('REPO_URL="${GP_REPO_URL')
         self.assertLess(profile_load_pos, defaults_pos)
 
@@ -261,6 +264,7 @@ class InstallerTests(unittest.TestCase):
                     "}\n",
                     1,
                 )
+                source = source.replace('if [ "$(id -u)" -eq 0 ]; then', 'if true; then', 1)
                 marker = 'CURRENT_UID="$(id -u)"'
                 replacement = (
                     'if install_web_enabled; then profile_web=enabled; else profile_web=disabled; fi\n'
@@ -298,6 +302,7 @@ class InstallerTests(unittest.TestCase):
                 encoding="utf-8",
                 newline="\n",
             )
+            profile.chmod(0o640)
             write_probe(profile)
 
             accepted = run_probe()
@@ -334,6 +339,12 @@ class InstallerTests(unittest.TestCase):
     def test_installer_writes_profile_only_after_success_and_legacy_capture_skips_reconfiguration(self) -> None:
         self.assertIn('capture_legacy_install_profile()', self.installer)
         self.assertIn('load_trusted_service_env "$CORE_ENV_FILE"', self.installer)
+        trusted_env_start = self.installer.index('load_trusted_service_env() {')
+        trusted_env_end = self.installer.index('\ncapture_legacy_install_profile()', trusted_env_start)
+        trusted_env_loader = self.installer[trusted_env_start:trusted_env_end]
+        self.assertIn('load_trusted_env_values "$service_env_file"', trusted_env_loader)
+        self.assertIn('GP_INSTALL_DIR GP_STATE_DIR GP_INSTALL_WEB', trusted_env_loader)
+        self.assertNotIn('. "$service_env_file"', trusted_env_loader)
         self.assertIn('unit_option "$CORE_SERVICE_NAME" --host', self.installer)
         self.assertIn('log "[root-helper] skipped while capturing the existing install profile"', self.installer)
         self.assertIn('log "[service] skipped while capturing the existing install profile"', self.installer)
@@ -346,6 +357,209 @@ class InstallerTests(unittest.TestCase):
         check_pos = self.installer.index('if step_log check "Checking installation"; then')
         write_pos = self.installer.index('write_install_profile', check_pos)
         self.assertLess(check_pos, write_pos)
+
+    def test_legacy_capture_reads_root_only_service_env_without_sourcing_it(self) -> None:
+        bash = shutil.which("bash")
+        if bash is None:
+            git_bash = Path(os.environ.get("ProgramFiles", r"C:\\Program Files")) / "Git" / "bin" / "bash.exe"
+            if git_bash.is_file():
+                bash = str(git_bash)
+        if bash is None:
+            self.skipTest("bash is required for legacy service environment regression probe")
+
+        with tempfile.TemporaryDirectory() as raw:
+            work_dir = Path(raw)
+            bash_work_dir = subprocess.run(
+                [bash, "-lc", "pwd"],
+                cwd=work_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            def bash_path(path: Path) -> str:
+                return f"{bash_work_dir}/{path.relative_to(work_dir).as_posix()}"
+
+            systemd_dir = work_dir / "systemd"
+            systemd_dir.mkdir()
+            core_env = work_dir / "gp-control-plane-core"
+            core_unit = systemd_dir / "gp-control-plane-core.service"
+            install_profile = work_dir / "install-profile"
+            probe = work_dir / "legacy-capture-probe.sh"
+            fake_bin = work_dir / "fake-bin"
+            fake_sudo = fake_bin / "sudo"
+            fake_id = fake_bin / "id"
+            fake_awk = fake_bin / "awk"
+            sudo_log = work_dir / "sudo.log"
+            direct_awk_log = work_dir / "direct-awk.log"
+            core_env_bash = bash_path(core_env)
+            real_awk = subprocess.run(
+                [bash, "-lc", "command -v awk"],
+                cwd=work_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if real_awk.returncode != 0:
+                self.skipTest("awk is required for legacy service environment regression probe")
+            real_awk_path = real_awk.stdout.strip()
+            core_unit.write_text(
+                "[Service]\n"
+                f"EnvironmentFile=-{core_env_bash}\n"
+                "ExecStart=/opt/gp/.venv/bin/gp-control-plane serve-core --host 127.0.0.9 --port 18081\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            source = self.installer.replace(
+                'INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"',
+                f"INSTALL_PROFILE={shlex.quote(bash_path(install_profile))}",
+                1,
+            ).replace("/etc/systemd/system", shlex.quote(bash_path(systemd_dir)))
+            current_uid_start = source.index('CURRENT_UID="$(id -u)"')
+            as_root_start = source.index('as_root() {', current_uid_start)
+            source = (
+                source[:current_uid_start]
+                + "CURRENT_UID=1000\n"
+                "CURRENT_USER=tester\n"
+                "TARGET_USER=tester\n"
+                "TARGET_HOME=/tmp\n"
+                "TARGET_GROUP=tester\n"
+                "INSTALL_DIR=/initial/install\n"
+                "STATE_DIR=/initial/state\n"
+                "TARGET_BIN_DIR=/tmp/.local/bin\n"
+                "SERVICE_PATH=/tmp/.local/bin\n\n"
+                + source[as_root_start:]
+            )
+            preflight_start = source.index('if [ "$CURRENT_UID" -ne 0 ]; then')
+            trusted_root_start = source.index('trusted_root_file() {', preflight_start)
+            source = (
+                source[:preflight_start]
+                + "need_command() { :; }\n"
+                "log() { :; }\n\n"
+                + source[trusted_root_start:]
+            )
+            capture_marker = 'if [ "$LEGACY_PROFILE_CAPTURE" = on ]; then\n  capture_legacy_install_profile\nfi\n'
+            self.assertIn(capture_marker, source)
+            source = source.replace(
+                capture_marker,
+                capture_marker
+                + 'printf "install_dir=%s state_dir=%s web=%s core=%s:%s\\n" "$INSTALL_DIR" "$STATE_DIR" "$INSTALL_WEB" "$CORE_HOST" "$CORE_PORT"\n'
+                + "exit 0\n",
+                1,
+            )
+            probe.write_text(source, encoding="utf-8", newline="\n")
+            probe.chmod(0o755)
+            fake_bin.mkdir()
+            fake_id.write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"${1:-}\" in\n"
+                "  -u) printf '1000\\n' ;;\n"
+                "  *) exit 98 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_sudo.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "printf '%s\\n' \"$*\" >> \"$GP_TEST_SUDO_LOG\"\n"
+                "if [ \"${GP_TEST_SUDO_FAIL_AWK:-off}\" = on ] && [ \"${1:-}\" = awk ]; then\n"
+                "  exit 75\n"
+                "fi\n"
+                "case \"${1:-}\" in\n"
+                "  stat)\n"
+                "    case \"${3:-}\" in\n"
+                "      %u) printf '0\\n' ;;\n"
+                "      %a) printf '640\\n' ;;\n"
+                "      *) exit 98 ;;\n"
+                "    esac\n"
+                "    ;;\n"
+                "  awk)\n"
+                "    shift\n"
+                "    exec \"$GP_TEST_REAL_AWK\" \"$@\"\n"
+                "    ;;\n"
+                "  *) exec \"$@\" ;;\n"
+                "esac\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_awk.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "case \"$*\" in\n"
+                "  *\"$GP_TEST_CORE_ENV\"*)\n"
+                "    printf 'direct awk was used for the service environment\\n' >> \"$GP_TEST_DIRECT_AWK_LOG\"\n"
+                "    exit 97\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$GP_TEST_REAL_AWK\" \"$@\"\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            for helper in (fake_id, fake_sudo, fake_awk):
+                helper.chmod(0o755)
+
+            def run_probe(*, fail_sudo_awk: bool = False) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [bash, bash_path(probe)],
+                    check=False,
+                    capture_output=True,
+                    env=os.environ
+                    | {
+                        "GP_INSTALL_FORCE_CLEAN": "on",
+                        "GP_TEST_CORE_ENV": core_env_bash,
+                        "GP_TEST_DIRECT_AWK_LOG": bash_path(direct_awk_log),
+                        "GP_TEST_REAL_AWK": real_awk_path,
+                        "GP_TEST_SUDO_FAIL_AWK": "on" if fail_sudo_awk else "off",
+                        "GP_TEST_SUDO_LOG": bash_path(sudo_log),
+                        "PATH": f"{bash_path(fake_bin)}:{os.environ['PATH']}",
+                    },
+                    text=True,
+                )
+
+            core_env.write_text(
+                "GP_INSTALL_DIR='/srv/gp'\\''s'\n"
+                "GP_STATE_DIR='/srv/gp/state'\n"
+                "GP_INSTALL_WEB='off'\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            core_env.chmod(0o640)
+            accepted = run_probe()
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(
+                accepted.stdout.strip(),
+                "install_dir=/srv/gp's state_dir=/srv/gp/state web=off core=127.0.0.9:18081",
+            )
+            sudo_awk_calls = [
+                line for line in sudo_log.read_text(encoding="utf-8").splitlines() if line.startswith("awk ")
+            ]
+            self.assertEqual(len(sudo_awk_calls), 3)
+            self.assertTrue(all(call.startswith("awk -v key=") for call in sudo_awk_calls))
+            self.assertIn("key=GP_INSTALL_DIR", sudo_awk_calls[0])
+            self.assertIn("key=GP_STATE_DIR", sudo_awk_calls[1])
+            self.assertIn("key=GP_INSTALL_WEB", sudo_awk_calls[2])
+            self.assertFalse(direct_awk_log.exists(), "service environment must not fall back to direct awk")
+
+            sudo_failure = run_probe(fail_sudo_awk=True)
+            self.assertNotEqual(sudo_failure.returncode, 0)
+            self.assertIn("Cannot safely parse service environment", sudo_failure.stderr)
+            self.assertFalse(direct_awk_log.exists(), "sudo failure must not fall back to direct awk")
+
+            marker = work_dir / "sourced-marker"
+            core_env.write_text(
+                "GP_INSTALL_DIR='/srv/gp'; touch " + shlex.quote(bash_path(marker)) + "\n"
+                "GP_STATE_DIR='/srv/gp/state'\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            core_env.chmod(0o640)
+            rejected = run_probe()
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("Cannot safely parse service environment", rejected.stderr)
+            self.assertFalse(marker.exists(), "legacy service environment must not be sourced")
+
     def test_root_helper_multidomain_runner_normalizes_empty_ip_list_before_nft(self) -> None:
         self.assertIn("gp_md_normalize_ip_list", self.helper)
         self.assertIn('ips="$(gp_md_normalize_ip_list "$ips")', self.helper)
