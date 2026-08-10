@@ -163,8 +163,13 @@ class WebUiTests(unittest.TestCase):
                     progress_payload = json.loads(
                         _http_request(port, "/api/core/strategy-discovery/current-run-progress")[2].decode("utf-8")
                     )
+                    current_log_payload = json.loads(
+                        _http_request(port, "/api/core/strategy-discovery/current-run-latest-log")[2].decode("utf-8")
+                    )
                     history_payload = json.loads(_http_request(port, "/api/core/runs/history")[2].decode("utf-8"))
-                    log_payload = json.loads(_http_request(port, "/api/core/runs/latest-log")[2].decode("utf-8"))
+                    log_payload = json.loads(
+                        _http_request(port, f"/api/core/runs/latest-log?run_id={run_id}")[2].decode("utf-8")
+                    )
                     stop_status, _stop_headers, stop_body = _http_request(
                         port,
                         "/api/core/strategy-discovery/stop-current-run",
@@ -175,6 +180,7 @@ class WebUiTests(unittest.TestCase):
 
                     self.assertEqual(status_payload["current_run"], {"run_id": run_id, "status": "running"})
                     self.assertEqual(progress_payload["run_id"], run_id)
+                    self.assertEqual(current_log_payload["run_id"], run_id)
                     self.assertEqual(history_payload["runs"][0]["run_id"], run_id)
                     self.assertEqual(log_payload["run_id"], run_id)
                     self.assertEqual(stop_status, 202)
@@ -232,7 +238,6 @@ class WebUiTests(unittest.TestCase):
                     )
                     self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
                     current_run_id = json.loads(body.decode("utf-8"))["run_id"]
-                    self.assertTrue(started.wait(timeout=2))
 
                     current_progress = json.loads(
                         _http_request(port, "/api/core/strategy-discovery/current-run-progress")[2].decode("utf-8")
@@ -240,7 +245,13 @@ class WebUiTests(unittest.TestCase):
                     current_log = json.loads(
                         _http_request(port, "/api/core/strategy-discovery/current-run-latest-log")[2].decode("utf-8")
                     )
-                    history_log = json.loads(_http_request(port, "/api/core/runs/latest-log")[2].decode("utf-8"))
+                    history = json.loads(_http_request(port, "/api/core/runs/history")[2].decode("utf-8"))
+                    requested_log = json.loads(
+                        _http_request(port, f"/api/core/runs/latest-log?run_id={current_run_id}")[2].decode("utf-8")
+                    )
+                    unknown_log = json.loads(
+                        _http_request(port, "/api/core/runs/latest-log?run_id=unknown-run")[2].decode("utf-8")
+                    )
 
                     self.assertEqual(current_progress["run_id"], current_run_id)
                     self.assertEqual(current_progress["stage"], "")
@@ -250,8 +261,12 @@ class WebUiTests(unittest.TestCase):
                     self.assertEqual(current_log["stdout_tail"], "")
                     self.assertEqual(current_log["stderr_tail"], "")
                     self.assertNotEqual(current_log["progress"].get("phase"), "old-phase")
-                    self.assertEqual(history_log["run_id"], "old-run")
-                    self.assertEqual(history_log["stdout_tail"], "old run output")
+                    self.assertIn(current_run_id, [item["run_id"] for item in history["runs"]])
+                    self.assertEqual(requested_log["run_id"], current_run_id)
+                    self.assertEqual(requested_log["stdout_tail"], "")
+                    self.assertEqual(unknown_log["run_id"], "unknown-run")
+                    self.assertEqual(unknown_log["stdout_tail"], "")
+                    self.assertTrue(started.wait(timeout=2))
                 finally:
                     release.set()
 

@@ -29,7 +29,7 @@ gp-control-plane-core.service
 gp-root-helper
 ```
 
-Headless-сценарий устанавливает только `gp-control-plane-core.service`. Штатный Web UI при этом не удаляется из проекта: пользователь может включить его установкой отдельного Web service или подключить собственный UI к Core API после решения auth-модели.
+Headless-сценарий устанавливает только `gp-control-plane-core.service`. Штатный Web UI при этом не удаляется из проекта: пользователь может включить его установкой отдельного Web service или подключить собственный UI к Core API с bearer-аутентификацией.
 
 ## Цели
 
@@ -42,8 +42,8 @@ Headless-сценарий устанавливает только `gp-control-pl
 
 - Не разделять текущий процесс на два systemd-сервиса в коде.
 - Не удалять штатный Web UI.
-- Не вводить новую auth-модель.
-- Не раскрывать Core API наружу без явной настройки пользователя и отдельного решения по авторизации.
+- Не менять модель bearer-аутентификации, уже входящую в контракт.
+- Не включать внешний bind Core API по умолчанию: его по-прежнему задает пользователь явной настройкой.
 - Не делать два разных формата состояния для headless и web.
 - Legacy root-level `/api/...` endpoint'ы удалены в alpha-этапе `WEB-LEGACY-001`; фактический контракт - Swagger/OpenAPI (`/swagger`, `/openapi.json`). Compatibility layer и таблица old-to-new mapping до 1.0 не поддерживаются.
 
@@ -108,7 +108,7 @@ Core API вызывает root-helper через явные команды. Web 
 - `gp-control-plane-core.service`: `127.0.0.1:8081` по умолчанию при установленном Web service.
 - Web service проксирует только зарегистрированные `/api/core/*` и `/api/service/*` routes в Core service; `/api/web/*` и `/openapi.json` обслуживаются Web локально.
 - Legacy/unknown API возвращают локальный 404 без body parsing/forwarding.
-- Headless/non-interactive install может не ставить Web service. Внешний bind для Core API включается только явной настройкой пользователя и после отдельного post-alpha/stable решения auth-модели.
+- Headless/non-interactive install может не ставить Web service. Внешний bind для Core API включается только явной настройкой пользователя; перед открытием API в LAN следует сменить исходный пароль.
 
 Причина такого выбора: пользователь продолжает работать по одному адресу платы, CORS не появляется, Web UI не требует знания второго порта, а headless-сценарий остается возможным.
 
@@ -120,7 +120,25 @@ Core API вызывает root-helper через явные команды. Web 
 | `/api/service/...` | Состояние установленного GP, релизы, service/unit, внешние источники и репозитории. |
 | `/api/web/...` | UI-оптимизированные срезы для штатного Web UI. |
 
-Auth не входит в текущий alpha-контракт: OpenAPI/Swagger сейчас без auth routes и security scheme. Auth/token/password модель будет отдельным post-alpha/stable gate. Разделение `/api/core/public/...` и `/api/core/private/...` не используется; будущая граница доступа должна определяться auth/token-моделью, а не названием URL.
+## Аутентификация И Swagger
+
+Bearer-аутентификация входит в постоянный OpenAPI-контракт и работает одинаково в compatibility, split-runtime и headless Core mode. При новом state-dir исходные учетные данные: `admin` / `admin`. Смените этот пароль до включения внешнего bind Core API.
+
+- `GET /api/health` и `POST /api/auth/login` доступны без токена.
+- `POST /api/auth/login` принимает `username` и `password` и возвращает `access_token`, `token_type: "Bearer"` и `expires_in: 86400`: токен действует 24 часа.
+- Все защищенные зарегистрированные API-операции, включая Core и Service, требуют заголовок `Authorization: Bearer <access_token>`.
+- `POST /api/auth/change-password` также требует bearer-токен. Он принимает текущий пароль и `new_password` длиной не менее 8 символов, возвращает новый токен и делает ранее выданные токены недействительными.
+
+Чтобы выполнить защищенный запрос через Swagger:
+
+1. Откройте `/swagger` и выполните `POST /api/auth/login` через **Try it out** с текущими учетными данными.
+2. Скопируйте из ответа только значение `access_token`.
+3. Нажмите **Authorize**, выберите `bearerAuth` и вставьте это значение без префикса `Bearer`.
+4. Выполняйте защищенные операции: Swagger добавит заголовок `Authorization: Bearer <access_token>` сам. Авторизация сохраняется в Swagger UI для текущего браузера.
+
+В headless-only режиме используйте Swagger по адресу `http://127.0.0.1:8081/swagger` либо обращайтесь к API напрямую с тем же заголовком. Core-only OpenAPI включает callable Core/Service операции, а также маршруты аутентификации и `/openapi.json`.
+
+Разделение `/api/core/public/...` и `/api/core/private/...` не используется: доступ определяется OpenAPI security scheme и требованием токена для конкретной операции, а не названием URL.
 
 Endpoint names должны быть человекочитаемыми. Для action endpoint'ов сохраняется прагматичный POST-action стиль: `POST /save-domain-list`, `POST /delete-user-domain-list`, `POST /check-updates`.
 
@@ -371,14 +389,7 @@ Rollback:
 - постоянный API-контракт - `openapi.json`;
 - `api_inventory.md` является временным черновиком исследования.
 
-Вне текущего alpha-решения:
-
-- точная auth/token/password модель;
-- время жизни токена;
-- список endpoint'ов, доступных без авторизации;
-- внешнее раскрытие Core API в LAN.
-
-Эти решения должны попасть в отдельные planned/ordinary-блоки перед production-разделением сервисов.
+Вне текущего alpha-решения остается только политика внешнего раскрытия Core API в LAN: bearer-аутентификация уже действует, но внешний bind не включается по умолчанию и требует явной настройки пользователя.
 
 ## Минимальная Проверка Перед Переносом В Ordinary
 

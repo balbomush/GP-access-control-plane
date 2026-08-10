@@ -1536,18 +1536,18 @@ pre {
   <form class="login-card" id="login-form">
     <div class="brand">
       <h1 id="login-title">GP Control Plane</h1>
-      <div class="subtitle">???????, ????? ?????????? ?????? ? ???????.</div>
+      <div class="subtitle">Войдите, чтобы продолжить работу с панелью.</div>
     </div>
     <div class="field">
-      <label for="login-username">?????</label>
-      <input id="login-username" name="username" autocomplete="username" value="admin" required>
+      <label for="login-username">Логин</label>
+      <input id="login-username" name="username" autocomplete="username" required>
     </div>
     <div class="field">
-      <label for="login-password">??????</label>
-      <input id="login-password" name="password" type="password" autocomplete="current-password" value="admin" required>
+      <label for="login-password">Пароль</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required>
     </div>
     <div class="login-error" id="login-error" role="alert" aria-live="polite"></div>
-    <button type="submit">?????</button>
+    <button type="submit">Войти</button>
   </form>
 </section>
 <div class="shell" id="app-shell" hidden>
@@ -1560,7 +1560,7 @@ pre {
       <div class="topbar-badges">
         <span class="topbar-version" id="app-version-badge">v-</span>
       </div>
-        <button class="secondary" data-action="logout" type="button">?????</button>
+        <button class="secondary" data-action="logout" type="button">Выйти</button>
     </div>
   </header>
   <main class="main">
@@ -1968,21 +1968,21 @@ pre {
             </div>
         <form class="preset-panel settings-password-panel" id="change-password-form">
           <div class="panel-header">
-            <h2>?????? ??????????????</h2>
+            <h2>Смена пароля</h2>
           </div>
           <div class="preset-grid">
             <div class="field">
-              <label for="settings-current-password">??????? ??????</label>
+              <label for="settings-current-password">Текущий пароль</label>
               <input id="settings-current-password" name="current_password" type="password" autocomplete="current-password" required>
             </div>
             <div class="field">
-              <label for="settings-new-password">????? ??????</label>
+              <label for="settings-new-password">Новый пароль</label>
               <input id="settings-new-password" name="new_password" type="password" autocomplete="new-password" required>
-              <div class="setting-note">??????????? ????? ? 8 ???????? ????????? ??????.</div>
+              <div class="setting-note">Используйте не менее 8 символов.</div>
             </div>
           </div>
           <div class="button-row">
-            <button data-action="change-password" type="submit">???????? ??????</button>
+            <button data-action="change-password" type="submit">Изменить пароль</button>
           </div>
         </form>
           </div>

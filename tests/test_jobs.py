@@ -309,7 +309,8 @@ def _wait_for_idle_state(state_dir: Path) -> dict[str, object]:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         state = read_state(state_dir)
-        if state.get("current_run_id") is None and state.get("last_run_status"):
+        lock_path = state_dir / "job-runner.lock"
+        if state.get("current_run_id") is None and state.get("last_run_status") and not lock_path.exists():
             return state
         time.sleep(0.01)
     raise AssertionError("job did not become idle")

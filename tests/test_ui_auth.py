@@ -15,12 +15,14 @@ import unittest
 import urllib.request
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.web.api_server import serve
+from gp_control_plane.web import api_server
 from gp_control_plane.web.ui import index_html
 
 
@@ -36,9 +38,25 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         end = script.index(end_marker, start)
         return script[start:end]
 
-    def test_login_uses_agreed_endpoint_and_default_admin_credentials(self) -> None:
+    def test_auth_ui_uses_russian_text_without_prefilled_credentials(self) -> None:
         self.assertIn('id="login-form"', self.html)
-        self.assertIn('value="admin"', self.html)
+        for text in (
+            'Войдите, чтобы продолжить работу с панелью.',
+            'Логин',
+            'Пароль',
+            'Войти',
+            'Выйти',
+            'Смена пароля',
+            'Текущий пароль',
+            'Новый пароль',
+            'Используйте не менее 8 символов.',
+            'Изменить пароль',
+        ):
+            self.assertIn(text, self.html)
+        self.assertIn('id="login-username" name="username" autocomplete="username" required', self.html)
+        self.assertIn(
+            'id="login-password" name="password" type="password" autocomplete="current-password" required', self.html
+        )
         self.assertIn("fetch('/api/auth/login'", self.html)
         self.assertIn("method: 'POST'", self.html)
 
@@ -114,11 +132,9 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
     def test_login_auth_fetch_blob_download_and_password_rotation_restart_sse(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            port = _start_server(config)
-            snapshot_id = _create_backup(port)
-
-            with _EdgeCdp(self.edge_executable) as page:
-                page.navigate(f"http://127.0.0.1:{port}/")
+            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+                snapshot_id = _create_backup(server.port)
+                page.navigate(f"http://127.0.0.1:{server.port}/")
                 page.wait_for(
                     "document.readyState === 'complete' && typeof submitLogin === 'function' && document.getElementById('login-form')",
                     "initialized login form",
@@ -130,6 +146,15 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
                       appShellHidden: document.getElementById('app-shell')?.hidden
                     })""",
                 )
+                login_values = page.evaluate(
+                    """
+                    ({
+                      username: document.getElementById('login-username').value,
+                      password: document.getElementById('login-password').value,
+                    })
+                    """
+                )
+                self.assertEqual(login_values, {"username": "", "password": ""})
                 page.evaluate(
                     """
                     document.getElementById('login-username').value = 'admin';
@@ -205,6 +230,49 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
             self.assertTrue(dict(result["sse"][1]["headers"])["authorization"].startswith("Bearer "))
 
 
+class TestServerLifecycleTests(unittest.TestCase):
+    def test_startup_failure_closes_listener_that_binds_during_cleanup(self) -> None:
+        bind_started = threading.Event()
+        allow_bind = threading.Event()
+        original_server = api_server.ThreadingHTTPServer
+
+        class DelayedServer(original_server):
+            def __init__(self, *args: Any, **kwargs: Any):
+                bind_started.set()
+                if not allow_bind.wait(timeout=5):
+                    raise AssertionError("test did not allow the server to bind")
+                super().__init__(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as raw:
+            server = _TestServer(
+                AppConfig(output=OutputConfig(state_dir=Path(raw) / "state")), startup_timeout=0.01
+            )
+            startup_error: list[BaseException] = []
+
+            def start_server() -> None:
+                try:
+                    server.__enter__()
+                except BaseException as error:
+                    startup_error.append(error)
+
+            with patch.object(api_server, "ThreadingHTTPServer", DelayedServer):
+                startup_thread = threading.Thread(target=start_server)
+                startup_thread.start()
+                self.assertTrue(bind_started.wait(timeout=1))
+                self.assertTrue(server._startup_cancelled.wait(timeout=1))
+                allow_bind.set()
+                startup_thread.join(timeout=5)
+
+            self.assertFalse(startup_thread.is_alive())
+            self.assertEqual(1, len(startup_error))
+            self.assertEqual("test server did not bind its HTTP listener", str(startup_error[0]))
+            self.assertIsNotNone(server._server)
+            self.assertIsNotNone(server._thread)
+            self.assertFalse(server._thread.is_alive())
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", server.port))
+
+
 def _edge_executable() -> Path | None:
     program_files_x86 = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
     program_files = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
@@ -217,12 +285,81 @@ def _edge_executable() -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
-def _start_server(config: AppConfig) -> int:
-    port = _free_port()
-    thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-    thread.start()
-    _wait_for_http(f"http://127.0.0.1:{port}/api/health")
-    return port
+class _TestServer:
+    def __init__(self, config: AppConfig, *, startup_timeout: float = 5):
+        self._config = config
+        self._startup_timeout = startup_timeout
+        self.port = _free_port()
+        self._server: Any | None = None
+        self._thread: threading.Thread | None = None
+        self._startup_lock = threading.Lock()
+        self._startup_cancelled = threading.Event()
+        self._serving = threading.Event()
+
+    def __enter__(self) -> "_TestServer":
+        ready = threading.Event()
+        original_server = api_server.ThreadingHTTPServer
+        self._startup_cancelled.clear()
+        self._serving.clear()
+
+        owner = self
+
+        class CapturingServer(original_server):
+            def __init__(self, *args: Any, **kwargs: Any):
+                super().__init__(*args, **kwargs)
+                with owner._startup_lock:
+                    owner._server = self
+                    ready.set()
+                    if owner._startup_cancelled.is_set():
+                        self.server_close()
+                        raise _ServerStartupCancelled()
+
+            def serve_forever(self, *args: Any, **kwargs: Any) -> None:
+                with owner._startup_lock:
+                    if owner._startup_cancelled.is_set():
+                        return
+                    owner._serving.set()
+                super().serve_forever(*args, **kwargs)
+
+        def run_server() -> None:
+            try:
+                serve(self._config, "127.0.0.1", self.port)
+            except _ServerStartupCancelled:
+                return
+
+        with patch.object(api_server, "ThreadingHTTPServer", CapturingServer):
+            try:
+                self._thread = threading.Thread(target=run_server, daemon=True)
+                self._thread.start()
+                if not ready.wait(timeout=self._startup_timeout):
+                    raise AssertionError("test server did not bind its HTTP listener")
+                _wait_for_http(f"http://127.0.0.1:{self.port}/api/health")
+            except BaseException:
+                self._stop()
+                raise
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self._stop()
+
+    def _stop(self) -> None:
+        with self._startup_lock:
+            self._startup_cancelled.set()
+            server = self._server
+            serving = self._serving.is_set()
+
+        if server is not None and serving:
+            server.shutdown()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                raise AssertionError("test server did not stop cleanly")
+        if self._server is not None:
+            self._server.server_close()
+
+
+class _ServerStartupCancelled(Exception):
+    pass
 
 
 def _create_backup(port: int) -> str:

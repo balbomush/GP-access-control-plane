@@ -870,6 +870,7 @@ def _event_fingerprint(payload: Any) -> str:
 def _latest_log_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     return latest_log_tail(
         config.output.state_dir,
+        run_id=_query_one(query, "run_id"),
         stdout_from_size=_query_int(query, "stdout_size", -1),
         stdout_log_match=_query_one(query, "stdout_log"),
         stderr_from_size=_query_int(query, "stderr_size", -1),
