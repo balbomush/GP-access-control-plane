@@ -19,9 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
 from gp_control_plane.state import read_state, write_state
-from gp_control_plane.storage import SCHEMA_VERSION, read_app_setting
+from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
 from gp_control_plane.strategy_finder import upsert_candidates
 from gp_control_plane.web import app as web_app
+from gp_control_plane.web import docs as web_docs
 from gp_control_plane.web import routes as web_routes
 from gp_control_plane.web.app import index_html, serve, serve_core, serve_web_proxy
 
@@ -76,6 +77,14 @@ class WebUiTests(unittest.TestCase):
         for marker in (*LEGACY_UI_API_MARKERS, *LEGACY_API_ROUTE_LITERALS):
             self.assertNotIn(marker, html)
 
+    def assertApiError(self, payload: dict[str, Any], code: str) -> None:
+        self.assertEqual(set(payload), {"error"})
+        error = payload["error"]
+        self.assertIsInstance(error, dict)
+        self.assertEqual(error.get("code"), code)
+        self.assertIsInstance(error.get("message"), str)
+        self.assertEqual(error.get("details"), {})
+
     def test_core_status_reports_sqlite_storage_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
@@ -104,6 +113,160 @@ class WebUiTests(unittest.TestCase):
             storage_status.assert_called_once_with(config.output.state_dir)
             self.assertTrue(payload["storage"]["ready"])
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
+
+    def test_active_run_http_contract_keeps_one_public_run_id_for_ui(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            started = threading.Event()
+            release = threading.Event()
+            log_dir = tmp / "logs"
+            log_dir.mkdir()
+
+            def active_run(_config: AppConfig, _payload: dict[str, Any], stop_event: threading.Event, run_id: str) -> dict[str, str]:
+                stdout_log = log_dir / f"{run_id}.stdout.log"
+                stdout_log.write_text("active run\n", encoding="utf-8")
+                append_run(
+                    config.output.state_dir,
+                    {
+                        "id": run_id,
+                        "kind": "zapret-standard-discovery",
+                        "status": "running",
+                        "timestamp": "2026-08-10T00:00:00Z",
+                        "stdout_log": str(stdout_log),
+                        "progress": {"phase": "strategy_discovery"},
+                    },
+                )
+                started.set()
+                release.wait(timeout=2)
+                return {"id": run_id, "status": "stopped" if stop_event.is_set() else "success"}
+
+            port = _free_port()
+            with mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                _wait_for_server(port, "/openapi.json")
+                try:
+                    status, _headers, body = _http_request(
+                        port,
+                        "/api/core/strategy-discovery/start-run",
+                        method="POST",
+                        body=json.dumps({"mode": "standard", "domains": ["youtube.com"], "protocols": ["tcp"]}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
+                    accepted = json.loads(body.decode("utf-8"))
+                    run_id = accepted["run_id"]
+                    self.assertTrue(started.wait(timeout=2))
+
+                    status_payload = json.loads(_http_request(port, "/api/core/status")[2].decode("utf-8"))
+                    progress_payload = json.loads(
+                        _http_request(port, "/api/core/strategy-discovery/current-run-progress")[2].decode("utf-8")
+                    )
+                    history_payload = json.loads(_http_request(port, "/api/core/runs/history")[2].decode("utf-8"))
+                    log_payload = json.loads(_http_request(port, "/api/core/runs/latest-log")[2].decode("utf-8"))
+                    stop_status, _stop_headers, stop_body = _http_request(
+                        port,
+                        "/api/core/strategy-discovery/stop-current-run",
+                        method="POST",
+                        body=json.dumps({"dry_run": True}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    )
+
+                    self.assertEqual(status_payload["current_run"], {"run_id": run_id, "status": "running"})
+                    self.assertEqual(progress_payload["run_id"], run_id)
+                    self.assertEqual(history_payload["runs"][0]["run_id"], run_id)
+                    self.assertEqual(log_payload["run_id"], run_id)
+                    self.assertEqual(stop_status, 202)
+                    self.assertEqual(json.loads(stop_body.decode("utf-8"))["run_id"], run_id)
+                finally:
+                    release.set()
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        if read_state(config.output.state_dir).get("current_run_id") is None:
+                            break
+                        time.sleep(0.01)
+                    self.assertIsNone(read_state(config.output.state_dir).get("current_run_id"))
+
+    def test_current_run_endpoints_do_not_fall_back_to_previous_run_log(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            old_stdout = tmp / "old.stdout.log"
+            old_stdout.write_text("old run output\n", encoding="utf-8")
+            append_run(
+                config.output.state_dir,
+                {
+                    "id": "old-run",
+                    "kind": "zapret-standard-discovery",
+                    "status": "success",
+                    "timestamp": "2026-08-09T00:00:00Z",
+                    "stdout_log": str(old_stdout),
+                    "progress": {"phase": "old-phase", "attempts_processed": 42},
+                },
+            )
+            started = threading.Event()
+            release = threading.Event()
+
+            def queued_run(
+                _config: AppConfig, _payload: dict[str, Any], _stop_event: threading.Event, _run_id: str
+            ) -> dict[str, str]:
+                started.set()
+                release.wait(timeout=2)
+                return {"status": "success"}
+
+            port = _free_port()
+            with mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=queued_run):
+                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
+                thread.start()
+                _wait_for_server(port, "/openapi.json")
+                try:
+                    status, _headers, body = _http_request(
+                        port,
+                        "/api/core/strategy-discovery/start-run",
+                        method="POST",
+                        body=json.dumps({"mode": "standard", "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                            "utf-8"
+                        ),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
+                    current_run_id = json.loads(body.decode("utf-8"))["run_id"]
+                    self.assertTrue(started.wait(timeout=2))
+
+                    current_progress = json.loads(
+                        _http_request(port, "/api/core/strategy-discovery/current-run-progress")[2].decode("utf-8")
+                    )
+                    current_log = json.loads(
+                        _http_request(port, "/api/core/strategy-discovery/current-run-latest-log")[2].decode("utf-8")
+                    )
+                    history_log = json.loads(_http_request(port, "/api/core/runs/latest-log")[2].decode("utf-8"))
+
+                    self.assertEqual(current_progress["run_id"], current_run_id)
+                    self.assertEqual(current_progress["stage"], "")
+                    self.assertEqual(current_progress["current_file"], "")
+                    self.assertNotIn("attempts_processed", current_progress)
+                    self.assertEqual(current_log["run_id"], current_run_id)
+                    self.assertEqual(current_log["stdout_tail"], "")
+                    self.assertEqual(current_log["stderr_tail"], "")
+                    self.assertNotEqual(current_log["progress"].get("phase"), "old-phase")
+                    self.assertEqual(history_log["run_id"], "old-run")
+                    self.assertEqual(history_log["stdout_tail"], "old run output")
+                finally:
+                    release.set()
+
+    def test_ui_runtime_uses_public_current_run_without_legacy_job_fields(self) -> None:
+        html = index_html()
+
+        self.assertIn("function currentRun()", html)
+        self.assertIn("const run = (state.status || {}).current_run;", html)
+        self.assertIn("return Boolean(currentRun());", html)
+        self.assertIn("const jobStatus = currentRun()?.status", html)
+        self.assertIn("const runId = response?.run_id || '';", html)
+        self.assertIn("target_ref: data.update_id || channel,", html)
+        self.assertNotIn("current_job", html)
+        self.assertNotIn("job_id", html)
+        self.assertNotIn("response?.job", html)
 
     def test_candidates_and_runs_use_50_item_load_more_pagination(self) -> None:
         html = index_html()
@@ -1158,22 +1321,22 @@ class WebUiTests(unittest.TestCase):
                     state_dir=tmp / "state",
                 ),
             )
-            write_state(config.output.state_dir, {"current_job": "stale-job", "last_error": None})
+            write_state(config.output.state_dir, {"current_run_id": "stale-job", "last_error": None})
             port = _free_port()
             thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
             thread.start()
             time.sleep(0.1)
 
-            self.assertIsNone(read_state(config.output.state_dir)["current_job"])
+            self.assertIsNone(read_state(config.output.state_dir)["current_run_id"])
 
     def test_serve_does_not_clear_current_job_when_runtime_lock_exists(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            write_state(config.output.state_dir, {"current_job": "active-job", "last_error": None})
+            write_state(config.output.state_dir, {"current_run_id": "active-job", "last_error": None})
             config.output.state_dir.mkdir(parents=True, exist_ok=True)
             (config.output.state_dir / "job-runner.lock").write_text(
-                json.dumps({"pid": os.getpid(), "job_id": "active-job"}),
+                json.dumps({"pid": os.getpid(), "run_id": "active-job"}),
                 encoding="utf-8",
             )
             port = _free_port()
@@ -1181,7 +1344,7 @@ class WebUiTests(unittest.TestCase):
             thread.start()
             _wait_for_server(port, "/openapi.json")
 
-            self.assertEqual(read_state(config.output.state_dir)["current_job"], "active-job")
+            self.assertEqual(read_state(config.output.state_dir)["current_run_id"], "active-job")
 
     def test_legacy_diagnostics_endpoint_is_removed_from_alpha_api(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1272,12 +1435,52 @@ class WebUiTests(unittest.TestCase):
             web_status, _web_headers, web_body = _http_request(port, "/api/web/run-preferences")
 
             self.assertEqual(root_response.status, 404)
-            self.assertIn("web ui is disabled", root_body)
+            self.assertApiError(json.loads(root_body), "not_found")
             self.assertNotIn("<!doctype html>", root_body.lower())
             self.assertEqual(core_status, 200)
             self.assertIn('"state"', core_body.decode("utf-8"))
             self.assertEqual(web_status, 404)
             self.assertIn("not found", web_body.decode("utf-8"))
+
+    def test_history_routes_use_run_id_without_legacy_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            append_run(
+                config.output.state_dir,
+                {
+                    "id": "run-contract",
+                    "kind": "standard-discovery",
+                    "status": "success",
+                    "timestamp": "2026-08-10T00:00:00Z",
+                },
+            )
+            authorization = _bearer_authorization_for_state(config.output.state_dir)
+            core_port = _free_port()
+            web_port = _free_port()
+            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
+            web_thread = threading.Thread(
+                target=serve_web_proxy,
+                args=(config, "127.0.0.1", web_port),
+                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
+                daemon=True,
+            )
+            core_thread.start()
+            web_thread.start()
+            _wait_for_server(core_port)
+            _wait_for_server(web_port)
+
+            contract = json.loads(web_app.openapi_json_bytes().decode("utf-8"))
+            item_schema = contract["components"]["schemas"]["RunHistoryItem"]
+            self.assertIn("run_id", item_schema["properties"])
+            self.assertNotIn("id", item_schema["properties"])
+
+            for path in ("/api/core/runs/history", "/api/web/runs/history-page"):
+                status, _headers, body = _http_request(web_port, path, headers={"Authorization": authorization})
+                self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+                item = json.loads(body.decode("utf-8"))["runs"][0]
+                self.assertEqual(item["run_id"], "run-contract")
+                self.assertNotIn("id", item)
 
     def test_openapi_and_swagger_are_served_by_monolith_and_core_mode(self) -> None:
         for target in (serve, serve_core):
@@ -1346,9 +1549,11 @@ class WebUiTests(unittest.TestCase):
                 self.assertIn("curl_max_time", start_schema["properties"]["settings"]["properties"])
                 self.assertNotIn("mode_settings", start_schema["properties"]["settings"]["properties"])
                 error_schema = openapi_contract["components"]["schemas"]["ErrorResponse"]
-                self.assertEqual("string", error_schema["properties"]["error"]["type"])
+                envelope_schema = error_schema["properties"]["error"]
+                self.assertEqual("object", envelope_schema["type"])
+                self.assertEqual(["code", "message", "details"], envelope_schema["required"])
                 self.assertEqual(
-                    {"error": "Local storage is not prepared"},
+                    {"error": {"code": "invalid_request", "message": "The request is invalid.", "details": {}}},
                     examples["ErrorResponse"]["value"],
                 )
                 self.assertIn(
@@ -1398,7 +1603,13 @@ class WebUiTests(unittest.TestCase):
                 self.assertNotIn("minItems", web_preset_save_schema["properties"]["domains"])
                 runtime_busy_response = openapi_contract["components"]["responses"]["RuntimeBusy"]
                 self.assertEqual(
-                    {"error": "runtime_busy"},
+                    {
+                        "error": {
+                            "code": "runtime_busy",
+                            "message": "The operation is unavailable while discovery is running.",
+                            "details": {},
+                        }
+                    },
                     runtime_busy_response["content"]["application/json"]["examples"]["runtimeBusy"]["value"],
                 )
                 for backup_mutation_path in (
@@ -1408,7 +1619,7 @@ class WebUiTests(unittest.TestCase):
                     "/api/core/backups/upload",
                 ):
                     responses = openapi_contract["paths"][backup_mutation_path]["post"]["responses"]
-                    self.assertEqual({"$ref": "#/components/responses/RuntimeBusy"}, responses["409"])
+                    self.assertEqual({"$ref": "#/components/responses/Error"}, responses["409"])
                 self.assertEqual(
                     "legacy-root-apis-removed-in-alpha",
                     openapi_contract["x-gp-decisions"]["legacy_api_compatibility"],
@@ -1449,6 +1660,55 @@ class WebUiTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
                 self.assertEqual(body, b"")
+
+    def test_openapi_contract_matches_routes_auth_errors_and_identifiers(self) -> None:
+        for core_only in (False, True):
+            contract = json.loads(web_docs.openapi_json_bytes(core_only=core_only))
+            documented = {
+                (path, method.upper())
+                for path, operations in contract["paths"].items()
+                for method in operations
+            }
+            expected = {
+                (spec.path, method)
+                for spec in web_routes.ROUTES
+                if spec.openapi and (not core_only or spec.allowed_in_core)
+                for method in spec.methods
+                if method != "HEAD"
+            }
+            self.assertEqual(expected, documented)
+
+            for path, method in documented:
+                route = web_routes.route_for(method, path)
+                self.assertIsNotNone(route)
+                operation = contract["paths"][path][method.lower()]
+                expected_security = [] if not route.auth_required else [{"bearerAuth": []}]
+                self.assertEqual(expected_security, operation["security"])
+                for status, response in operation["responses"].items():
+                    if status == "default" or not status.startswith("2"):
+                        self.assertEqual({"$ref": "#/components/responses/Error"}, response)
+
+            error_schema = contract["components"]["schemas"]["ErrorResponse"]["properties"]["error"]
+            self.assertEqual(["code", "message", "details"], error_schema["required"])
+            self.assertEqual(
+                "#/components/schemas/RunAccepted",
+                contract["paths"]["/api/core/strategy-discovery/stop-current-run"]["post"]["responses"]["202"]["content"][
+                    "application/json"
+                ]["schema"]["$ref"],
+            )
+            self.assertEqual(
+                "#/components/schemas/ReleaseInstallAccepted",
+                contract["paths"]["/api/service/releases/install"]["post"]["responses"]["202"]["content"]["application/json"][
+                    "schema"
+                ]["$ref"],
+            )
+            self.assertIn("run_id", contract["components"]["schemas"]["RunAccepted"]["properties"])
+            self.assertIn("update_id", contract["components"]["schemas"]["ReleaseInstallAccepted"]["properties"])
+            self.assertNotIn("job_id", json.dumps(contract))
+
+        swagger_html = web_docs.swagger_ui_html()
+        self.assertIn("persistAuthorization: true", swagger_html)
+        self.assertIn("tryItOutEnabled: true", swagger_html)
 
     def test_route_registry_defines_runtime_boundaries(self) -> None:
         self.assertEqual("core", web_routes.route_for("GET", "/api/core/status").namespace)
@@ -1595,11 +1855,15 @@ class WebUiTests(unittest.TestCase):
             }
             with (
                 mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
-                mock.patch.object(web_app.service_api, "queue_release_update", return_value={"status": "queued", "target_ref": "v0.0.0-test"}),
+                mock.patch.object(
+                    web_app.service_api,
+                    "queue_release_update",
+                    return_value={"status": "queued", "target_ref": "v0.0.0-test", "update_id": "test-update"},
+                ),
                 mock.patch.object(
                     web_app,
                     "release_update_plan",
-                    return_value={"release": release, "can_update": True, "blocked_reason": "", "active_job": "", "steps": []},
+                    return_value={"release": release, "can_update": True, "blocked_reason": "", "active_run_id": "", "steps": []},
                 ),
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
@@ -1665,7 +1929,7 @@ class WebUiTests(unittest.TestCase):
 
                 expected_json_fields = {
                     ("GET", "/api/core/status"): {"state", "storage", "updated_at"},
-                    ("POST", "/api/core/strategy-discovery/stop-current-run"): {"accepted", "status", "job_id"},
+                    ("POST", "/api/core/strategy-discovery/stop-current-run"): {"accepted", "status", "run_id"},
                     ("GET", "/api/core/strategy-discovery/current-run-progress"): {"run_id", "status", "stage", "current_file"},
                     ("GET", "/api/core/strategy-discovery/current-run-latest-log"): {"stdout_tail", "stderr_tail", "progress"},
                     ("GET", "/api/core/strategy-discovery/preflight"): {"ready", "checks"},
@@ -1702,7 +1966,7 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/service/releases/install-channel"): {"channel"},
                     ("GET", "/api/service/releases/install-plan"): {"plan"},
                     ("POST", "/api/service/releases/set-install-channel"): {"channel"},
-                    ("POST", "/api/service/releases/install"): {"accepted", "status", "job_id"},
+                    ("POST", "/api/service/releases/install"): {"accepted", "status", "update_id"},
                     ("GET", "/api/service/v2fly/local-storage-status"): {
                         "state",
                         "source_repo",
@@ -1803,11 +2067,15 @@ class WebUiTests(unittest.TestCase):
                 mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}),
                 mock.patch.object(web_app, "run_standard_discovery", return_value={"status": "success"}),
                 mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
-                mock.patch.object(web_app.service_api, "queue_release_update", return_value={"status": "queued", "target_ref": "v0.0.0-test"}),
+                mock.patch.object(
+                    web_app.service_api,
+                    "queue_release_update",
+                    return_value={"status": "queued", "target_ref": "v0.0.0-test", "update_id": "test-update"},
+                ),
                 mock.patch.object(
                     web_app,
                     "release_update_plan",
-                    return_value={"release": release, "can_update": True, "blocked_reason": "", "active_job": "", "steps": []},
+                    return_value={"release": release, "can_update": True, "blocked_reason": "", "active_run_id": "", "steps": []},
                 ),
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
@@ -1914,18 +2182,17 @@ class WebUiTests(unittest.TestCase):
                                 core_checked.add((method, path))
                             else:
                                 proxy_checked.add((method, path))
-                            self.assertNotEqual(status, 404, message)
+                            _assert_openapi_response_contract(
+                                self,
+                                openapi_contract,
+                                operation,
+                                status,
+                                headers,
+                                response_body,
+                                context=message,
+                            )
                             if path == "/api/core/backups/download-archive" and status == 200:
                                 self.assertGreater(len(response_body), 0, message)
-                                continue
-                            if path == "/api/core/strategy-candidates/export" and status == 200:
-                                self.assertEqual(headers.get("content-type"), "application/x-ndjson; charset=utf-8", message)
-                                continue
-                            self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8", message)
-                            response_payload = json.loads(response_body.decode("utf-8"))
-                            if status >= 400:
-                                self.assertIn("error", response_payload, message)
-                                self.assertIsInstance(response_payload["error"], str, message)
 
                 core_head_status, core_head_headers, core_head_body = _http_request(
                     core_port,
@@ -2027,15 +2294,13 @@ class WebUiTests(unittest.TestCase):
             payload = json.loads(body.decode("utf-8"))
             self.assertEqual(status, 409)
             self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertEqual({"error": "no active job"}, payload)
-            self.assertIsInstance(payload["error"], str)
+            self.assertApiError(payload, "conflict")
 
             status, headers, body = _http_request(port, "/api/core/presets/v2fly/category-domains?category=missing")
             payload = json.loads(body.decode("utf-8"))
             self.assertEqual(status, 400)
             self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn("группа v2fly не найдена", payload["error"])
-            self.assertIsInstance(payload["error"], str)
+            self.assertApiError(payload, "invalid_request")
 
     def test_core_and_service_v2fly_storage_status_use_same_formatter(self) -> None:
         from gp_control_plane.domain_sources import write_v2fly_catalog_cache
@@ -2080,7 +2345,7 @@ class WebUiTests(unittest.TestCase):
 
             def fake_queue(config_arg: AppConfig, settings: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
                 calls.append({"config": config_arg, "settings": settings, "payload": payload})
-                return {"update": {"status": "queued", "target_ref": "v0.4.0"}}
+                return {"update": {"status": "queued", "target_ref": "v0.4.0", "update_id": "test-update"}}
 
             port = _free_port()
             with mock.patch.object(web_app.service_api, "queue_release_update_payload", fake_queue), mock.patch(
@@ -2134,7 +2399,7 @@ class WebUiTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             config.output.state_dir.mkdir(parents=True, exist_ok=True)
             (config.output.state_dir / "job-runner.lock").write_text(
-                json.dumps({"pid": os.getpid(), "job_id": "lock-only"}),
+                json.dumps({"pid": os.getpid(), "run_id": "lock-only"}),
                 encoding="utf-8",
             )
             port = _free_port()
@@ -2166,7 +2431,7 @@ class WebUiTests(unittest.TestCase):
             dry_payload = json.loads(dry_body.decode("utf-8"))
             self.assertEqual(status, 409)
             self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn("blocked", payload["error"])
+            self.assertApiError(payload, "conflict")
             self.assertEqual(dry_status, 200)
             self.assertEqual(dry_payload["status"], "dry_run")
             self.assertEqual(dry_payload["operation_id"], "v2fly-update-local-storage")
@@ -2178,7 +2443,7 @@ class WebUiTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             config.output.state_dir.mkdir(parents=True, exist_ok=True)
             (config.output.state_dir / "job-runner.lock").write_text(
-                json.dumps({"pid": os.getpid(), "job_id": "lock-only"}),
+                json.dumps({"pid": os.getpid(), "run_id": "lock-only"}),
                 encoding="utf-8",
             )
             port = _free_port()
@@ -2197,8 +2462,8 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(status, 409)
             self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn("job already running in state_dir", payload["error"])
-            self.assertIsNone(read_state(config.output.state_dir)["current_job"])
+            self.assertApiError(payload, "conflict")
+            self.assertIsNone(read_state(config.output.state_dir)["current_run_id"])
 
     def test_ingress_budget_rejects_oversize_json_without_mutating_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2221,7 +2486,7 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(status, 413)
             self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertEqual({"error": "request body is too large"}, json.loads(body.decode("utf-8")))
+            self.assertApiError(json.loads(body.decode("utf-8")), "request_too_large")
             self.assertNotIn("settings", read_state(config.output.state_dir))
 
     def test_backup_upload_rejects_oversize_before_import(self) -> None:
@@ -2246,7 +2511,7 @@ class WebUiTests(unittest.TestCase):
                 )
 
             self.assertEqual(status, 413)
-            self.assertEqual({"error": "backup upload is too large"}, json.loads(body.decode("utf-8")))
+            self.assertApiError(json.loads(body.decode("utf-8")), "request_too_large")
             import_mock.assert_not_called()
 
     def test_backup_mutations_return_runtime_busy_while_list_and_download_remain_available(self) -> None:
@@ -2256,7 +2521,7 @@ class WebUiTests(unittest.TestCase):
             snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
             config.output.state_dir.mkdir(parents=True, exist_ok=True)
             (config.output.state_dir / "job-runner.lock").write_text(
-                json.dumps({"pid": os.getpid(), "job_id": "active-job"}),
+                json.dumps({"pid": os.getpid(), "run_id": "active-job"}),
                 encoding="utf-8",
             )
             port = _free_port()
@@ -2297,7 +2562,7 @@ class WebUiTests(unittest.TestCase):
                 message = (method, path, response_body.decode("utf-8", errors="replace"))
                 self.assertEqual(status, 409, message)
                 self.assertEqual(response_headers.get("content-type"), "application/json; charset=utf-8", message)
-                self.assertEqual({"error": "runtime_busy"}, json.loads(response_body.decode("utf-8")), message)
+                self.assertApiError(json.loads(response_body.decode("utf-8")), "runtime_busy")
 
     def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2410,7 +2675,7 @@ class WebUiTests(unittest.TestCase):
 
             self.assertEqual(status, 413)
             self.assertEqual(headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertEqual({"error": "request body is too large"}, json.loads(body.decode("utf-8")))
+            self.assertApiError(json.loads(body.decode("utf-8")), "request_too_large")
             self.assertNotIn("settings", read_state(config.output.state_dir))
 
     def test_web_proxy_serves_head_requests_without_body(self) -> None:
@@ -2480,7 +2745,7 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(swagger_headers.get("content-type"), "text/html; charset=utf-8")
             self.assertIn("SwaggerUIBundle", swagger_body.decode("utf-8"))
             self.assertEqual(core_status, 502)
-            self.assertIn("core api is unavailable", core_body.decode("utf-8"))
+            self.assertApiError(json.loads(core_body.decode("utf-8")), "core_unavailable")
             self.assertEqual(web_status, 200)
             self.assertEqual(web_headers.get("content-type"), "application/json; charset=utf-8")
             self.assertIn('"run_preferences"', web_body.decode("utf-8"))
@@ -2530,7 +2795,7 @@ class WebUiTests(unittest.TestCase):
                     message = (method, path, response_body.decode("utf-8", errors="replace"))
                     self.assertEqual(status, 404, message)
                     self.assertEqual(response_headers.get("content-type"), "application/json; charset=utf-8")
-                    self.assertEqual({"error": "not found"}, json.loads(response_body.decode("utf-8")), message)
+                    self.assertApiError(json.loads(response_body.decode("utf-8")), "not_found")
                     self.assertNotIn("core api is unavailable", response_body.decode("utf-8"), message)
                     self.assertNotIn("request body is too large", response_body.decode("utf-8"), message)
 
@@ -2550,7 +2815,7 @@ class WebUiTests(unittest.TestCase):
             )
             self.assertEqual(anonymous_status, 401)
             self.assertEqual(anonymous_headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertEqual({"error": "missing bearer token"}, json.loads(anonymous_body.decode("utf-8")))
+            self.assertApiError(json.loads(anonymous_body.decode("utf-8")), "authentication_required")
 
             status, _headers, body = _http_request(port, "/api/core/backups/list")
             self.assertEqual(status, 200)
@@ -2893,7 +3158,7 @@ class WebUiTests(unittest.TestCase):
                 self.assertTrue(runner.call_args.kwargs["enable_tls12"])
                 deadline = time.time() + 2
                 while time.time() < deadline:
-                    if read_state(config.output.state_dir).get("current_job") is None:
+                    if read_state(config.output.state_dir).get("current_run_id") is None:
                         break
                     time.sleep(0.02)
 
@@ -3347,6 +3612,163 @@ def _openapi_resolve_ref(openapi_contract: dict[str, Any], ref: str) -> Any:
     for part in ref[2:].split("/"):
         node = node[part]
     return node
+
+
+
+def _assert_openapi_response_contract(
+    test_case: unittest.TestCase,
+    openapi_contract: dict[str, Any],
+    operation: dict[str, Any],
+    status: int,
+    headers: dict[str, str],
+    body: bytes,
+    *,
+    context: object,
+) -> None:
+    responses = operation.get("responses")
+    test_case.assertIsInstance(responses, dict, context)
+    response = responses.get(str(status)) or responses.get("default")
+    test_case.assertIsNotNone(
+        response,
+        (*context, f"HTTP {status} has no documented response") if isinstance(context, tuple) else context,
+    )
+    response = _openapi_resolve_document_node(openapi_contract, response)
+    content = response.get("content") or {}
+    if not content:
+        test_case.assertEqual(body, b"", context)
+        return
+
+    content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    test_case.assertIn(content_type, content, context)
+    if content_type != "application/json":
+        return
+
+    media = content[content_type]
+    schema = media.get("schema")
+    test_case.assertIsInstance(schema, dict, context)
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        test_case.fail(f"{context}: documented JSON response is not valid JSON: {error}")
+    _assert_openapi_schema(test_case, openapi_contract, schema, payload, path="$")
+
+
+def _openapi_resolve_document_node(openapi_contract: dict[str, Any], node: Any) -> Any:
+    while isinstance(node, dict) and "$ref" in node:
+        resolved = _openapi_resolve_ref(openapi_contract, str(node["$ref"]))
+        if len(node) == 1:
+            node = resolved
+        else:
+            node = {**resolved, **{key: value for key, value in node.items() if key != "$ref"}}
+    return node
+
+
+def _assert_openapi_schema(
+    test_case: unittest.TestCase,
+    openapi_contract: dict[str, Any],
+    schema: Any,
+    value: Any,
+    *,
+    path: str,
+) -> None:
+    schema = _openapi_resolve_document_node(openapi_contract, schema)
+    if schema is True:
+        return
+    test_case.assertIsInstance(schema, dict, f"{path}: invalid OpenAPI schema")
+    if schema is False:
+        test_case.fail(f"{path}: value is forbidden by the documented schema")
+
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        if keyword not in schema:
+            continue
+        choices = schema[keyword]
+        test_case.assertIsInstance(choices, list, f"{path}: {keyword} must be an array")
+        if keyword == "allOf":
+            for index, choice in enumerate(choices):
+                _assert_openapi_schema(test_case, openapi_contract, choice, value, path=f"{path}.allOf[{index}]")
+            continue
+        matches = 0
+        failures: list[str] = []
+        for index, choice in enumerate(choices):
+            try:
+                _assert_openapi_schema(test_case, openapi_contract, choice, value, path=f"{path}.{keyword}[{index}]")
+            except AssertionError as error:
+                failures.append(str(error))
+            else:
+                matches += 1
+        if keyword == "anyOf":
+            test_case.assertGreater(matches, 0, f"{path}: no anyOf schema matched: {failures}")
+        else:
+            test_case.assertEqual(matches, 1, f"{path}: expected exactly one oneOf match, got {matches}: {failures}")
+
+    if "const" in schema:
+        test_case.assertEqual(value, schema["const"], f"{path}: const mismatch")
+    if "enum" in schema:
+        test_case.assertIn(value, schema["enum"], f"{path}: value is not in enum")
+
+    schema_type = schema.get("type")
+    if schema_type is not None:
+        expected_types = schema_type if isinstance(schema_type, list) else [schema_type]
+        test_case.assertTrue(
+            any(_openapi_value_matches_type(value, expected_type) for expected_type in expected_types),
+            f"{path}: expected {expected_types}, got {type(value).__name__}",
+        )
+
+    if isinstance(value, str):
+        if "minLength" in schema:
+            test_case.assertGreaterEqual(len(value), schema["minLength"], f"{path}: shorter than minLength")
+        if "maxLength" in schema:
+            test_case.assertLessEqual(len(value), schema["maxLength"], f"{path}: longer than maxLength")
+        if "pattern" in schema:
+            test_case.assertIsNotNone(re.search(schema["pattern"], value), f"{path}: pattern mismatch")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema:
+            test_case.assertGreaterEqual(value, schema["minimum"], f"{path}: below minimum")
+        if "maximum" in schema:
+            test_case.assertLessEqual(value, schema["maximum"], f"{path}: above maximum")
+        if "exclusiveMinimum" in schema:
+            test_case.assertGreater(value, schema["exclusiveMinimum"], f"{path}: below exclusiveMinimum")
+        if "exclusiveMaximum" in schema:
+            test_case.assertLess(value, schema["exclusiveMaximum"], f"{path}: above exclusiveMaximum")
+
+    if isinstance(value, list):
+        if "minItems" in schema:
+            test_case.assertGreaterEqual(len(value), schema["minItems"], f"{path}: fewer than minItems")
+        if "maxItems" in schema:
+            test_case.assertLessEqual(len(value), schema["maxItems"], f"{path}: more than maxItems")
+        if schema.get("uniqueItems"):
+            test_case.assertEqual(len(value), len({json.dumps(item, sort_keys=True) for item in value}), f"{path}: items are not unique")
+        if "items" in schema:
+            for index, item in enumerate(value):
+                _assert_openapi_schema(test_case, openapi_contract, schema["items"], item, path=f"{path}[{index}]")
+
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        for name in required:
+            test_case.assertIn(name, value, f"{path}: missing required property {name!r}")
+        for name, item in value.items():
+            if name in properties:
+                _assert_openapi_schema(test_case, openapi_contract, properties[name], item, path=f"{path}.{name}")
+                continue
+            additional = schema.get("additionalProperties", True)
+            if additional is False:
+                test_case.fail(f"{path}: unexpected property {name!r}")
+            if isinstance(additional, dict):
+                _assert_openapi_schema(test_case, openapi_contract, additional, item, path=f"{path}.{name}")
+
+
+def _openapi_value_matches_type(value: Any, expected_type: str) -> bool:
+    return {
+        "null": value is None,
+        "boolean": isinstance(value, bool),
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }.get(expected_type, False)
 
 
 def _http_request(

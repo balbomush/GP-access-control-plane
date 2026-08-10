@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.zapret2 import (
     BLOCKCHECK_ENV_KEYS,
     _blockcheck_nft_tables,
-    _cleanup_blockcheck_processes,
+    signal_registered_process_run,
     _stop_process_group,
     check_install,
     check_install_cached,
@@ -21,6 +24,7 @@ from gp_control_plane.zapret2 import (
     root_command,
     root_helper_status,
 )
+from gp_control_plane.core_api import preflight_payload
 
 
 class Zapret2Tests(unittest.TestCase):
@@ -47,6 +51,55 @@ class Zapret2Tests(unittest.TestCase):
         self.assertFalse(result["root_helper_ready"])
         self.assertFalse(result["ready"])
         self.assertTrue(any(item["id"] == "root-helper" and not item["ok"] for item in result["diagnostics"]))
+
+    def test_check_install_reports_russian_message_for_missing_nfqws2(self) -> None:
+        with mock.patch("gp_control_plane.zapret2.shutil.which", return_value=None):
+            result = check_install()
+
+        diagnostics = {str(item["id"]): item for item in result["diagnostics"]}
+        self.assertEqual(
+            diagnostics["nfqws2"]["message"],
+            "не найден в PATH; установите zapret2 или проверьте ссылку на nfqws2",
+        )
+
+    def test_unavailable_root_helper_has_russian_message_and_raw_diagnostic_reason(self) -> None:
+        cases = (
+            ("root-helper not found at /helper/gp-root-helper", {"sudo": "/usr/bin/sudo"}, False),
+            ("sudo command not found", {}, True),
+        )
+        for raw_reason, commands, helper_exists in cases:
+            with (
+                self.subTest(raw_reason=raw_reason),
+                mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+                mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+                mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=helper_exists),
+                mock.patch("gp_control_plane.zapret2.os.access", return_value=True),
+                mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=lambda name: commands.get(name)),
+            ):
+                result = check_install()
+
+            diagnostics = {str(item["id"]): item for item in result["diagnostics"]}
+            root_helper = diagnostics["root-helper"]
+            self.assertEqual(root_helper["message"], "служба с повышенными правами недоступна; запустите Linux-установщик")
+            self.assertEqual(root_helper["details"], {"reason": raw_reason})
+            self.assertEqual(result["root_helper_error"], raw_reason)
+
+    def test_preflight_preserves_root_helper_diagnostic_details(self) -> None:
+        zapret = {
+            "diagnostics": [
+                {
+                    "id": "root-helper",
+                    "ok": False,
+                    "message": "служба с повышенными правами недоступна; запустите Linux-установщик",
+                    "details": {"reason": "sudo command not found"},
+                }
+            ]
+        }
+        with mock.patch("gp_control_plane.core_api.check_install_cached", return_value=zapret):
+            preflight = preflight_payload(mock.sentinel.config)
+
+        self.assertEqual(preflight["checks"][0]["message"], "служба с повышенными правами недоступна; запустите Linux-установщик")
+        self.assertEqual(preflight["checks"][0]["details"], {"reason": "sudo command not found"})
 
     def test_check_install_reports_human_diagnostics(self) -> None:
         def fake_which(name: str) -> str | None:
@@ -132,7 +185,9 @@ class Zapret2Tests(unittest.TestCase):
             mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
             mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/bin/sudo"),
         ):
-            command = root_command(["/opt/zapret2/blockcheck2.sh"], env=env, pass_env_keys=BLOCKCHECK_ENV_KEYS)
+            command = root_command(
+                ["/opt/zapret2/blockcheck2.sh"], env=env, pass_env_keys=BLOCKCHECK_ENV_KEYS, run_id="run-owned"
+            )
 
         self.assertEqual(
             command,
@@ -140,7 +195,8 @@ class Zapret2Tests(unittest.TestCase):
                 "/usr/bin/sudo",
                 "-n",
                 "/helper/gp-root-helper",
-                "run-env",
+                "run-owned-env",
+                "run-owned",
                 "BATCH=1",
                 "DOMAINS=youtube.com",
                 "ENABLE_HTTP3=1",
@@ -163,6 +219,7 @@ class Zapret2Tests(unittest.TestCase):
                 env=env,
                 pass_env_keys=BLOCKCHECK_ENV_KEYS,
                 helper_command="run-multidomain",
+                run_id="run-owned",
             )
 
         self.assertEqual(
@@ -171,7 +228,8 @@ class Zapret2Tests(unittest.TestCase):
                 "/usr/bin/sudo",
                 "-n",
                 "/helper/gp-root-helper",
-                "run-multidomain-env",
+                "run-multidomain-owned-env",
+                "run-owned",
                 "BATCH=1",
                 "DOMAINS=youtube.com",
                 "GP_MD_CURL_PARALLELISM=30",
@@ -199,37 +257,144 @@ table inet blockcheck42
 
         self.assertEqual(_blockcheck_nft_tables(output), [("inet", "blockcheck1460063"), ("inet", "blockcheck42")])
 
-    def test_cleanup_blockcheck_processes_kills_remaining_pids(self) -> None:
-        pgrep_calls: dict[str, int] = {}
+    def test_registered_process_signal_uses_only_the_run_record(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
-            if command[0] == "pgrep":
-                pattern = command[-1]
-                pgrep_calls[pattern] = pgrep_calls.get(pattern, 0) + 1
-                if pattern == "/opt/zapret2/nfq2/nfqws2" and pgrep_calls[pattern] == 1:
-                    return subprocess.CompletedProcess(command, 0, "101\n", "")
-                if pattern == "curl --connect-to":
-                    return subprocess.CompletedProcess(command, 0, "102\n", "")
-                return subprocess.CompletedProcess(command, 1, "", "")
             return subprocess.CompletedProcess(command, 0, "", "")
 
         with (
-            mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=lambda name: name if name in {"pgrep", "sudo"} else None),
-            mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=True),
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
             mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+            mock.patch("gp_control_plane.zapret2.Path.is_file", return_value=True),
+            mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/bin/sudo"),
             mock.patch("gp_control_plane.zapret2.subprocess.run", side_effect=fake_run),
-            mock.patch("gp_control_plane.zapret2.time.sleep"),
         ):
-            _cleanup_blockcheck_processes()
+            signal_registered_process_run("a" * 32, "TERM")
 
-        self.assertIn(["kill", "-TERM", "101", "102"], calls)
-        self.assertIn(["sudo", "-n", "/helper/gp-root-helper", "kill", "TERM", "101", "102"], calls)
-        self.assertIn(["kill", "-KILL", "102"], calls)
-        self.assertIn(["sudo", "-n", "/helper/gp-root-helper", "kill", "KILL", "102"], calls)
-        self.assertIn(["pgrep", "-f", "blockcheck2.sh"], calls)
-        self.assertIn(["pgrep", "-f", "gp_multidomain_strategy"], calls)
+        self.assertEqual(calls, [["/usr/bin/sudo", "-n", "/helper/gp-root-helper", "signal-run", "a" * 32, "TERM"]])
+
+    def test_immediate_stop_waits_for_helper_owned_record_before_signalling(self) -> None:
+        run_id = "immediate-stop-race"
+        calls: list[list[str]] = []
+        responses = [
+            subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n"),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]
+
+        def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return responses.pop(0)
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2._run_root_helper", side_effect=fake_helper),
+            mock.patch("gp_control_plane.zapret2.time.sleep") as sleep,
+        ):
+            signal_registered_process_run(run_id, "TERM")
+
+        self.assertEqual(calls, [["signal-run", run_id, "TERM"], ["signal-run", run_id, "TERM"]])
+        sleep.assert_called_once()
+
+    def test_signal_registered_process_stops_retrying_at_the_record_wait_deadline(self) -> None:
+        failure = subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n")
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2._run_root_helper", return_value=failure) as helper,
+            mock.patch("gp_control_plane.zapret2.ROOT_HELPER_RECORD_WAIT_SECONDS", 0.1),
+            mock.patch("gp_control_plane.zapret2.time.monotonic", side_effect=[10.0, 10.1]),
+            mock.patch("gp_control_plane.zapret2.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stale or invalid"):
+                signal_registered_process_run("timeout-race", "TERM")
+
+        self.assertEqual(helper.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_root_helper_exposes_no_direct_pid_registration_or_unscoped_cleanup(self) -> None:
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+
+        self.assertIn('  run-owned)', helper)
+        self.assertIn('  run-owned-env)', helper)
+        self.assertIn('  signal-run)', helper)
+        self.assertIn('    signal_registered_process_run "$@"', helper)
+        self.assertNotIn('  register-run)', helper)
+        self.assertNotIn('  unregister-run)', helper)
+        self.assertNotIn('"kill")', helper)
+        self.assertNotIn('"killpg")', helper)
+        self.assertNotIn("pgrep", helper)
+
+    def test_root_helper_creates_the_only_signalable_record_and_rejects_direct_registration(self) -> None:
+        if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "blockcheck2.sh"
+            target.write_text("#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30\n", encoding="utf-8")
+            target.chmod(0o700)
+            registry = root / "runs"
+            env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            run_id = "helper-owned-run"
+            managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target)], env=env)
+            try:
+                record = registry / run_id
+                for _ in range(50):
+                    if record.exists():
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(record.exists())
+                self.assertEqual(record.read_text(encoding="utf-8").split()[0], "helper-v1")
+
+                rejected = subprocess.run(
+                    ["sh", str(helper), "register-run", "foreign-pid", str(os.getpid()), str(os.getpgrp()), "1"],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(rejected.returncode, 126)
+                self.assertTrue(record.exists())
+
+                stopped = subprocess.run(
+                    ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
+                )
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                self.assertEqual(managed.wait(timeout=5), 0)
+                self.assertFalse(record.exists())
+
+                stale_id = "stale-owned-run"
+                stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target)], env=env)
+                try:
+                    stale_record = registry / stale_id
+                    for _ in range(50):
+                        if stale_record.exists():
+                            break
+                        time.sleep(0.05)
+                    self.assertTrue(stale_record.exists())
+                    version, pid, pgid, _marker = stale_record.read_text(encoding="utf-8").split()
+                    stale_record.write_text(f"{version} {pid} {pgid} stale-marker\n", encoding="utf-8")
+
+                    stale_signal = subprocess.run(
+                        ["sh", str(helper), "signal-run", stale_id, "TERM"],
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(stale_signal.returncode, 126)
+                    time.sleep(0.1)
+                    self.assertIsNone(stale.poll())
+                    self.assertFalse(stale_record.exists())
+                finally:
+                    if stale.poll() is None:
+                        stale.terminate()
+                    stale.wait(timeout=5)
+            finally:
+                if managed.poll() is None:
+                    subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
+                    managed.wait(timeout=5)
 
 
 if __name__ == "__main__":

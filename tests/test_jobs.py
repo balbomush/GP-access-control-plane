@@ -11,8 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from gp_control_plane.config import AppConfig, OutputConfig
+from gp_control_plane.core_api import release_update_accepted_payload, runs_history_payload
 from gp_control_plane.jobs import JobRunner
 from gp_control_plane.state import read_state, update_state
+from gp_control_plane.storage import read_latest_run_payloads
 
 
 class JobRunnerTests(unittest.TestCase):
@@ -21,15 +24,38 @@ class JobRunnerTests(unittest.TestCase):
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
-            def failing_job(_stop: threading.Event) -> None:
-                raise RuntimeError("save failed")
+            def failing_job(_stop: threading.Event, _run_id: str) -> None:
+                raise RuntimeError("root helper unavailable")
 
-            runner.start("failing", failing_job)
+            run = runner.start("zapret-standard-discovery", failing_job)
             state = _wait_for_idle_state(state_dir)
+            persisted = read_latest_run_payloads(state_dir, limit=1)[0]
 
-            self.assertIsNone(state["current_job"])
-            self.assertEqual(state["last_job_status"], "failed")
-            self.assertIn("save failed", state["last_error"])
+            self.assertIsNone(state["current_run_id"])
+            self.assertEqual(state["last_run_status"], "failed")
+            self.assertIn("root helper unavailable", state["last_error"])
+            self.assertEqual(persisted["id"], run.run_id)
+            self.assertEqual(persisted["kind"], "zapret-standard-discovery")
+            self.assertEqual(persisted["status"], "failed")
+            self.assertIn("root helper unavailable", persisted["error"])
+            self.assertIn("completed_at", persisted)
+
+    def test_history_api_returns_one_failed_run_after_early_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+
+            def failing_discovery(_stop: threading.Event, _run_id: str) -> None:
+                raise RuntimeError("discovery setup failed")
+
+            run = runner.start("zapret-standard-discovery", failing_discovery)
+            _wait_for_idle_state(state_dir)
+            history = runs_history_payload(AppConfig(output=OutputConfig(state_dir=state_dir)), {})
+
+            self.assertEqual(
+                [(item["run_id"], item["status"]) for item in history["runs"] if item["run_id"] == run.run_id],
+                [(run.run_id, "failed")],
+            )
 
     def test_current_job_is_cleared_before_idle_hook_errors_are_swallowed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -39,11 +65,11 @@ class JobRunnerTests(unittest.TestCase):
                 raise RuntimeError("idle hook failed")
 
             runner = JobRunner(state_dir, on_idle=failing_idle)
-            runner.start("ok", lambda _stop: {"status": "success"})
+            runner.start("ok", lambda _stop, _run_id: {"status": "success"})
             state = _wait_for_idle_state(state_dir)
 
-            self.assertIsNone(state["current_job"])
-            self.assertEqual(state["last_job_status"], "success")
+            self.assertIsNone(state["current_run_id"])
+            self.assertEqual(state["last_run_status"], "success")
             self.assertIsNone(state["last_error"])
 
     def test_dict_result_timeout_is_recorded_as_timeout(self) -> None:
@@ -51,12 +77,12 @@ class JobRunnerTests(unittest.TestCase):
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
-            runner.start("timeout-job", lambda _stop: {"status": "timeout", "id": "run-timeout"})
+            runner.start("timeout-job", lambda _stop, _run_id: {"status": "timeout", "id": "run-timeout"})
             state = _wait_for_idle_state(state_dir)
             records = _job_records(state_dir)
 
-            self.assertIsNone(state["current_job"])
-            self.assertEqual(state["last_job_status"], "timeout")
+            self.assertIsNone(state["current_run_id"])
+            self.assertEqual(state["last_run_status"], "timeout")
             self.assertIsNone(state["last_error"])
             self.assertIn("timeout", [item["status"] for item in records])
 
@@ -65,12 +91,12 @@ class JobRunnerTests(unittest.TestCase):
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
-            runner.start("failed-result-job", lambda _stop: {"status": "failed", "id": "run-failed"})
+            runner.start("failed-result-job", lambda _stop, _run_id: {"status": "failed", "id": "run-failed"})
             state = _wait_for_idle_state(state_dir)
             records = _job_records(state_dir)
 
-            self.assertIsNone(state["current_job"])
-            self.assertEqual(state["last_job_status"], "failed")
+            self.assertIsNone(state["current_run_id"])
+            self.assertEqual(state["last_run_status"], "failed")
             self.assertIsNone(state["last_error"])
             self.assertIn("failed", [item["status"] for item in records])
 
@@ -79,7 +105,7 @@ class JobRunnerTests(unittest.TestCase):
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
-            def stop_then_fail(stop: threading.Event) -> None:
+            def stop_then_fail(stop: threading.Event, _run_id: str) -> None:
                 self.assertTrue(stop.wait(timeout=2))
                 raise RuntimeError("postprocess failed")
 
@@ -87,8 +113,8 @@ class JobRunnerTests(unittest.TestCase):
             runner.cancel_active()
             state = _wait_for_idle_state(state_dir)
 
-            self.assertIsNone(state["current_job"])
-            self.assertEqual(state["last_job_status"], "failed")
+            self.assertIsNone(state["current_run_id"])
+            self.assertEqual(state["last_run_status"], "failed")
             self.assertIn("postprocess failed", state["last_error"])
 
     def test_cancel_active_runs_cancel_hook_immediately(self) -> None:
@@ -97,7 +123,7 @@ class JobRunnerTests(unittest.TestCase):
             runner = JobRunner(state_dir)
             hook_called = threading.Event()
 
-            def stoppable_job(stop: threading.Event) -> dict[str, str]:
+            def stoppable_job(stop: threading.Event, _run_id: str) -> dict[str, str]:
                 self.assertTrue(stop.wait(timeout=2))
                 time.sleep(0.1)
                 return {"status": "stopped"}
@@ -108,14 +134,14 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "stopping")
             self.assertTrue(hook_called.wait(timeout=1))
             state = _wait_for_idle_state(state_dir)
-            self.assertEqual(state["last_job_status"], "stopped")
+            self.assertEqual(state["last_run_status"], "stopped")
 
     def test_cancel_hook_error_does_not_block_stop(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
-            def stoppable_job(stop: threading.Event) -> dict[str, str]:
+            def stoppable_job(stop: threading.Event, _run_id: str) -> dict[str, str]:
                 self.assertTrue(stop.wait(timeout=2))
                 return {"status": "stopped"}
 
@@ -127,14 +153,14 @@ class JobRunnerTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "stopping")
             state = _wait_for_idle_state(state_dir)
-            self.assertEqual(state["last_job_status"], "stopped")
+            self.assertEqual(state["last_run_status"], "stopped")
 
     def test_job_result_is_compacted_in_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
-            def heavy_job(_stop: threading.Event) -> dict[str, object]:
+            def heavy_job(_stop: threading.Event, _run_id: str) -> dict[str, object]:
                 return {
                     "id": "run-heavy",
                     "status": "success",
@@ -149,10 +175,48 @@ class JobRunnerTests(unittest.TestCase):
             lines = (state_dir / "jobs.jsonl").read_text(encoding="utf-8").splitlines()
             success = [json.loads(line) for line in lines if json.loads(line).get("status") == "success"][0]
 
-            self.assertEqual(state["last_job_status"], "success")
+            self.assertEqual(state["last_run_status"], "success")
             self.assertEqual(success["result"]["candidate_count"], 2)
             self.assertNotIn("candidates", success["result"])
             self.assertNotIn("summary", success["result"])
+
+    def test_one_run_id_is_persisted_before_start_returns_and_used_by_events(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+            started = threading.Event()
+            release = threading.Event()
+            observed_run_ids: list[str] = []
+
+            def blocking_run(_stop: threading.Event, run_id: str) -> dict[str, str]:
+                observed_run_ids.append(run_id)
+                started.set()
+                self.assertTrue(release.wait(timeout=2))
+                return {"id": run_id, "status": "success"}
+
+            run = runner.start("zapret-standard-discovery", blocking_run)
+            self.assertTrue(started.wait(timeout=1))
+            persisted = read_latest_run_payloads(state_dir, limit=1)[0]
+            events = _job_records(state_dir)
+
+            self.assertEqual(run.run_id, observed_run_ids[0])
+            self.assertEqual(persisted["id"], run.run_id)
+            self.assertEqual(persisted["status"], "queued")
+            self.assertTrue(events)
+            self.assertTrue(all(item["run_id"] == run.run_id for item in events))
+            self.assertTrue(all("job_id" not in item for item in events))
+
+            release.set()
+            _wait_for_idle_state(state_dir)
+
+    def test_release_update_acknowledgement_uses_only_update_id(self) -> None:
+        payload = release_update_accepted_payload({"update_id": "update-123", "status": "queued"})
+
+        self.assertEqual(payload, {"accepted": True, "update_id": "update-123", "status": "queued"})
+        self.assertNotIn("run_id", payload)
+        self.assertNotIn("job_id", payload)
+        with self.assertRaisesRegex(ValueError, "update_id"):
+            release_update_accepted_payload({"status": "queued"})
 
     def test_state_dir_lock_blocks_parallel_runners(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -162,7 +226,7 @@ class JobRunnerTests(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def long_job(_stop: threading.Event) -> dict[str, str]:
+            def long_job(_stop: threading.Event, _run_id: str) -> dict[str, str]:
                 started.set()
                 self.assertTrue(release.wait(timeout=2))
                 return {"status": "success"}
@@ -171,12 +235,12 @@ class JobRunnerTests(unittest.TestCase):
             self.assertTrue(started.wait(timeout=1))
             self.assertTrue((state_dir / "job-runner.lock").is_file())
 
-            with self.assertRaisesRegex(RuntimeError, "job already running in state_dir"):
-                second.start("second", lambda _stop: {"status": "success"})
+            with self.assertRaisesRegex(RuntimeError, "run already running in state_dir"):
+                second.start("second", lambda _stop, _run_id: {"status": "success"})
 
             release.set()
             state = _wait_for_idle_state(state_dir)
-            self.assertEqual(state["last_job_status"], "success")
+            self.assertEqual(state["last_run_status"], "success")
 
     def test_job_completion_preserves_state_written_while_job_runs(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -185,7 +249,7 @@ class JobRunnerTests(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def long_job(_stop: threading.Event) -> dict[str, str]:
+            def long_job(_stop: threading.Event, _run_id: str) -> dict[str, str]:
                 started.set()
                 self.assertTrue(release.wait(timeout=2))
                 return {"status": "success"}
@@ -196,8 +260,8 @@ class JobRunnerTests(unittest.TestCase):
             release.set()
             state = _wait_for_idle_state(state_dir)
 
-            self.assertIsNone(state["current_job"])
-            self.assertEqual(state["last_job_status"], "success")
+            self.assertIsNone(state["current_run_id"])
+            self.assertEqual(state["last_run_status"], "success")
             self.assertEqual(state["settings"], {"curl_parallelism_max": 12})
 
     def test_state_dir_lock_reclaims_stale_foreign_pid_lock(self) -> None:
@@ -206,15 +270,15 @@ class JobRunnerTests(unittest.TestCase):
             lock_path = state_dir / "job-runner.lock"
             state_dir.mkdir(parents=True, exist_ok=True)
             lock_path.write_text(
-                json.dumps({"pid": 99999999, "job_id": "dead-job", "job_name": "dead"}),
+                json.dumps({"pid": 99999999, "run_id": "dead-run", "run_name": "dead"}),
                 encoding="utf-8",
             )
 
             runner = JobRunner(state_dir)
-            runner.start("after-stale", lambda _stop: {"status": "success"})
+            runner.start("after-stale", lambda _stop, _run_id: {"status": "success"})
             state = _wait_for_idle_state(state_dir)
 
-            self.assertEqual(state["last_job_status"], "success")
+            self.assertEqual(state["last_run_status"], "success")
             self.assertFalse(lock_path.exists())
 
     def test_state_dir_lock_does_not_reclaim_corrupt_or_current_pid_lock(self) -> None:
@@ -225,27 +289,27 @@ class JobRunnerTests(unittest.TestCase):
             runner = JobRunner(state_dir)
 
             lock_path.write_text("{broken", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "job already running in state_dir"):
-                runner.start("blocked", lambda _stop: {"status": "success"})
+            with self.assertRaisesRegex(RuntimeError, "run already running in state_dir"):
+                runner.start("blocked", lambda _stop, _run_id: {"status": "success"})
 
             lock_path.unlink()
-            lock_path.write_text(json.dumps({"pid": os.getpid(), "job_id": "same-pid"}), encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "job already running in state_dir"):
-                runner.start("blocked", lambda _stop: {"status": "success"})
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "run_id": "same-pid"}), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "run already running in state_dir"):
+                runner.start("blocked", lambda _stop, _run_id: {"status": "success"})
             self.assertTrue((state_dir / "job-runner.lock").exists())
 
             lock_path.unlink()
             second = JobRunner(state_dir)
-            second.start("second", lambda _stop: {"status": "success"})
+            second.start("second", lambda _stop, _run_id: {"status": "success"})
             state = _wait_for_idle_state(state_dir)
-            self.assertEqual(state["last_job_status"], "success")
+            self.assertEqual(state["last_run_status"], "success")
 
 
 def _wait_for_idle_state(state_dir: Path) -> dict[str, object]:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         state = read_state(state_dir)
-        if state.get("current_job") is None and state.get("last_job_status"):
+        if state.get("current_run_id") is None and state.get("last_run_status"):
             return state
         time.sleep(0.01)
     raise AssertionError("job did not become idle")

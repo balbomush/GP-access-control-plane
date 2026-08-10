@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [ -n "${GP_INSTALL_CONFIG:-}" ]; then
+INSTALL_FORCE_CLEAN="${GP_INSTALL_FORCE_CLEAN:-off}"
+# Fixed, root-owned profile; a release update must not use a caller-selected path.
+INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"
+LEGACY_PROFILE_CAPTURE=off
+
+release_update_enabled() {
+  case "$INSTALL_FORCE_CLEAN" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if release_update_enabled; then
+  if [ -e "$INSTALL_PROFILE" ] || [ -L "$INSTALL_PROFILE" ]; then
+    [ -f "$INSTALL_PROFILE" ] && [ ! -L "$INSTALL_PROFILE" ] || { printf '\nERROR: install profile is not a regular file: %s\n' "$INSTALL_PROFILE" >&2; exit 1; }
+    profile_uid="$(stat -c '%u' "$INSTALL_PROFILE" 2>/dev/null || true)"
+    profile_mode="$(stat -c '%a' "$INSTALL_PROFILE" 2>/dev/null || true)"
+    [ "$profile_uid" = "0" ] && [ -n "$profile_mode" ] && [ $((8#$profile_mode & 022)) -eq 0 ] || { printf '\nERROR: install profile must be root-owned and not group/world-writable: %s\n' "$INSTALL_PROFILE" >&2; exit 1; }
+    set -a
+    # shellcheck disable=SC1090
+    . "$INSTALL_PROFILE"
+    set +a
+  else
+    LEGACY_PROFILE_CAPTURE=on
+  fi
+elif [ -n "${GP_INSTALL_CONFIG:-}" ]; then
   [ -r "$GP_INSTALL_CONFIG" ] || { printf '\nERROR: install config is not readable: %s\n' "$GP_INSTALL_CONFIG" >&2; exit 1; }
   # shellcheck disable=SC1090
   set -a
@@ -26,6 +51,7 @@ ZAPRET_BRANCH="${ZAPRET_BRANCH:-master}"
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
 ROOT_HELPER_PATH="${GP_ROOT_HELPER_PATH:-/usr/local/libexec/gp-control-plane/gp-root-helper}"
 ROOT_HELPER_CONFIG="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
+ROOT_HELPER_RUN_DIR="${GP_ROOT_HELPER_RUN_DIR:-/run/gp-control-plane/runs}"
 SUDOERS_PATH="${GP_SUDOERS_PATH:-/etc/sudoers.d/gp-control-plane-root-helper}"
 SERVICE_MEMORY_HIGH="${GP_SERVICE_MEMORY_HIGH:-512M}"
 SERVICE_MEMORY_MAX="${GP_SERVICE_MEMORY_MAX:-1G}"
@@ -302,6 +328,103 @@ fi
 log "Checking administrator access"
 as_root true
 
+trusted_root_file() {
+  profile_path="$1"
+  [ -f "$profile_path" ] && [ ! -L "$profile_path" ] || return 1
+  profile_uid="$(as_root stat -c '%u' "$profile_path" 2>/dev/null || true)"
+  profile_mode="$(as_root stat -c '%a' "$profile_path" 2>/dev/null || true)"
+  [ "$profile_uid" = "0" ] && [ -n "$profile_mode" ] && [ $((8#$profile_mode & 022)) -eq 0 ]
+}
+
+unit_value() {
+  unit_file="/etc/systemd/system/$1"
+  property="$2"
+  trusted_root_file "$unit_file" || fail "Cannot safely read systemd unit: $unit_file"
+  sed -n "s/^$property=//p" "$unit_file" | head -n 1
+}
+
+unit_option() {
+  unit_file="/etc/systemd/system/$1"
+  option="$2"
+  trusted_root_file "$unit_file" || fail "Cannot safely read systemd unit: $unit_file"
+  awk -v option="$option" '/^ExecStart=/ { for (i = 1; i < NF; i++) if ($i == option) { print $(i + 1); exit } }' "$unit_file"
+}
+
+load_trusted_service_env() {
+  trusted_root_file "$1" || fail "Cannot safely read service environment: $1"
+  set -a
+  # shellcheck disable=SC1090
+  . "$1"
+  set +a
+}
+
+capture_legacy_install_profile() {
+  [ -f "/etc/systemd/system/$CORE_SERVICE_NAME" ] || fail "Cannot capture legacy install profile: Core service is missing"
+  CORE_ENV_FILE="$(unit_value "$CORE_SERVICE_NAME" EnvironmentFile | sed 's/^-//')"
+  [ -n "$CORE_ENV_FILE" ] || fail "Cannot capture legacy install profile: Core EnvironmentFile is missing"
+  load_trusted_service_env "$CORE_ENV_FILE"
+  INSTALL_DIR="${GP_INSTALL_DIR:-$INSTALL_DIR}"
+  STATE_DIR="${GP_STATE_DIR:-$STATE_DIR}"
+  SERVICE_PATH="$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  CORE_HOST="$(unit_option "$CORE_SERVICE_NAME" --host)"
+  CORE_PORT="$(unit_option "$CORE_SERVICE_NAME" --port)"
+  [ -n "$CORE_HOST" ] && [ -n "$CORE_PORT" ] || fail "Cannot capture legacy install profile: Core host/port are missing"
+  CORE_URL="http://$CORE_HOST:$CORE_PORT"
+  if [ -f "/etc/systemd/system/$SERVICE_NAME" ]; then
+    INSTALL_WEB=on
+    WEB_ENV_FILE="$(unit_value "$SERVICE_NAME" EnvironmentFile | sed 's/^-//')"
+    [ -n "$WEB_ENV_FILE" ] || fail "Cannot capture legacy install profile: Web EnvironmentFile is missing"
+    load_trusted_service_env "$WEB_ENV_FILE"
+    WEB_HOST="$(unit_option "$SERVICE_NAME" --host)"
+    WEB_PORT="$(unit_option "$SERVICE_NAME" --port)"
+    CORE_URL="$(unit_option "$SERVICE_NAME" --core-url)"
+    [ -n "$WEB_HOST" ] && [ -n "$WEB_PORT" ] && [ -n "$CORE_URL" ] || fail "Cannot capture legacy install profile: Web topology is incomplete"
+  else
+    INSTALL_WEB=off
+  fi
+}
+
+write_install_profile_value() {
+  profile_key="$1"
+  profile_value="$2"
+  profile_escaped="$(printf '%s' "$profile_value" | sed "s/'/'\\\\''/g")"
+  printf "%s='%s'\n" "$profile_key" "$profile_escaped"
+}
+
+write_install_profile() {
+  tmp_profile="$(mktemp)"
+  if install_web_enabled; then profile_install_web=on; else profile_install_web=off; fi
+  {
+    printf '# Managed by GP Access Control Plane installer. Reconfigure only through the explicit installer.\n'
+    write_install_profile_value GP_INSTALL_USER "$TARGET_USER"
+    write_install_profile_value GP_INSTALL_DIR "$INSTALL_DIR"
+    write_install_profile_value GP_STATE_DIR "$STATE_DIR"
+    write_install_profile_value GP_SERVICE_NAME "$SERVICE_NAME"
+    write_install_profile_value GP_CORE_SERVICE_NAME "$CORE_SERVICE_NAME"
+    write_install_profile_value GP_INSTALL_WEB "$profile_install_web"
+    write_install_profile_value GP_WEB_HOST "$WEB_HOST"
+    write_install_profile_value GP_WEB_PORT "$WEB_PORT"
+    write_install_profile_value GP_WEB_ENV_FILE "$WEB_ENV_FILE"
+    write_install_profile_value GP_CORE_HOST "$CORE_HOST"
+    write_install_profile_value GP_CORE_PORT "$CORE_PORT"
+    write_install_profile_value GP_CORE_URL "$CORE_URL"
+    write_install_profile_value GP_CORE_ENV_FILE "$CORE_ENV_FILE"
+    write_install_profile_value GP_ZAPRET_DIR "$ZAPRET_DIR"
+    write_install_profile_value GP_ROOT_HELPER_PATH "$ROOT_HELPER_PATH"
+    write_install_profile_value GP_ROOT_HELPER_CONFIG "$ROOT_HELPER_CONFIG"
+    write_install_profile_value GP_ROOT_HELPER_RUN_DIR "$ROOT_HELPER_RUN_DIR"
+    write_install_profile_value GP_SUDOERS_PATH "$SUDOERS_PATH"
+    write_install_profile_value GP_SERVICE_MEMORY_HIGH "$SERVICE_MEMORY_HIGH"
+    write_install_profile_value GP_SERVICE_MEMORY_MAX "$SERVICE_MEMORY_MAX"
+  } > "$tmp_profile"
+  as_root install -m 0640 -o root -g root "$tmp_profile" "$INSTALL_PROFILE"
+  rm -f "$tmp_profile"
+}
+
+if [ "$LEGACY_PROFILE_CAPTURE" = on ]; then
+  capture_legacy_install_profile
+fi
+
 log "Installing for user: $TARGET_USER"
 log "Install directory: $INSTALL_DIR"
 log "State directory: $STATE_DIR"
@@ -429,13 +552,19 @@ if step_log v2fly "Preparing local v2fly domain catalog"; then
   fi
 fi
 
-if step_log root-helper "Installing GP root helper"; then
+if [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled root-helper; then
+  log "[root-helper] skipped while capturing the existing install profile"
+elif step_log root-helper "Installing GP root helper"; then
   as_root install -d -m 0755 "$(dirname "$ROOT_HELPER_PATH")"
   as_root install -m 0755 -o root -g root "$INSTALL_DIR/scripts/gp-root-helper.sh" "$ROOT_HELPER_PATH"
 
   TMP_ROOT_HELPER_CONFIG="$(mktemp)"
   ZAPRET_DIR_ESCAPED="$(printf '%s' "$ZAPRET_DIR" | sed "s/'/'\\\\''/g")"
-  printf "ZAPRET_DIR='%s'\n" "$ZAPRET_DIR_ESCAPED" > "$TMP_ROOT_HELPER_CONFIG"
+  ROOT_HELPER_RUN_DIR_ESCAPED="$(printf '%s' "$ROOT_HELPER_RUN_DIR" | sed "s/'/'\\\\''/g")"
+  {
+    printf "ZAPRET_DIR='%s'\n" "$ZAPRET_DIR_ESCAPED"
+    printf "GP_ROOT_HELPER_RUN_DIR='%s'\n" "$ROOT_HELPER_RUN_DIR_ESCAPED"
+  } > "$TMP_ROOT_HELPER_CONFIG"
   as_root install -m 0644 -o root -g root "$TMP_ROOT_HELPER_CONFIG" "$ROOT_HELPER_CONFIG"
   rm -f "$TMP_ROOT_HELPER_CONFIG"
 
@@ -446,7 +575,9 @@ if step_log root-helper "Installing GP root helper"; then
   rm -f "$TMP_SUDOERS"
 fi
 
-if step_log service "Creating and starting systemd service"; then
+if [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled service; then
+  log "[service] skipped while capturing the existing install profile"
+elif step_log service "Creating and starting systemd service"; then
   install_service_env_file "$CORE_ENV_FILE"
   install_systemd_service "$CORE_SERVICE_NAME" "GP Strategy Finder Core API" "core" "$CORE_HOST" "$CORE_PORT" "$CORE_ENV_FILE"
   as_root systemctl daemon-reload
@@ -469,6 +600,11 @@ if step_log check "Checking installation"; then
   if install_web_enabled; then
     as_root systemctl --no-pager --full status "$SERVICE_NAME" || true
   fi
+fi
+
+if { [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled app; } || { ! release_update_enabled && step_enabled service; }; then
+  log "Writing root-owned resolved install profile"
+  write_install_profile
 fi
 
 IP_ADDRESS="$(hostname -I 2>/dev/null | awk '{print $1}')"

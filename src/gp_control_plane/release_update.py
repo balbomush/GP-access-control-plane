@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -30,10 +31,10 @@ def release_update_plan(
     state = read_state(state_dir)
     _expire_stale_release_update(state_dir, state)
     runtime = active_runtime_payload(state_dir)
-    active_job = str(runtime.get("job_id") or "")
+    active_run_id = str(runtime.get("run_id") or "")
     active_update = _active_release_update_payload(state, current_version=current_version)
     reason = ""
-    if active_job:
+    if active_run_id:
         reason = "job is running"
     elif active_update:
         reason = "release update is already queued"
@@ -49,11 +50,11 @@ def release_update_plan(
         "release": release,
         "can_update": not reason,
         "blocked_reason": reason,
-        "active_job": active_job,
+        "active_run_id": active_run_id,
         "steps": [
             "check selected release channel",
             "create backup before code change",
-            "queue installer through root-helper",
+            "queue installer through root-helper using the root-owned install profile",
             "verify installed ref/version after installer finishes",
             "if verification fails, restore the pre-update backup from Backups",
             "service will come back on the selected release",
@@ -99,8 +100,10 @@ def queue_release_update(
         raise RuntimeError("install_dir is required")
     root = install_dir.resolve()
     queued_at = now_iso()
+    update_id = uuid.uuid4().hex
     payload = {
         "queued": True,
+        "update_id": update_id,
         "status": "queueing",
         "queued_at": queued_at,
         "release": release,

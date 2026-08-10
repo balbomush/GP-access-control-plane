@@ -74,12 +74,12 @@ from ..strategy_finder import (
     read_candidate_domain_index,
     read_candidate_page,
     read_runs,
-    read_runs_page,
     run_multi_domain_discovery,
     run_standard_discovery,
     stop_active_blockcheck_runtime,
 )
-from ..zapret2 import check_install_cached
+from ..zapret2 import check_install_cached, recover_registered_process_runs
+from .errors import error_payload, normalize_error_payload
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
     SWAGGER_HTML_CONTENT_TYPE,
@@ -114,7 +114,8 @@ def index_html() -> str:
 
 
 def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -> None:
-    _clear_stale_current_job(config)
+    recover_registered_process_runs()
+    _clear_stale_current_run(config)
     close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_snapshot_if_idle(config.output.state_dir))
     runtime_role = "monolith" if ui_enabled else "core"
@@ -162,7 +163,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/health": health_payload,
                 "/api/core/status": lambda: core_api.status_payload(config),
                 "/api/core/strategy-discovery/current-run-progress": lambda: core_api.current_progress_payload(config),
-                "/api/core/strategy-discovery/current-run-latest-log": lambda: _latest_log_payload(config, query),
+                "/api/core/strategy-discovery/current-run-latest-log": lambda: _current_run_latest_log_payload(config, query),
                 "/api/core/strategy-discovery/preflight": lambda: core_api.preflight_payload(config),
                 "/api/core/presets/domain-lists": lambda: core_api.domain_lists_payload(config),
                 "/api/core/presets/v2fly/categories": lambda: core_api.v2fly_categories_payload(config, query),
@@ -274,7 +275,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                         {
                             "accepted": True,
                             "status": "dry_run",
-                            "job_id": str(state.get("current_job") or ""),
+                            "run_id": str(state.get("current_run_id") or ""),
                         },
                         HTTPStatus.ACCEPTED,
                     )
@@ -284,11 +285,15 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             def start_strategy_discovery() -> tuple[dict[str, Any], HTTPStatus]:
                 name, core_payload = core_api.strategy_discovery_job_payload(payload)
                 func = (
-                    (lambda stop: _job_zapret_multi_domain_discovery(config, core_payload, stop))
+                    (lambda stop, run_id: _job_zapret_multi_domain_discovery(config, core_payload, stop, run_id))
                     if name == "zapret-multi-domain-discovery"
-                    else (lambda stop: _job_zapret_standard_discovery(config, core_payload, stop))
+                    else (lambda stop, run_id: _job_zapret_standard_discovery(config, core_payload, stop, run_id))
                 )
-                job = runner.start(name, func, cancel_hook=stop_active_blockcheck_runtime)
+                job = runner.start(
+                    name,
+                    func,
+                    cancel_hook=lambda: stop_active_blockcheck_runtime(config.output.state_dir),
+                )
                 return core_api.run_accepted_payload(job), HTTPStatus.ACCEPTED
 
             def create_core_backup() -> tuple[dict[str, Any], HTTPStatus]:
@@ -302,7 +307,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 restored = restore_snapshot_if_idle(config.output.state_dir, snapshot_id)
                 if restored.get("queued"):
                     raise RuntimeBusyError()
-                return {"accepted": True, "status": "success", "job_id": snapshot_id}, HTTPStatus.ACCEPTED
+                return {"accepted": True, "status": "success", "snapshot_id": snapshot_id}, HTTPStatus.ACCEPTED
 
             def delete_core_backup() -> tuple[dict[str, Any], HTTPStatus]:
                 snapshot_id = core_api.payload_snapshot_id(payload)
@@ -335,7 +340,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     raise ValueError("channel must be stable or prerelease")
                 if payload.get("dry_run"):
                     return (
-                        {"accepted": True, "status": "dry_run", "job_id": str(payload.get("target_ref") or channel)},
+                        {"accepted": True, "status": "dry_run", "update_id": ""},
                         HTTPStatus.ACCEPTED,
                     )
                 update = service_api.queue_release_update_payload(
@@ -343,10 +348,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     read_service_settings(config),
                     payload,
                 ).get("update") or {}
-                return (
-                    {"accepted": True, "status": str(update.get("status") or "queued"), "job_id": str(update.get("target_ref") or "")},
-                    HTTPStatus.ACCEPTED,
-                )
+                return core_api.release_update_accepted_payload(update), HTTPStatus.ACCEPTED
 
             return {
                 "/api/auth/login": (
@@ -447,8 +449,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def _openapi_json(self) -> None:
             try:
                 data = openapi_json_bytes(core_only=not ui_enabled)
-            except OSError as exc:
-                self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
+            except OSError:
+                self._json({"error": "openapi contract is not available"}, status=HTTPStatus.NOT_FOUND)
                 return
             self._bytes(data, OPENAPI_JSON_CONTENT_TYPE, cache_control="no-store")
 
@@ -517,7 +519,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             require_bearer_token(config.output.state_dir, authorization)
 
         def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            response = normalize_error_payload(payload, status)
+            data = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -538,7 +541,12 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             return True
 
         def _auth_error(self, error: AuthenticationError) -> None:
-            data = json.dumps({"error": str(error)}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            del error
+            data = json.dumps(
+                error_payload("authentication_required", "A Bearer token is required."),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
             self.send_response(HTTPStatus.UNAUTHORIZED)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("WWW-Authenticate", "Bearer")
@@ -578,10 +586,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             except Exception:
                 self._not_found()
                 return
-            self._file(path, download_name=path.name)
+            self._file(path, download_name=path.name, content_type="application/zip")
 
-        def _file(self, path: Path, download_name: str) -> None:
-            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        def _file(self, path: Path, download_name: str, *, content_type: str | None = None) -> None:
+            content_type = content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(path.stat().st_size))
@@ -869,6 +877,18 @@ def _latest_log_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[
     )
 
 
+def _current_run_latest_log_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    state = read_state(config.output.state_dir)
+    return latest_log_tail(
+        config.output.state_dir,
+        run_id=str(state.get("current_run_id") or ""),
+        stdout_from_size=_query_int(query, "stdout_size", -1),
+        stdout_log_match=_query_one(query, "stdout_log"),
+        stderr_from_size=_query_int(query, "stderr_size", -1),
+        stderr_log_match=_query_one(query, "stderr_log"),
+    )
+
+
 DEFAULT_RUN_PREFERENCES = {
     "domains": [],
     "domain_preset": "system:required",
@@ -1055,20 +1075,20 @@ def _profile_name(value: Any) -> str:
     return "".join(allowed)[:64]
 
 
-def _clear_stale_current_job(config: AppConfig) -> None:
+def _clear_stale_current_run(config: AppConfig) -> None:
     state = read_state(config.output.state_dir)
-    if not state.get("current_job"):
+    if not state.get("current_run_id"):
         return
     if active_job_lock_payload(config.output.state_dir, cleanup_stale=True):
         return
 
-    def clear_current_job(current: dict[str, Any]) -> dict[str, Any]:
-        current["current_job"] = None
-        current["current_job_name"] = None
-        current["current_job_status"] = None
+    def clear_current_run(current: dict[str, Any]) -> dict[str, Any]:
+        current["current_run_id"] = None
+        current["current_run_name"] = None
+        current["current_run_status"] = None
         return current
 
-    update_state(config.output.state_dir, clear_current_job)
+    update_state(config.output.state_dir, clear_current_run)
 
 
 def _candidate_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1095,11 +1115,7 @@ def _candidate_domain_index_payload(config: AppConfig, query: dict[str, list[str
 
 
 def _runs_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
-    return read_runs_page(
-        config.output.state_dir,
-        limit=_query_int(query, "limit", 50),
-        offset=_query_int(query, "offset", 0),
-    )
+    return core_api.runs_history_page_payload(config, query)
 
 
 def _presets_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1289,7 +1305,9 @@ def _multipart_file_bytes(body: bytes, boundary: str) -> bytes:
     raise ValueError("backup file is missing")
 
 
-def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
+def _job_zapret_standard_discovery(
+    config: AppConfig, payload: dict[str, Any], stop_event: Any, run_id: str = ""
+) -> dict[str, Any]:
     domains = _payload_domains(payload)
     settings = read_run_settings(config)
     return run_standard_discovery(
@@ -1315,10 +1333,13 @@ def _job_zapret_standard_discovery(config: AppConfig, payload: dict[str, Any], s
         ),
         debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
+        run_id=run_id,
     )
 
 
-def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any], stop_event: Any) -> dict[str, Any]:
+def _job_zapret_multi_domain_discovery(
+    config: AppConfig, payload: dict[str, Any], stop_event: Any, run_id: str = ""
+) -> dict[str, Any]:
     domains = _payload_domains(payload)
     settings = read_run_settings(config)
     max_parallelism = _minimum_int(settings.get("curl_parallelism_max"), default=10, minimum=1)
@@ -1346,6 +1367,7 @@ def _job_zapret_multi_domain_discovery(config: AppConfig, payload: dict[str, Any
         curl_parallelism=_bounded_int(payload.get("curl_parallelism"), default=int(settings.get("curl_parallelism_default") or 4), minimum=1, maximum=max_parallelism),
         debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
         stop_event=stop_event,
+        run_id=run_id,
     )
 
 def _payload_domains(payload: dict[str, Any]) -> list[str]:

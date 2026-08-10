@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -198,6 +203,149 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("GP_INSTALL_DIR", self.installer)
         self.assertIn("GP_STATE_DIR", self.installer)
 
+    def test_release_update_uses_only_root_owned_resolved_install_profile(self) -> None:
+        self.assertIn('INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"', self.installer)
+        self.assertIn("if release_update_enabled; then", self.installer)
+        self.assertIn('LEGACY_PROFILE_CAPTURE=on', self.installer)
+        self.assertIn('if [ -e "$INSTALL_PROFILE" ] || [ -L "$INSTALL_PROFILE" ]; then', self.installer)
+        self.assertIn('[ -f "$INSTALL_PROFILE" ] && [ ! -L "$INSTALL_PROFILE" ]', self.installer)
+        self.assertIn('profile_uid="$(stat -c \'%u\' "$INSTALL_PROFILE"', self.installer)
+        self.assertIn('profile_mode="$(stat -c \'%a\' "$INSTALL_PROFILE"', self.installer)
+        self.assertIn('$((8#$profile_mode & 022)) -eq 0', self.installer)
+        self.assertIn('. "$INSTALL_PROFILE"', self.installer)
+        self.assertNotIn('INSTALL_PROFILE="${GP_INSTALL_PROFILE', self.installer)
+
+        profile_load_pos = self.installer.index('. "$INSTALL_PROFILE"')
+        defaults_pos = self.installer.index('REPO_URL="${GP_REPO_URL')
+        self.assertLess(profile_load_pos, defaults_pos)
+
+    def test_release_update_install_profile_runtime_regression(self) -> None:
+        bash = shutil.which("bash")
+        if bash is None:
+            git_bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if git_bash.is_file():
+                bash = str(git_bash)
+        if bash is None:
+            self.skipTest("bash is required for installer profile regression probe")
+
+        with tempfile.TemporaryDirectory() as raw:
+            work_dir = Path(raw)
+            bash_work_dir = subprocess.run(
+                [bash, "-lc", "pwd"],
+                cwd=work_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            profile = work_dir / "install-profile"
+            probe = work_dir / "install-profile-probe.sh"
+
+            def bash_path(path: Path) -> str:
+                return f"{bash_work_dir}/{path.name}"
+
+            def write_probe(profile_path: Path) -> None:
+                source = self.installer.replace(
+                    'INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"',
+                    f"INSTALL_PROFILE={shlex.quote(bash_path(profile_path))}",
+                    1,
+                )
+                source = source.replace(
+                    "LEGACY_PROFILE_CAPTURE=off\n",
+                    "LEGACY_PROFILE_CAPTURE=off\n"
+                    "stat() {\n"
+                    "  case \"${2:-}\" in\n"
+                    "    %u) printf '%s\\n' \"${GP_TEST_PROFILE_UID:?}\" ;;\n"
+                    "    %a) printf '%s\\n' \"${GP_TEST_PROFILE_MODE:?}\" ;;\n"
+                    "    *) command stat \"$@\" ;;\n"
+                    "  esac\n"
+                    "}\n",
+                    1,
+                )
+                marker = 'CURRENT_UID="$(id -u)"'
+                replacement = (
+                    'if install_web_enabled; then profile_web=enabled; else profile_web=disabled; fi\n'
+                    'printf "profile_web=%s core=%s:%s url=%s\\n" "$profile_web" "$CORE_HOST" "$CORE_PORT" "$CORE_URL"\n'
+                    'exit 0\n\n'
+                    + marker
+                )
+                self.assertIn(marker, source)
+                probe.write_text(source.replace(marker, replacement, 1), encoding="utf-8", newline="\n")
+                probe.chmod(0o755)
+
+            def run_probe(*, uid: str = "0", mode: str = "640") -> subprocess.CompletedProcess[str]:
+                environment = os.environ | {
+                    "GP_INSTALL_FORCE_CLEAN": "on",
+                    "GP_INSTALL_WEB": "on",
+                    "GP_CORE_HOST": "0.0.0.0",
+                    "GP_CORE_PORT": "9999",
+                    "GP_CORE_URL": "http://0.0.0.0:9999",
+                    "GP_TEST_PROFILE_UID": uid,
+                    "GP_TEST_PROFILE_MODE": mode,
+                }
+                return subprocess.run(
+                    [bash, bash_path(probe)],
+                    check=False,
+                    capture_output=True,
+                    env=environment,
+                    text=True,
+                )
+
+            profile.write_text(
+                "GP_INSTALL_WEB='off'\n"
+                "GP_CORE_HOST='127.0.0.9'\n"
+                "GP_CORE_PORT='18081'\n"
+                "GP_CORE_URL='http://127.0.0.9:18081'\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            write_probe(profile)
+
+            accepted = run_probe()
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(
+                accepted.stdout.strip(),
+                "profile_web=disabled core=127.0.0.9:18081 url=http://127.0.0.9:18081",
+            )
+
+            wrong_owner = run_probe(uid="1000")
+            self.assertNotEqual(wrong_owner.returncode, 0)
+            self.assertIn("must be root-owned", wrong_owner.stderr)
+
+            writable_profile = run_probe(mode="660")
+            self.assertNotEqual(writable_profile.returncode, 0)
+            self.assertIn("must be root-owned", writable_profile.stderr)
+
+            profile.unlink()
+            symlink = subprocess.run(
+                [bash, "-c", 'cd "$1" && ln -s install-profile-target install-profile', "bash", bash_work_dir],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if symlink.returncode:
+                if os.name == "nt":
+                    return  # The remaining profile cases ran; Windows lacks symlink creation privilege here.
+                self.fail(symlink.stderr)
+            write_probe(profile)
+            symlink_profile = run_probe()
+            self.assertNotEqual(symlink_profile.returncode, 0)
+            self.assertIn("not a regular file", symlink_profile.stderr)
+
+    def test_installer_writes_profile_only_after_success_and_legacy_capture_skips_reconfiguration(self) -> None:
+        self.assertIn('capture_legacy_install_profile()', self.installer)
+        self.assertIn('load_trusted_service_env "$CORE_ENV_FILE"', self.installer)
+        self.assertIn('unit_option "$CORE_SERVICE_NAME" --host', self.installer)
+        self.assertIn('log "[root-helper] skipped while capturing the existing install profile"', self.installer)
+        self.assertIn('log "[service] skipped while capturing the existing install profile"', self.installer)
+        self.assertIn('as_root install -m 0640 -o root -g root "$tmp_profile" "$INSTALL_PROFILE"', self.installer)
+        self.assertIn('write_install_profile_value GP_INSTALL_WEB "$profile_install_web"', self.installer)
+        self.assertIn('write_install_profile_value GP_CORE_URL "$CORE_URL"', self.installer)
+        self.assertIn('write_install_profile_value GP_WEB_HOST "$WEB_HOST"', self.installer)
+        self.assertIn('write_install_profile_value GP_WEB_PORT "$WEB_PORT"', self.installer)
+
+        check_pos = self.installer.index('if step_log check "Checking installation"; then')
+        write_pos = self.installer.index('write_install_profile', check_pos)
+        self.assertLess(check_pos, write_pos)
     def test_root_helper_multidomain_runner_normalizes_empty_ip_list_before_nft(self) -> None:
         self.assertIn("gp_md_normalize_ip_list", self.helper)
         self.assertIn('ips="$(gp_md_normalize_ip_list "$ips")', self.helper)

@@ -15,6 +15,9 @@ REMOVED_STATE_KEYS = {
     "last_validate_at",
     "last_render_at",
     "selected_strategy",
+    "current_job",
+    "current_job_name",
+    "current_job_status",
 }
 
 JOB_RUNNER_LOCK_FILE_NAME = "job-runner.lock"
@@ -29,7 +32,7 @@ def now_iso() -> str:
 def read_state(state_dir: Path) -> dict[str, Any]:
     path = state_dir / "state.json"
     defaults = {
-        "current_job": None,
+        "current_run_id": None,
         "last_error": None,
     }
     if not path.exists():
@@ -79,17 +82,15 @@ def update_state(state_dir: Path, updater: Callable[[dict[str, Any]], dict[str, 
 def active_runtime_payload(state_dir: Path) -> dict[str, Any]:
     state = read_state(state_dir)
     lock = active_job_lock_payload(state_dir, cleanup_stale=True)
-    current_job = str(state.get("current_job") or lock.get("job_id") or "").strip()
-    if not current_job and lock:
-        current_job = "job-lock"
-    current_name = str(state.get("current_job_name") or lock.get("job_name") or "").strip()
-    current_status = str(state.get("current_job_status") or ("running" if lock else "") or "").strip()
+    current_run_id = str(state.get("current_run_id") or lock.get("run_id") or "").strip()
+    current_name = str(state.get("current_run_name") or lock.get("run_name") or "").strip()
+    current_status = str(state.get("current_run_status") or ("running" if lock else "") or "").strip()
     return {
-        "active": bool(current_job or lock),
-        "job_id": current_job,
-        "job_name": current_name,
+        "active": bool(current_run_id or lock),
+        "run_id": current_run_id,
+        "run_name": current_name,
         "status": current_status,
-        "source": "state" if state.get("current_job") else ("lock" if lock else ""),
+        "source": "state" if state.get("current_run_id") else ("lock" if lock else ""),
         "lock": lock,
     }
 
@@ -118,7 +119,7 @@ def active_job_lock_payload(state_dir: Path, *, cleanup_stale: bool = False) -> 
         return {}
     payload = read_job_lock_payload(state_dir)
     if not payload:
-        return {"job_id": "", "job_name": "", "corrupt": True}
+        return {"run_id": "", "run_name": "", "corrupt": True}
     if is_stale_process_payload(payload):
         if cleanup_stale:
             try:

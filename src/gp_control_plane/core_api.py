@@ -17,7 +17,7 @@ from .storage import (
     save_system_preset,
     storage_runtime_status,
 )
-from .strategy_finder import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_strategy_candidates_filtered
+from .strategy_finder import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_runs_page, read_strategy_candidates_filtered
 from .v2fly_payloads import v2fly_storage_status_payload
 from .zapret2 import check_install_cached
 
@@ -52,9 +52,9 @@ STRATEGY_DISCOVERY_START_RUN_SETTINGS_KEYS = {
 def status_payload(config: AppConfig) -> dict[str, Any]:
     state = read_state(config.output.state_dir)
     storage = storage_runtime_status(config.output.state_dir)
-    current_job = str(state.get("current_job") or "")
-    current_status = str(state.get("current_job_status") or "")
-    status = "running" if current_job else "idle"
+    current_run_id = str(state.get("current_run_id") or "")
+    current_status = str(state.get("current_run_status") or "")
+    status = "running" if current_run_id else "idle"
     if current_status == "stopping":
         status = "stopping"
     if state.get("last_error"):
@@ -68,21 +68,21 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         },
         "updated_at": now_iso(),
     }
-    if current_job:
-        payload["current_run"] = {"run_id": current_job, "status": current_status or "running"}
+    if current_run_id:
+        payload["current_run"] = {"run_id": current_run_id, "status": current_status or "running"}
     return payload
 
 
 def current_progress_payload(config: AppConfig) -> dict[str, Any]:
     state = read_state(config.output.state_dir)
-    log = latest_log_tail(config.output.state_dir, max_lines=20)
+    current_run_id = str(state.get("current_run_id") or "")
+    log = latest_log_tail(config.output.state_dir, max_lines=20, run_id=current_run_id)
     progress = log.get("progress") if isinstance(log.get("progress"), dict) else {}
-    current_job = str(state.get("current_job") or log.get("run_id") or "")
-    status = str(state.get("current_job_status") or log.get("status") or "")
-    if not state.get("current_job"):
+    status = str(state.get("current_run_status") or "")
+    if not current_run_id:
         status = "idle"
     result: dict[str, Any] = {
-        "run_id": current_job,
+        "run_id": current_run_id,
         "status": status or "idle",
         "stage": str(progress.get("phase") or progress.get("stage") or ""),
         "current_file": str(progress.get("current_file") or progress.get("script") or ""),
@@ -113,13 +113,14 @@ def preflight_payload(config: AppConfig) -> dict[str, Any]:
     for item in diagnostics:
         if not isinstance(item, dict):
             continue
-        checks.append(
-            {
-                "name": str(item.get("id") or item.get("label") or "check"),
-                "status": "ok" if item.get("ok") else "error",
-                "message": str(item.get("message") or ""),
-            }
-        )
+        check = {
+            "name": str(item.get("id") or item.get("label") or "check"),
+            "status": "ok" if item.get("ok") else "error",
+            "message": str(item.get("message") or ""),
+        }
+        if isinstance(item.get("details"), dict):
+            check["details"] = item["details"]
+        checks.append(check)
     if not checks:
         ready = bool(zapret.get("ready") or zapret.get("ok"))
         checks.append({"name": "zapret2", "status": "ok" if ready else "error", "message": str(zapret.get("message") or "")})
@@ -248,27 +249,53 @@ def backup_snapshot_payload(item: dict[str, Any]) -> dict[str, Any]:
 
 def runs_history_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     return {
-        "runs": read_runs(
-            config.output.state_dir,
-            limit=query_int(query, "limit", 1000),
-            offset=query_int(query, "offset", 0),
-        )
+        "runs": [
+            run_history_item_payload(run)
+            for run in read_runs(
+                config.output.state_dir,
+                limit=query_int(query, "limit", 1000),
+                offset=query_int(query, "offset", 0),
+            )
+        ]
+    }
+def runs_history_page_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    page = read_runs_page(
+        config.output.state_dir,
+        limit=query_int(query, "limit", 50),
+        offset=query_int(query, "offset", 0),
+    )
+    return page | {"runs": [run_history_item_payload(run) for run in page["runs"]]}
+
+
+def run_history_item_payload(run: dict[str, Any]) -> dict[str, Any]:
+    return {"run_id": str(run.get("id") or "")} | {key: value for key, value in run.items() if key != "id"}
+
+
+
+
+def run_accepted_payload(run: Any) -> dict[str, Any]:
+    return {
+        "accepted": True,
+        "run_id": str(getattr(run, "run_id", "")),
+        "status": str(getattr(run, "status", "")),
     }
 
 
-def run_accepted_payload(job: Any) -> dict[str, Any]:
+def action_accepted_payload(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "accepted": True,
-        "run_id": str(getattr(job, "id", "")),
-        "status": str(getattr(job, "status", "")),
+        "run_id": str(run.get("run_id") or ""),
+        "status": str(run.get("status") or ""),
     }
 
-
-def action_accepted_payload(job: dict[str, Any]) -> dict[str, Any]:
+def release_update_accepted_payload(update: dict[str, Any]) -> dict[str, Any]:
+    update_id = str(update.get("update_id") or "").strip()
+    if not update_id:
+        raise ValueError("release update is missing update_id")
     return {
         "accepted": True,
-        "status": str(job.get("status") or ""),
-        "job_id": str(job.get("id") or ""),
+        "update_id": update_id,
+        "status": str(update.get("status") or ""),
     }
 
 

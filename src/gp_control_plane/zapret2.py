@@ -9,6 +9,8 @@ import threading
 import time
 from pathlib import Path
 
+from .process_registry import validate_run_id
+
 
 DEFAULT_ROOT_HELPER = "/usr/local/libexec/gp-control-plane/gp-root-helper"
 BLOCKCHECK_ENV_KEYS = (
@@ -33,6 +35,8 @@ BLOCKCHECK_ENV_KEYS = (
     "ZAPRET_RW",
 )
 INSTALL_CHECK_CACHE_SECONDS = 30.0
+ROOT_HELPER_RECORD_WAIT_SECONDS = 5.0
+ROOT_HELPER_RECORD_RETRY_SECONDS = 0.05
 _INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 _INSTALL_CHECK_LOCK = threading.Lock()
 
@@ -105,8 +109,9 @@ def _install_diagnostics(payload: dict[str, object]) -> list[dict[str, object]]:
             "message": (
                 "готов"
                 if payload.get("root_helper_ready")
-                else str(payload.get("root_helper_error") or "не готов; запустите Linux-установщик")
+                else "служба с повышенными правами недоступна; запустите Linux-установщик"
             ),
+            "details": {"reason": str(payload.get("root_helper_error") or "root-helper is not configured")},
         },
         {
             "id": "curl",
@@ -138,14 +143,14 @@ def clear_install_check_cache() -> None:
         _INSTALL_CHECK_CACHE["expires_at"] = 0.0
 
 
-def _stop_process_group(process: subprocess.Popen[str]) -> None:
+def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = None) -> None:
     if process.poll() is not None:
         return
-    _signal_process_group("TERM", process)
+    _signal_process_group("TERM", process, run_id)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        _signal_process_group("KILL", process)
+        _signal_process_group("KILL", process, run_id)
         process.wait(timeout=5)
 
 
@@ -154,11 +159,13 @@ def root_command(
     env: dict[str, str] | None = None,
     pass_env_keys: tuple[str, ...] = (),
     helper_command: str = "run",
+    run_id: str | None = None,
 ) -> list[str]:
     if _is_root():
         return command
     if helper_command not in {"run", "run-multidomain"}:
         raise ValueError(f"unsupported root helper command: {helper_command}")
+    managed_run_id = validate_run_id(run_id) if run_id else ""
     require_root_helper_ready()
     helper = _root_helper_path()
     sudo = shutil.which("sudo")
@@ -168,7 +175,12 @@ def root_command(
         source_env = env or {}
         assignments = [f"{key}={source_env[key]}" for key in pass_env_keys if key in source_env]
         env_command = "run-multidomain-env" if helper_command == "run-multidomain" else "run-env"
+        if managed_run_id:
+            env_command = env_command.replace("-env", "-owned-env")
+            return [sudo, "-n", helper, env_command, managed_run_id, *assignments, "--", *command]
         return [sudo, "-n", helper, env_command, *assignments, "--", *command]
+    if managed_run_id:
+        return [sudo, "-n", helper, f"{helper_command}-owned", managed_run_id, *command]
     return [sudo, "-n", helper, helper_command, *command]
 
 
@@ -249,43 +261,24 @@ def root_helper_status() -> dict[str, str | bool]:
     }
 
 
-def _cleanup_blockcheck_processes() -> None:
-    patterns = (
-        "/opt/zapret2/nfq2/nfqws2",
-        "curl --connect-to",
-        "blockcheck2.sh",
-        "blockcheck.sh",
-        "gp_multidomain_strategy",
-        "pktws_curl_test_update",
-    )
-    pids = _blockcheck_process_pids(patterns)
-    if not pids:
+def signal_registered_process_run(run_id: str, signal_name: str) -> None:
+    if _is_root():
         return
-    _signal_pids("TERM", pids)
-    time.sleep(1)
-    remaining = _blockcheck_process_pids(patterns)
-    if remaining:
-        _signal_pids("KILL", remaining)
+    run_id = validate_run_id(run_id)
+    deadline = time.monotonic() + ROOT_HELPER_RECORD_WAIT_SECONDS
+    while True:
+        result = _run_root_helper(["signal-run", run_id, signal_name])
+        if result.returncode == 0:
+            return
+        error = result.stderr.strip() or "root-helper rejected registered process signal"
+        if "registered process is stale or invalid" not in error or time.monotonic() >= deadline:
+            raise RuntimeError(error)
+        time.sleep(min(ROOT_HELPER_RECORD_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
-def _blockcheck_process_pids(patterns: tuple[str, ...]) -> list[str]:
-    pgrep = shutil.which("pgrep")
-    if not pgrep:
-        return []
-    pids: list[str] = []
-    for pattern in patterns:
-        found = subprocess.run([pgrep, "-f", pattern], text=True, capture_output=True, check=False)
-        if found.returncode == 0:
-            pids.extend(pid for pid in found.stdout.split() if pid.isdigit() and int(pid) != os.getpid())
-    return sorted(set(pids), key=int)
-
-
-def _signal_pids(signal_name: str, pids: list[str]) -> None:
-    if not pids:
-        return
-    subprocess.run(["kill", f"-{signal_name}", *pids], text=True, capture_output=True, check=False)
-    _run_root_helper(["kill", signal_name, *pids])
-
+def recover_registered_process_runs() -> None:
+    if not _is_root():
+        _run_root_helper(["recover-runs"])
 
 def _cleanup_nft_blockcheck_tables() -> None:
     nft = shutil.which("nft")
@@ -312,7 +305,10 @@ def _blockcheck_nft_tables(output: str) -> list[tuple[str, str]]:
     return tables
 
 
-def _signal_process_group(signal_name: str, process: subprocess.Popen[str]) -> None:
+def _signal_process_group(signal_name: str, process: subprocess.Popen[str], run_id: str | None = None) -> None:
+    if run_id and not _is_root():
+        signal_registered_process_run(run_id, signal_name)
+        return
     if hasattr(os, "killpg"):
         try:
             os.killpg(process.pid, getattr(signal, f"SIG{signal_name}"))
@@ -320,7 +316,6 @@ def _signal_process_group(signal_name: str, process: subprocess.Popen[str]) -> N
             return
         except PermissionError:
             pass
-        _run_root_helper(["killpg", signal_name, str(process.pid)])
         return
     if signal_name == "TERM":
         process.terminate()

@@ -2184,9 +2184,11 @@ async function postJson(url, payload){
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(data.error || data.message || response.statusText);
+    const apiError = data && typeof data.error === 'object' ? data.error : {};
+    const error = new Error(apiError.message || data.message || response.statusText);
     error.status = response.status;
-    error.code = data.error || '';
+    error.code = apiError.code || '';
+    error.details = apiError.details || {};
     error.data = data;
     throw error;
   }
@@ -2280,7 +2282,10 @@ async function submitLogin(event){
       body: JSON.stringify({ username: el('login-username').value, password: el('login-password').value })
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || data.message || 'Unable to sign in');
+    if (!response.ok) {
+      const apiError = data && typeof data.error === 'object' ? data.error : {};
+      throw new Error(apiError.message || data.message || 'Unable to sign in');
+    }
     storeAuthToken(data);
     startAuthenticatedUi();
   } catch (error) {
@@ -2449,9 +2454,12 @@ function setActiveTab(tabName){
 function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
 }
+function currentRun(){
+  const run = (state.status || {}).current_run;
+  return run && typeof run === 'object' && run.run_id ? run : null;
+}
 function isBusy(){
-  const board = (state.status || {}).state || {};
-  return Boolean(board.current_job);
+  return Boolean(currentRun());
 }
 function mutatingBlocked(){
   return isBusy();
@@ -3283,12 +3291,11 @@ function jobStatusClass(status, busy){
 }
 function renderMetrics(){
   const status = state.status || {};
-  const board = status.state || {};
   const zapret = status.zapret2 || {};
   const zapretCompact = zapretCompactStatus(zapret);
   const ready = zapretCompact.ready;
   const busy = isBusy();
-  const jobStatus = board.current_job_status || (busy ? 'running' : '');
+  const jobStatus = currentRun()?.status || (busy ? 'running' : '');
   const version = (state.status || {}).version || '-';
   const action = nextActionStatus(ready, busy, jobStatus, status);
   setText('app-version-badge', `v${version}`);
@@ -4175,7 +4182,7 @@ function renderRunCard(row){
   </article>`;
 }
 function runDomainKey(row){
-  return String(row.id || `${row.timestamp || ''}:${(row.domains || []).join('|')}`);
+  return String(row.run_id || `${row.timestamp || ''}:${(row.domains || []).join('|')}`);
 }
 function runCardClass(row){
   const status = String(row.status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'unknown';
@@ -4460,7 +4467,7 @@ function fillRunFormFromPayload(row, payload){
   setMessage('Параметры прошлого подбора перенесены в форму запуска. Проверьте сводку и запустите вручную.', 'good');
 }
 function repeatRun(runKey){
-  const row = state.finderRuns.find((item) => runDomainKey(item) === runKey || String(item.id || '') === runKey);
+  const row = state.finderRuns.find((item) => runDomainKey(item) === runKey);
   if (!row) {
     setMessage('Запуск не найден в истории', 'bad');
     return;
@@ -4647,8 +4654,7 @@ function interruptedRunWarning(){
   return 'Предыдущий подбор был прерван перезагрузкой';
 }
 function liveRunStatusText(){
-  const board = (state.status || {}).state || {};
-  if (isBusy()) return runStatusLabel(board.current_job_status || 'running');
+  if (isBusy()) return runStatusLabel(currentRun()?.status || 'running');
   const interrupted = interruptedRunWarning();
   if (interrupted) return 'Остановлено';
   const row = latestRun();
@@ -5106,7 +5112,7 @@ function normalizeReleaseUpdatePayload(data, channel){
   return {
     status: data.status || 'queued',
     release: state.releaseInfo || { channel },
-    target_ref: data.job_id || channel,
+    target_ref: data.update_id || channel,
     accepted: Boolean(data.accepted)
   };
 }
@@ -6205,11 +6211,12 @@ async function uploadBackup(){
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (response.status === 409 && data.error === 'runtime_busy') {
+      const apiError = data && typeof data.error === 'object' ? data.error : {};
+      if (response.status === 409 && apiError.code === 'runtime_busy') {
         setMessage(backupBusyMessage('upload'), 'warn');
         return;
       }
-      throw new Error(data.error || data.message || response.statusText);
+      throw new Error(apiError.message || data.message || response.statusText);
     }
     setMessage('Бекап загружен и проверен', 'good');
     input.value = '';
@@ -6222,7 +6229,7 @@ async function startJob(url, payload, text){
   try {
     setMessage(`${text} запущено`, 'warn');
     const response = await postJson(url, payload || {});
-    const runId = response?.job?.id || response?.run_id || response?.job_id || '';
+    const runId = response?.run_id || '';
     setMessage(runId ? `Задание ${runId} добавлено` : `${text} принято к выполнению`, 'good');
     await refresh();
     return response;

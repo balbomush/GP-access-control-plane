@@ -4,6 +4,7 @@ set -eu
 CONFIG_FILE="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
 [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
+RUN_REGISTRY_DIR="${GP_ROOT_HELPER_RUN_DIR:-/run/gp-control-plane/runs}"
 
 fail() {
   printf 'gp-root-helper: %s\n' "$1" >&2
@@ -90,6 +91,80 @@ run_target() {
   target="$(validate_run_target "$@")"
   shift
   exec "$target" "$@"
+}
+
+write_owned_run_record() {
+  run_id="$(validate_run_id "$1")"
+  pid="$(validate_pid "$2")"
+  pgid="$(validate_pid "$3")"
+  marker="$4"
+  [ -n "$marker" ] || fail "process start marker is required"
+  ensure_run_registry
+  record="$(registry_record_path "$run_id")"
+  umask 077
+  tmp_record="$(mktemp "$RUN_REGISTRY_DIR/.${run_id}.XXXXXX")"
+  printf 'helper-v1 %s %s %s\n' "$pid" "$pgid" "$marker" > "$tmp_record"
+  chown root:root "$tmp_record"
+  chmod 0600 "$tmp_record"
+  mv -f "$tmp_record" "$record"
+}
+
+run_owned_process() {
+  run_id="$(validate_run_id "$1")"
+  shift
+  target="$1"
+  shift
+  ensure_run_registry
+  lock_dir="$RUN_REGISTRY_DIR/.${run_id}.lock"
+  mkdir "$lock_dir" 2>/dev/null || fail "run is already active"
+  record="$(registry_record_path "$run_id")"
+  owned_record=0
+  pgid=""
+  cleanup_owned_run() {
+    [ "$owned_record" = 1 ] && rm -f "$record"
+    rmdir "$lock_dir" 2>/dev/null || true
+  }
+  abort_owned_run() {
+    [ -n "$pgid" ] && kill -TERM -- "-$pgid" 2>/dev/null || true
+    cleanup_owned_run
+    trap - EXIT HUP INT TERM
+    exit 128
+  }
+  trap cleanup_owned_run EXIT
+  trap abort_owned_run HUP INT TERM
+  if registered_process_matches "$run_id" >/dev/null 2>&1; then
+    fail "run is already active"
+  fi
+  rm -f "$record"
+  command -v setsid >/dev/null 2>&1 || fail "setsid is required for managed runs"
+  setsid "$target" "$@" &
+  pid="$!"
+  marker="$(process_start_time "$pid" 2>/dev/null || true)"
+  pgid="$(process_group_id "$pid" 2>/dev/null || true)"
+  if [ -z "$marker" ] || [ -z "$pgid" ]; then
+    wait "$pid" 2>/dev/null || true
+    fail "managed process exited before registration"
+  fi
+  if ! write_owned_run_record "$run_id" "$pid" "$pgid" "$marker"; then
+    abort_owned_run
+  fi
+  owned_record=1
+  set +e
+  wait "$pid"
+  code="$?"
+  set -e
+  cleanup_owned_run
+  trap - EXIT HUP INT TERM
+  return "$code"
+}
+
+run_owned_target() {
+  [ "$#" -ge 2 ] || fail "run-owned requires run id and target"
+  run_id="$(validate_run_id "$1")"
+  shift
+  target="$(validate_run_target "$@")"
+  shift
+  run_owned_process "$run_id" "$target" "$@"
 }
 
 write_multidomain_runner() {
@@ -328,6 +403,28 @@ run_multidomain_target() {
   exit "$code"
 }
 
+run_owned_multidomain_target() {
+  [ "$#" -ge 2 ] || fail "run-multidomain-owned requires run id and target"
+  run_id="$(validate_run_id "$1")"
+  shift
+  target="$(validate_run_target "$@")"
+  shift
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gp-root-helper.XXXXXX")"
+  runner="$tmp_dir/gp-multidomain-blockcheck.sh"
+  cleanup_runner() {
+    rm -rf "$tmp_dir"
+  }
+  trap cleanup_runner EXIT HUP INT TERM
+  write_multidomain_runner "$target" "$runner"
+  set +e
+  run_owned_process "$run_id" "$runner" "$@"
+  code="$?"
+  set -e
+  cleanup_runner
+  trap - EXIT HUP INT TERM
+  return "$code"
+}
+
 queue_update() {
   install_dir="$(validate_install_dir "$1")"
   ref="$(validate_update_ref "$2")"
@@ -433,6 +530,79 @@ SCRIPT
   printf 'queued=true\nunit=%s\nlog=%s\n' "$unit" "$log_file"
 }
 
+validate_run_id() {
+  case "${1:-}" in
+    ""|*[!A-Za-z0-9._-]*|.*|*..*) fail "invalid run id" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+registry_record_path() {
+  run_id="$(validate_run_id "${1:-}")"
+  printf '%s/%s\n' "$RUN_REGISTRY_DIR" "$run_id"
+}
+
+ensure_run_registry() {
+  install -d -m 0750 -o root -g root "$RUN_REGISTRY_DIR"
+}
+
+process_start_time() {
+  pid="$(validate_pid "${1:-}")"
+  [ -r "/proc/$pid/stat" ] || return 1
+  awk '{ sub(/^.*\\) /, ""); print $20 }' "/proc/$pid/stat"
+}
+
+process_group_id() {
+  pid="$(validate_pid "${1:-}")"
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+}
+
+registered_process_matches() {
+  run_id="$(validate_run_id "${1:-}")"
+  record="$(registry_record_path "$run_id")"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  IFS=' ' read -r version pid pgid marker extra < "$record" || return 1
+  [ "$version" = "helper-v1" ] || return 1
+  [ -z "${extra:-}" ] || return 1
+  validate_pid "$pid" >/dev/null
+  validate_pid "$pgid" >/dev/null
+  [ -n "$marker" ] || return 1
+  [ "$(process_start_time "$pid" 2>/dev/null || true)" = "$marker" ] || return 1
+  [ "$(process_group_id "$pid" 2>/dev/null || true)" = "$pgid" ] || return 1
+  printf '%s %s\n' "$pid" "$pgid"
+}
+
+signal_registered_process_run() {
+  [ "$#" -eq 2 ] || fail "signal-run requires run id and signal"
+  run_id="$(validate_run_id "$1")"
+  signal="$(validate_signal "$2")"
+  record="$(registry_record_path "$run_id")"
+  target="$(registered_process_matches "$run_id" || true)"
+  if [ -z "$target" ]; then
+    rm -f "$record"
+    fail "registered process is stale or invalid"
+  fi
+  pgid="${target#* }"
+  kill "-$signal" -- "-$pgid" 2>/dev/null || true
+}
+
+recover_registered_process_runs() {
+  ensure_run_registry
+  for record in "$RUN_REGISTRY_DIR"/*; do
+    [ -e "$record" ] || continue
+    run_id="$(basename "$record")"
+    if target="$(registered_process_matches "$run_id" 2>/dev/null || true)" && [ -n "$target" ]; then
+      pgid="${target#* }"
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+      sleep 1
+      if registered_process_matches "$run_id" >/dev/null 2>&1; then
+        kill -KILL -- "-$pgid" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$record"
+  done
+}
+
 require_root
 
 command="${1:-}"
@@ -441,13 +611,27 @@ shift
 
 case "$command" in
   check)
+    ensure_run_registry
     exit 0
+    ;;
+  signal-run)
+    signal_registered_process_run "$@"
+    ;;
+  recover-runs)
+    [ "$#" -eq 0 ] || fail "recover-runs accepts no arguments"
+    recover_registered_process_runs
     ;;
   run)
     run_target "$@"
     ;;
+  run-owned)
+    run_owned_target "$@"
+    ;;
   run-multidomain)
     run_multidomain_target "$@"
+    ;;
+  run-multidomain-owned)
+    run_owned_multidomain_target "$@"
     ;;
   run-env)
     while [ "$#" -gt 0 ]; do
@@ -461,6 +645,20 @@ case "$command" in
     done
     run_target "$@"
     ;;
+  run-owned-env)
+    run_id="$(validate_run_id "${1:-}")"
+    shift
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--" ]; then
+        shift
+        break
+      fi
+      validate_env_assignment "$1"
+      export "$1"
+      shift
+    done
+    run_owned_target "$run_id" "$@"
+    ;;
   run-multidomain-env)
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--" ]; then
@@ -473,23 +671,23 @@ case "$command" in
     done
     run_multidomain_target "$@"
     ;;
+  run-multidomain-owned-env)
+    run_id="$(validate_run_id "${1:-}")"
+    shift
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--" ]; then
+        shift
+        break
+      fi
+      validate_env_assignment "$1"
+      export "$1"
+      shift
+    done
+    run_owned_multidomain_target "$run_id" "$@"
+    ;;
   queue-update)
     [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || fail "queue-update requires install directory, release ref and optional state directory"
     queue_update "$@"
-    ;;
-  kill)
-    signal="$(validate_signal "${1:-}")"
-    shift
-    [ "$#" -gt 0 ] || exit 0
-    for pid in "$@"; do
-      validate_pid "$pid" >/dev/null
-      kill "-$signal" "$pid" 2>/dev/null || true
-    done
-    ;;
-  killpg)
-    signal="$(validate_signal "${1:-}")"
-    pgid="$(validate_pid "${2:-}")"
-    kill "-$signal" "-$pgid" 2>/dev/null || true
     ;;
   nft-list-tables)
     exec nft list tables

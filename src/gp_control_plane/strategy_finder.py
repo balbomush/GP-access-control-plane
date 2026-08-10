@@ -18,23 +18,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from .state import append_jsonl, now_iso
+from .state import active_runtime_payload, append_jsonl, now_iso
 from .strategy_safety import analyze_strategy
 from .storage import (
     append_run,
     connect,
     count_latest_run_payloads,
     read_latest_run_payloads,
-    read_run_payloads,
     upsert_candidate_event,
     upsert_candidate_event_conn,
 )
 from .zapret2 import (
     BLOCKCHECK_ENV_KEYS,
-    _cleanup_blockcheck_processes,
     _cleanup_nft_blockcheck_tables,
     _stop_process_group,
     root_command,
+    signal_registered_process_run,
 )
 
 
@@ -507,6 +506,14 @@ def _domain_validation_run_fields(validation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def allocate_discovery_run_id() -> str:
+    return f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
+
+
+def _discovery_run_id(run_id: str | None) -> str:
+    value = str(run_id or "").strip()
+    return value or allocate_discovery_run_id()
+
 def _ipvs_value(options: DiscoveryOptions) -> str:
     return "4 6" if options.enable_ipv6 else "4"
 
@@ -530,6 +537,7 @@ def run_standard_discovery(
     curl_max_time_doh: int = 2,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     options = DiscoveryOptions(
         enable_http=enable_http,
@@ -559,6 +567,7 @@ def run_standard_discovery(
         domain_validation=domain_validation,
         debug_stdout=debug_stdout,
         stop_event=stop_event,
+        run_id=run_id,
     )
 
 
@@ -582,6 +591,7 @@ def run_multi_domain_discovery(
     curl_parallelism: int = 4,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     options = DiscoveryOptions(
         enable_http=enable_http,
@@ -610,6 +620,7 @@ def run_multi_domain_discovery(
         domain_validation=domain_validation,
         debug_stdout=debug_stdout,
         stop_event=stop_event,
+        run_id=run_id,
     )
 
 
@@ -1071,7 +1082,7 @@ def _fragmentation_query_clause(classes: list[str]) -> tuple[str, list[Any]]:
 
 
 def read_runs(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-    return [_compact_run(run) for run in read_run_payloads(state_dir, limit=limit, offset=offset)]
+    return [_compact_run(run) for run in read_latest_run_payloads(state_dir, limit=limit, offset=offset)]
 
 
 def read_runs_page(state_dir: Path, limit: int = 50, offset: int = 0) -> dict[str, Any]:
@@ -1171,12 +1182,16 @@ def latest_log_tail(
     state_dir: Path,
     max_lines: int = 200,
     *,
+    run_id: str | None = None,
     stdout_from_size: int | None = None,
     stdout_log_match: str | None = None,
     stderr_from_size: int | None = None,
     stderr_log_match: str | None = None,
 ) -> dict[str, Any]:
+    requested_run_id = str(run_id or "") if run_id is not None else None
     for run in reversed(read_runs(state_dir, limit=200)):
+        if requested_run_id is not None and str(run.get("id") or "") != requested_run_id:
+            continue
         stdout_log = Path(str(run.get("stdout_log") or ""))
         if not stdout_log.is_file():
             continue
@@ -1223,7 +1238,7 @@ def latest_log_tail(
             "run_settings": _run_settings_for_progress(run),
         }
     return {
-        "run_id": None,
+        "run_id": requested_run_id,
         "kind": None,
         "status": None,
         "stdout_tail": "",
@@ -1233,7 +1248,7 @@ def latest_log_tail(
         "stderr_diagnostics": [],
         "stdout_size": 0,
         "stderr_size": 0,
-        "progress": progress_from_stdout("", {}),
+        "progress": {} if requested_run_id is not None else progress_from_stdout("", {}),
         "metrics": {},
         "run_settings": {},
     }
@@ -2087,8 +2102,13 @@ def _set_debug_stdout_env(env: dict[str, str], debug_stdout: bool | None) -> Non
         env.pop("GP_DEBUG_STDOUT", None)
 
 
-def stop_active_blockcheck_runtime() -> None:
-    _cleanup_blockcheck_processes()
+def stop_active_blockcheck_runtime(state_dir: Path | None = None) -> None:
+    run_id = str(active_runtime_payload(state_dir).get("run_id") or "").strip() if state_dir else ""
+    if run_id:
+        try:
+            signal_registered_process_run(run_id, "TERM")
+        except RuntimeError:
+            pass
     _cleanup_nft_blockcheck_tables()
 
 
@@ -2101,6 +2121,7 @@ def _run_process_with_live_stdout(
     timeout_seconds: int,
     stop_event: threading.Event | None,
     recorder: _LiveStdoutRecorder,
+    run_id: str = "",
 ) -> dict[str, Any]:
     status = "success"
     returncode: int | None = None
@@ -2124,7 +2145,6 @@ def _run_process_with_live_stdout(
                 env=env,
                 start_new_session=hasattr(os, "setsid"),
             )
-
             def read_stdout() -> None:
                 try:
                     if process.stdout is None:
@@ -2154,11 +2174,10 @@ def _run_process_with_live_stdout(
                 if stop_event is not None and stop_event.is_set():
                     stopped = True
                     status = "stopped"
-                    _stop_process_group(process)
-                    _cleanup_blockcheck_processes()
+                    _stop_process_group(process, run_id)
                     _cleanup_nft_blockcheck_tables()
                     recorder.mark_phase(PHASE_SAVING)
-                    returncode = _wait_process_after_stop(process)
+                    returncode = _wait_process_after_stop(process, run_id)
                     break
                 wait_timeout = 1.0
                 if deadline is not None:
@@ -2166,11 +2185,10 @@ def _run_process_with_live_stdout(
                     if remaining <= 0:
                         timed_out = True
                         status = "timeout"
-                        _stop_process_group(process)
-                        _cleanup_blockcheck_processes()
+                        _stop_process_group(process, run_id)
                         _cleanup_nft_blockcheck_tables()
                         recorder.mark_phase(PHASE_SAVING)
-                        returncode = _wait_process_after_stop(process)
+                        returncode = _wait_process_after_stop(process, run_id)
                         break
                     wait_timeout = min(1.0, remaining)
                 try:
@@ -2178,7 +2196,6 @@ def _run_process_with_live_stdout(
                     if stop_event is not None and stop_event.is_set():
                         stopped = True
                         status = "stopped"
-                        _cleanup_blockcheck_processes()
                         _cleanup_nft_blockcheck_tables()
                         recorder.mark_phase(PHASE_SAVING)
                         break
@@ -2202,13 +2219,15 @@ def _run_process_with_live_stdout(
     }
 
 
-def _wait_process_after_stop(process: subprocess.Popen[str], timeout_seconds: float = 5.0) -> int | None:
+def _wait_process_after_stop(
+    process: subprocess.Popen[str], run_id: str | None, timeout_seconds: float = 5.0
+) -> int | None:
     if process.returncode is not None:
         return process.returncode
     try:
         return process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        _stop_process_group(process)
+        _stop_process_group(process, run_id)
         try:
             return process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -2226,6 +2245,7 @@ def _run_blockcheck_live(
     domain_validation: dict[str, Any] | None = None,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
@@ -2248,13 +2268,14 @@ def _run_blockcheck_live(
         }
     )
     _set_debug_stdout_env(full_env, debug_stdout)
-    command = root_command([str(blockcheck_path)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS)
-
     root = _finder_dir(state_dir)
     logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     _cleanup_old_strategy_logs(logs)
-    run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
+    run_id = _discovery_run_id(run_id)
+    command = root_command(
+        [str(blockcheck_path)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS, run_id=run_id
+    )
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
     progress_log = logs / f"{run_id}.{kind}.progress.json"
@@ -2308,6 +2329,7 @@ def _run_blockcheck_live(
         timeout_seconds=timeout_seconds,
         stop_event=stop_event,
         recorder=recorder,
+        run_id=run_id,
     )
     parsed = recorder.parsed()
     completed_at = now_iso()
@@ -2370,6 +2392,7 @@ def _run_multidomain_blockcheck_live(
     domain_validation: dict[str, Any] | None = None,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
     if not blockcheck:
@@ -2397,12 +2420,14 @@ def _run_multidomain_blockcheck_live(
         }
     )
     _set_debug_stdout_env(full_env, debug_stdout)
+    run_id = _discovery_run_id(run_id)
     return _run_blockcheck_command_live(
         command=root_command(
             [str(blockcheck_path)],
             env=full_env,
             pass_env_keys=BLOCKCHECK_ENV_KEYS,
             helper_command="run-multidomain",
+            run_id=run_id,
         ),
         env=full_env,
         state_dir=state_dir,
@@ -2415,6 +2440,7 @@ def _run_multidomain_blockcheck_live(
         domain_validation=domain_validation,
         debug_stdout=debug_stdout,
         stop_event=stop_event,
+        run_id=run_id,
     )
 
 
@@ -2432,6 +2458,7 @@ def _run_blockcheck_command_live(
     domain_validation: dict[str, Any] | None = None,
     debug_stdout: bool | None = None,
     stop_event: threading.Event | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     options = options.normalized()
     domain_validation = domain_validation or validate_domain_inputs(domains, default_to_critical=True)
@@ -2443,7 +2470,7 @@ def _run_blockcheck_command_live(
     root = _finder_dir(state_dir)
     logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    run_id = f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
+    run_id = _discovery_run_id(run_id)
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
     progress_log = logs / f"{run_id}.{kind}.progress.json"
@@ -2498,6 +2525,7 @@ def _run_blockcheck_command_live(
         timeout_seconds=timeout_seconds,
         stop_event=stop_event,
         recorder=recorder,
+        run_id=run_id,
     )
     parsed = recorder.parsed()
     completed_at = now_iso()

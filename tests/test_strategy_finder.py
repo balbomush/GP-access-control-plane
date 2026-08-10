@@ -58,6 +58,19 @@ from gp_control_plane.strategy_finder import (
 
 
 class StrategyFinderTests(unittest.TestCase):
+    def test_standard_discovery_forwards_the_assigned_public_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch.object(strategy_finder_module, "_run_blockcheck_live", return_value={"id": "run-public"}) as live:
+                result = run_standard_discovery(
+                    ["youtube.com"],
+                    Path(raw),
+                    timeout_seconds=1,
+                    run_id="run-public",
+                )
+
+        self.assertEqual(result["id"], "run-public")
+        self.assertEqual(live.call_args.kwargs["run_id"], "run-public")
+
     def test_discovery_options_build_blockcheck_env(self) -> None:
         options = DiscoveryOptions(
             enable_http=True,
@@ -1354,10 +1367,7 @@ pktws_check_https_tls12()
 
             stopper = threading.Thread(target=request_stop)
             stopper.start()
-            with (
-                patch("gp_control_plane.strategy_finder._cleanup_blockcheck_processes"),
-                patch("gp_control_plane.strategy_finder._cleanup_nft_blockcheck_tables"),
-            ):
+            with patch("gp_control_plane.strategy_finder._cleanup_nft_blockcheck_tables"):
                 result = _run_process_with_live_stdout(
                     command=command,
                     env=os.environ.copy(),

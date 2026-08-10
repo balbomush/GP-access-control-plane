@@ -119,7 +119,17 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
 
             with _EdgeCdp(self.edge_executable) as page:
                 page.navigate(f"http://127.0.0.1:{port}/")
-                page.wait_for("document.getElementById('login-form')", "login form")
+                page.wait_for(
+                    "document.readyState === 'complete' && typeof submitLogin === 'function' && document.getElementById('login-form')",
+                    "initialized login form",
+                    diagnostics="""({
+                      readyState: document.readyState,
+                      submitLogin: typeof submitLogin,
+                      loginForm: Boolean(document.getElementById('login-form')),
+                      loginScreenHidden: document.getElementById('login-screen')?.hidden,
+                      appShellHidden: document.getElementById('app-shell')?.hidden
+                    })""",
+                )
                 page.evaluate(
                     """
                     document.getElementById('login-username').value = 'admin';
@@ -322,13 +332,15 @@ class _EdgeCdp:
             raise AssertionError(f"browser JavaScript failed: {response['exceptionDetails']}")
         return response["result"].get("value")
 
-    def wait_for(self, expression: str, description: str, timeout: float = 10) -> None:
+    def wait_for(self, expression: str, description: str, timeout: float = 10, diagnostics: str | None = None) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.evaluate(f"Boolean({expression})"):
                 return
             time.sleep(0.02)
-        raise AssertionError(f"browser condition did not become true: {description}")
+        detail = self.evaluate(diagnostics) if diagnostics else None
+        suffix = f"; diagnostics: {detail!r}" if diagnostics else ""
+        raise AssertionError(f"browser condition did not become true: {description}{suffix}")
 
     def _command(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         assert self._client is not None

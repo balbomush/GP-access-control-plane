@@ -24,14 +24,14 @@ class StateTests(unittest.TestCase):
                         "last_validate_at": "old",
                         "last_render_at": "old",
                         "selected_strategy": "old",
-                        "current_job": "job",
+                        "current_run_id": "job",
                         "last_error": "error",
                     }
                 ),
                 encoding="utf-8",
             )
 
-            self.assertEqual(read_state(state_dir), {"current_job": "job", "last_error": "error"})
+            self.assertEqual(read_state(state_dir), {"current_run_id": "job", "last_error": "error"})
 
     def test_read_state_preserves_current_runtime_sections(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -39,7 +39,7 @@ class StateTests(unittest.TestCase):
             (state_dir / "state.json").write_text(
                 json.dumps(
                     {
-                        "current_job": None,
+                        "current_run_id": None,
                         "last_error": None,
                         "settings": {"enable_ipv6": True},
                         "discovery_profiles": {"night-test": {"title": "Night test"}},
@@ -58,7 +58,7 @@ class StateTests(unittest.TestCase):
             state_dir = Path(raw)
             (state_dir / "state.json").write_text("{broken", encoding="utf-8")
 
-            self.assertEqual(read_state(state_dir), {"current_job": None, "last_error": None})
+            self.assertEqual(read_state(state_dir), {"current_run_id": None, "last_error": None})
 
     def test_update_state_merges_parallel_field_updates(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -96,7 +96,7 @@ class StateTests(unittest.TestCase):
     def test_update_state_rolls_back_when_mutator_raises(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
-            write_state(state_dir, {"current_job": "job-1", "settings": {"enable_ipv6": False}})
+            write_state(state_dir, {"current_run_id": "job-1", "settings": {"enable_ipv6": False}})
 
             def broken_update(state: dict[str, object]) -> dict[str, object]:
                 state["settings"] = {"enable_ipv6": True}

@@ -109,6 +109,8 @@ def swagger_ui_html() -> str:
         displayRequestDuration: true,
         docExpansion: 'list',
         defaultModelsExpandDepth: 1,
+        persistAuthorization: true,
+        tryItOutEnabled: true,
         presets: [
           SwaggerUIBundle.presets.apis,
           SwaggerUIStandalonePreset
@@ -210,10 +212,20 @@ def _with_bearer_auth_contract(contract: dict[str, Any]) -> dict[str, Any]:
         }
     )
     contract["security"] = [{"bearerAuth": []}]
-    public_operations = {("/api/health", "get"), ("/api/auth/login", "post")}
+    from .routes import route_for
+
     for path, operations in paths.items():
         for method, operation in operations.items():
             if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options", "trace"}:
                 continue
-            operation["security"] = [] if (path, method.lower()) in public_operations else [{"bearerAuth": []}]
+            route = route_for(method, path)
+            if route is None:
+                continue
+            operation["security"] = [] if not route.auth_required else [{"bearerAuth": []}]
+            responses = operation.setdefault("responses", {})
+            for status in tuple(responses):
+                if status == "default" or not status.startswith("2"):
+                    responses[status] = error_response
+            if route.auth_required:
+                responses.setdefault("401", error_response)
     return contract

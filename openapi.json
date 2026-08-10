@@ -155,11 +155,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActionAccepted"
+                  "$ref": "#/components/schemas/RunAccepted"
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/ActionAccepted"
+                    "$ref": "#/components/examples/RunAccepted"
                   }
                 }
               }
@@ -552,11 +552,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActionAccepted"
+                  "$ref": "#/components/schemas/BackupRestoreAccepted"
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/ActionAccepted"
+                    "$ref": "#/components/examples/BackupRestoreAccepted"
                   }
                 }
               }
@@ -1313,11 +1313,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActionAccepted"
+                  "$ref": "#/components/schemas/ReleaseInstallAccepted"
                 },
                 "examples": {
                   "default": {
-                    "$ref": "#/components/examples/ActionAccepted"
+                    "$ref": "#/components/examples/ReleaseInstallAccepted"
                   }
                 }
               }
@@ -1964,7 +1964,11 @@
             "examples": {
               "runtimeBusy": {
                 "value": {
-                  "error": "runtime_busy"
+                  "error": {
+                    "code": "runtime_busy",
+                    "message": "The operation is unavailable while discovery is running.",
+                    "details": {}
+                  }
                 }
               }
             }
@@ -1988,11 +1992,12 @@
       }
     },
     "schemas": {
-      "ActionAccepted": {
+      "BackupRestoreAccepted": {
         "type": "object",
         "required": [
           "accepted",
-          "status"
+          "status",
+          "snapshot_id"
         ],
         "properties": {
           "accepted": {
@@ -2002,7 +2007,28 @@
           "status": {
             "type": "string"
           },
-          "job_id": {
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleaseInstallAccepted": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "update_id",
+          "status"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "const": true
+          },
+          "update_id": {
+            "type": "string"
+          },
+          "status": {
             "type": "string"
           }
         },
@@ -2238,7 +2264,27 @@
         ],
         "properties": {
           "error": {
-            "type": "string"
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "details"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "example": "invalid_request"
+              },
+              "message": {
+                "type": "string",
+                "example": "The request is invalid."
+              },
+              "details": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -2340,7 +2386,7 @@
           "release",
           "can_update",
           "blocked_reason",
-          "active_job",
+          "active_run_id",
           "steps"
         ],
         "properties": {
@@ -2353,8 +2399,9 @@
           "blocked_reason": {
             "type": "string"
           },
-          "active_job": {
-            "type": "string"
+          "active_run_id": {
+            "type": "string",
+            "description": "Identifier of the active runtime run that blocks a release installation, if any."
           },
           "steps": {
             "type": "array",
@@ -2561,34 +2608,45 @@
         "additionalProperties": true
       },
       "PagedRunHistoryResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/RunHistoryResponse"
-          },
-          {
-            "$ref": "#/components/schemas/Pagination"
-          }
-        ]
+        "type": "object",
+        "required": ["runs", "limit", "offset", "total", "has_more"],
+        "properties": {
+          "runs": {"type": "array", "items": {"$ref": "#/components/schemas/RunHistoryItem"}},
+          "limit": {"type": "integer", "minimum": 1},
+          "offset": {"type": "integer", "minimum": 0},
+          "total": {"type": "integer", "minimum": 0},
+          "has_more": {"type": "boolean"}
+        },
+        "additionalProperties": false
       },
       "PagedCandidateDomainIndexResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CandidateDomainIndexResponse"
-          },
-          {
-            "$ref": "#/components/schemas/Pagination"
-          }
-        ]
+        "type": "object",
+        "required": ["domains", "total", "strategy_total", "limit", "offset", "has_more"],
+        "properties": {
+          "domains": {"type": "array", "items": {"$ref": "#/components/schemas/CandidateDomainIndexItem"}},
+          "total": {"type": "integer", "minimum": 0},
+          "strategy_total": {"type": "integer", "minimum": 0},
+          "tested_domains": {"type": "array", "items": {"type": "string"}},
+          "version": {"type": "object", "additionalProperties": {"type": "integer"}},
+          "limit": {"type": "integer", "minimum": 1},
+          "offset": {"type": "integer", "minimum": 0},
+          "has_more": {"type": "boolean"}
+        },
+        "additionalProperties": false
       },
       "PagedStrategyCandidatesResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/StrategyCandidatesResponse"
-          },
-          {
-            "$ref": "#/components/schemas/Pagination"
-          }
-        ]
+        "type": "object",
+        "required": ["candidates", "total", "limit", "offset", "has_more", "tested_domains", "version"],
+        "properties": {
+          "candidates": {"type": "array", "items": {"$ref": "#/components/schemas/StrategyCandidate"}},
+          "total": {"type": "integer", "minimum": 0},
+          "limit": {"type": "integer", "minimum": 1},
+          "offset": {"type": "integer", "minimum": 0},
+          "has_more": {"type": "boolean"},
+          "tested_domains": {"type": "array", "items": {"type": "string"}},
+          "version": {"type": "object", "additionalProperties": {"type": "integer"}}
+        },
+        "additionalProperties": false
       },
       "Pagination": {
         "type": "object",
@@ -2728,6 +2786,10 @@
           "run_id": {
             "type": "string"
           },
+          "kind": {
+            "type": "string",
+            "description": "Runtime execution kind that identifies the discovery workflow which produced the run."
+          },
           "mode": {
             "$ref": "#/components/schemas/RunMode"
           },
@@ -2737,6 +2799,11 @@
           "started_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp recorded for this run history entry; for the initial entry it is the run start time."
           },
           "completed_at": {
             "type": "string",
@@ -4204,12 +4271,20 @@
           "status": "queued"
         }
       },
-      "ActionAccepted": {
+      "BackupRestoreAccepted": {
         "summary": "Асинхронное действие принято",
         "value": {
           "accepted": true,
           "status": "queued",
-          "job_id": "job_20260722_173005"
+          "snapshot_id": "backup_20260722_173005"
+        }
+      },
+      "ReleaseInstallAccepted": {
+        "summary": "Release install accepted",
+        "value": {
+          "accepted": true,
+          "status": "queued",
+          "update_id": "update_20260722_173005"
         }
       },
       "RunProgressRunning": {
@@ -4697,7 +4772,7 @@
             },
             "can_update": true,
             "blocked_reason": "",
-            "active_job": "",
+            "active_run_id": "",
             "steps": [
               "check selected release channel",
               "create backup before code change",
@@ -4830,7 +4905,7 @@
       "ErrorResponse": {
         "summary": "Простая ошибка",
         "value": {
-          "error": "Local storage is not prepared"
+          "error": {"code": "invalid_request", "message": "The request is invalid.", "details": {}}
         }
       },
       "ServiceActionResult": {

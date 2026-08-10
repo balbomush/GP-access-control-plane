@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from ..config import AppConfig
 from ..auth import AuthenticationError, require_bearer_token
 from ..resource_budget import BACKUP_UPLOAD_MAX_BYTES, JSON_REQUEST_MAX_BYTES, PROXY_STREAM_CHUNK_BYTES
+from .errors import error_payload, normalize_error_payload
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
     SWAGGER_HTML_CONTENT_TYPE,
@@ -79,8 +80,8 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             if path == "/openapi.json" and self.command in {"GET", "HEAD"}:
                 try:
                     data = openapi_json_bytes()
-                except OSError as exc:
-                    self._json({"error": "openapi contract is not available", "detail": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                except OSError:
+                    self._json({"error": "openapi contract is not available"}, status=HTTPStatus.NOT_FOUND)
                     return
                 if self.command == "HEAD":
                     self._head(HTTPStatus.OK, OPENAPI_JSON_CONTENT_TYPE, len(data))
@@ -256,7 +257,8 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             *,
             close_connection: bool = False,
         ) -> None:
-            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            response = normalize_error_payload(payload, status)
+            data = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             if close_connection:
@@ -281,7 +283,12 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             return True
 
         def _auth_error(self, error: AuthenticationError) -> None:
-            data = json.dumps({"error": str(error)}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            del error
+            data = json.dumps(
+                error_payload("authentication_required", "A Bearer token is required."),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
             self.send_response(HTTPStatus.UNAUTHORIZED)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("WWW-Authenticate", "Bearer")

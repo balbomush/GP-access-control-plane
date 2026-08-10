@@ -59,7 +59,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
     def test_snapshot_if_idle_skips_while_job_running(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
-            write_state(state_dir, {"current_job": "job-1", "last_error": None})
+            write_state(state_dir, {"current_run_id": "job-1", "last_error": None})
 
             result = create_snapshot_if_idle(state_dir)
 
@@ -79,7 +79,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             upsert_candidates(state_dir, parsed, {"id": "run-1"})
             snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
             lock_path = state_dir / "job-runner.lock"
-            lock_path.write_text(json.dumps({"pid": os.getpid(), "job_id": "lock-only"}), encoding="utf-8")
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "run_id": "lock-only"}), encoding="utf-8")
 
             create_result = create_snapshot_if_idle(state_dir)
             delete_result = delete_snapshot_if_idle(state_dir, snapshot_id)
@@ -93,7 +93,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             self.assertTrue(restore_result["queued"])
             self.assertEqual(list_snapshots(state_dir)["snapshots"][0]["id"], snapshot_id)
 
-            lock_path.write_text(json.dumps({"pid": 99999999, "job_id": "stale"}), encoding="utf-8")
+            lock_path.write_text(json.dumps({"pid": 99999999, "run_id": "stale"}), encoding="utf-8")
             create_result = create_snapshot_if_idle(state_dir)
 
             self.assertTrue(create_result["created"])
@@ -131,7 +131,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             )
             upsert_candidates(state_dir, parsed, {"id": "run-1"})
             snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
-            write_state(state_dir, {"current_job": "job-1", "last_error": None})
+            write_state(state_dir, {"current_run_id": "job-1", "last_error": None})
 
             result = delete_snapshot_if_idle(state_dir, snapshot_id)
 
@@ -278,7 +278,7 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
                 {"finder": {"mine": ["discord.com"]}, "common": {}},
                 "2026-06-25T01:00:00Z",
             )
-            write_state(state_dir, {"current_job": None, "settings": {"enable_ipv6": True}})
+            write_state(state_dir, {"current_run_id": None, "settings": {"enable_ipv6": True}})
 
             preview = restore_snapshot_preview(state_dir, snapshot_id)
             entities = {item["key"]: item for item in preview["entities"]}
@@ -518,7 +518,7 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
             )
             upsert_candidates(state_dir, parsed, {"id": "run-1"})
             snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
-            write_state(state_dir, {"current_job": "job-1", "last_error": None})
+            write_state(state_dir, {"current_run_id": "job-1", "last_error": None})
 
             result = restore_snapshot_if_idle(state_dir, snapshot_id)
 

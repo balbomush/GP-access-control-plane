@@ -146,7 +146,7 @@ bbbb refs/tags/v0.3.2-alpha.2
 """
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
-            write_state(state_dir, {"current_job": "job-1"})
+            write_state(state_dir, {"current_run_id": "job-1"})
 
             def unexpected_fetch() -> str:
                 raise AssertionError("release lookup must not run while job is active")
@@ -166,7 +166,7 @@ bbbb refs/tags/v0.3.2-alpha.2
             state_dir = Path(raw) / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
             lock_path = state_dir / "job-runner.lock"
-            lock_path.write_text(json.dumps({"pid": os.getpid(), "job_id": "lock-only"}), encoding="utf-8")
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "run_id": "lock-only"}), encoding="utf-8")
 
             def unexpected_fetch() -> str:
                 raise AssertionError("release lookup must not run while runtime lock is active")
@@ -175,12 +175,13 @@ bbbb refs/tags/v0.3.2-alpha.2
 
             self.assertFalse(plan["can_update"])
             self.assertEqual(plan["blocked_reason"], "job is running")
-            self.assertEqual(plan["active_job"], "lock-only")
+            self.assertEqual(plan["active_run_id"], "lock-only")
 
-            lock_path.write_text(json.dumps({"pid": 99999999, "job_id": "stale"}), encoding="utf-8")
+            lock_path.write_text(json.dumps({"pid": 99999999, "run_id": "stale"}), encoding="utf-8")
             plan = release_update_plan(state_dir, channel="stable", current_version="0.3.0", fetcher=lambda: payload)
 
             self.assertTrue(plan["can_update"])
+            self.assertIn("root-owned install profile", plan["steps"][2])
             self.assertFalse(lock_path.exists())
 
     def test_release_update_plan_blocks_active_update(self) -> None:
@@ -230,6 +231,7 @@ bbbb refs/tags/v0.3.2-alpha.2
             state = read_state(state_dir)
 
             self.assertTrue(plan["can_update"])
+            self.assertIn("root-owned install profile", plan["steps"][2])
             self.assertEqual(state["release_update"]["status"], "failed")
             self.assertEqual(state["release_update"]["error"], "release update queue timeout")
 

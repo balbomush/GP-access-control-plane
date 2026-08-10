@@ -92,6 +92,8 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts
 
 Без конфига проект ставится в `~/gp/GP-access-control-plane`, а данные хранятся в `~/gp/GP-access-control-plane/build/state`.
 
+После успешной установки или явной перенастройки установщик сохраняет разрешенный профиль в root-owned `/etc/default/gp-control-plane-install-profile`. Обычное обновление релиза повторно использует этот профиль и не меняет `GP_INSTALL_WEB`, host/port, `GP_CORE_URL` или топологию сервисов. Для изменения этих параметров снова явно запустите bootstrap/installer с нужным `GP_INSTALL_CONFIG`; не меняйте профиль вручную.
+
 Что делает установщик:
 
 - ставит нужные пакеты через `apt-get install`;
