@@ -23,13 +23,13 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | GP_INSTALL_WEB=off bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | GP_INSTALL_WEB=off bash
 ```
 
 Bootstrap-скрипт ставит минимальные зависимости для загрузки (`ca-certificates`, `curl`, `git`), находит последний стабильный git tag и запускает установщик из этого tag. Если `sudo` нужен, скрипт запросит его сам.
@@ -87,7 +87,7 @@ GP_SERVICE_MEMORY_MAX=1500M
 EOF
 
 export GP_INSTALL_CONFIG="$PWD/gp-install.env"
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | bash
 ```
 
 Без конфига проект ставится в `~/gp/GP-access-control-plane`, а данные хранятся в `~/gp/GP-access-control-plane/build/state`.
@@ -163,7 +163,7 @@ journalctl -u gp-control-plane-core.service -u gp-control-plane-web.service -f
 Полный установщик GP уже ставит `zapret2`. Если нужен только `zapret2`, запустите отдельный короткий скрипт:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/install-zapret2.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/install-zapret2.sh | bash
 ```
 
 После установки должны появиться:
@@ -204,7 +204,7 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts
 Повторно запустите bootstrap:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/main/scripts/bootstrap-linux.sh | bash
+curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | bash
 ```
 
 Он установит последний стабильный git tag, обновит Python-окружение и перезапустит сервисы. Для явной установки ветки или tag задайте `GP_BRANCH`.
