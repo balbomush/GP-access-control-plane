@@ -17,7 +17,7 @@ from .state import (
     read_job_lock_payload,
     update_state,
 )
-from .storage import append_run, compact_run_payload
+from .storage import append_run, compact_run_payload, connect
 
 
 FINAL_JOB_STATUSES = {"success", "failed", "timeout", "stopped"}
@@ -82,12 +82,16 @@ class JobRunner:
                 raise RuntimeError("no active run")
             run_id = self._active_run_id
             name = self._active_run_name
-            self._active_cancel.set()
-            cancel_hook = self._active_cancel_hook
+            cancel_hook = None
+            cancellation_started = not self._active_cancel.is_set()
+            if cancellation_started:
+                self._active_cancel.set()
+                cancel_hook = self._active_cancel_hook
         if cancel_hook:
             threading.Thread(target=self._run_cancel_hook, args=(cancel_hook,), daemon=True).start()
-        self._record(run_id, name, "stopping", now_iso())
-        self._set_current_run_if_active(run_id, name, "stopping")
+        if cancellation_started:
+            self._record(run_id, name, "stopping", now_iso())
+            self._set_current_run_if_active(run_id, name, "stopping")
         return {"run_id": run_id, "name": name, "status": "stopping"}
 
     @staticmethod
@@ -201,6 +205,21 @@ class JobRunner:
         completed_at: str,
         error: str,
     ) -> None:
+        previous = _latest_run_payload_by_id(self.state_dir, run_id)
+        log_metadata = {
+            key: previous[key]
+            for key in (
+                "stdout_log",
+                "stderr_log",
+                "progress_log",
+                "metrics_log",
+                "summary_fallback_log",
+                "debug_stdout_log",
+                "stdout_log_mode",
+                "debug_stdout",
+            )
+            if key in previous
+        }
         append_run(
             self.state_dir,
             {
@@ -211,6 +230,7 @@ class JobRunner:
                 "started_at": started_at,
                 "completed_at": completed_at,
                 "error": error,
+                **log_metadata,
             },
         )
 
@@ -295,3 +315,19 @@ def _status_from_result(result: Any) -> str:
         if status in FINAL_JOB_STATUSES:
             return status
     return "success"
+
+
+def _latest_run_payload_by_id(state_dir: Path, run_id: str) -> dict[str, Any]:
+    """Return the newest persisted payload for one run without paging global history."""
+    with connect(state_dir) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM runs WHERE id = ? ORDER BY seq DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return {}
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except json.JSONDecodeError:
+        return {}
+    return compact_run_payload(payload) if isinstance(payload, dict) else {}

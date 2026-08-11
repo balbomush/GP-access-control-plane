@@ -15,7 +15,8 @@ from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.core_api import release_update_accepted_payload, runs_history_payload
 from gp_control_plane.jobs import JobRunner
 from gp_control_plane.state import read_state, update_state
-from gp_control_plane.storage import read_latest_run_payloads
+from gp_control_plane.storage import append_run, connect, read_latest_run_payloads
+from gp_control_plane.strategy_finder import latest_log_tail
 
 
 class JobRunnerTests(unittest.TestCase):
@@ -136,6 +137,37 @@ class JobRunnerTests(unittest.TestCase):
             state = _wait_for_idle_state(state_dir)
             self.assertEqual(state["last_run_status"], "stopped")
 
+    def test_cancel_active_runs_hook_only_once_for_duplicate_cancels(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+            hook_called = threading.Event()
+            job_stopping = threading.Event()
+            release = threading.Event()
+            hook_calls: list[str] = []
+
+            def stoppable_job(stop: threading.Event, _run_id: str) -> dict[str, str]:
+                self.assertTrue(stop.wait(timeout=2))
+                job_stopping.set()
+                self.assertTrue(release.wait(timeout=2))
+                return {"status": "stopped"}
+
+            def hook() -> None:
+                hook_calls.append("called")
+                hook_called.set()
+
+            runner.start("stoppable", stoppable_job, cancel_hook=hook)
+            first = runner.cancel_active()
+            self.assertTrue(job_stopping.wait(timeout=1))
+            second = runner.cancel_active()
+            self.assertTrue(hook_called.wait(timeout=1))
+            self.assertEqual(first, second)
+            self.assertEqual(hook_calls, ["called"])
+
+            release.set()
+            state = _wait_for_idle_state(state_dir)
+            self.assertEqual(state["last_run_status"], "stopped")
+
     def test_cancel_hook_error_does_not_block_stop(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -179,6 +211,64 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(success["result"]["candidate_count"], 2)
             self.assertNotIn("candidates", success["result"])
             self.assertNotIn("summary", success["result"])
+
+    def test_failed_job_preserves_existing_log_metadata_beyond_history_page(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+            log_dir = state_dir / "strategy-finder" / "logs"
+            log_dir.mkdir(parents=True)
+
+            def failing_job(_stop: threading.Event, run_id: str) -> None:
+                stdout_log = log_dir / f"{run_id}.stdout.log"
+                stderr_log = log_dir / f"{run_id}.stderr.log"
+                stdout_log.write_text("before failure\n", encoding="utf-8")
+                stderr_log.write_text("root helper failed\n", encoding="utf-8")
+                append_run(
+                    state_dir,
+                    {
+                        "id": run_id,
+                        "kind": "zapret-standard-discovery",
+                        "status": "running",
+                        "stdout_log": str(stdout_log),
+                        "stderr_log": str(stderr_log),
+                        "debug_stdout": False,
+                    },
+                )
+                with connect(state_dir) as conn:
+                    conn.executemany(
+                        "INSERT INTO runs(id, kind, status, timestamp, payload_json) VALUES(?, ?, ?, ?, ?)",
+                        [
+                            (
+                                f"newer-run-{index}",
+                                "zapret-standard-discovery",
+                                "success",
+                                "",
+                                json.dumps(
+                                    {
+                                        "id": f"newer-run-{index}",
+                                        "kind": "zapret-standard-discovery",
+                                        "status": "success",
+                                    }
+                                ),
+                            )
+                            for index in range(1_001)
+                        ],
+                    )
+                raise RuntimeError("registered process is stale or invalid")
+
+            run = runner.start("zapret-standard-discovery", failing_job)
+            _wait_for_idle_state(state_dir)
+            persisted = read_latest_run_payloads(state_dir, limit=1)[0]
+            tail = latest_log_tail(state_dir, run_id=run.run_id)
+
+            self.assertEqual(persisted["status"], "failed")
+            self.assertTrue(persisted["stdout_log"].endswith(".stdout.log"))
+            self.assertTrue(persisted["stderr_log"].endswith(".stderr.log"))
+            self.assertIn("debug_stdout", persisted)
+            self.assertFalse(persisted["debug_stdout"])
+            self.assertEqual(tail["stdout_tail"], "before failure")
+            self.assertEqual(tail["stderr_tail"], "root helper failed")
 
     def test_one_run_id_is_persisted_before_start_returns_and_used_by_events(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

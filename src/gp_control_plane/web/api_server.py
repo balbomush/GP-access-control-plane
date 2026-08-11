@@ -76,7 +76,6 @@ from ..strategy_finder import (
     read_runs,
     run_multi_domain_discovery,
     run_standard_discovery,
-    stop_active_blockcheck_runtime,
 )
 from ..zapret2 import check_install_cached, recover_registered_process_runs
 from .errors import error_payload, normalize_error_payload
@@ -289,11 +288,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     if name == "zapret-multi-domain-discovery"
                     else (lambda stop, run_id: _job_zapret_standard_discovery(config, core_payload, stop, run_id))
                 )
-                job = runner.start(
-                    name,
-                    func,
-                    cancel_hook=lambda: stop_active_blockcheck_runtime(config.output.state_dir),
-                )
+                job = runner.start(name, func)
                 return core_api.run_accepted_payload(job), HTTPStatus.ACCEPTED
 
             def create_core_backup() -> tuple[dict[str, Any], HTTPStatus]:

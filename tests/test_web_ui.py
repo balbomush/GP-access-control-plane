@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
+import gp_control_plane.strategy_finder as strategy_finder
 from gp_control_plane.strategy_finder import upsert_candidates
 from gp_control_plane.web import app as web_app
 from gp_control_plane.web import docs as web_docs
@@ -115,11 +116,12 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
 
     def test_active_run_http_contract_keeps_one_public_run_id_for_ui(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw:
+        with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             started = threading.Event()
             release = threading.Event()
+            snapshot_completed = threading.Event()
             log_dir = tmp / "logs"
             log_dir.mkdir()
 
@@ -141,14 +143,22 @@ class WebUiTests(unittest.TestCase):
                 release.wait(timeout=2)
                 return {"id": run_id, "status": "stopped" if stop_event.is_set() else "success"}
 
-            port = _free_port()
-            with mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                _wait_for_server(port, "/openapi.json")
+            original_create_snapshot_if_idle = web_app.create_snapshot_if_idle
+
+            def create_snapshot_when_idle(state_dir: Path) -> dict[str, Any]:
+                try:
+                    return original_create_snapshot_if_idle(state_dir)
+                finally:
+                    snapshot_completed.set()
+
+            with (
+                mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run),
+                mock.patch.object(web_app, "create_snapshot_if_idle", side_effect=create_snapshot_when_idle),
+            ):
+                server = _start_captured_server(serve, config)
                 try:
                     status, _headers, body = _http_request(
-                        port,
+                        server.port,
                         "/api/core/strategy-discovery/start-run",
                         method="POST",
                         body=json.dumps({"mode": "standard", "domains": ["youtube.com"], "protocols": ["tcp"]}).encode("utf-8"),
@@ -159,19 +169,19 @@ class WebUiTests(unittest.TestCase):
                     run_id = accepted["run_id"]
                     self.assertTrue(started.wait(timeout=2))
 
-                    status_payload = json.loads(_http_request(port, "/api/core/status")[2].decode("utf-8"))
+                    status_payload = json.loads(_http_request(server.port, "/api/core/status")[2].decode("utf-8"))
                     progress_payload = json.loads(
-                        _http_request(port, "/api/core/strategy-discovery/current-run-progress")[2].decode("utf-8")
+                        _http_request(server.port, "/api/core/strategy-discovery/current-run-progress")[2].decode("utf-8")
                     )
                     current_log_payload = json.loads(
-                        _http_request(port, "/api/core/strategy-discovery/current-run-latest-log")[2].decode("utf-8")
+                        _http_request(server.port, "/api/core/strategy-discovery/current-run-latest-log")[2].decode("utf-8")
                     )
-                    history_payload = json.loads(_http_request(port, "/api/core/runs/history")[2].decode("utf-8"))
+                    history_payload = json.loads(_http_request(server.port, "/api/core/runs/history")[2].decode("utf-8"))
                     log_payload = json.loads(
-                        _http_request(port, f"/api/core/runs/latest-log?run_id={run_id}")[2].decode("utf-8")
+                        _http_request(server.port, f"/api/core/runs/latest-log?run_id={run_id}")[2].decode("utf-8")
                     )
                     stop_status, _stop_headers, stop_body = _http_request(
-                        port,
+                        server.port,
                         "/api/core/strategy-discovery/stop-current-run",
                         method="POST",
                         body=json.dumps({"dry_run": True}).encode("utf-8"),
@@ -187,12 +197,16 @@ class WebUiTests(unittest.TestCase):
                     self.assertEqual(json.loads(stop_body.decode("utf-8"))["run_id"], run_id)
                 finally:
                     release.set()
-                    deadline = time.monotonic() + 2
-                    while time.monotonic() < deadline:
-                        if read_state(config.output.state_dir).get("current_run_id") is None:
-                            break
-                        time.sleep(0.01)
-                    self.assertIsNone(read_state(config.output.state_dir).get("current_run_id"))
+                    try:
+                        deadline = time.monotonic() + 2
+                        while time.monotonic() < deadline:
+                            if read_state(config.output.state_dir).get("current_run_id") is None:
+                                break
+                            time.sleep(0.01)
+                        self.assertIsNone(read_state(config.output.state_dir).get("current_run_id"))
+                        self.assertTrue(snapshot_completed.wait(timeout=2))
+                    finally:
+                        server.close()
 
     def test_current_run_endpoints_do_not_fall_back_to_previous_run_log(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw:
@@ -3177,6 +3191,87 @@ class WebUiTests(unittest.TestCase):
                         break
                     time.sleep(0.02)
 
+    def test_strategy_discovery_start_leaves_root_signal_cancellation_to_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            captured_start_kwargs: list[dict[str, object]] = []
+            original_runner = web_app.JobRunner
+            worker_started = threading.Event()
+            worker_cancelled = threading.Event()
+            release_worker = threading.Event()
+            worker_finished = threading.Event()
+
+            class CapturingJobRunner(original_runner):
+                def start(self, *args: object, **kwargs: object) -> object:
+                    captured_start_kwargs.append(dict(kwargs))
+                    return super().start(*args, **kwargs)
+
+            def worker_run(*args: object, **kwargs: object) -> dict[str, str]:
+                stop_event = kwargs["stop_event"]
+                run_id = kwargs["run_id"]
+                self.assertIsInstance(stop_event, threading.Event)
+                self.assertIsInstance(run_id, str)
+                worker_started.set()
+                try:
+                    self.assertTrue(stop_event.wait(timeout=2))
+                    strategy_finder.signal_registered_process_run(run_id, "TERM")
+                    worker_cancelled.set()
+                    self.assertTrue(release_worker.wait(timeout=2))
+                    return {"status": "stopped"}
+                finally:
+                    worker_finished.set()
+
+            with (
+                mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
+                mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
+                mock.patch.object(strategy_finder, "signal_registered_process_run") as root_signal,
+            ):
+                server = _start_captured_server(serve, config)
+                try:
+                    status, _headers, body = _http_request(
+                        server.port,
+                        "/api/core/strategy-discovery/start-run",
+                        method="POST",
+                        body=json.dumps({"mode": "standard", "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                            "utf-8"
+                        ),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
+                    accepted = json.loads(body.decode("utf-8"))
+                    self.assertTrue(worker_started.wait(timeout=2))
+                    self.assertEqual(len(captured_start_kwargs), 1)
+                    self.assertNotIn("cancel_hook", captured_start_kwargs[0])
+
+                    for _ in range(2):
+                        stop_status, _stop_headers, stop_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/stop-current-run",
+                            method="POST",
+                            body=b"{}",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
+                    self.assertTrue(worker_cancelled.wait(timeout=2))
+                    root_signal.assert_called_once_with(accepted["run_id"], "TERM")
+                finally:
+                    try:
+                        if worker_started.is_set() and not worker_finished.is_set():
+                            _http_request(
+                                server.port,
+                                "/api/core/strategy-discovery/stop-current-run",
+                                method="POST",
+                                body=b"{}",
+                                headers={"Content-Type": "application/json"},
+                            )
+                    finally:
+                        release_worker.set()
+                        try:
+                            self.assertTrue(worker_finished.wait(timeout=2))
+                        finally:
+                            server.close()
+
     def test_core_strategy_discovery_start_run_rejects_unknown_protocols(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported protocols"):
             web_app._core_strategy_discovery_job_payload(
@@ -3511,10 +3606,12 @@ class _CapturedTestServer:
 
     def close(self) -> None:
         self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=5)
-        if self._thread.is_alive():
-            raise AssertionError(f"server thread did not stop on port {self.port}")
+        try:
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                raise AssertionError(f"server thread did not stop on port {self.port}")
+        finally:
+            self._server.server_close()
 
 
 def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _CapturedTestServer:
