@@ -84,6 +84,41 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn('new_password: newPassword', self.html)
         self.assertIn('storeAuthToken(data);', self.html)
 
+    def test_password_change_panel_is_independent_accessible_and_has_its_own_lifecycle_messages(self) -> None:
+        password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
+
+        self.assertRegex(
+            self.html,
+            r'<form class="preset-panel settings-access-panel" id="change-password-form" '
+            r'aria-labelledby="settings-access-heading">[\s\S]*?'
+            r'<h2 id="settings-access-heading">Доступ к панели</h2>',
+        )
+        self.assertRegex(
+            self.html,
+            r'<input id="settings-new-password"[^>]*minlength="8"[^>]*'
+            r'aria-describedby="settings-new-password-hint"[^>]*>',
+        )
+        self.assertIn('id="settings-new-password-hint">Используйте не менее 8 символов.</div>', self.html)
+        self.assertIn(
+            'id="change-password-status" role="status" aria-live="polite" aria-atomic="true"', self.html
+        )
+        self.assertIn("form.setAttribute('aria-busy', 'true');", password_change)
+        self.assertIn("form.removeAttribute('aria-busy');", password_change)
+        self.assertIn('submitButton.disabled = true;', password_change)
+        self.assertIn('submitButton.disabled = false;', password_change)
+        self.assertIn("status.textContent = 'Пароль изменяется…';", password_change)
+        self.assertIn(
+            "status.textContent = 'Пароль изменён. Текущая сессия продолжится; на остальных устройствах войдите заново.';",
+            password_change,
+        )
+        self.assertIn(
+            "status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.';",
+            password_change,
+        )
+        self.assertIn("el('settings-current-password').value = '';", password_change)
+        self.assertIn("el('settings-new-password').value = '';", password_change)
+        self.assertNotIn('setMessage(', password_change)
+
     def test_archive_download_is_top_level_and_uses_authenticated_blob_without_token_query_parameter(self) -> None:
         backup_url = self.script_block('function backupDownloadUrl(snapshot){', 'async function downloadBackup(url, snapshotId){')
         download = self.script_block('async function downloadBackup(url, snapshotId){', 'function formatBytes(value){')
@@ -166,16 +201,66 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
                     "localStorage.getItem('gp-control-plane-auth-token') && document.getElementById('login-screen').hidden && !document.getElementById('app-shell').hidden",
                     "authenticated application shell",
                 )
+                access_panel = page.evaluate(
+                    """
+                    (() => {
+                      const form = document.getElementById('change-password-form');
+                      const status = document.getElementById('change-password-status');
+                      const newPassword = document.getElementById('settings-new-password');
+                      return {
+                        isSeparatePanel: form.classList.contains('settings-access-panel') && !form.closest('.settings-discovery-panel'),
+                        heading: document.getElementById(form.getAttribute('aria-labelledby'))?.textContent.trim(),
+                        statusRole: status.getAttribute('role'),
+                        statusLive: status.getAttribute('aria-live'),
+                        statusAtomic: status.getAttribute('aria-atomic'),
+                        minLength: newPassword.minLength,
+                        describedBy: newPassword.getAttribute('aria-describedby'),
+                        hint: document.getElementById(newPassword.getAttribute('aria-describedby'))?.textContent.trim(),
+                      };
+                    })()
+                    """
+                )
+                self.assertEqual(
+                    access_panel,
+                    {
+                        "isSeparatePanel": True,
+                        "heading": "Доступ к панели",
+                        "statusRole": "status",
+                        "statusLive": "polite",
+                        "statusAtomic": "true",
+                        "minLength": 8,
+                        "describedBy": "settings-new-password-hint",
+                        "hint": "Используйте не менее 8 символов.",
+                    },
+                )
                 page.evaluate(
                     """
                     (() => {
-                      const state = window.__bearerAuthE2E = { downloads: [], sse: [], blob: null, anchor: null };
+                      const state = window.__bearerAuthE2E = {
+                        downloads: [],
+                        sse: [],
+                        blob: null,
+                        anchor: null,
+                        passwordChange: { requests: 0, held: false, release: null }
+                      };
                       const originalFetch = window.fetch.bind(window);
                       window.fetch = async (input, init) => {
                         const url = typeof input === 'string' ? input : input.url;
                         const headers = Array.from(new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined)).entries());
                         if (url.includes('/api/core/backups/download-archive')) state.downloads.push({ url, headers });
                         if (url.includes('/api/web/events/stream')) state.sse.push({ url, headers });
+                        if (url.includes('/api/auth/change-password')) {
+                          state.passwordChange.requests += 1;
+                          if (state.passwordChange.requests === 1) {
+                            state.passwordChange.held = true;
+                            await new Promise((resolve) => { state.passwordChange.release = resolve; });
+                            return originalFetch(input, init);
+                          }
+                          return new Response(JSON.stringify({ error: { message: 'wrong password' } }), {
+                            status: 400,
+                            headers: { 'Content-Type': 'application/json' }
+                          });
+                        }
                         return originalFetch(input, init);
                       };
                       const originalObjectUrl = URL.createObjectURL.bind(URL);
@@ -206,6 +291,7 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
 
                 page.evaluate("stopRealtimeEvents(); startRealtimeEvents();")
                 page.wait_for("window.__bearerAuthE2E.sse.length === 1", "initial authenticated SSE stream")
+                old_token = page.evaluate("localStorage.getItem('gp-control-plane-auth-token')")
                 page.evaluate(
                     """
                     document.getElementById('settings-current-password').value = 'admin';
@@ -214,8 +300,46 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
                     """
                 )
                 page.wait_for(
-                    "window.__bearerAuthE2E.sse.length >= 2 && window.__bearerAuthE2E.sse[0].headers.find(([key]) => key === 'authorization')[1] !== window.__bearerAuthE2E.sse[1].headers.find(([key]) => key === 'authorization')[1]",
-                    "SSE restart with the rotated token",
+                    """
+                    window.__bearerAuthE2E.passwordChange.held
+                      && document.getElementById('change-password-form').getAttribute('aria-busy') === 'true'
+                      && document.querySelector('#change-password-form [type="submit"]').disabled
+                      && document.getElementById('change-password-status').textContent === 'Пароль изменяется…'
+                    """,
+                    "password rotation pending lifecycle",
+                )
+                page.evaluate("window.__bearerAuthE2E.passwordChange.release()")
+                page.wait_for(
+                    """
+                    window.__bearerAuthE2E.sse.length >= 2
+                      && localStorage.getItem('gp-control-plane-auth-token') !== null
+                      && !document.getElementById('change-password-form').hasAttribute('aria-busy')
+                      && !document.querySelector('#change-password-form [type="submit"]').disabled
+                      && document.getElementById('settings-current-password').value === ''
+                      && document.getElementById('settings-new-password').value === ''
+                      && document.getElementById('change-password-status').textContent === 'Пароль изменён. Текущая сессия продолжится; на остальных устройствах войдите заново.'
+                      && window.__bearerAuthE2E.sse[0].headers.find(([key]) => key === 'authorization')[1] !== window.__bearerAuthE2E.sse[1].headers.find(([key]) => key === 'authorization')[1]
+                    """,
+                    "password rotation success lifecycle and SSE restart with the new token",
+                )
+                new_token = page.evaluate("localStorage.getItem('gp-control-plane-auth-token')")
+                page.evaluate(
+                    """
+                    document.getElementById('settings-current-password').value = 'wrongpass';
+                    document.getElementById('settings-new-password').value = 'another8';
+                    document.getElementById('change-password-form').requestSubmit();
+                    """
+                )
+                page.wait_for(
+                    """
+                    window.__bearerAuthE2E.passwordChange.requests === 2
+                      && !document.getElementById('change-password-form').hasAttribute('aria-busy')
+                      && !document.querySelector('#change-password-form [type="submit"]').disabled
+                      && document.getElementById('settings-current-password').value === ''
+                      && document.getElementById('settings-new-password').value === ''
+                      && document.getElementById('change-password-status').textContent === 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.'
+                    """,
+                    "password rotation error lifecycle",
                 )
                 result = page.evaluate("JSON.parse(JSON.stringify(window.__bearerAuthE2E))")
 
@@ -228,6 +352,8 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
             self.assertTrue(result["anchor"]["href"].startswith("blob:"))
             self.assertEqual(len(result["sse"]), 2)
             self.assertTrue(dict(result["sse"][1]["headers"])["authorization"].startswith("Bearer "))
+            self.assertNotEqual(old_token, new_token)
+            self.assertEqual(f"Bearer {new_token}", dict(result["sse"][1]["headers"])["authorization"])
 
 
 class TestServerLifecycleTests(unittest.TestCase):

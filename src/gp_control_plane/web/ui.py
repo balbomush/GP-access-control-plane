@@ -1966,10 +1966,16 @@ pre {
               <input id="settings-curl-max" type="number" min="1" value="10">
               <div class="setting-note">Верхняя граница для запуска параллельных проверочных запросов. Можно ставить любое число от 1, если плата и сеть справляются.</div>
             </div>
-        <form class="preset-panel settings-password-panel" id="change-password-form">
-          <div class="panel-header">
-            <h2>Смена пароля</h2>
           </div>
+          <div class="button-row">
+            <button data-action="save-settings" type="button">Сохранить настройки</button>
+          </div>
+        </div>
+        <form class="preset-panel settings-access-panel" id="change-password-form" aria-labelledby="settings-access-heading">
+          <div class="panel-header">
+            <h2 id="settings-access-heading">Доступ к панели</h2>
+          </div>
+          <div class="helper-text">Смена пароля</div>
           <div class="preset-grid">
             <div class="field">
               <label for="settings-current-password">Текущий пароль</label>
@@ -1977,19 +1983,15 @@ pre {
             </div>
             <div class="field">
               <label for="settings-new-password">Новый пароль</label>
-              <input id="settings-new-password" name="new_password" type="password" autocomplete="new-password" required>
-              <div class="setting-note">Используйте не менее 8 символов.</div>
+              <input id="settings-new-password" name="new_password" type="password" autocomplete="new-password" minlength="8" aria-describedby="settings-new-password-hint" required>
+              <div class="setting-note" id="settings-new-password-hint">Используйте не менее 8 символов.</div>
             </div>
           </div>
           <div class="button-row">
             <button data-action="change-password" type="submit">Изменить пароль</button>
           </div>
+          <div class="setting-note" id="change-password-status" role="status" aria-live="polite" aria-atomic="true"></div>
         </form>
-          </div>
-          <div class="button-row">
-            <button data-action="save-settings" type="button">Сохранить настройки</button>
-          </div>
-        </div>
         <div class="preset-panel settings-release-panel">
           <div class="panel-header">
             <h2>Релизы и обновления</h2>
@@ -2295,8 +2297,14 @@ async function submitLogin(event){
   }
 }
 async function changePassword(){
+  const form = el('change-password-form');
+  const submitButton = form.querySelector('[type="submit"]');
+  const status = el('change-password-status');
   const currentPassword = el('settings-current-password').value;
   const newPassword = el('settings-new-password').value;
+  form.setAttribute('aria-busy', 'true');
+  submitButton.disabled = true;
+  status.textContent = 'Пароль изменяется…';
   try {
     const data = await postJson('/api/auth/change-password', {
       current_password: currentPassword,
@@ -2304,11 +2312,14 @@ async function changePassword(){
     });
     storeAuthToken(data);
     renewRealtimeEvents();
+    status.textContent = 'Пароль изменён. Текущая сессия продолжится; на остальных устройствах войдите заново.';
+  } catch (error) {
+    status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.';
+  } finally {
     el('settings-current-password').value = '';
     el('settings-new-password').value = '';
-    setMessage('Password changed. Session refreshed.', 'good');
-  } catch (error) {
-    setMessage(`Password change failed: ${error.message}`, 'bad');
+    submitButton.disabled = false;
+    form.removeAttribute('aria-busy');
   }
 }function apiEndpoint(namespace, name){
   const group = API_ENDPOINTS[namespace] || {};
