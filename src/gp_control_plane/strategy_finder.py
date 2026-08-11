@@ -2112,6 +2112,38 @@ def stop_active_blockcheck_runtime(state_dir: Path | None = None) -> None:
     _cleanup_nft_blockcheck_tables()
 
 
+def _stop_requested(stop_event: threading.Event | None) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
+def _stopped_process_result(recorder: _LiveStdoutRecorder) -> dict[str, Any]:
+    recorder.mark_phase(PHASE_SAVING)
+    return {
+        "status": "stopped",
+        "returncode": None,
+        "timed_out": False,
+        "stopped": True,
+    }
+
+
+def _root_command_unless_stopped(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    stop_event: threading.Event | None,
+    **kwargs: Any,
+) -> list[str] | None:
+    if _stop_requested(stop_event):
+        return None
+    try:
+        rooted_command = root_command(command, env=env, **kwargs)
+    except Exception:
+        if _stop_requested(stop_event):
+            return None
+        raise
+    return None if _stop_requested(stop_event) else rooted_command
+
+
 def _run_process_with_live_stdout(
     command: list[str],
     env: dict[str, str],
@@ -2123,6 +2155,9 @@ def _run_process_with_live_stdout(
     recorder: _LiveStdoutRecorder,
     run_id: str = "",
 ) -> dict[str, Any]:
+    if _stop_requested(stop_event):
+        return _stopped_process_result(recorder)
+
     status = "success"
     returncode: int | None = None
     timed_out = False
@@ -2273,9 +2308,6 @@ def _run_blockcheck_live(
     logs.mkdir(parents=True, exist_ok=True)
     _cleanup_old_strategy_logs(logs)
     run_id = _discovery_run_id(run_id)
-    command = root_command(
-        [str(blockcheck_path)], env=full_env, pass_env_keys=BLOCKCHECK_ENV_KEYS, run_id=run_id
-    )
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
     progress_log = logs / f"{run_id}.{kind}.progress.json"
@@ -2320,17 +2352,27 @@ def _run_blockcheck_live(
     append_run(state_dir, started)
 
     recorder = _LiveStdoutRecorder(state_dir, started)
-    process_result = _run_process_with_live_stdout(
-        command=command,
+    command = _root_command_unless_stopped(
+        [str(blockcheck_path)],
         env=full_env,
-        stdout_log=stdout_log,
-        stderr_log=stderr_log,
-        debug_stdout_log=debug_stdout_log,
-        timeout_seconds=timeout_seconds,
-        stop_event=stop_event,
-        recorder=recorder,
+        pass_env_keys=BLOCKCHECK_ENV_KEYS,
         run_id=run_id,
+        stop_event=stop_event,
     )
+    if command is None:
+        process_result = _stopped_process_result(recorder)
+    else:
+        process_result = _run_process_with_live_stdout(
+            command=command,
+            env=full_env,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            debug_stdout_log=debug_stdout_log,
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            recorder=recorder,
+            run_id=run_id,
+        )
     parsed = recorder.parsed()
     completed_at = now_iso()
     run = {
@@ -2421,14 +2463,16 @@ def _run_multidomain_blockcheck_live(
     )
     _set_debug_stdout_env(full_env, debug_stdout)
     run_id = _discovery_run_id(run_id)
+    command = _root_command_unless_stopped(
+        [str(blockcheck_path)],
+        env=full_env,
+        pass_env_keys=BLOCKCHECK_ENV_KEYS,
+        helper_command="run-multidomain",
+        run_id=run_id,
+        stop_event=stop_event,
+    )
     return _run_blockcheck_command_live(
-        command=root_command(
-            [str(blockcheck_path)],
-            env=full_env,
-            pass_env_keys=BLOCKCHECK_ENV_KEYS,
-            helper_command="run-multidomain",
-            run_id=run_id,
-        ),
+        command=command or [],
         env=full_env,
         state_dir=state_dir,
         kind="multi-domain-discovery",

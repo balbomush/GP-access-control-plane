@@ -3329,6 +3329,185 @@ class WebUiTests(unittest.TestCase):
                         finally:
                             server.close()
 
+    def test_strategy_discovery_immediate_stop_finishes_without_privileged_child(self) -> None:
+        def run_immediate_stop(mode: str) -> None:
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                original_runner = web_app.JobRunner
+                worker_at_barrier = threading.Event()
+                release_worker = threading.Event()
+                worker_finished = threading.Event()
+
+                class BarrierJobRunner(original_runner):
+                    def _run(self, *args: object, **kwargs: object) -> None:
+                        worker_at_barrier.set()
+                        try:
+                            if not release_worker.wait(timeout=2):
+                                raise AssertionError("test did not release discovery worker")
+                            super()._run(*args, **kwargs)
+                        finally:
+                            worker_finished.set()
+
+                with (
+                    mock.patch.object(web_app, "JobRunner", BarrierJobRunner),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(
+                        strategy_finder,
+                        "root_command",
+                        side_effect=AssertionError("root_command must not run after immediate stop"),
+                    ) as root_command,
+                    mock.patch.object(
+                        strategy_finder.subprocess, "Popen", side_effect=AssertionError("privileged child must not start")
+                    ) as popen,
+                    mock.patch.object(
+                        strategy_finder,
+                        "signal_registered_process_run",
+                        side_effect=AssertionError("root signal must not run after immediate stop"),
+                    ) as root_signal,
+                ):
+                    server = _start_captured_server(serve, config)
+                    try:
+                        start_status, _headers, start_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/start-run",
+                            method="POST",
+                            body=json.dumps({"mode": mode, "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                                "utf-8"
+                            ),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
+                        accepted = json.loads(start_body.decode("utf-8"))
+                        self.assertTrue(worker_at_barrier.wait(timeout=2))
+
+                        stop_status, _headers, stop_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/stop-current-run",
+                            method="POST",
+                            body=b"{}",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
+                        self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+
+                        release_worker.set()
+                        self.assertTrue(worker_finished.wait(timeout=2))
+
+                        state = read_state(config.output.state_dir)
+                        status_status, _headers, status_body = _http_request(server.port, "/api/core/status")
+                        history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
+                        self.assertEqual(status_status, 200, status_body.decode("utf-8", errors="replace"))
+                        self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
+                        status_payload = json.loads(status_body.decode("utf-8"))
+                        history = json.loads(history_body.decode("utf-8"))
+
+                        self.assertIsNone(state["current_run_id"])
+                        self.assertIsNone(state["last_error"])
+                        self.assertEqual("stopped", state["last_run_status"])
+                        self.assertEqual("idle", status_payload["state"])
+                        self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
+                        self.assertEqual("stopped", history["runs"][0]["status"])
+                        root_command.assert_not_called()
+                        popen.assert_not_called()
+                        root_signal.assert_not_called()
+                    finally:
+                        release_worker.set()
+                        server.close()
+
+        for mode in ("standard", "multi_domain"):
+            with self.subTest(mode=mode):
+                run_immediate_stop(mode)
+
+    def test_strategy_discovery_stop_during_root_command_finishes_without_privileged_child(self) -> None:
+        def run_stop_during_root_command(mode: str) -> None:
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                original_runner = web_app.JobRunner
+                root_command_entered = threading.Event()
+                release_root_command = threading.Event()
+                worker_finished = threading.Event()
+
+                class ObservingJobRunner(original_runner):
+                    def _run(self, *args: object, **kwargs: object) -> None:
+                        try:
+                            super()._run(*args, **kwargs)
+                        finally:
+                            worker_finished.set()
+
+                def root_command_that_waits(command: list[str], **_kwargs: object) -> list[str]:
+                    root_command_entered.set()
+                    if not release_root_command.wait(timeout=2):
+                        raise AssertionError("test did not release root_command")
+                    return command
+
+                with (
+                    mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(
+                        strategy_finder,
+                        "root_command",
+                        side_effect=root_command_that_waits,
+                    ) as root_command,
+                    mock.patch.object(
+                        strategy_finder.subprocess,
+                        "Popen",
+                        side_effect=AssertionError("privileged child must not start after stop during root_command"),
+                    ) as popen,
+                    mock.patch.object(
+                        strategy_finder,
+                        "signal_registered_process_run",
+                        side_effect=AssertionError("root signal must not run after stop during root_command"),
+                    ) as root_signal,
+                ):
+                    server = _start_captured_server(serve, config)
+                    try:
+                        start_status, _headers, start_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/start-run",
+                            method="POST",
+                            body=json.dumps({"mode": mode, "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                                "utf-8"
+                            ),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
+                        accepted = json.loads(start_body.decode("utf-8"))
+                        self.assertTrue(root_command_entered.wait(timeout=2))
+
+                        stop_status, _headers, stop_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/stop-current-run",
+                            method="POST",
+                            body=b"{}",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
+                        self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+
+                        release_root_command.set()
+                        self.assertTrue(worker_finished.wait(timeout=2))
+
+                        state = read_state(config.output.state_dir)
+                        history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
+                        self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
+                        history = json.loads(history_body.decode("utf-8"))
+                        self.assertIsNone(state["last_error"])
+                        self.assertEqual("stopped", state["last_run_status"])
+                        self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
+                        self.assertEqual("stopped", history["runs"][0]["status"])
+                        root_command.assert_called_once()
+                        popen.assert_not_called()
+                        root_signal.assert_not_called()
+                    finally:
+                        release_root_command.set()
+                        server.close()
+
+        for mode in ("standard", "multi_domain"):
+            with self.subTest(mode=mode):
+                run_stop_during_root_command(mode)
+
     def test_core_strategy_discovery_start_run_rejects_unknown_protocols(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported protocols"):
             web_app._core_strategy_discovery_job_payload(

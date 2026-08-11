@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane import strategy_finder as strategy_finder_module
+from gp_control_plane.state import read_state
 from gp_control_plane.storage import (
     append_run,
     connect,
@@ -51,6 +52,7 @@ from gp_control_plane.strategy_finder import (
     read_candidates,
     read_runs,
     read_runs_page,
+    run_multi_domain_discovery,
     run_standard_discovery,
     upsert_candidates,
     validate_domain_inputs,
@@ -70,6 +72,131 @@ class StrategyFinderTests(unittest.TestCase):
 
         self.assertEqual(result["id"], "run-public")
         self.assertEqual(live.call_args.kwargs["run_id"], "run-public")
+
+    def test_standard_discovery_pre_cancelled_does_not_start_privileged_child(self) -> None:
+        stop_event = threading.Event()
+        stop_event.set()
+
+        with tempfile.TemporaryDirectory() as raw:
+            with (
+                patch.object(strategy_finder_module.shutil, "which", return_value="/test/blockcheck2.sh"),
+                patch.object(
+                    strategy_finder_module,
+                    "root_command",
+                    side_effect=AssertionError("root_command must not run after pre-cancel"),
+                ) as root_command,
+                patch.object(strategy_finder_module.subprocess, "Popen", side_effect=AssertionError("Popen must not run")) as popen,
+                patch.object(
+                    strategy_finder_module,
+                    "signal_registered_process_run",
+                    side_effect=AssertionError("root signal must not run after pre-cancel"),
+                ) as root_signal,
+            ):
+                result = run_standard_discovery(
+                    ["youtube.com"],
+                    Path(raw),
+                    timeout_seconds=1,
+                    stop_event=stop_event,
+                    run_id="pre-cancelled-run",
+                )
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertTrue(result["stopped"])
+        self.assertIsNone(result["returncode"])
+        root_command.assert_not_called()
+        popen.assert_not_called()
+        root_signal.assert_not_called()
+
+    def test_multi_domain_discovery_pre_cancelled_does_not_start_privileged_child(self) -> None:
+        stop_event = threading.Event()
+        stop_event.set()
+
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            with (
+                patch.object(strategy_finder_module.shutil, "which", return_value="/test/blockcheck2.sh"),
+                patch.object(
+                    strategy_finder_module,
+                    "root_command",
+                    side_effect=AssertionError("root_command must not run after pre-cancel"),
+                ) as root_command,
+                patch.object(
+                    strategy_finder_module.subprocess, "Popen", side_effect=AssertionError("Popen must not run")
+                ) as popen,
+                patch.object(
+                    strategy_finder_module,
+                    "signal_registered_process_run",
+                    side_effect=AssertionError("root signal must not run after pre-cancel"),
+                ) as root_signal,
+            ):
+                result = run_multi_domain_discovery(
+                    ["youtube.com"],
+                    state_dir,
+                    timeout_seconds=1,
+                    stop_event=stop_event,
+                    run_id="pre-cancelled-multi-domain-run",
+                )
+
+            state = read_state(state_dir)
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertTrue(result["stopped"])
+        self.assertIsNone(result["returncode"])
+        self.assertIsNone(state["last_error"])
+        root_command.assert_not_called()
+        popen.assert_not_called()
+        root_signal.assert_not_called()
+
+    def test_discovery_cancellation_during_root_command_wins_over_root_result(self) -> None:
+        for mode in ("standard", "multi_domain"):
+            for root_outcome in ("returns", "raises"):
+                with self.subTest(mode=mode, root_outcome=root_outcome):
+                    stop_event = threading.Event()
+
+                    def root_command_that_cancels(command: list[str], **_kwargs: object) -> list[str]:
+                        stop_event.set()
+                        if root_outcome == "raises":
+                            raise RuntimeError("root command failed after cancellation")
+                        return command
+
+                    with tempfile.TemporaryDirectory() as raw:
+                        state_dir = Path(raw)
+                        with (
+                            patch.object(strategy_finder_module.shutil, "which", return_value="/test/blockcheck2.sh"),
+                            patch.object(
+                                strategy_finder_module,
+                                "root_command",
+                                side_effect=root_command_that_cancels,
+                            ) as root_command,
+                            patch.object(
+                                strategy_finder_module.subprocess,
+                                "Popen",
+                                side_effect=AssertionError("Popen must not run after root-command cancellation"),
+                            ) as popen,
+                            patch.object(
+                                strategy_finder_module,
+                                "signal_registered_process_run",
+                                side_effect=AssertionError("root signal must not run after root-command cancellation"),
+                            ) as root_signal,
+                        ):
+                            runner = run_standard_discovery if mode == "standard" else run_multi_domain_discovery
+                            result = runner(
+                                ["youtube.com"],
+                                state_dir,
+                                timeout_seconds=1,
+                                stop_event=stop_event,
+                                run_id=f"cancel-during-root-{mode}-{root_outcome}",
+                            )
+
+                        state = read_state(state_dir)
+
+                    self.assertEqual(result["status"], "stopped")
+                    self.assertTrue(result["stopped"])
+                    self.assertIsNone(result["returncode"])
+                    self.assertIsNone(state["last_error"])
+                    root_command.assert_called_once()
+                    popen.assert_not_called()
+                    root_signal.assert_not_called()
 
     def test_discovery_options_build_blockcheck_env(self) -> None:
         options = DiscoveryOptions(
