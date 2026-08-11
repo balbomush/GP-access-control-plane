@@ -307,8 +307,15 @@ def _blockcheck_nft_tables(output: str) -> list[tuple[str, str]]:
 
 def _signal_process_group(signal_name: str, process: subprocess.Popen[str], run_id: str | None = None) -> None:
     if run_id and not _is_root():
-        signal_registered_process_run(run_id, signal_name)
+        try:
+            signal_registered_process_run(run_id, signal_name)
+        finally:
+            _signal_local_process_group(signal_name, process)
         return
+    _signal_local_process_group(signal_name, process)
+
+
+def _signal_local_process_group(signal_name: str, process: subprocess.Popen[str]) -> None:
     if hasattr(os, "killpg"):
         try:
             os.killpg(process.pid, getattr(signal, f"SIG{signal_name}"))

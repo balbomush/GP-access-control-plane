@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.zapret2 import (
     BLOCKCHECK_ENV_KEYS,
     _blockcheck_nft_tables,
+    _signal_process_group,
     signal_registered_process_run,
     _stop_process_group,
     check_install,
@@ -246,6 +247,64 @@ class Zapret2Tests(unittest.TestCase):
         finally:
             if process.poll() is None:
                 process.kill()
+
+    def test_managed_stop_signals_registered_run_and_local_supervisor_for_term_and_kill(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired(["blockcheck2.sh"], 5), None]
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+            mock.patch("gp_control_plane.zapret2.signal.SIGTERM", "term-signal"),
+            mock.patch("gp_control_plane.zapret2.signal.SIGKILL", "kill-signal", create=True),
+        ):
+            _stop_process_group(process, run_id="managed-run")
+
+        self.assertEqual(
+            signal_registered.call_args_list,
+            [mock.call("managed-run", "TERM"), mock.call("managed-run", "KILL")],
+        )
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(12345, "term-signal"), mock.call(12345, "kill-signal")],
+        )
+        self.assertEqual(process.wait.call_count, 2)
+
+    def test_managed_signal_still_signals_local_supervisor_when_helper_fails(self) -> None:
+        process = mock.Mock(pid=12345)
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch(
+                "gp_control_plane.zapret2.signal_registered_process_run",
+                side_effect=RuntimeError("root-helper rejected registered process signal"),
+            ) as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+            mock.patch("gp_control_plane.zapret2.signal.SIGTERM", "term-signal"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "root-helper rejected"):
+                _signal_process_group("TERM", process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        killpg.assert_called_once_with(12345, "term-signal")
+
+    def test_stop_process_group_propagates_timeout_after_kill_wait(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        timeout = subprocess.TimeoutExpired(["blockcheck2.sh"], 5)
+        process.wait.side_effect = [timeout, timeout]
+
+        with mock.patch("gp_control_plane.zapret2._signal_process_group") as signal_process_group:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _stop_process_group(process)
+
+        self.assertEqual(
+            signal_process_group.call_args_list,
+            [mock.call("TERM", process, None), mock.call("KILL", process, None)],
+        )
+        self.assertEqual(process.wait.call_count, 2)
 
     def test_blockcheck_nft_tables_extracts_only_temporary_tables(self) -> None:
         output = """
