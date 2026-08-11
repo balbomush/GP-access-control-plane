@@ -1351,12 +1351,11 @@ class WebUiTests(unittest.TestCase):
                 ),
             )
             write_state(config.output.state_dir, {"current_run_id": "stale-job", "last_error": None})
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
-
-            self.assertIsNone(read_state(config.output.state_dir)["current_run_id"])
+            server = _start_captured_server(serve, config)
+            try:
+                self.assertIsNone(read_state(config.output.state_dir)["current_run_id"])
+            finally:
+                server.close()
 
     def test_serve_does_not_clear_current_job_when_runtime_lock_exists(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1368,12 +1367,11 @@ class WebUiTests(unittest.TestCase):
                 json.dumps({"pid": os.getpid(), "run_id": "active-job"}),
                 encoding="utf-8",
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            _wait_for_server(port, "/openapi.json")
-
-            self.assertEqual(read_state(config.output.state_dir)["current_run_id"], "active-job")
+            server = _start_captured_server(serve, config)
+            try:
+                self.assertEqual(read_state(config.output.state_dir)["current_run_id"], "active-job")
+            finally:
+                server.close()
 
     def test_legacy_diagnostics_endpoint_is_removed_from_alpha_api(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3201,6 +3199,7 @@ class WebUiTests(unittest.TestCase):
             worker_cancelled = threading.Event()
             release_worker = threading.Event()
             worker_finished = threading.Event()
+            snapshot_completed = threading.Event()
 
             class CapturingJobRunner(original_runner):
                 def start(self, *args: object, **kwargs: object) -> object:
@@ -3222,10 +3221,15 @@ class WebUiTests(unittest.TestCase):
                 finally:
                     worker_finished.set()
 
+            def create_snapshot_when_idle(*_args: object, **_kwargs: object) -> dict[str, object]:
+                snapshot_completed.set()
+                return {}
+
             with (
                 mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
                 mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
                 mock.patch.object(strategy_finder, "signal_registered_process_run") as root_signal,
+                mock.patch.object(web_app, "create_snapshot_if_idle", side_effect=create_snapshot_when_idle),
             ):
                 server = _start_captured_server(serve, config)
                 try:
@@ -3269,6 +3273,7 @@ class WebUiTests(unittest.TestCase):
                         release_worker.set()
                         try:
                             self.assertTrue(worker_finished.wait(timeout=2))
+                            self.assertTrue(snapshot_completed.wait(timeout=2))
                         finally:
                             server.close()
 
