@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import http.client
 import ast
+import errno
 import importlib
 import json
 import os
 import socket
+import socketserver
+import struct
 import sys
 import tempfile
 import threading
@@ -2857,6 +2860,7 @@ class WebUiTests(unittest.TestCase):
             )
             server = _start_captured_server(serve, config)
             connection = response = None
+            test_error: BaseException | None = None
             try:
                 connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
                 connection.request("GET", "/api/web/events/stream", headers=_authenticated_headers(server.port))
@@ -2868,9 +2872,57 @@ class WebUiTests(unittest.TestCase):
                 self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
                 self.assertEqual(first_line, "event: status")
                 self.assertTrue(second_line.startswith("data:"))
+            except BaseException as error:
+                test_error = error
+                raise
             finally:
-                _close_sse_stream(connection, response)
-                server.close()
+                cleanup_error: BaseException | None = None
+
+                def run_cleanup(action: Any) -> None:
+                    nonlocal cleanup_error
+                    try:
+                        action()
+                    except BaseException as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+                        else:
+                            cleanup_error.add_note(f"Additional SSE cleanup failure: {error!r}")
+
+                try:
+                    run_cleanup(lambda: _close_sse_stream(connection, response))
+                    run_cleanup(server.close_active_request_connections)
+                    # Prompt the disconnected stream to write once more, so its
+                    # handler observes the closed connection before temp cleanup.
+                    run_cleanup(lambda: web_app.save_run_settings(config, {"curl_parallelism_default": 17}))
+                finally:
+                    run_cleanup(server.close)
+                if cleanup_error is not None:
+                    if test_error is not None:
+                        test_error.add_note(f"SSE cleanup also failed: {cleanup_error!r}")
+                    else:
+                        raise cleanup_error
+
+    def test_captured_server_close_keeps_handler_timeout_bounded(self) -> None:
+        server = mock.Mock()
+        server.request_handlers_idle.wait.return_value = False
+        server.active_request_handler_count = 1
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        captured = _CapturedTestServer(12345, server, thread)
+
+        with mock.patch.object(socketserver.TCPServer, "server_close") as base_server_close:
+            with self.assertRaisesRegex(AssertionError, "request handlers did not stop on port 12345: 1 still active"):
+                captured.close()
+
+        server.request_handlers_idle.wait.assert_called_once()
+        wait_args, wait_kwargs = server.request_handlers_idle.wait.call_args
+        timeout = wait_args[0] if wait_args else wait_kwargs.get("timeout")
+        self.assertNotIsInstance(timeout, bool)
+        self.assertIsInstance(timeout, (int, float))
+        self.assertGreater(timeout, 0)
+        self.assertLess(timeout, float("inf"))
+        server.server_close.assert_not_called()
+        base_server_close.assert_called_once_with(server)
 
     def test_core_and_web_events_have_separate_payloads_and_cursors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3610,13 +3662,74 @@ class _CapturedTestServer:
         self._thread = thread
 
     def close(self) -> None:
-        self._server.shutdown()
+        teardown_error: BaseException | None = None
+
+        def record_teardown_error(error: BaseException, step: str) -> None:
+            nonlocal teardown_error
+            if teardown_error is None:
+                teardown_error = error
+            else:
+                teardown_error.add_note(f"Additional server teardown failure during {step}: {error!r}")
+
         try:
+            self._server.shutdown()
             self._thread.join(timeout=5)
             if self._thread.is_alive():
                 raise AssertionError(f"server thread did not stop on port {self.port}")
-        finally:
+        except BaseException as error:
+            record_teardown_error(error, "shutdown")
+
+        try:
+            self.close_active_request_connections()
+        except BaseException as error:
+            record_teardown_error(error, "active connection close")
+
+        try:
+            self._wait_for_request_handlers()
+        except BaseException as error:
+            # ThreadingMixIn.server_close() joins every registered request
+            # handler without a timeout.  The bounded wait above is the
+            # diagnostic boundary, so only close the listening socket here.
+            if teardown_error is not None:
+                error.add_note(f"Additional server teardown failure: {teardown_error!r}")
+            try:
+                socketserver.TCPServer.server_close(self._server)
+            except BaseException as close_error:
+                error.add_note(f"Additional server teardown failure during listening socket close: {close_error!r}")
+            raise
+
+        try:
             self._server.server_close()
+        except BaseException as error:
+            record_teardown_error(error, "server close")
+
+        if teardown_error is not None:
+            raise teardown_error
+
+    def close_active_request_connections(self) -> None:
+        self._server.close_active_request_connections()
+
+    def _wait_for_request_handlers(self, timeout: float = 5) -> None:
+        if self._server.request_handlers_idle.wait(timeout):
+            return
+        raise AssertionError(
+            f"request handlers did not stop on port {self.port}: "
+            f"{self._server.active_request_handler_count} still active"
+        )
+
+
+def _is_expected_socket_teardown_error(error: OSError) -> bool:
+    return error.errno in {
+        errno.EBADF,
+        errno.ECONNABORTED,
+        errno.ECONNRESET,
+        errno.ENOTCONN,
+    } or getattr(error, "winerror", None) in {
+        10038,  # WSAENOTSOCK: already closed.
+        10053,  # WSAECONNABORTED: connection aborted.
+        10054,  # WSAECONNRESET: connection reset.
+        10057,  # WSAENOTCONN: no longer connected.
+    }
 
 
 def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _CapturedTestServer:
@@ -3629,9 +3742,82 @@ def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _
 
     class CapturingThreadingHTTPServer(server_type):
         def __init__(self, *args: Any, **server_kwargs: Any) -> None:
-            super().__init__(*args, **server_kwargs)
+            server_address, request_handler_class, *server_args = args
+
+            class CapturingRequestHandler(request_handler_class):
+                def handle_one_request(self) -> None:
+                    super().handle_one_request()
+                    if getattr(self, "path", "").split("?", 1)[0] == "/api/web/events/stream":
+                        self.close_connection = True
+
+            super().__init__(server_address, CapturingRequestHandler, *server_args, **server_kwargs)
+            self._request_handlers_lock = threading.Lock()
+            self._active_request_handler_count = 0
+            self._active_request_sockets: set[socket.socket] = set()
+            self.request_handlers_idle = threading.Event()
+            self.request_handlers_idle.set()
             server_holder["server"] = self
             server_created.set()
+
+        @property
+        def active_request_handler_count(self) -> int:
+            with self._request_handlers_lock:
+                return self._active_request_handler_count
+
+        def process_request(self, request: Any, client_address: Any) -> None:
+            with self._request_handlers_lock:
+                self._active_request_handler_count += 1
+                self._active_request_sockets.add(request)
+                self.request_handlers_idle.clear()
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                # ThreadingMixIn starts the worker in process_request().  If that
+                # fails, no worker finally block will release this reservation.
+                with self._request_handlers_lock:
+                    self._active_request_handler_count -= 1
+                    self._active_request_sockets.discard(request)
+                    if self._active_request_handler_count == 0:
+                        self.request_handlers_idle.set()
+                raise
+
+        def process_request_thread(self, request: Any, client_address: Any) -> None:
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                with self._request_handlers_lock:
+                    self._active_request_handler_count -= 1
+                    self._active_request_sockets.discard(request)
+                    if self._active_request_handler_count == 0:
+                        self.request_handlers_idle.set()
+
+        def close_active_request_connections(self) -> None:
+            with self._request_handlers_lock:
+                active_request_sockets = tuple(self._active_request_sockets)
+            cleanup_error: OSError | None = None
+
+            def record_cleanup_error(error: OSError, operation: str) -> None:
+                nonlocal cleanup_error
+                if cleanup_error is None:
+                    cleanup_error = error
+                else:
+                    cleanup_error.add_note(
+                        f"Additional active request socket {operation} failure: {error!r}"
+                    )
+
+            for request in active_request_sockets:
+                try:
+                    request.shutdown(socket.SHUT_RDWR)
+                except OSError as error:
+                    if not _is_expected_socket_teardown_error(error):
+                        record_cleanup_error(error, "shutdown")
+                try:
+                    request.close()
+                except OSError as error:
+                    if not _is_expected_socket_teardown_error(error):
+                        record_cleanup_error(error, "close")
+            if cleanup_error is not None:
+                raise cleanup_error
 
     def run() -> None:
         try:
@@ -3664,6 +3850,13 @@ def _close_sse_stream(
     connection: http.client.HTTPConnection | None, response: http.client.HTTPResponse | None
 ) -> None:
     try:
+        if connection is not None and connection.sock is not None:
+            linger_format = "HH" if os.name == "nt" else "ii"
+            connection.sock.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_LINGER,
+                struct.pack(linger_format, 1, 0),
+            )
         if response is not None:
             response.close()
     finally:
