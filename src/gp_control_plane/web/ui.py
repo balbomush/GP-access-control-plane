@@ -478,6 +478,11 @@ details.preset-panel > summary:focus-visible {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 8px;
 }
+.settings-access-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
 .common-filter-panel .preset-grid {
   grid-template-columns: 1fr;
 }
@@ -1519,7 +1524,7 @@ pre {
 @media (max-width: 560px) {
   .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
   .topbar-inner { align-items: stretch; flex-direction: column; }
-  .status-grid, .button-row, .fill-row, .preset-grid, .preset-actions, .domain-picker-row, .backup-downloads, .release-grid, .category-toolbar, .time-limit-row { grid-template-columns: 1fr; }
+  .status-grid, .button-row, .fill-row, .preset-grid, .settings-access-grid, .preset-actions, .domain-picker-row, .backup-downloads, .release-grid, .category-toolbar, .time-limit-row { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
@@ -1976,7 +1981,7 @@ pre {
             <h2 id="settings-access-heading">Доступ к панели</h2>
           </div>
           <div class="helper-text">Смена пароля</div>
-          <div class="preset-grid">
+          <div class="settings-access-grid">
             <div class="field">
               <label for="settings-current-password">Текущий пароль</label>
               <input id="settings-current-password" name="current_password" type="password" autocomplete="current-password" required>
