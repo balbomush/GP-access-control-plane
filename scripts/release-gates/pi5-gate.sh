@@ -150,6 +150,12 @@ resolve_state_dir() {
   die "cannot safely read GP_STATE_DIR from installation profile: $INSTALL_PROFILE"
 }
 
+reload_state_dir_from_install_profile() {
+  # A strict update can migrate the default state directory outside INSTALL_DIR.
+  STATE_DIR=""
+  resolve_state_dir
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ref) require_value "$1" "${2:-}"; REF="$2"; shift 2 ;;
@@ -518,6 +524,7 @@ require_step installed-ref-before check_installed_ref
 if [ "$MODE" = dirty-update ]; then
   require_step strict-update-rollback-contract check_rollback_contract
   require_step strict-update-queue-success-evidence queue_dirty_update
+  require_step state-dir-after-strict-update reload_state_dir_from_install_profile
   require_step installed-ref-after check_installed_ref
 fi
 if [ "$MODE" = clean-install ]; then report_event operator clean-install-acknowledged verified "operator performed reimage/install outside this gate" ""; fi

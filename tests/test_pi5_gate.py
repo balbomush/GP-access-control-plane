@@ -98,6 +98,15 @@ read_trusted_profile_state_dir
         self.assertIn('v0.[0-3].*', shell_function(self.source, "legacy_state_fallback_allowed"))
         self.assertNotIn('STATE_DIR="$(canonical_existing_dir "${STATE_DIR:-$INSTALL_DIR/build/state}")"', self.source)
 
+    def test_dirty_update_reloads_state_dir_after_a_possible_migration(self) -> None:
+        reload = shell_function(self.source, "reload_state_dir_from_install_profile")
+        main = self.source.split('report_event metadata pi5-gate started', 1)[1]
+
+        self.assertIn('STATE_DIR=""', reload)
+        self.assertIn('resolve_state_dir', reload)
+        self.assertLess(main.index('queue_dirty_update'), main.index('reload_state_dir_from_install_profile'))
+        self.assertLess(main.index('reload_state_dir_from_install_profile'), main.index('check_storage_integrity'))
+
     def test_profile_reader_derives_trusted_state_and_refuses_malformed_or_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary = Path(temporary_directory)
