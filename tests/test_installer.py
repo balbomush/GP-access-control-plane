@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -19,6 +20,13 @@ class InstallerTests(unittest.TestCase):
         cls.legacy_bootstrap = (root / "scripts" / "bootstrap-raspberry-pi.sh").read_text(encoding="utf-8")
         cls.zapret_installer = (root / "scripts" / "install-zapret2.sh").read_text(encoding="utf-8")
         cls.helper = (root / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+
+    @staticmethod
+    def shell_function(source: str, name: str) -> str:
+        match = re.search(rf"^{re.escape(name)}\(\) \{{\n(?P<body>.*?)(?=^\}}$)", source, re.MULTILINE | re.DOTALL)
+        if not match:
+            raise AssertionError(f"Bash function {name} was not found")
+        return match.group("body")
 
     def test_installer_configures_root_helper(self) -> None:
         self.assertIn("ROOT_HELPER_PATH", self.installer)
@@ -79,6 +87,14 @@ class InstallerTests(unittest.TestCase):
         self.assertLess(stage.index('bash "\\$installer" --strict-preflight'), stage.index("strict_acquire_update_gate", stage.index('bash "\\$installer" --strict-preflight')))
         self.assertLess(stage.index("strict_acquire_update_gate\n"), stage.index("USER_PUBLISH"))
         self.assertLess(stage.index("USER_PUBLISH"), stage.index("rollback_published_code()"))
+
+    def test_managed_paths_normalize_octal_modes_before_exact_postcondition_checks(self) -> None:
+        for function_name in ("ensure_root_directory", "ensure_root_regular_file"):
+            with self.subTest(function_name=function_name):
+                function = self.shell_function(self.installer, function_name)
+                self.assertIn("expected_mode=\"$(printf '%o' \"$((8#$managed_mode))\")\"", function)
+                self.assertIn(":$expected_mode\"", function)
+                self.assertNotIn(":$managed_mode\"", function)
 
     def test_installer_strict_update_accepts_only_tag_pins_and_preflights_before_actions(self) -> None:
         self.assertIn('UPDATE_CANDIDATE_REF="${GP_UPDATE_CANDIDATE_REF:-}"', self.installer)

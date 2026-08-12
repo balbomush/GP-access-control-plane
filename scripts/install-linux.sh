@@ -332,6 +332,7 @@ ensure_root_directory() {
   managed_mode="$2"
   managed_owner="$3"
   managed_group="$4"
+  expected_mode="$(printf '%o' "$((8#$managed_mode))")"
 
   if as_root test -e "$managed_directory" || as_root test -L "$managed_directory"; then
     as_root test -d "$managed_directory" && ! as_root test -L "$managed_directory" \
@@ -340,7 +341,7 @@ ensure_root_directory() {
   as_root install -d -m "$managed_mode" -o "$managed_owner" -g "$managed_group" "$managed_directory"
   as_root test -d "$managed_directory" && ! as_root test -L "$managed_directory" \
     || fail "Managed directory was not created safely: $managed_directory"
-  [ "$(as_root stat -c '%u:%g:%a' "$managed_directory" 2>/dev/null || true)" = "0:$(getent group "$managed_group" | cut -d: -f3):$managed_mode" ] \
+  [ "$(as_root stat -c '%u:%g:%a' "$managed_directory" 2>/dev/null || true)" = "0:$(getent group "$managed_group" | cut -d: -f3):$expected_mode" ] \
     || fail "Managed directory has unexpected ownership or mode: $managed_directory"
 }
 
@@ -349,6 +350,7 @@ ensure_root_regular_file() {
   managed_mode="$2"
   managed_owner="$3"
   managed_group="$4"
+  expected_mode="$(printf '%o' "$((8#$managed_mode))")"
 
   if as_root test -e "$managed_file" || as_root test -L "$managed_file"; then
     as_root test -f "$managed_file" && ! as_root test -L "$managed_file" \
@@ -359,7 +361,7 @@ ensure_root_regular_file() {
   as_root chown "$managed_owner:$managed_group" "$managed_file"
   as_root chmod "$managed_mode" "$managed_file"
   as_root test -f "$managed_file" && ! as_root test -L "$managed_file" \
-    && [ "$(as_root stat -c '%u:%g:%a' "$managed_file" 2>/dev/null || true)" = "0:$(getent group "$managed_group" | cut -d: -f3):$managed_mode" ] \
+    && [ "$(as_root stat -c '%u:%g:%a' "$managed_file" 2>/dev/null || true)" = "0:$(getent group "$managed_group" | cut -d: -f3):$expected_mode" ] \
     || fail "Managed file has unexpected ownership or mode: $managed_file"
 }
 
