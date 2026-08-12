@@ -371,7 +371,9 @@ class TestServerLifecycleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             server = _TestServer(
-                AppConfig(output=OutputConfig(state_dir=Path(raw) / "state")), startup_timeout=0.01
+                AppConfig(output=OutputConfig(state_dir=Path(raw) / "state")),
+                startup_timeout=0.01,
+                server_type=DelayedServer,
             )
             startup_error: list[BaseException] = []
 
@@ -381,11 +383,12 @@ class TestServerLifecycleTests(unittest.TestCase):
                 except BaseException as error:
                     startup_error.append(error)
 
-            with patch.object(api_server, "ThreadingHTTPServer", DelayedServer):
-                startup_thread = threading.Thread(target=start_server)
-                startup_thread.start()
+            startup_thread = threading.Thread(target=start_server)
+            startup_thread.start()
+            try:
                 self.assertTrue(bind_started.wait(timeout=1))
                 self.assertTrue(server._startup_cancelled.wait(timeout=1))
+            finally:
                 allow_bind.set()
                 startup_thread.join(timeout=5)
 
@@ -395,6 +398,7 @@ class TestServerLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(server._server)
             self.assertIsNotNone(server._thread)
             self.assertFalse(server._thread.is_alive())
+            self.assertIs(api_server.ThreadingHTTPServer, original_server)
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", server.port))
 
@@ -412,9 +416,10 @@ def _edge_executable() -> Path | None:
 
 
 class _TestServer:
-    def __init__(self, config: AppConfig, *, startup_timeout: float = 5):
+    def __init__(self, config: AppConfig, *, startup_timeout: float = 5, server_type: type[Any] | None = None):
         self._config = config
         self._startup_timeout = startup_timeout
+        self._server_type = server_type
         self.port = _free_port()
         self._server: Any | None = None
         self._thread: threading.Thread | None = None
@@ -424,7 +429,7 @@ class _TestServer:
 
     def __enter__(self) -> "_TestServer":
         ready = threading.Event()
-        original_server = api_server.ThreadingHTTPServer
+        original_server = self._server_type or api_server.ThreadingHTTPServer
         self._startup_cancelled.clear()
         self._serving.clear()
 
