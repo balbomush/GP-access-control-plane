@@ -4,13 +4,16 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.backups import (
+    create_post_run_snapshot,
     create_snapshot,
     create_snapshot_if_idle,
     delete_snapshot,
@@ -30,6 +33,109 @@ from gp_control_plane.strategy_finder import parse_blockcheck_stdout, read_candi
 
 
 class BackupTests(unittest.TestCase):
+    def test_snapshot_uses_one_read_transaction_during_concurrent_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            before = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua-desync=fake
+"""
+            )
+            after = parse_blockcheck_stdout(
+                """
+* SUMMARY
+curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua-desync=multisplit
+"""
+            )
+            upsert_candidates(state_dir, before, {"id": "before"})
+            save_custom_presets(state_dir, {"finder": {"before": ["youtube.com"]}, "common": {}}, "2026-08-12T00:00:00Z")
+
+            export_started = threading.Event()
+            write_finished = threading.Event()
+            writer_errors: list[BaseException] = []
+
+            def writer() -> None:
+                if not export_started.wait(timeout=2):
+                    writer_errors.append(AssertionError("snapshot export did not begin"))
+                    write_finished.set()
+                    return
+                try:
+                    upsert_candidates(state_dir, after, {"id": "after"})
+                    save_custom_presets(
+                        state_dir,
+                        {"finder": {"before": ["youtube.com"], "after": ["discord.com"]}, "common": {}},
+                        "2026-08-12T00:00:01Z",
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    writer_errors.append(exc)
+                finally:
+                    write_finished.set()
+
+            from gp_control_plane import backups as backup_module
+
+            original_export_domains = backup_module._export_domains
+
+            def export_domains_then_write(conn: object, root: Path) -> int:
+                count = original_export_domains(conn, root)
+                export_started.set()
+                self.assertTrue(write_finished.wait(timeout=2), "concurrent writer was blocked by snapshot export")
+                return count
+
+            write_thread = threading.Thread(target=writer)
+            write_thread.start()
+            with mock.patch.object(backup_module, "_export_domains", side_effect=export_domains_then_write):
+                snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
+            write_thread.join(timeout=2)
+            self.assertFalse(write_thread.is_alive())
+            if writer_errors:
+                raise writer_errors[0]
+
+            snapshot_path = state_dir.parent / "backups" / "snapshots" / snapshot_id
+            domains = _read_snapshot_ndjson(snapshot_path / "domains" / "domains.ndjson")
+            strategies = _read_snapshot_ndjson(snapshot_path / "strategies" / "strategies.ndjson")
+            strategy_links = _read_snapshot_ndjson(snapshot_path / "strategies" / "strategy-domain-links.ndjson")
+            presets = _read_snapshot_ndjson(snapshot_path / "presets" / "domain-presets.ndjson")
+            preset_links = _read_snapshot_ndjson(snapshot_path / "presets" / "preset-domains.ndjson")
+
+            domain_names = {str(item["domain"]) for item in domains}
+            strategy_ids = {str(item["id"]) for item in strategies}
+            preset_keys = {(str(item["scope"]), str(item["name"]), str(item["kind"])) for item in presets}
+            self.assertEqual(domain_names, {"youtube.com"})
+            self.assertTrue(all(str(link["domain"]) in domain_names for link in strategy_links))
+            self.assertTrue(all(str(link["strategy_id"]) in strategy_ids for link in strategy_links))
+            self.assertTrue(all(str(link["domain"]) in domain_names for link in preset_links))
+            self.assertTrue(
+                all((str(link["scope"]), str(link["name"]), str(link["kind"])) in preset_keys for link in preset_links)
+            )
+
+    def test_post_run_snapshot_returns_contractual_success_or_bounded_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+
+            success = create_post_run_snapshot(state_dir)
+
+            self.assertEqual(success["kind"], "snapshot")
+            self.assertEqual(success["status"], "success")
+            self.assertTrue(success["completed_at"].endswith("Z"))
+            self.assertEqual(success["snapshot_id"], success["snapshot"]["id"])
+            self.assertIsInstance(success["snapshot"], dict)
+            with (
+                mock.patch("gp_control_plane.backups.create_snapshot", side_effect=RuntimeError("x" * 600)),
+                mock.patch("gp_control_plane.backups.now_iso", return_value="2026-08-12T00:00:00Z"),
+            ):
+                failure = create_post_run_snapshot(state_dir)
+            self.assertEqual(
+                failure,
+                {
+                    "kind": "snapshot",
+                    "status": "failed",
+                    "completed_at": "2026-08-12T00:00:00Z",
+                    "error_code": "snapshot_export_failed",
+                    "error_message": "x" * 512,
+                },
+            )
+
     def test_snapshot_exports_strategies_and_keeps_last_five(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
@@ -524,6 +630,10 @@ curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=tls_client_hello --lua
 
             self.assertFalse(result["restored"])
             self.assertTrue(result["queued"])
+
+
+def _read_snapshot_ndjson(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
 if __name__ == "__main__":

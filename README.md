@@ -23,16 +23,18 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | GP_INSTALL_WEB=off bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" GP_INSTALL_WEB=off bash
 ```
 
-Bootstrap-скрипт ставит минимальные зависимости для загрузки (`ca-certificates`, `curl`, `git`), находит последний стабильный git tag и запускает установщик из этого tag. Если `sudo` нужен, скрипт запросит его сам.
+Bootstrap-скрипт загружается как asset последнего стабильного release, ставит минимальные зависимости для загрузки (`ca-certificates`, `curl`, `git`), затем по `GP_BRANCH` (по умолчанию `latest-stable`) находит последний стабильный git tag и запускает установщик из этого tag. Укажите `GP_BRANCH=<tag>` только когда нужен конкретный релиз. Если `sudo` нужен, скрипт запросит его сам.
 
 Установка проверяется на Debian/Ubuntu-like системах с `apt-get` и `systemd`.
 
@@ -87,10 +89,11 @@ GP_SERVICE_MEMORY_MAX=1500M
 EOF
 
 export GP_INSTALL_CONFIG="$PWD/gp-install.env"
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
 ```
 
-Без конфига проект ставится в `~/gp/GP-access-control-plane`, а данные хранятся в `~/gp/GP-access-control-plane/build/state`.
+Без конфига проект ставится в `~/gp/GP-access-control-plane`. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
 
 После успешной установки или явной перенастройки установщик сохраняет разрешенный профиль в root-owned `/etc/default/gp-control-plane-install-profile`. Обычное обновление релиза повторно использует этот профиль и не меняет `GP_INSTALL_WEB`, host/port, `GP_CORE_URL` или топологию сервисов. Для изменения этих параметров снова явно запустите bootstrap/installer с нужным `GP_INSTALL_CONFIG`; не меняйте профиль вручную.
 
@@ -163,7 +166,8 @@ journalctl -u gp-control-plane-core.service -u gp-control-plane-web.service -f
 Полный установщик GP уже ставит `zapret2`. Если нужен только `zapret2`, запустите отдельный короткий скрипт:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/install-zapret2.sh | bash
+GP_ZAPRET_INSTALLER_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/install-zapret2.sh'
+curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 ```
 
 После установки должны появиться:
@@ -204,7 +208,8 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scrip
 Повторно запустите bootstrap:
 
 ```bash
-curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scripts/bootstrap-linux.sh | bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
 ```
 
 Он установит последний стабильный git tag, обновит Python-окружение и перезапустит сервисы. Для явной установки ветки или tag задайте `GP_BRANCH`.
@@ -214,13 +219,15 @@ curl -LfsS https://github.com/balbomush/GP-access-control-plane/raw/v0.4.0/scrip
 По умолчанию локальные данные лежат здесь:
 
 ```text
-~/gp/GP-access-control-plane/build/state/
+~/gp/.GP-access-control-plane.data/state/
 ```
 
 Файловые бекапы лежат здесь:
 
 ```text
-~/gp/GP-access-control-plane/build/backups/
+~/gp/.GP-access-control-plane.data/backups/
 ```
 
-Каталог состояния можно переопределить через `GP_STATE_DIR` или `--state-dir`. Данные остаются на хосте и никуда не публикуются.
+При строгом обновлении релиза прежние данные, находившиеся внутри каталога проекта, автоматически переносятся в этот постоянный каталог. Если вы заранее указали внешний `GP_STATE_DIR`, его путь не меняется.
+
+Откат кода не откатывает пользовательские данные и не отменяет этот перенос. Для возврата данных используйте созданный ранее бекап. Данные остаются на хосте и никуда не публикуются.

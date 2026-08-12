@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from .. import __version__, core_api, service_api
 from ..auth import AuthenticationError, PasswordValidationError, change_password, health_payload, login, require_bearer_token
 from ..backups import (
+    create_post_run_snapshot,
     create_snapshot_if_idle,
     delete_snapshot_if_idle,
     import_snapshot_archive,
@@ -65,6 +66,7 @@ from ..storage import (
     save_custom_presets,
     save_system_preset,
     set_preset_domain_enabled,
+    is_storage_unavailable_error as _is_storage_unavailable_error,
 )
 from ..strategy_finder import (
     candidate_storage_version,
@@ -116,7 +118,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
     recover_registered_process_runs()
     _clear_stale_current_run(config)
     close_stale_running_runs(config.output.state_dir)
-    runner = JobRunner(config.output.state_dir, on_idle=lambda: create_snapshot_if_idle(config.output.state_dir))
+    runner = JobRunner(config.output.state_dir, on_idle=lambda: create_post_run_snapshot(config.output.state_dir))
     runtime_role = "monolith" if ui_enabled else "core"
     web_install_enabled = True if ui_enabled else None
 
@@ -126,6 +128,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 super().handle_one_request()
             except (ConnectionAbortedError, ConnectionResetError):
                 return
+            except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return
+                raise
 
         def do_GET(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
@@ -195,11 +202,17 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 try:
                     self._json(web_json_get_payload(config, path, query))
                 except Exception as exc:  # noqa: BLE001
+                    if _is_storage_unavailable_error(exc):
+                        self._storage_unavailable()
+                        return
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
                 self._json(self._json_get_routes(query)[path]())
             except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return
                 if path in {"/api/core/presets/v2fly/category-domains", "/api/core/strategy-candidates"}:
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
@@ -242,12 +255,16 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                         raise RuntimeBusyError()
                     imported = import_snapshot_archive(config.output.state_dir, self._request_upload_bytes())
                     self._json(core_api.backup_snapshot_payload(imported.get("snapshot") or {}), status=HTTPStatus.CREATED)
-                except RuntimeBusyError:
-                    self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
-                except RequestBodyTooLarge as exc:
-                    self._json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 except Exception as exc:  # noqa: BLE001
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    if _is_storage_unavailable_error(exc):
+                        self._storage_unavailable()
+                        return
+                    if isinstance(exc, RuntimeBusyError):
+                        self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
+                    elif isinstance(exc, RequestBodyTooLarge):
+                        self._json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                    else:
+                        self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             if path not in JSON_POST_ROUTE_PATHS:
                 self._not_found()
@@ -352,7 +369,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     HTTPStatus.BAD_REQUEST,
                 ),
                 "/api/auth/change-password": (
-                    lambda: (change_password(config.output.state_dir, payload), HTTPStatus.OK),
+                    lambda: (
+                        change_password(config.output.state_dir, payload, self.headers.get("Authorization")),
+                        HTTPStatus.OK,
+                    ),
                     HTTPStatus.UNAUTHORIZED,
                     HTTPStatus.BAD_REQUEST,
                 ),
@@ -409,19 +429,22 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             handler, error_status, value_error_status = route
             try:
                 payload, status = handler()
-            except AuthenticationError as exc:
-                self._auth_error(exc)
-                return
-            except PasswordValidationError as exc:
-                self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            except RuntimeBusyError:
-                self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
-                return
-            except ValueError as exc:
-                self._json({"error": str(exc)}, status=value_error_status)
-                return
             except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return
+                if isinstance(exc, AuthenticationError):
+                    self._auth_error(exc)
+                    return
+                if isinstance(exc, PasswordValidationError):
+                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                if isinstance(exc, RuntimeBusyError):
+                    self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
+                    return
+                if isinstance(exc, ValueError):
+                    self._json({"error": str(exc)}, status=value_error_status)
+                    return
                 self._json({"error": str(exc)}, status=error_status)
                 return
             self._json(payload, status=status)
@@ -492,6 +515,16 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self.close_connection = True
                     return
                 except Exception as exc:  # noqa: BLE001
+                    if _is_storage_unavailable_error(exc):
+                        self._event(
+                            "event-error",
+                            {
+                                "error": "storage_unavailable",
+                                "message": "Storage is temporarily unavailable.",
+                            },
+                        )
+                        self.close_connection = True
+                        return
                     try:
                         self._require_stream_authorization(authorization)
                         self._event("event-error", {"error": "event-loop", "message": str(exc)})
@@ -530,10 +563,18 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return True
             try:
                 require_bearer_token(config.output.state_dir, self.headers.get("Authorization"))
-            except AuthenticationError as exc:
-                self._auth_error(exc)
-                return False
+            except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return False
+                if isinstance(exc, AuthenticationError):
+                    self._auth_error(exc)
+                    return False
+                raise
             return True
+
+        def _storage_unavailable(self) -> None:
+            self._json(error_payload("storage_unavailable", "Storage is temporarily unavailable."), HTTPStatus.SERVICE_UNAVAILABLE)
 
         def _auth_error(self, error: AuthenticationError) -> None:
             del error
@@ -578,7 +619,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             file_name = _query_one(query, "file") or "archive"
             try:
                 path = snapshot_file_path(config.output.state_dir, snapshot_id, file_name)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return
                 self._not_found()
                 return
             self._file(path, download_name=path.name, content_type="application/zip")
@@ -597,19 +641,35 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
         def _stream_strategy_candidates_export(self, config: AppConfig, query: dict[str, list[str]]) -> None:
             try:
                 iterator = core_api.iter_strategy_candidates_export_lines(config, query)
+                first_line = next(iterator)
             except ValueError as exc:
                 self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
+            except StopIteration:
+                first_line = None
+            except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return
+                raise
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", NDJSON_CONTENT_TYPE)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             try:
+                if first_line is not None:
+                    self.wfile.write(first_line)
+                    self.wfile.flush()
                 for line in iterator:
                     self.wfile.write(line)
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 return
+            except Exception as exc:  # noqa: BLE001
+                if _is_storage_unavailable_error(exc):
+                    self.close_connection = True
+                    return
+                raise
 
         def _bytes(self, data: bytes, content_type: str, *, cache_control: str | None = None) -> None:
             self.send_response(HTTPStatus.OK)

@@ -239,6 +239,16 @@ class Zapret2Tests(unittest.TestCase):
             ],
         )
 
+    def test_root_caller_still_uses_the_discovery_helper_gate(self) -> None:
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+            mock.patch("gp_control_plane.zapret2.require_root_helper_ready"),
+            mock.patch("gp_control_plane.zapret2._root_helper_path", return_value="/helper/gp-root-helper"),
+        ):
+            command = root_command(["/opt/zapret2/blockcheck2.sh"], helper_command="run-multidomain")
+
+        self.assertEqual(command, ["/helper/gp-root-helper", "run-multidomain", "/opt/zapret2/blockcheck2.sh"])
+
     def test_stop_process_group_terminates_process(self) -> None:
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=hasattr(os, "setsid"))
         try:
@@ -384,6 +394,937 @@ table inet blockcheck42
         self.assertNotIn('"killpg")', helper)
         self.assertNotIn("pgrep", helper)
 
+    def test_discovery_gate_wraps_every_privileged_blockcheck_entrypoint(self) -> None:
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+
+        self.assertIn("DISCOVERY_GATE_FILE=\"$DISCOVERY_GATE_DIR/discovery-update.lock\"", helper)
+        gate = helper.split("with_discovery_gate() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('flock -n -s 9', gate)
+        self.assertIn('return 75', gate)
+        self.assertIn('exec 9<>"$DISCOVERY_GATE_FILE"', gate)
+        self.assertIn('[ -f "$DISCOVERY_GATE_FILE" ] && [ ! -L "$DISCOVERY_GATE_FILE" ]', helper)
+        self.assertIn("if [ ! -e \"$DISCOVERY_GATE_FILE\" ] && [ ! -L \"$DISCOVERY_GATE_FILE\" ]; then", helper)
+        self.assertNotIn('cat "$DISCOVERY_GATE_FILE"', gate)  # an empty stale gate file is valid
+        for command in (
+            'with_discovery_gate run_target "$@"',
+            'with_discovery_gate run_owned_target "$@"',
+            'with_discovery_gate run_multidomain_target "$@"',
+            'with_discovery_gate run_owned_multidomain_target "$@"',
+            'with_discovery_gate run_owned_target "$run_id" "$@"',
+            'with_discovery_gate run_owned_multidomain_target "$run_id" "$@"',
+        ):
+            self.assertIn(command, helper)
+
+    def test_empty_gate_file_supports_both_nonblocking_conflicts_without_root_or_systemd(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires POSIX flock")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            gate = root / "discovery-update.lock"
+            gate.touch()  # stale/empty content must not affect advisory locking
+            ready = root / "ready"
+            holder = subprocess.Popen(
+                [shell, "-c", 'exec 9<> "$1"; flock -s 9; : > "$2"; read release', "shared-holder", str(gate), str(ready)],
+                stdin=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                _wait_for_path(ready)
+                update = subprocess.run(
+                    [shell, "-c", 'exec 9<> "$1"; flock -n -x 9 || exit 75', "update", str(gate)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(update.returncode, 75)
+            finally:
+                assert holder.stdin is not None
+                holder.stdin.write("release\n")
+                holder.stdin.close()
+                self.assertEqual(holder.wait(timeout=5), 0)
+
+            ready.unlink()
+            holder = subprocess.Popen(
+                [shell, "-c", 'exec 9<> "$1"; flock -x 9; : > "$2"; read release', "exclusive-holder", str(gate), str(ready)],
+                stdin=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                _wait_for_path(ready)
+                discovery = subprocess.run(
+                    [shell, "-c", 'exec 9<> "$1"; flock -n -s 9 || exit 75', "discovery", str(gate)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(discovery.returncode, 75)
+            finally:
+                assert holder.stdin is not None
+                holder.stdin.write("release\n")
+                holder.stdin.close()
+                self.assertEqual(holder.wait(timeout=5), 0)
+
+    def test_root_helper_cleanup_is_limited_to_a_validated_isolated_process_group(self) -> None:
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+
+        self.assertIn('process_session_id() {', helper)
+        self.assertIn('[ "$known_pid" = "$known_pgid" ] || fail "managed process group is not isolated"', helper)
+        self.assertIn('$1 == pgid && $2 == sid', helper)
+        self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"', helper)
+        self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" TERM', helper)
+        self.assertIn('rm -f "$record"', helper)
+        signal_handler = helper.split("signal_registered_process_run() {", 1)[1].split(
+            "recover_registered_process_runs() {", 1
+        )[0]
+        self.assertLess(
+            signal_handler.index('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"'),
+            signal_handler.rindex('rm -f "$record"'),
+        )
+
+    def test_root_helper_does_not_signal_when_marker_changes_at_revalidation_boundary(self) -> None:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter to execute the root-helper")
+        if subprocess.run([shell, "-c", "[ -r /proc/$$/stat ]"], check=False).returncode != 0:
+            self.skipTest("requires the /proc start-marker interface used by the root-helper")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            marker_state = root / "marker-count"
+            signal_log = root / "signals.log"
+            self._write_root_helper_marker_shims(fake_bin)
+
+            for helper_command, run_id, valid_markers in (
+                # The third match is the last revalidation immediately before TERM.
+                ("signal-run", "marker-stale-before-term", 2),
+                ("recover-runs", "marker-stale-during-recovery", 0),
+            ):
+                with self.subTest(command=helper_command, run_id=run_id):
+                    marker_state.write_text("0", encoding="utf-8")
+                    signal_log.unlink(missing_ok=True)
+                    lock_dir = registry / f".{run_id}.lock"
+                    lock_dir.mkdir()
+                    status_file = lock_dir / "target-status"
+                    status_file.write_text("helper-status-v1 7\n", encoding="utf-8")
+                    completed = self._run_root_helper_with_marker_shims(
+                        shell=shell,
+                        helper=helper,
+                        fake_bin=fake_bin,
+                        registry=registry,
+                        marker_state=marker_state,
+                        signal_log=signal_log,
+                        run_id=run_id,
+                        valid_markers=valid_markers,
+                        helper_command=helper_command,
+                    )
+
+                    if helper_command == "signal-run":
+                        self.assertEqual(completed.returncode, 126, completed.stderr)
+                        self.assertIn("stale or invalid", completed.stderr)
+                    else:
+                        self.assertEqual(completed.returncode, 0, completed.stderr)
+                    actual_signals = signal_log.read_text(encoding="utf-8").splitlines() if signal_log.exists() else []
+                    self.assertEqual(actual_signals, [])
+                    self.assertFalse((registry / run_id).exists())
+                    # A stale marker must never authorize deleting the private status/lock:
+                    # it may still describe an unverified active supervisor group.
+                    self.assertTrue(lock_dir.is_dir())
+                    self.assertEqual(status_file.read_text(encoding="utf-8"), "helper-status-v1 7\n")
+
+    def _write_root_helper_marker_shims(self, fake_bin: Path) -> None:
+        (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+        (fake_bin / "install").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "ps").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *'-e -o pgid= -o sid='*) printf '%s %s\\n' \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" ;;\n"
+            "  *'-o pgid='*) printf '%s\\n' \"$FAKE_PROCESS_ID\" ;;\n"
+            "  *'-o sid='*) printf '%s\\n' \"$FAKE_PROCESS_ID\" ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "awk").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *'-v pgid='*) cat >/dev/null; exit 0 ;;\n"
+            "esac\n"
+            "count=$(cat \"$FAKE_MARKER_STATE\")\n"
+            "count=$((count + 1))\n"
+            "printf '%s\\n' \"$count\" > \"$FAKE_MARKER_STATE\"\n"
+            "if [ \"$count\" -le \"$FAKE_VALID_MARKERS\" ]; then\n"
+            "  printf 'good-marker\\n'\n"
+            "else\n"
+            "  printf 'stale-marker\\n'\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        for shim in fake_bin.iterdir():
+            shim.chmod(0o700)
+
+    def _run_root_helper_with_marker_shims(
+        self,
+        *,
+        shell: str,
+        helper: Path,
+        fake_bin: Path,
+        registry: Path,
+        marker_state: Path,
+        signal_log: Path,
+        run_id: str,
+        valid_markers: int,
+        helper_command: str,
+    ) -> subprocess.CompletedProcess[str]:
+        # Source the production script unchanged so this function intercepts the shell builtin
+        # safely; the shims control every process-inspection result deterministically.
+        harness = """
+fake_bin=$1
+registry=$2
+marker_state=$3
+signal_log=$4
+helper=$5
+run_id=$6
+valid_markers=$7
+helper_command=$8
+PATH="$fake_bin:/usr/bin:/bin"
+GP_ROOT_HELPER_RUN_DIR="$registry"
+FAKE_MARKER_STATE="$marker_state"
+FAKE_SIGNAL_LOG="$signal_log"
+FAKE_VALID_MARKERS="$valid_markers"
+FAKE_PROCESS_ID=$$
+printf 'helper-v1 %s %s good-marker\n' "$FAKE_PROCESS_ID" "$FAKE_PROCESS_ID" > "$registry/$run_id"
+export PATH GP_ROOT_HELPER_RUN_DIR FAKE_MARKER_STATE FAKE_SIGNAL_LOG FAKE_VALID_MARKERS FAKE_PROCESS_ID
+kill() { printf '%s\\n' "$*" >> "$FAKE_SIGNAL_LOG"; }
+case "$helper_command" in
+  signal-run) set -- signal-run "$run_id" TERM ;;
+  recover-runs) set -- recover-runs ;;
+esac
+. "$helper"
+"""
+        return subprocess.run(
+            [
+                shell,
+                "-c",
+                harness,
+                "root-helper-shim",
+                _posix_shell_path(fake_bin),
+                _posix_shell_path(registry),
+                _posix_shell_path(marker_state),
+                _posix_shell_path(signal_log),
+                _posix_shell_path(helper),
+                run_id,
+                str(valid_markers),
+                helper_command,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_run_owned_supervisor_reaps_after_target_status_with_portable_shell_shims(self) -> None:
+        """Exercise the real helper body where Linux setsid/root are unavailable.
+
+        The shims model only host process inspection and group delivery.  The production
+        supervisor, target-status protocol, record writing, and cleanup paths run unchanged.
+        """
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            child_pid_path = root / "child.pid"
+            signal_log = root / "signals.log"
+            supervisor_pid_path = root / "supervisor.pid"
+            sleep_pid_path = root / "supervisor-sleep.pid"
+            phase_path = root / "phase"
+            run_id = "portable-target-status"
+            lock_dir = registry / f".{run_id}.lock"
+            status_file = lock_dir / "target-status"
+            target = root / "blockcheck2.sh"
+            target.write_text(
+                "#!/bin/sh\n"
+                "(trap '' TERM; exec tail -f /dev/null >/dev/null 2>&1) &\n"
+                "printf '%s\\n' \"$!\" > \"$1\"\n"
+                "exit 7\n",
+                encoding="utf-8",
+            )
+            target.chmod(0o700)
+            self._write_run_owned_lifecycle_shims(fake_bin)
+            helper_copy = root / "gp-root-helper-with-test-gate.sh"
+            helper_copy.write_text(
+                helper.read_text(encoding="utf-8").replace(
+                    "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                    f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self._run_owned_with_lifecycle_shims(
+                shell=shell,
+                helper=helper_copy,
+                fake_bin=fake_bin,
+                root=root,
+                registry=registry,
+                target=target,
+                child_pid_path=child_pid_path,
+                signal_log=signal_log,
+                supervisor_pid_path=supervisor_pid_path,
+                sleep_pid_path=sleep_pid_path,
+                phase_path=phase_path,
+                status_file=status_file,
+                run_id=run_id,
+            )
+
+            self.assertEqual(completed.returncode, 7, completed.stderr)
+            self.assertEqual(signal_log.read_text(encoding="utf-8").splitlines(), ["TERM", "KILL"])
+            self.assertEqual((root / "term-observed-status").read_text(encoding="utf-8"), "live\n")
+            self.assertFalse((registry / run_id).exists())
+            self.assertFalse(status_file.exists())
+            self.assertFalse(lock_dir.exists())
+            self.assertEqual((root / "child-killed").read_text(encoding="utf-8"), "yes\n")
+
+    def test_owned_multidomain_setup_failure_removes_only_its_generated_directory_portably(self) -> None:
+        """The wrapper must clean its private directory even before ownership starts."""
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            temp_root = root / "tmp"
+            temp_root.mkdir()
+            keep = temp_root / "keep"
+            keep.mkdir()
+            (keep / "sentinel").write_text("keep\n", encoding="utf-8")
+            source = root / "blockcheck2.sh"
+            source.write_text("#!/bin/sh\n# fsleep_setup marker deliberately absent\n", encoding="utf-8")
+            source.chmod(0o700)
+
+            completed = _run_owned_multidomain_library(
+                shell=shell,
+                helper=helper,
+                source=source,
+                temp_root=temp_root,
+                run_id="owned-md-setup-failure",
+                lifecycle="return 0",
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertIn("main marker not found", completed.stderr)
+            self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
+            self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
+
+    def test_owned_multidomain_early_term_cleans_private_window_before_runner_handoff_portably(self) -> None:
+        """TERM after mktemp must remove only this wrapper's directory before handoff."""
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            temp_root = root / "tmp"
+            temp_root.mkdir()
+            keep = temp_root / "keep"
+            keep.mkdir()
+            (keep / "sentinel").write_text("keep\n", encoding="utf-8")
+            source = root / "blockcheck2.sh"
+            source.write_text("#!/bin/sh\n", encoding="utf-8")
+            source.chmod(0o700)
+            library = root / "root-helper-library.sh"
+            library.write_text(helper.read_text(encoding="utf-8").split("\nrequire_root\n", 1)[0] + "\n", encoding="utf-8")
+            runner_path = root / "runner-path"
+            handoff = root / "handoff"
+            harness = '''\
+. "$1"
+write_multidomain_runner() {
+  printf '%s\\n' "$2" > "$GP_TEST_RUNNER_PATH"
+  # Invoke the production TERM handler directly: MSYS defers a self-sent signal
+  # until this function returns, which would incorrectly cross the handoff boundary.
+  abort_multidomain_owned_run 143
+}
+run_owned_process() {
+  : > "$GP_TEST_HANDOFF"
+  return 0
+}
+run_owned_multidomain_target "$2" "$3"
+'''
+            env = {
+                **os.environ,
+                "PATH": "/usr/bin:/bin",
+                "TMPDIR": _posix_shell_path(temp_root),
+                "ZAPRET_DIR": _posix_shell_path(root),
+                "GP_TEST_RUNNER_PATH": _posix_shell_path(runner_path),
+                "GP_TEST_HANDOFF": _posix_shell_path(handoff),
+            }
+            completed = subprocess.run(
+                [
+                    shell,
+                    "-c",
+                    harness,
+                    "owned-multidomain-early-term",
+                    _posix_shell_path(library),
+                    "owned-md-early-term",
+                    _posix_shell_path(source),
+                ],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertIn(completed.returncode, (143, 15 * 256), completed.stderr)
+            runner = _native_shell_path(runner_path.read_text(encoding="utf-8").strip())
+            self.assertFalse(runner.exists())
+            self.assertFalse(runner.parent.exists())
+            self.assertFalse(handoff.exists(), "TERM before runner generation must not hand off to the owned supervisor")
+            self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
+            self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
+
+    def test_owned_multidomain_normal_lifecycle_cleans_generated_runner_once_without_trap_replacement(self) -> None:
+        """The wrapper owns its temp-dir trap; the supervisor runs in a child trap scope."""
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            temp_root = root / "tmp"
+            temp_root.mkdir()
+            keep = temp_root / "keep"
+            keep.mkdir()
+            (keep / "sentinel").write_text("keep\n", encoding="utf-8")
+            runner_path = root / "runner-path"
+            hook_log = root / "hook.log"
+            source = root / "blockcheck2.sh"
+            source.write_text(_minimal_multidomain_blockcheck_source(), encoding="utf-8")
+            source.chmod(0o700)
+
+            completed = _run_owned_multidomain_library(
+                shell=shell,
+                helper=helper,
+                source=source,
+                temp_root=temp_root,
+                run_id="owned-md-hook-once",
+                lifecycle=(
+                    'printf "%s\\n" "$runner" > "$GP_TEST_RUNNER_PATH"\n'
+                    '[ -x "$runner" ] || exit 91\n'
+                    'return 23'
+                ),
+                extra_env={
+                    "GP_TEST_RUNNER_PATH": _posix_shell_path(runner_path),
+                    "GP_TEST_RM_LOG": _posix_shell_path(hook_log),
+                },
+            )
+
+            self.assertEqual(completed.returncode, 23, completed.stderr)
+            runner_text = runner_path.read_text(encoding="utf-8").strip()
+            runner = _native_shell_path(runner_text)
+            self.assertEqual(runner.name, "gp-multidomain-blockcheck.sh")
+            runner_dir = runner_text.rsplit("/", 1)[0]
+            cleanup_calls = [line for line in hook_log.read_text(encoding="utf-8").splitlines() if line == f"-rf -- {runner_dir}"]
+            self.assertEqual(cleanup_calls, [f"-rf -- {runner_dir}"])
+            self.assertFalse(runner.exists())
+            self.assertFalse(runner.parent.exists())
+            self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
+            self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
+
+        helper_text = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+        owned_wrapper = helper_text.split("run_owned_multidomain_target() (", 1)[1].split("\n)\n\nSTRICT_UPSTREAM", 1)[0]
+        self.assertIn('( run_owned_process "$run_id" "$runner" "$@" )', owned_wrapper)
+        self.assertNotIn("--cleanup-dir", owned_wrapper)
+        self.assertIn("trap cleanup_runner EXIT", owned_wrapper)
+
+    def test_root_owned_multidomain_normal_completion_cleans_only_its_runner_directory(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            temp_root = root / "tmp"
+            temp_root.mkdir()
+            keep = temp_root / "keep"
+            keep.mkdir()
+            (keep / "sentinel").write_text("keep\n", encoding="utf-8")
+            runner_path = root / "runner-path"
+            source = root / "blockcheck2.sh"
+            source.write_text(_minimal_multidomain_blockcheck_source(), encoding="utf-8")
+            source.chmod(0o700)
+            registry = root / "runs"
+            env = {
+                **os.environ,
+                "ZAPRET_DIR": str(root),
+                "TMPDIR": str(temp_root),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+                "GP_TEST_RUNNER_PATH": str(runner_path),
+            }
+
+            completed = subprocess.run(
+                ["sh", str(helper), "run-multidomain-owned", "owned-md-normal", str(source)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            runner = Path(runner_path.read_text(encoding="utf-8").strip())
+            self.assertFalse(runner.exists())
+            self.assertFalse(runner.parent.exists())
+            self.assertFalse((registry / "owned-md-normal").exists())
+            self.assertFalse((registry / ".owned-md-normal.lock").exists())
+            self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
+            self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
+
+    def test_root_owned_multidomain_external_term_cleans_runner_once_and_preserves_other_temp_data(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            temp_root = root / "tmp"
+            temp_root.mkdir()
+            keep = temp_root / "keep"
+            keep.mkdir()
+            (keep / "sentinel").write_text("keep\n", encoding="utf-8")
+            runner_path = root / "runner-path"
+            started = root / "runner-started"
+            release = root / "release"
+            os.mkfifo(release)
+            source = root / "blockcheck2.sh"
+            source.write_text(_minimal_multidomain_blockcheck_source(wait_for_release=True), encoding="utf-8")
+            source.chmod(0o700)
+            registry = root / "runs"
+            env = {
+                **os.environ,
+                "ZAPRET_DIR": str(root),
+                "TMPDIR": str(temp_root),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+                "GP_TEST_RUNNER_PATH": str(runner_path),
+                "GP_TEST_STARTED": str(started),
+                "GP_TEST_RELEASE": str(release),
+            }
+            run_id = "owned-md-external-term"
+            managed = subprocess.Popen(["sh", str(helper), "run-multidomain-owned", run_id, str(source)], env=env)
+            try:
+                _wait_for_path(started)
+                _wait_for_path(runner_path)
+                _wait_for_path(registry / run_id)
+                runner = Path(runner_path.read_text(encoding="utf-8").strip())
+                self.assertTrue(runner.exists())
+
+                stopped = subprocess.run(
+                    ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
+                )
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                self.assertEqual(managed.wait(timeout=8), 143)
+                self.assertFalse(runner.exists())
+                self.assertFalse(runner.parent.exists())
+                self.assertFalse((registry / run_id).exists())
+                self.assertFalse((registry / f".{run_id}.lock").exists())
+                self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
+                self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
+            finally:
+                if managed.poll() is None:
+                    subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
+                    managed.wait(timeout=5)
+
+    def _write_run_owned_lifecycle_shims(self, fake_bin: Path) -> None:
+        (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+        (fake_bin / "install").write_text(
+            "#!/bin/sh\nfor destination do :; done\nmkdir -p \"$destination\"\n", encoding="utf-8"
+        )
+        (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "stat").write_text(
+            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*) printf '0:0:600\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "setsid").write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$FAKE_SUPERVISOR_PID_PATH\"\nexec \"$@\"\n", encoding="utf-8"
+        )
+        (fake_bin / "sleep").write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = 2147483647 ]; then\n"
+            "  printf '%s\\n' \"$$\" > \"$FAKE_SLEEP_PID_PATH\"\n"
+            "  exec tail -f /dev/null >/dev/null 2>&1\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "ps").write_text(
+            "#!/bin/sh\n"
+            "while [ ! -s \"$FAKE_SUPERVISOR_PID_PATH\" ]; do :; done\n"
+            "supervisor=$(cat \"$FAKE_SUPERVISOR_PID_PATH\")\n"
+            "case \"$*\" in\n"
+            "  *'-e -o pid= -o pgid= -o sid='*) [ \"$(cat \"$FAKE_PHASE_PATH\")\" = gone ] || printf '%s %s %s\\n' \"$supervisor\" \"$supervisor\" \"$supervisor\" ;;\n"
+            "  *'-e -o pgid= -o sid='*) [ \"$(cat \"$FAKE_PHASE_PATH\")\" = gone ] || printf '%s %s\\n' \"$supervisor\" \"$supervisor\" ;;\n"
+            "  *'-o pgid='*) printf '%s\\n' \"$supervisor\" ;;\n"
+            "  *'-o sid='*) printf '%s\\n' \"$supervisor\" ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "kill").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *-TERM*)\n"
+            "    printf 'TERM\\n' >> \"$FAKE_SIGNAL_LOG\"\n"
+            "    supervisor=$(cat \"$FAKE_SUPERVISOR_PID_PATH\")\n"
+            "    if [ -f \"$FAKE_STATUS_FILE\" ] && command kill -0 \"$supervisor\" 2>/dev/null; then\n"
+            "      printf 'live\\n' > \"$FAKE_TERM_OBSERVED_STATUS\"\n"
+            "    fi\n"
+            "    ;;\n"
+            "  *-KILL*)\n"
+            "    printf 'KILL\\n' >> \"$FAKE_SIGNAL_LOG\"\n"
+            "    printf 'gone\\n' > \"$FAKE_PHASE_PATH\"\n"
+            "    for path in \"$FAKE_SUPERVISOR_PID_PATH\" \"$FAKE_SLEEP_PID_PATH\" \"$FAKE_CHILD_PID_PATH\"; do\n"
+            "      [ -s \"$path\" ] && command kill -KILL \"$(cat \"$path\")\" 2>/dev/null || true\n"
+            "    done\n"
+            "    printf 'yes\\n' > \"$(dirname \"$FAKE_CHILD_PID_PATH\")/child-killed\"\n"
+            "    ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        for shim in fake_bin.iterdir():
+            shim.chmod(0o700)
+
+    def _run_owned_with_lifecycle_shims(
+        self,
+        *,
+        shell: str,
+        helper: Path,
+        fake_bin: Path,
+        root: Path,
+        registry: Path,
+        target: Path,
+        child_pid_path: Path,
+        signal_log: Path,
+        supervisor_pid_path: Path,
+        sleep_pid_path: Path,
+        phase_path: Path,
+        status_file: Path,
+        run_id: str,
+    ) -> subprocess.CompletedProcess[str]:
+        phase_path.write_text("active\n", encoding="utf-8")
+        harness = """
+PATH="$1:/usr/bin:/bin"
+ZAPRET_DIR="$2"
+GP_ROOT_HELPER_RUN_DIR="$3"
+FAKE_CHILD_PID_PATH="$4"
+FAKE_SIGNAL_LOG="$5"
+FAKE_SUPERVISOR_PID_PATH="$6"
+FAKE_SLEEP_PID_PATH="$7"
+FAKE_PHASE_PATH="$8"
+FAKE_STATUS_FILE="$9"
+FAKE_TERM_OBSERVED_STATUS="${10}"
+FAKE_KILL_SHIM="$1/kill"
+export PATH ZAPRET_DIR GP_ROOT_HELPER_RUN_DIR FAKE_CHILD_PID_PATH FAKE_SIGNAL_LOG FAKE_SUPERVISOR_PID_PATH FAKE_SLEEP_PID_PATH FAKE_PHASE_PATH FAKE_STATUS_FILE FAKE_TERM_OBSERVED_STATUS FAKE_KILL_SHIM
+kill() { "$FAKE_KILL_SHIM" "$@"; }
+helper="${11}"
+set -- run-owned "${12}" "${13}" "$4"
+. "$helper"
+"""
+        return subprocess.run(
+            [
+                shell,
+                "-c",
+                harness,
+                "root-helper-run-owned-shim",
+                _posix_shell_path(fake_bin),
+                _posix_shell_path(root),
+                _posix_shell_path(registry),
+                _posix_shell_path(child_pid_path),
+                _posix_shell_path(signal_log),
+                _posix_shell_path(supervisor_pid_path),
+                _posix_shell_path(sleep_pid_path),
+                _posix_shell_path(phase_path),
+                _posix_shell_path(status_file),
+                _posix_shell_path(root / "term-observed-status"),
+                _posix_shell_path(helper),
+                run_id,
+                _posix_shell_path(target),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_run_owned_handshake_refuses_to_start_target_before_attestation(self) -> None:
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        text = helper.read_text(encoding="utf-8")
+        run_owned = text.split("run_owned_process() {", 1)[1].split("run_owned_target() {", 1)[0]
+
+        self.assertIn('helper-ready-v1 %s', run_owned)
+        self.assertIn('helper-go-v1 $$', run_owned)
+        self.assertLess(run_owned.index('wait_for_owned_run_ready'), run_owned.index('write_owned_run_record'))
+        self.assertLess(run_owned.index('write_owned_run_record'), run_owned.index('write_owned_run_go'))
+        supervisor_body = run_owned.split("setsid /bin/sh -c '", 1)[1].split("' gp-owned-supervisor", 1)[0]
+        self.assertLess(supervisor_body.index('[ "$go_contents" = "helper-go-v1 $$" ]'), supervisor_body.index('( trap - HUP INT TERM; exec "$@" ) &'))
+        self.assertIn('stop_unattested_supervisor || return 1', run_owned)
+        self.assertIn('kill -TERM "$pid"', run_owned)
+        self.assertNotIn('kill -TERM -- "-$pid"', run_owned)
+        self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" TERM', run_owned)
+        cleanup_body = run_owned.split("cleanup_owned_run() {", 1)[1].split("abort_owned_run() {", 1)[0]
+        self.assertLess(
+            cleanup_body.index('stop_unattested_supervisor || return 1'),
+            cleanup_body.index('remove_unattested_run_lock'),
+        )
+        self.assertIn('if ! write_owned_run_record', run_owned)
+        self.assertIn('if ! write_owned_run_go', run_owned)
+        self.assertIn("trap 'abort_owned_run 143' TERM", run_owned)
+
+    def test_root_helper_kills_snapshot_child_after_term_when_leader_is_gone(self) -> None:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter to execute the root-helper")
+        if subprocess.run([shell, "-c", "[ -r /proc/$$/stat ]"], check=False).returncode != 0:
+            self.skipTest("requires the /proc start-marker interface used by the root-helper")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            signal_log = root / "signals.log"
+            self._write_root_helper_snapshot_shims(fake_bin)
+
+            completed = self._run_root_helper_with_snapshot_shims(
+                shell=shell,
+                helper=helper,
+                fake_bin=fake_bin,
+                registry=registry,
+                signal_log=signal_log,
+                run_id="snapshot-child-leader-gone",
+                leader_after_term_marker=None,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            actual_signals = signal_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(actual_signals), 2, actual_signals)
+            self.assertRegex(actual_signals[0], r"^-TERM -- -[1-9][0-9]*$")
+            self.assertRegex(actual_signals[1], r"^-KILL -- -[1-9][0-9]*$")
+            self.assertFalse((registry / "snapshot-child-leader-gone").exists())
+
+    def test_root_helper_refuses_kill_when_leader_marker_changes_after_term(self) -> None:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter to execute the root-helper")
+        if subprocess.run([shell, "-c", "[ -r /proc/$$/stat ]"], check=False).returncode != 0:
+            self.skipTest("requires the /proc start-marker interface used by the root-helper")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            signal_log = root / "signals.log"
+            self._write_root_helper_snapshot_shims(fake_bin)
+
+            completed = self._run_root_helper_with_snapshot_shims(
+                shell=shell,
+                helper=helper,
+                fake_bin=fake_bin,
+                registry=registry,
+                signal_log=signal_log,
+                run_id="snapshot-child-leader-reused",
+                leader_after_term_marker="reused-leader-marker",
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertIn("stale or invalid", completed.stderr)
+            actual_signals = signal_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(actual_signals), 1, actual_signals)
+            self.assertRegex(actual_signals[0], r"^-TERM -- -[1-9][0-9]*$")
+            self.assertFalse((registry / "snapshot-child-leader-reused").exists())
+
+    def _write_root_helper_snapshot_shims(self, fake_bin: Path) -> None:
+        (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+        (fake_bin / "install").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "ps").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *'-e -o pid= -o pgid= -o sid='*) printf '%s %s %s\\n%s %s %s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_CHILD_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" ;;\n"
+            "  *'-e -o pgid= -o sid='*)\n"
+            "    [ \"$(cat \"$FAKE_PHASE\")\" = killed ] || printf '%s %s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\"\n"
+            "    ;;\n"
+            "  *'-o pgid='*) printf '%s\\n' \"$FAKE_LEADER_PID\" ;;\n"
+            "  *'-o sid='*) printf '%s\\n' \"$FAKE_LEADER_PID\" ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "awk").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *'$2 == pgid'*) printf '%s\\n%s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_CHILD_PID\" ;;\n"
+            "  *'$1 == pgid'*) [ \"$(cat \"$FAKE_PHASE\")\" = killed ] && exit 1; exit 0 ;;\n"
+            "  *\"/proc/$FAKE_LEADER_PID/stat\"*)\n"
+            "    if [ \"$(cat \"$FAKE_PHASE\")\" = after-term ]; then\n"
+            "      [ -n \"$FAKE_LEADER_AFTER_TERM_MARKER\" ] && printf '%s\\n' \"$FAKE_LEADER_AFTER_TERM_MARKER\"\n"
+            "    else\n"
+            "      printf 'leader-marker\\n'\n"
+            "    fi\n"
+            "    ;;\n"
+            "  *\"/proc/$FAKE_CHILD_PID/stat\"*) printf 'child-marker\\n' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        for shim in fake_bin.iterdir():
+            shim.chmod(0o700)
+
+    def _run_root_helper_with_snapshot_shims(
+        self,
+        *,
+        shell: str,
+        helper: Path,
+        fake_bin: Path,
+        registry: Path,
+        signal_log: Path,
+        run_id: str,
+        leader_after_term_marker: str | None,
+    ) -> subprocess.CompletedProcess[str]:
+        harness = """
+fake_bin=$1
+registry=$2
+signal_log=$3
+helper=$4
+run_id=$5
+leader_after_term_marker=$6
+python_executable=$7
+FAKE_LEADER_PID=$$
+"$python_executable" -c 'import time; time.sleep(300)' &
+FAKE_CHILD_PID=$!
+PATH="$fake_bin:/usr/bin:/bin"
+GP_ROOT_HELPER_RUN_DIR="$registry"
+FAKE_SIGNAL_LOG="$signal_log"
+FAKE_PHASE="$registry/phase"
+FAKE_LEADER_AFTER_TERM_MARKER="$leader_after_term_marker"
+printf 'before-term\n' > "$FAKE_PHASE"
+printf 'helper-v1 %s %s leader-marker\n' "$FAKE_LEADER_PID" "$FAKE_LEADER_PID" > "$registry/$run_id"
+export PATH GP_ROOT_HELPER_RUN_DIR FAKE_SIGNAL_LOG FAKE_LEADER_PID FAKE_CHILD_PID FAKE_PHASE FAKE_LEADER_AFTER_TERM_MARKER
+cleanup() { command kill -KILL "$FAKE_CHILD_PID" 2>/dev/null || true; wait "$FAKE_CHILD_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+kill() {
+  printf '%s\n' "$*" >> "$FAKE_SIGNAL_LOG"
+  case "$*" in
+    *-TERM*) printf 'after-term\n' > "$FAKE_PHASE" ;;
+    *-KILL*) printf 'killed\n' > "$FAKE_PHASE" ;;
+  esac
+}
+set -- signal-run "$run_id" TERM
+. "$helper"
+"""
+        return subprocess.run(
+            [
+                shell,
+                "-c",
+                harness,
+                "root-helper-snapshot-shim",
+                _posix_shell_path(fake_bin),
+                _posix_shell_path(registry),
+                _posix_shell_path(signal_log),
+                _posix_shell_path(helper),
+                run_id,
+                leader_after_term_marker or "",
+                _posix_shell_path(Path(sys.executable)),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_root_run_owned_reaps_term_ignoring_child_and_returns_target_code(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            child_pid_path = root / "child.pid"
+            target = root / "blockcheck2.sh"
+            target.write_text(
+                "#!/bin/sh\n"
+                "(trap '' TERM; while :; do sleep 30 & wait $!; done) &\n"
+                "child=$!\n"
+                "printf '%s\\n' \"$child\" > \"$1\"\n"
+                "exit 7\n",
+                encoding="utf-8",
+            )
+            target.chmod(0o700)
+            registry = root / "runs"
+            env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            run_id = "reap-background-child"
+            managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target), str(child_pid_path)], env=env)
+            record = registry / run_id
+            try:
+                _wait_for_path(child_pid_path)
+                _wait_for_path(record)
+                child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+
+                self.assertEqual(managed.wait(timeout=5), 7)
+                self.assertFalse(record.exists())
+                _wait_for_pid_to_exit(child_pid)
+            finally:
+                if managed.poll() is None:
+                    subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
+                    managed.wait(timeout=5)
+
+    def test_root_signal_after_go_reaps_term_ignoring_target_and_child(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            started = root / "target-started"
+            child_pid_path = root / "child.pid"
+            target = root / "blockcheck2.sh"
+            target.write_text(
+                "#!/bin/sh\n"
+                "printf started > \"$1\"\n"
+                "(trap '' TERM; while :; do sleep 30 & wait $!; done) &\n"
+                "child=$!\n"
+                "printf '%s\\n' \"$child\" > \"$2\"\n"
+                "trap '' TERM\n"
+                "wait \"$child\"\n",
+                encoding="utf-8",
+            )
+            target.chmod(0o700)
+            env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            run_id = "signal-after-go-term-ignored"
+            managed = subprocess.Popen(
+                ["sh", str(helper), "run-owned", run_id, str(target), str(started), str(child_pid_path)], env=env
+            )
+            record = registry / run_id
+            lock_dir = registry / f".{run_id}.lock"
+            try:
+                _wait_for_path(started)
+                _wait_for_path(child_pid_path)
+                _wait_for_path(record)
+                self.assertEqual(record.read_text(encoding="utf-8").split()[0], "helper-v1")
+                child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+
+                stopped = subprocess.run(
+                    ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
+                )
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                self.assertEqual(managed.wait(timeout=8), 126)
+                self.assertFalse(record.exists())
+                self.assertFalse(lock_dir.exists())
+                _wait_for_pid_to_exit(child_pid)
+            finally:
+                if managed.poll() is None:
+                    subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
+                    managed.wait(timeout=5)
+
     def test_root_helper_creates_the_only_signalable_record_and_rejects_direct_registration(self) -> None:
         if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
             self.skipTest("requires a root Linux test environment with setsid")
@@ -399,11 +1340,7 @@ table inet blockcheck42
             managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target)], env=env)
             try:
                 record = registry / run_id
-                for _ in range(50):
-                    if record.exists():
-                        break
-                    time.sleep(0.05)
-                self.assertTrue(record.exists())
+                _wait_for_path(record)
                 self.assertEqual(record.read_text(encoding="utf-8").split()[0], "helper-v1")
 
                 rejected = subprocess.run(
@@ -427,11 +1364,7 @@ table inet blockcheck42
                 stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target)], env=env)
                 try:
                     stale_record = registry / stale_id
-                    for _ in range(50):
-                        if stale_record.exists():
-                            break
-                        time.sleep(0.05)
-                    self.assertTrue(stale_record.exists())
+                    _wait_for_path(stale_record)
                     version, pid, pgid, _marker = stale_record.read_text(encoding="utf-8").split()
                     stale_record.write_text(f"{version} {pid} {pgid} stale-marker\n", encoding="utf-8")
 
@@ -443,9 +1376,9 @@ table inet blockcheck42
                         check=False,
                     )
                     self.assertEqual(stale_signal.returncode, 126)
-                    time.sleep(0.1)
                     self.assertIsNone(stale.poll())
                     self.assertFalse(stale_record.exists())
+                    self.assertTrue((registry / f".{stale_id}.lock").is_dir())
                 finally:
                     if stale.poll() is None:
                         stale.terminate()
@@ -454,6 +1387,154 @@ table inet blockcheck42
                 if managed.poll() is None:
                     subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
                     managed.wait(timeout=5)
+
+
+def _minimal_multidomain_blockcheck_source(*, wait_for_release: bool = False) -> str:
+    wait_body = (
+        'printf "started\\n" > "$GP_TEST_STARTED"\n'
+        'IFS= read -r _ < "$GP_TEST_RELEASE"\n'
+        if wait_for_release
+        else ""
+    )
+    return (
+        "#!/bin/sh\n"
+        "fsleep_setup() {\n"
+        '  printf "%s\\n" "$0" > "$GP_TEST_RUNNER_PATH"\n'
+        f"  {wait_body}"
+        "}\n"
+        "fix_sbin_path() { :; }\n"
+        "check_system() { :; }\n"
+        "check_already() { :; }\n"
+        "require_root() { :; }\n"
+        "check_prerequisites() { :; }\n"
+        "sigint_cleanup() { :; }\n"
+        "check_dns() { :; }\n"
+        "check_virt() { :; }\n"
+        "ask_params() { :; }\n"
+        "sigint() { :; }\n"
+        "sigsilent() { :; }\n"
+        "configure_ip_version() { :; }\n"
+        "cleanup() { :; }\n"
+        "UNAME=CYGWIN\n"
+        "SKIP_PKTWS=1\n"
+        "IPVS=\n"
+        "ENABLE_HTTP=0\n"
+        "ENABLE_HTTPS_TLS12=0\n"
+        "ENABLE_HTTPS_TLS13=0\n"
+        "ENABLE_HTTP3=0\n"
+        "fsleep_setup\n"
+    )
+
+
+def _run_owned_multidomain_library(
+    *,
+    shell: str,
+    helper: Path,
+    source: Path,
+    temp_root: Path,
+    run_id: str,
+    lifecycle: str,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the production wrapper with its process supervisor replaced by a portable lifecycle driver."""
+    with tempfile.TemporaryDirectory() as raw:
+        harness_root = Path(raw)
+        library = harness_root / "root-helper-library.sh"
+        fake_bin = harness_root / "fake-bin"
+        fake_bin.mkdir()
+        # The dispatch footer invokes require_root, so load only the production function library.
+        library.write_text(helper.read_text(encoding="utf-8").split("\nrequire_root\n", 1)[0] + "\n", encoding="utf-8")
+        (fake_bin / "rm").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$GP_TEST_RM_LOG\"\n"
+            "exec /bin/rm \"$@\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "rm").chmod(0o700)
+        rm_log = (extra_env or {}).get("GP_TEST_RM_LOG", str(harness_root / "rm.log"))
+        env = {
+            **os.environ,
+            **(extra_env or {}),
+            "PATH": f"{_posix_shell_path(fake_bin)}:/usr/bin:/bin",
+            "TMPDIR": _posix_shell_path(temp_root),
+            "ZAPRET_DIR": _posix_shell_path(source.parent),
+            "GP_TEST_RM_LOG": rm_log,
+        }
+        harness = f'''\
+. "$1"
+run_owned_process() {{
+  runner="$2"
+{lifecycle}
+}}
+run_owned_multidomain_target "$2" "$3"
+'''
+        return subprocess.run(
+            [shell, "-c", harness, "owned-multidomain-library", _posix_shell_path(library), run_id, _posix_shell_path(source)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+
+def _wait_for_path(path: Path, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"path did not appear: {path}")
+
+
+def _wait_for_pid_to_exit(pid: int, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_live(pid):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"PID {pid} remained live after the managed group was killed")
+
+
+def _pid_is_live(pid: int) -> bool:
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.is_file():
+        fields = stat_path.read_text(encoding="utf-8").split()
+        return len(fields) > 2 and fields[2] != "Z"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _posix_shell() -> str | None:
+    shell = shutil.which("sh")
+    if shell is not None:
+        return shell
+    for candidate in (
+        Path(r"C:\Program Files\Git\usr\bin\sh.exe"),
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _posix_shell_path(path: Path) -> str:
+    value = str(path)
+    if os.name != "nt":
+        return value
+    drive, tail = os.path.splitdrive(value)
+    if drive:
+        posix_tail = tail.replace("\\", "/")
+        return f"/{drive[0].lower()}{posix_tail}"
+    return value.replace("\\", "/")
+
+
+def _native_shell_path(value: str) -> Path:
+    if os.name == "nt" and re.fullmatch(r"/[A-Za-z]/.*", value):
+        return Path(f"{value[1].upper()}:/{value[3:]}")
+    return Path(value)
 
 
 if __name__ == "__main__":

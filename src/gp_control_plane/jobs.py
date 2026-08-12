@@ -22,6 +22,7 @@ from .storage import append_run, compact_run_payload, connect
 
 
 FINAL_JOB_STATUSES = {"success", "failed", "timeout", "stopped"}
+FINALIZATION_ERROR_MESSAGE_MAX_LENGTH = 512
 
 
 @dataclass(frozen=True)
@@ -148,36 +149,105 @@ class JobRunner:
             self._record(run_id, name, "failed", completed_at, error=last_error)
             self._persist_failed_run(run_id, name, started_at, completed_at, last_error)
         finally:
-            state_lock = None
+            last_snapshot: dict[str, Any] | None = None
             try:
-                with self._lock:
-                    if self._active_run_id == run_id:
-                        state_lock = self._active_state_lock
-                    try:
-                        def mark_finished(state: dict[str, Any]) -> dict[str, Any]:
-                            state["last_error"] = last_error
-                            state["last_run_status"] = last_run_status
-                            state["current_run_id"] = None
-                            state["current_run_name"] = None
-                            state["current_run_status"] = None
-                            return state
-
-                        update_state(self.state_dir, mark_finished)
-                    finally:
-                        if self._active_run_id == run_id:
-                            self._active_run_id = None
-                            self._active_run_name = None
-                            self._active_cancel = None
-                            self._active_cancel_hook = None
-                            self._active_state_lock = None
-            finally:
-                if state_lock:
-                    state_lock.release()
-            if self._on_idle:
                 try:
-                    self._on_idle()
+                    self._mark_run_finalizing(run_id, name, last_run_status, last_error)
                 except Exception:
+                    pass
+                if self._on_idle:
+                    last_snapshot = self._run_post_run_finalizer()
+                    self._record(
+                        run_id,
+                        name,
+                        "saving",
+                        now_iso(),
+                        event="post_run_snapshot",
+                        outcome=last_snapshot,
+                        terminal_run_status=last_run_status,
+                        terminal_last_error=last_error,
+                    )
+            finally:
+                self._finish_active_run(run_id, last_run_status, last_error, last_snapshot)
+
+    def _run_post_run_finalizer(self) -> dict[str, Any]:
+        try:
+            result = self._on_idle() if self._on_idle else None
+        except Exception as exc:  # noqa: BLE001
+            return _finalization_callback_failure(exc)
+        if not isinstance(result, dict):
+            return _finalization_callback_failure("snapshot finalizer returned no outcome")
+        outcome = dict(result)
+        if outcome.get("kind") != "snapshot" or outcome.get("status") not in {"success", "failed"}:
+            return _finalization_callback_failure("snapshot finalizer returned an invalid outcome")
+        if not isinstance(outcome.get("completed_at"), str) or not outcome["completed_at"]:
+            return _finalization_callback_failure("snapshot finalizer outcome has no completion time")
+        if outcome["status"] == "success" and not str(outcome.get("snapshot_id") or "").strip():
+            return _finalization_callback_failure("successful snapshot outcome has no snapshot id")
+        if outcome["status"] == "failed":
+            if not isinstance(outcome.get("error_code"), str) or not outcome["error_code"]:
+                return _finalization_callback_failure("failed snapshot outcome has no error code")
+            if not isinstance(outcome.get("error_message"), str) or not outcome["error_message"]:
+                return _finalization_callback_failure("failed snapshot outcome has no error message")
+        return outcome
+
+    def _mark_run_finalizing(
+        self,
+        run_id: str,
+        name: str,
+        last_run_status: str,
+        last_error: str | None,
+    ) -> None:
+        with self._lock:
+            if self._active_run_id != run_id:
+                return
+            self._active_cancel = None
+            self._active_cancel_hook = None
+
+            def mark_finalizing(state: dict[str, Any]) -> dict[str, Any]:
+                state["last_error"] = last_error
+                state["last_run_status"] = last_run_status
+                state["current_run_id"] = run_id
+                state["current_run_name"] = name
+                state["current_run_status"] = "saving"
+                return state
+
+            update_state(self.state_dir, mark_finalizing)
+
+    def _finish_active_run(
+        self,
+        run_id: str,
+        last_run_status: str,
+        last_error: str | None,
+        last_snapshot: dict[str, Any] | None,
+    ) -> None:
+        state_lock = None
+        try:
+            with self._lock:
+                if self._active_run_id != run_id:
                     return
+                state_lock = self._active_state_lock
+                try:
+                    def mark_finished(state: dict[str, Any]) -> dict[str, Any]:
+                        state["last_error"] = last_error
+                        state["last_run_status"] = last_run_status
+                        if last_snapshot is not None:
+                            state["last_snapshot"] = last_snapshot
+                        state["current_run_id"] = None
+                        state["current_run_name"] = None
+                        state["current_run_status"] = None
+                        return state
+
+                    update_state(self.state_dir, mark_finished)
+                finally:
+                    self._active_run_id = None
+                    self._active_run_name = None
+                    self._active_cancel = None
+                    self._active_cancel_hook = None
+                    self._active_state_lock = None
+        finally:
+            if state_lock:
+                state_lock.release()
 
     def _clear_active_run(self, run_id: str, *, release_state_lock: bool) -> None:
         state_lock = None
@@ -338,6 +408,19 @@ def _status_from_result(result: Any) -> str:
         if status in FINAL_JOB_STATUSES:
             return status
     return "success"
+
+
+def _finalization_callback_failure(error: BaseException | str) -> dict[str, str]:
+    message = str(error).strip() or (
+        type(error).__name__ if isinstance(error, BaseException) else "snapshot finalizer failed"
+    )
+    return {
+        "kind": "snapshot",
+        "status": "failed",
+        "completed_at": now_iso(),
+        "error_code": "finalization_callback_failed",
+        "error_message": " ".join(message.split())[:FINALIZATION_ERROR_MESSAGE_MAX_LENGTH],
+    }
 
 
 def _latest_run_payload_by_id(state_dir: Path, run_id: str) -> dict[str, Any]:

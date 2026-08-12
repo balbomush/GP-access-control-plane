@@ -324,6 +324,14 @@ Compatibility-mode:
 
 ## Migration И Rollback
 
+### Постоянный Каталог Данных (v0.4.0)
+
+Для новой рабочей установки каталог данных является соседним с каталогом проекта. Например, при `~/gp/GP-access-control-plane` состояние находится в `~/gp/.GP-access-control-plane.data/state`, а файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
+
+При строгом обновлении релиза установщик автоматически переносит прежние данные из каталога проекта в этот постоянный каталог. Явно заданный внешний `GP_STATE_DIR` не переносится и остаётся по указанному пути.
+
+Откат кода возвращает предыдущий код и перезапускает сервисы, но не откатывает пользовательские данные и не отменяет перенос. Для возврата данных нужен ранее созданный бекап.
+
 ### Durable/Ephemeral State Plan
 
 Цель: убрать долговременные пользовательские данные из `state.json`, оставив там только короткое runtime/compatibility-состояние процесса.
@@ -340,7 +348,7 @@ Compatibility-mode:
 
 Статус модульного split: `index_html()` вынесен в `web/ui.py`, Swagger/OpenAPI helpers - в `web/docs.py`, Web proxy - в `web/proxy.py`, Core entrypoint - в `web/core_server.py`; `web.app` сохраняет compatibility-wrapper'ы для старых импортов.
 
-Resource budget для Raspberry Pi 2 зафиксирован в `GP-access-control-plane/docs/resource-budget.md`; feature-ветки не измеряются на Pi2, фактический RSS gate выполняется после main/release-candidate.
+Бюджет ресурсов и ручные проверки Pi2/Pi5 описаны в [`resource-budget.md`](resource-budget.md). Feature-ветки не измеряются на Pi2; фактический RSS gate выполняется после main/release-candidate.
 
 1. Добавить в SQLite таблицу `app_settings(key, value_json, updated_at)` и функции чтения/записи настроек запуска подбора.
 2. Перевести `GET /api/core/run-settings` и `POST /api/core/run-settings/save` на SQLite, но оставить fallback чтения старого `state.json.settings`.
@@ -373,8 +381,8 @@ Rollback:
 
 Rollback:
 
-- перед миграцией installer создает backup текущего состояния;
-- state-dir остается единым и совместимым;
+- строгое обновление при ошибке после публикации возвращает предыдущий код и перезапускает предыдущие service unit (`rollback_scope=code`); оно не создаёт резервную копию данных перед миграцией;
+- постоянный state-dir не возвращается к прежнему расположению вместе с кодом;
 - старый `gp-control-plane web` продолжает запускаться на том же state-dir;
 - rollback возвращает прежний service unit и установленный ref/tag;
 - backup restore остается через Core storage model.
@@ -400,5 +408,5 @@ Rollback:
 - alpha-решение по старым URL зафиксировано: legacy root-level `/api/...` удалены, compatibility layer/aliasing до 1.0 не добавляется;
 - тесты для legacy/unknown API 404 без old-to-new mapping;
 - installer/systemd сценарии для default Web UI и headless install;
-- rollback сценарий без потери state-dir;
+- сценарий отката кода при строгом обновлении с проверкой совместимости state-dir;
 - оценку нагрузки на слабой плате только как архитектурную проверку, без релизного использования feature-ветки на контрольной плате.

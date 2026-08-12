@@ -235,123 +235,82 @@ bbbb refs/tags/v0.3.2-alpha.2
             self.assertEqual(state["release_update"]["status"], "failed")
             self.assertEqual(state["release_update"]["error"], "release update queue timeout")
 
-    def test_queue_release_update_creates_backup_and_calls_helper(self) -> None:
-        payload = """
+    _TAG = "v0.3.1"
+    _CANDIDATE_REF = "refs/tags/v0.3.1"
+    _EXPECTED_SHA = "a" * 40
+    _OTHER_SHA = "b" * 40
+
+    def _release_payload(self) -> str:
+        return """
 [
   {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
 ]
 """
+
+    def _candidate_refs(self) -> str:
+        return f"{'c' * 40} {self._CANDIDATE_REF}\n{self._EXPECTED_SHA} {self._CANDIDATE_REF}^{{}}\n"
+
+    def _queued_helper_output(self) -> str:
+        return "\n".join(
+            [
+                "queued=true",
+                "status=queued",
+                "unit=gp-control-plane-update.service",
+                "log=/tmp/update.log",
+                f"candidate_ref={self._CANDIDATE_REF}",
+                f"expected_sha={self._EXPECTED_SHA}",
+                "phase=queued",
+            ]
+        )
+
+    def _queue_output_values(self) -> dict[str, str]:
+        return {
+            "queued": "true",
+            "status": "queued",
+            "phase": "queued",
+            "unit": "gp-control-plane-update.service",
+            "log": "/tmp/update.log",
+            "candidate_ref": self._CANDIDATE_REF,
+            "expected_sha": self._EXPECTED_SHA,
+        }
+
+    def _success_log_values(self) -> dict[str, str]:
+        return {
+            "phase": "installed",
+            "status": "success",
+            "verified_ref": self._CANDIDATE_REF,
+            "verified_sha": self._EXPECTED_SHA,
+            "checked_out_sha": self._EXPECTED_SHA,
+            "installed_ref": self._CANDIDATE_REF,
+            "installed_sha": self._EXPECTED_SHA,
+            "installed_version": self._TAG.removeprefix("v"),
+        }
+
+    def _strict_update_payload(self, log_path: Path, *, status: str = "queued") -> dict[str, object]:
+        return {
+            "status": status,
+            "target_ref": self._TAG,
+            "candidate_ref": self._CANDIDATE_REF,
+            "expected_sha": self._EXPECTED_SHA,
+            "log_path": str(log_path),
+            "release": {"available_version": self._TAG},
+        }
+
+    def test_release_update_plan_pins_annotated_tag_to_peeled_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            plan = release_update_plan(
+                Path(raw) / "state",
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=self._release_payload,
+                candidate_fetcher=self._candidate_refs,
+            )
+
+        self.assertTrue(plan["can_update"])
+        self.assertEqual(plan["candidate"], {"candidate_ref": self._CANDIDATE_REF, "expected_sha": self._EXPECTED_SHA})
+
+    def test_queue_release_update_uses_strict_helper_argv_and_persists_candidate(self) -> None:
         calls: list[list[str]] = []
-
-        def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
-
-        with tempfile.TemporaryDirectory() as raw:
-            state_dir = Path(raw) / "state"
-            install_dir = Path(raw) / "repo"
-            install_dir.mkdir()
-
-            result = queue_release_update(
-                state_dir,
-                channel="stable",
-                current_version="0.3.0",
-                fetcher=lambda: payload,
-                install_dir=install_dir,
-                helper_runner=fake_helper,
-            )
-
-            self.assertTrue(result["queued"])
-            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1", str(state_dir.resolve())])
-            self.assertIn("snapshot", result)
-            self.assertIn("queued=true", result["helper_stdout"])
-            self.assertEqual(result["status"], "queued")
-            self.assertEqual(result["target_ref"], "v0.3.1")
-            self.assertIn("pre-update", result["rollback_instruction"])
-            self.assertTrue(any("restore" in step for step in result["steps"]))
-
-    def test_queue_release_update_requires_explicit_install_dir(self) -> None:
-        payload = """
-[
-  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
-]
-"""
-        with tempfile.TemporaryDirectory() as raw:
-            state_dir = Path(raw) / "state"
-
-            with self.assertRaisesRegex(RuntimeError, "install_dir is required"):
-                queue_release_update(
-                    state_dir,
-                    channel="stable",
-                    current_version="0.3.0",
-                    fetcher=lambda: payload,
-                    helper_runner=lambda args: subprocess.CompletedProcess(args, 0, "", ""),
-                )
-
-    def test_queue_release_update_deduplicates_active_update(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            state_dir = Path(raw) / "state"
-            write_state(
-                state_dir,
-                {
-                    "release_update": {
-                        "queued": True,
-                        "status": "queued",
-                        "queued_at": "2999-01-01T00:00:00Z",
-                        "target_ref": "v0.3.1",
-                    }
-                },
-            )
-
-            def unexpected_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
-                raise AssertionError("helper must not be called for active update")
-
-            result = queue_release_update(
-                state_dir,
-                channel="stable",
-                current_version="0.3.0",
-                fetcher=lambda: "[]",
-                helper_runner=unexpected_helper,
-            )
-
-            self.assertTrue(result["deduplicated"])
-            self.assertEqual(result["target_ref"], "v0.3.1")
-
-    def test_queue_release_update_can_use_git_tag_fallback(self) -> None:
-        tags = """
-aaaa refs/tags/v0.3.0
-bbbb refs/tags/v0.3.1
-"""
-        calls: list[list[str]] = []
-
-        def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
-
-        with tempfile.TemporaryDirectory() as raw:
-            state_dir = Path(raw) / "state"
-            install_dir = Path(raw) / "repo"
-            install_dir.mkdir()
-
-            result = queue_release_update(
-                state_dir,
-                channel="stable",
-                current_version="0.3.0",
-                fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
-                tag_fetcher=lambda: tags,
-                install_dir=install_dir,
-                helper_runner=fake_helper,
-            )
-
-            self.assertEqual(result["release"]["source"], "git-tags")
-            self.assertEqual(calls[0], ["queue-update", str(install_dir.resolve()), "v0.3.1", str(state_dir.resolve())])
-
-    def test_queue_release_update_prewrites_state_before_root_helper(self) -> None:
-        payload = """
-[
-  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
-]
-"""
 
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
@@ -359,28 +318,140 @@ bbbb refs/tags/v0.3.1
             install_dir.mkdir()
 
             def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
-                state = read_state(state_dir)
-                self.assertEqual(state["release_update"]["status"], "queueing")
-                self.assertEqual(state["release_update"]["target_ref"], "v0.3.1")
-                return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
+                calls.append(args)
+                queued = read_state(state_dir)["release_update"]
+                self.assertEqual(queued["status"], "queueing")
+                self.assertEqual(queued["candidate_ref"], self._CANDIDATE_REF)
+                self.assertEqual(queued["expected_sha"], self._EXPECTED_SHA)
+                return subprocess.CompletedProcess(args, 0, self._queued_helper_output(), "")
 
             result = queue_release_update(
                 state_dir,
                 channel="stable",
                 current_version="0.3.0",
-                fetcher=lambda: payload,
+                fetcher=self._release_payload,
+                candidate_fetcher=self._candidate_refs,
                 install_dir=install_dir,
                 helper_runner=fake_helper,
             )
 
-            self.assertEqual(result["status"], "queued")
+        self.assertEqual(
+            calls,
+            [[
+                "queue-update",
+                "--candidate-ref",
+                self._CANDIDATE_REF,
+                "--expected-sha",
+                self._EXPECTED_SHA,
+            ]],
+        )
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result["phase"], "queued")
+        self.assertEqual(result["candidate_ref"], self._CANDIDATE_REF)
+        self.assertEqual(result["expected_sha"], self._EXPECTED_SHA)
+        self.assertEqual(result["target_ref"], self._TAG)
+
+    def test_queue_release_update_rejects_each_missing_required_helper_field(self) -> None:
+        for missing_field in self._queue_output_values():
+            with self.subTest(missing_field=missing_field), tempfile.TemporaryDirectory() as raw:
+                values = self._queue_output_values()
+                del values[missing_field]
+                state_dir = Path(raw) / "state"
+                with self.assertRaisesRegex(RuntimeError, "strict root-helper output"):
+                    queue_release_update(
+                        state_dir,
+                        channel="stable",
+                        current_version="0.3.0",
+                        fetcher=self._release_payload,
+                        candidate_fetcher=self._candidate_refs,
+                        helper_runner=lambda args: subprocess.CompletedProcess(args, 0, "\n".join(f"{key}={value}" for key, value in values.items()), ""),
+                    )
+
+                failed = read_state(state_dir)["release_update"]
+                self.assertEqual(failed["status"], "failed")
+                self.assertEqual(failed["phase"], "queue_failed")
+
+    def test_queue_release_update_rejects_each_substituted_pinned_helper_field(self) -> None:
+        replacements = {
+            "queued": "false",
+            "status": "running",
+            "phase": "queueing",
+            "unit": "",
+            "log": "",
+            "candidate_ref": "refs/tags/v9.9.9",
+            "expected_sha": self._OTHER_SHA,
+        }
+        for field, replacement in replacements.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as raw:
+                values = self._queue_output_values()
+                values[field] = replacement
+                state_dir = Path(raw) / "state"
+                with self.assertRaisesRegex(RuntimeError, "strict root-helper output"):
+                    queue_release_update(
+                        state_dir,
+                        channel="stable",
+                        current_version="0.3.0",
+                        fetcher=self._release_payload,
+                        candidate_fetcher=self._candidate_refs,
+                        helper_runner=lambda args: subprocess.CompletedProcess(args, 0, "\n".join(f"{key}={value}" for key, value in values.items()), ""),
+                    )
+
+    def test_queue_release_update_accepts_no_install_dir_but_never_passes_paths(self) -> None:
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=self._release_payload,
+                candidate_fetcher=self._candidate_refs,
+                helper_runner=lambda args: calls.append(args) or subprocess.CompletedProcess(args, 0, self._queued_helper_output(), ""),
+            )
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(calls[0], ["queue-update", "--candidate-ref", self._CANDIDATE_REF, "--expected-sha", self._EXPECTED_SHA])
+
+    def test_queue_release_update_deduplicates_active_update(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            write_state(
+                state_dir,
+                {"release_update": {"queued": True, "status": "queued", "queued_at": "2999-01-01T00:00:00Z", "target_ref": self._TAG}},
+            )
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=lambda: "[]",
+                helper_runner=lambda args: (_ for _ in ()).throw(AssertionError("helper must not run")),
+            )
+
+        self.assertTrue(result["deduplicated"])
+        self.assertEqual(result["target_ref"], self._TAG)
+
+    def test_queue_release_update_keeps_release_channel_fallback(self) -> None:
+        tags = "\n".join([f"{'d' * 40} refs/tags/v0.3.0", f"{'e' * 40} {self._CANDIDATE_REF}"])
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            install_dir = Path(raw) / "repo"
+            install_dir.mkdir()
+            result = queue_release_update(
+                state_dir,
+                channel="stable",
+                current_version="0.3.0",
+                fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+                tag_fetcher=lambda: tags,
+                candidate_fetcher=self._candidate_refs,
+                install_dir=install_dir,
+                helper_runner=lambda args: subprocess.CompletedProcess(args, 0, self._queued_helper_output(), ""),
+            )
+
+        self.assertEqual(result["release"]["source"], "git-tags")
+        self.assertEqual(result["candidate_ref"], self._CANDIDATE_REF)
 
     def test_queue_release_update_preserves_concurrent_state_fields(self) -> None:
-        payload = """
-[
-  {"tag_name": "v0.3.1", "name": "stable", "prerelease": false, "draft": false, "html_url": "https://example.test/stable", "published_at": "2026-01-01T00:00:00Z"}
-]
-"""
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
             install_dir = Path(raw) / "repo"
@@ -388,144 +459,144 @@ bbbb refs/tags/v0.3.1
 
             def fake_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
                 update_state(state_dir, lambda state: state | {"run_preferences": {"domains": ["youtube.com"]}})
-                return subprocess.CompletedProcess(args, 0, "queued=true\nunit=test\nlog=/tmp/update.log\n", "")
+                return subprocess.CompletedProcess(args, 0, self._queued_helper_output(), "")
 
             result = queue_release_update(
                 state_dir,
                 channel="stable",
                 current_version="0.3.0",
-                fetcher=lambda: payload,
+                fetcher=self._release_payload,
+                candidate_fetcher=self._candidate_refs,
                 install_dir=install_dir,
                 helper_runner=fake_helper,
             )
             state = read_state(state_dir)
 
-            self.assertEqual(result["status"], "queued")
-            self.assertEqual(state["release_update"]["status"], "queued")
-            self.assertEqual(state["run_preferences"], {"domains": ["youtube.com"]})
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(state["release_update"]["status"], "queued")
+        self.assertEqual(state["run_preferences"], {"domains": ["youtube.com"]})
 
-    def test_release_update_status_reads_helper_log(self) -> None:
+    def test_release_update_status_requires_full_matching_install_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            log_path = Path(raw) / "update.log"
+            log_path.write_text(
+                "\n".join(f"{key}={value}" for key, value in self._success_log_values().items()),
+                encoding="utf-8",
+            )
+            write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
+
+            status = release_update_status(state_dir, current_version="0.0.0")
+            persisted = read_state(state_dir)["release_update"]
+
+        self.assertEqual(status["status"], "success")
+        self.assertTrue(status["verified"])
+        self.assertEqual(status["installed_ref"], self._CANDIDATE_REF)
+        self.assertEqual(status["installed_version"], "0.3.1")
+        self.assertEqual(persisted["installed_sha"], self._EXPECTED_SHA)
+        self.assertEqual(persisted["phase"], "installed")
+
+    def test_release_update_status_rejects_each_missing_success_log_field(self) -> None:
+        for missing_field in self._success_log_values():
+            with self.subTest(missing_field=missing_field), tempfile.TemporaryDirectory() as raw:
+                values = self._success_log_values()
+                del values[missing_field]
+                state_dir = Path(raw) / "state"
+                log_path = Path(raw) / "update.log"
+                log_path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
+                write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
+
+                status = release_update_status(state_dir)
+
+                self.assertEqual(status["status"], "failed")
+                self.assertFalse(status["verified"])
+                self.assertIn("strict root-helper output is missing", status["error"])
+
+    def test_release_update_status_rejects_each_substituted_success_log_field(self) -> None:
+        replacements = {
+            "phase": "verified",
+            "status": "failed",
+            "verified_ref": "refs/tags/v9.9.9",
+            "verified_sha": self._OTHER_SHA,
+            "checked_out_sha": self._OTHER_SHA,
+            "installed_ref": "refs/tags/v9.9.9",
+            "installed_sha": self._OTHER_SHA,
+            "installed_version": "9.9.9",
+        }
+        for field, replacement in replacements.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as raw:
+                values = self._success_log_values()
+                values[field] = replacement
+                state_dir = Path(raw) / "state"
+                log_path = Path(raw) / "update.log"
+                log_path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
+                write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
+
+                status = release_update_status(state_dir)
+
+                self.assertEqual(status["status"], "failed")
+                self.assertFalse(status["verified"])
+
+    def test_release_update_status_persists_failure_phase_and_candidate_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
             log_path = Path(raw) / "update.log"
             log_path.write_text(
                 "\n".join(
                     [
-                        "gp-control-plane update queued",
-                        "installed_ref=v0.3.1",
-                        "installed_version=0.3.1",
-                        "status=success",
+                        "phase=checkout_failed",
+                        f"candidate_ref={self._CANDIDATE_REF}",
+                        f"expected_sha={self._OTHER_SHA}",
+                        "error=git checkout failed",
+                        "status=failed",
                     ]
                 ),
                 encoding="utf-8",
             )
-            write_state(
-                state_dir,
-                {
-                    "release_update": {
-                        "status": "queued",
-                        "target_ref": "v0.3.1",
-                        "log_path": str(log_path),
-                        "release": {"available_version": "v0.3.1"},
-                    }
-                },
-            )
+            write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
 
-            status = release_update_status(state_dir, current_version="0.3.1")
+            status = release_update_status(state_dir)
+            persisted = read_state(state_dir)["release_update"]
 
-            self.assertEqual(status["status"], "success")
-            self.assertTrue(status["verified"])
-            self.assertEqual(status["installed_ref"], "v0.3.1")
-            self.assertEqual(status["installed_version"], "0.3.1")
-            self.assertIn("status=success", status["log_tail"])
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"], "git checkout failed")
+        self.assertEqual(status["phase"], "checkout_failed")
+        self.assertEqual(persisted["candidate_ref"], self._CANDIDATE_REF)
+        self.assertEqual(persisted["expected_sha"], self._EXPECTED_SHA)
+        self.assertIn("phase=checkout_failed", status["log_tail"])
 
-    def test_release_update_status_clears_stale_error_after_success(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            state_dir = Path(raw) / "state"
-            log_path = Path(raw) / "update.log"
-            log_path.write_text(
-                "\n".join(
-                    [
-                        "installed_ref=v0.3.1",
-                        "installed_version=0.3.1",
-                        "status=success",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            write_state(
-                state_dir,
-                {
-                    "release_update": {
-                        "status": "failed",
-                        "error": "release update queue timeout",
-                        "target_ref": "v0.3.1",
-                        "log_path": str(log_path),
-                        "release": {"available_version": "v0.3.1"},
-                    }
-                },
-            )
-
-            status = release_update_status(state_dir, current_version="0.3.1")
-
-            self.assertEqual(status["status"], "success")
-            self.assertEqual(status["error"], "")
-            self.assertTrue(status["verified"])
-
-    def test_release_update_status_recovers_after_service_restart_before_final_state_write(self) -> None:
+    def test_release_update_status_recovers_strict_completion_from_latest_log(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
             log_dir = state_dir / "release-updates"
             log_dir.mkdir(parents=True)
             log_path = log_dir / "gp-control-plane-update-test.log"
             log_path.write_text(
-                "\n".join(
-                    [
-                        "installed_ref=v0.3.1",
-                        "installed_version=0.3.1",
-                        "status=success",
-                    ]
-                ),
+                "\n".join(f"{key}={value}" for key, value in self._success_log_values().items()),
                 encoding="utf-8",
             )
-            write_state(
-                state_dir,
-                {
-                    "release_update": {
-                        "status": "queueing",
-                        "target_ref": "v0.3.1",
-                        "release": {"available_version": "v0.3.1"},
-                    }
-                },
-            )
+            write_state(state_dir, {"release_update": self._strict_update_payload(Path(""), status="queueing") | {"log_path": ""}})
 
-            status = release_update_status(state_dir, current_version="0.3.1")
+            status = release_update_status(state_dir)
 
-            self.assertEqual(status["status"], "success")
-            self.assertTrue(status["verified"])
-            self.assertEqual(status["log_path"], str(log_path))
-            self.assertEqual(status["installed_ref"], "v0.3.1")
+        self.assertEqual(status["status"], "success")
+        self.assertTrue(status["verified"])
+        self.assertEqual(status["log_path"], str(log_path))
 
     def test_release_update_status_marks_stale_update_failed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"
             write_state(
                 state_dir,
-                {
-                    "release_update": {
-                        "status": "queued",
-                        "queued_at": "2026-01-01T00:00:00Z",
-                        "target_ref": "v0.3.1",
-                    }
-                },
+                {"release_update": {"status": "queued", "queued_at": "2026-01-01T00:00:00Z", "target_ref": self._TAG}},
             )
 
             status = release_update_status(state_dir, current_version="0.3.0")
             state = read_state(state_dir)
 
-            self.assertEqual(status["status"], "failed")
-            self.assertEqual(status["error"], "release update queue timeout")
-            self.assertEqual(state["release_update"]["status"], "failed")
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"], "release update queue timeout")
+        self.assertEqual(state["release_update"]["status"], "failed")
 
 
 if __name__ == "__main__":

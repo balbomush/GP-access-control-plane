@@ -6,6 +6,6 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "$(dirname -- "${BASH_SOURCE[0]}")/insta
   exec bash "$script_dir/install-linux.sh" "$@"
 fi
 
-raw_base_url="${GP_RAW_BASE_URL:-https://github.com/balbomush/GP-access-control-plane/raw}"
-install_ref="${GP_BRANCH:-main}"
-curl -LfsS "$raw_base_url/$install_ref/scripts/install-linux.sh" | bash -s -- "$@"
+bootstrap_url="${GP_LEGACY_BOOTSTRAP_URL:-https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh}"
+export GP_BRANCH="${GP_BRANCH:-latest-stable}"
+curl -LfsS "$bootstrap_url" | bash -s -- "$@"

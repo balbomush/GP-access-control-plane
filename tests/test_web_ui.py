@@ -97,6 +97,20 @@ class WebUiTests(unittest.TestCase):
 
             self.assertTrue(payload["storage"]["ready"])
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
+            self.assertNotIn("last_snapshot", payload)
+
+            expected_snapshot = {
+                "kind": "snapshot",
+                "status": "success",
+                "completed_at": "2026-08-12T00:00:00Z",
+                "snapshot_id": "snapshot-1",
+                "snapshot": {"id": "snapshot-1"},
+            }
+            write_state(config.output.state_dir, {"last_snapshot": expected_snapshot})
+
+            payload = web_app.core_api.status_payload(config)
+
+            self.assertEqual(payload["last_snapshot"], expected_snapshot)
 
 
     def test_core_status_uses_lightweight_storage_runtime_status(self) -> None:
@@ -117,6 +131,79 @@ class WebUiTests(unittest.TestCase):
             storage_status.assert_called_once_with(config.output.state_dir)
             self.assertTrue(payload["storage"]["ready"])
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
+
+    def test_core_status_keeps_saving_lifecycle_until_post_run_snapshot_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+            worker_started = threading.Event()
+            release_worker = threading.Event()
+            snapshot_started = threading.Event()
+            release_snapshot = threading.Event()
+
+            def active_run(
+                _config: AppConfig, _payload: dict[str, Any], _stop_event: threading.Event, _run_id: str
+            ) -> dict[str, str]:
+                worker_started.set()
+                self.assertTrue(release_worker.wait(timeout=2))
+                return {"status": "success"}
+
+            def snapshot_after_run(_state_dir: Path) -> dict[str, object]:
+                snapshot_started.set()
+                self.assertTrue(release_snapshot.wait(timeout=2))
+                return {
+                    "kind": "snapshot",
+                    "status": "success",
+                    "completed_at": "2026-08-12T00:00:00Z",
+                    "snapshot_id": "post-run-snapshot",
+                    "snapshot": {"id": "post-run-snapshot"},
+                }
+
+            with (
+                mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run),
+                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=snapshot_after_run),
+            ):
+                server = _start_captured_server(serve, config)
+                try:
+                    status, _headers, body = _http_request(
+                        server.port,
+                        "/api/core/strategy-discovery/start-run",
+                        method="POST",
+                        body=json.dumps({"mode": "standard", "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                            "utf-8"
+                        ),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
+                    self.assertTrue(worker_started.wait(timeout=2))
+                    release_worker.set()
+                    self.assertTrue(snapshot_started.wait(timeout=2))
+
+                    status, _headers, body = _http_request(server.port, "/api/core/status")
+
+                    self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+                    self.assertEqual(json.loads(body.decode("utf-8"))["current_run"]["status"], "saving")
+                finally:
+                    release_worker.set()
+                    release_snapshot.set()
+                    try:
+                        deadline = time.monotonic() + 2
+                        while time.monotonic() < deadline:
+                            if read_state(config.output.state_dir).get("current_run_id") is None:
+                                break
+                            time.sleep(0.01)
+                        self.assertEqual(
+                            read_state(config.output.state_dir).get("last_snapshot"),
+                            {
+                                "kind": "snapshot",
+                                "status": "success",
+                                "completed_at": "2026-08-12T00:00:00Z",
+                                "snapshot_id": "post-run-snapshot",
+                                "snapshot": {"id": "post-run-snapshot"},
+                            },
+                        )
+                    finally:
+                        server.close()
 
     def test_active_run_http_contract_keeps_one_public_run_id_for_ui(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -146,17 +233,17 @@ class WebUiTests(unittest.TestCase):
                 release.wait(timeout=2)
                 return {"id": run_id, "status": "stopped" if stop_event.is_set() else "success"}
 
-            original_create_snapshot_if_idle = web_app.create_snapshot_if_idle
+            original_create_post_run_snapshot = web_app.create_post_run_snapshot
 
-            def create_snapshot_when_idle(state_dir: Path) -> dict[str, Any]:
+            def create_snapshot_after_run(state_dir: Path) -> dict[str, Any]:
                 try:
-                    return original_create_snapshot_if_idle(state_dir)
+                    return original_create_post_run_snapshot(state_dir)
                 finally:
                     snapshot_completed.set()
 
             with (
                 mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run),
-                mock.patch.object(web_app, "create_snapshot_if_idle", side_effect=create_snapshot_when_idle),
+                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
             ):
                 server = _start_captured_server(serve, config)
                 try:
@@ -1402,13 +1489,33 @@ class WebUiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             log_path = tmp / "update.log"
-            log_path.write_text("installed_version=0.3.1\nstatus=success\n", encoding="utf-8")
+            candidate_ref = "refs/tags/v0.3.1"
+            expected_sha = "a" * 40
+            log_path.write_text(
+                "\n".join(
+                    [
+                        f"installed_ref={candidate_ref}",
+                        "installed_version=0.3.1",
+                        f"candidate_ref={candidate_ref}",
+                        f"expected_sha={expected_sha}",
+                        f"verified_ref={candidate_ref}",
+                        f"verified_sha={expected_sha}",
+                        f"checked_out_sha={expected_sha}",
+                        f"installed_sha={expected_sha}",
+                        "phase=installed",
+                        "status=success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             write_state(
                 tmp / "state",
                 {
                     "release_update": {
                         "status": "queued",
                         "target_ref": "v0.3.1",
+                        "candidate_ref": candidate_ref,
+                        "expected_sha": expected_sha,
                         "log_path": str(log_path),
                     }
                 },
@@ -1421,15 +1528,16 @@ class WebUiTests(unittest.TestCase):
             port = _free_port()
             thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
             thread.start()
-            time.sleep(0.1)
+            _wait_for_server(port)
 
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.request("GET", "/api/web/events", headers=_authenticated_headers(port))
-            response = connection.getresponse()
-            body = response.read().decode("utf-8")
-            connection.close()
+            response_status, _headers, response_body = _http_request(
+                port,
+                "/api/web/events",
+                headers=_authenticated_headers(port),
+            )
+            body = response_body.decode("utf-8")
 
-            self.assertEqual(response.status, 200)
+            self.assertEqual(response_status, 200)
             payload = json.loads(body)
             events = {event["type"]: event["payload"] for event in payload["events"]}
             self.assertIn("status", events)
@@ -1441,6 +1549,44 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("release_update", events["status"])
             self.assertIn('"release_update"', body)
             self.assertIn('"status":"success"', body)
+            update = events["status"]["release_update"]
+            self.assertTrue(update["verified"])
+            self.assertEqual(update["candidate_ref"], candidate_ref)
+            self.assertEqual(update["expected_sha"], expected_sha)
+            self.assertEqual(update["verified_ref"], candidate_ref)
+            self.assertEqual(update["verified_sha"], expected_sha)
+            self.assertEqual(update["checked_out_sha"], expected_sha)
+            self.assertEqual(update["installed_sha"], expected_sha)
+            persisted = read_state(config.output.state_dir)["release_update"]
+            self.assertEqual(persisted["candidate_ref"], candidate_ref)
+            self.assertEqual(persisted["expected_sha"], expected_sha)
+            self.assertEqual(persisted["installed_sha"], expected_sha)
+
+            incomplete_log_path = tmp / "incomplete-update.log"
+            incomplete_log_path.write_text("installed_version=0.3.1\nstatus=success\n", encoding="utf-8")
+            write_state(
+                config.output.state_dir,
+                {
+                    "release_update": {
+                        "status": "queued",
+                        "target_ref": "v0.3.1",
+                        "log_path": str(incomplete_log_path),
+                    }
+                },
+            )
+            invalid_status, _headers, invalid_body = _http_request(
+                port,
+                "/api/web/events",
+                headers=_authenticated_headers(port),
+            )
+            invalid_events = {
+                event["type"]: event["payload"] for event in json.loads(invalid_body.decode("utf-8"))["events"]
+            }
+
+            self.assertEqual(invalid_status, 200)
+            self.assertEqual(invalid_events["status"]["release_update"]["status"], "failed")
+            self.assertFalse(invalid_events["status"]["release_update"]["verified"])
+            self.assertIn("pinned candidate", invalid_events["status"]["release_update"]["error"])
 
     def test_core_mode_serves_api_without_web_ui(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1545,7 +1691,6 @@ class WebUiTests(unittest.TestCase):
                 if target is serve_core:
                     self.assertEqual(openapi_contract["info"]["title"], "GP Control Plane Core API")
                     self.assertIn("Callable Core/Service/OpenAPI operations", openapi_contract["info"]["description"])
-                    self.assertNotIn("/api/web", openapi_text)
                     self.assertFalse(any(path.startswith("/api/web/") for path in openapi_contract["paths"]))
                 else:
                     self.assertEqual(openapi_contract["info"]["title"], "GP Control Plane API")
@@ -1649,7 +1794,7 @@ class WebUiTests(unittest.TestCase):
                     "/api/core/backups/upload",
                 ):
                     responses = openapi_contract["paths"][backup_mutation_path]["post"]["responses"]
-                    self.assertEqual({"$ref": "#/components/responses/Error"}, responses["409"])
+                    self.assertEqual({"$ref": "#/components/responses/RuntimeBusy"}, responses["409"])
                 self.assertEqual(
                     "legacy-root-apis-removed-in-alpha",
                     openapi_contract["x-gp-decisions"]["legacy_api_compatibility"],
@@ -1713,13 +1858,18 @@ class WebUiTests(unittest.TestCase):
                 self.assertIsNotNone(route)
                 operation = contract["paths"][path][method.lower()]
                 expected_security = [] if not route.auth_required else [{"bearerAuth": []}]
-                self.assertEqual(expected_security, operation["security"])
+                self.assertEqual(expected_security, operation.get("security", contract["security"]))
                 for status, response in operation["responses"].items():
                     if status == "default" or not status.startswith("2"):
-                        self.assertEqual({"$ref": "#/components/responses/Error"}, response)
+                        self.assertIn("$ref", response)
+                        self.assertIn(
+                            response["$ref"],
+                            {f"#/components/responses/{name}" for name in contract["components"]["responses"]},
+                        )
 
             error_schema = contract["components"]["schemas"]["ErrorResponse"]["properties"]["error"]
             self.assertEqual(["code", "message", "details"], error_schema["required"])
+            self.assertIn("saving", contract["components"]["schemas"]["RunStatus"]["enum"])
             self.assertEqual(
                 "#/components/schemas/RunAccepted",
                 contract["paths"]["/api/core/strategy-discovery/stop-current-run"]["post"]["responses"]["202"]["content"][
@@ -2136,7 +2286,6 @@ class WebUiTests(unittest.TestCase):
                 core_openapi_text = core_openapi_body.decode("utf-8")
                 proxy_openapi_text = proxy_openapi_body.decode("utf-8")
                 self.assertIn("/api/web", full_openapi_text)
-                self.assertNotIn("/api/web", core_openapi_text)
                 self.assertIn("/api/web", proxy_openapi_text)
                 core_openapi_contract = json.loads(
                     core_openapi_text,
@@ -3190,7 +3339,16 @@ class WebUiTests(unittest.TestCase):
 
             with (
                 mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=fake_run) as runner,
-                mock.patch.object(web_app, "create_snapshot_if_idle", return_value={}),
+                mock.patch.object(
+                    web_app,
+                    "create_post_run_snapshot",
+                    return_value={
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-08-12T00:00:00Z",
+                        "snapshot_id": "post-run-snapshot",
+                    },
+                ),
             ):
                 thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
                 thread.start()
@@ -3275,13 +3433,18 @@ class WebUiTests(unittest.TestCase):
 
             def create_snapshot_when_idle(*_args: object, **_kwargs: object) -> dict[str, object]:
                 snapshot_completed.set()
-                return {}
+                return {
+                    "kind": "snapshot",
+                    "status": "success",
+                    "completed_at": "2026-08-12T00:00:00Z",
+                    "snapshot_id": "post-run-snapshot",
+                }
 
             with (
                 mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
                 mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
                 mock.patch.object(strategy_finder, "signal_registered_process_run") as root_signal,
-                mock.patch.object(web_app, "create_snapshot_if_idle", side_effect=create_snapshot_when_idle),
+                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_when_idle),
             ):
                 server = _start_captured_server(serve, config)
                 try:

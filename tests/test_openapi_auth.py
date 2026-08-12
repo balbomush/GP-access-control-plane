@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import json
+import sys
+import unittest
+from pathlib import Path
+from typing import Any
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from gp_control_plane.web import docs as web_docs
+from gp_control_plane.web import routes as web_routes
+
+
+OPENAPI_PATH = Path(__file__).resolve().parents[1] / "openapi.json"
+HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "trace"})
+BEARER_SECURITY = [{"bearerAuth": []}]
+
+
+def _without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_openapi_source() -> dict[str, Any]:
+    return json.loads(OPENAPI_PATH.read_text(encoding="utf-8"), object_pairs_hook=_without_duplicate_keys)
+
+
+def _documented_operations(contract: dict[str, Any]) -> set[tuple[str, str]]:
+    return {
+        (path, method.upper())
+        for path, path_item in contract["paths"].items()
+        for method in path_item
+        if method.lower() in HTTP_METHODS
+    }
+
+
+class OpenApiAuthenticationContractTests(unittest.TestCase):
+    def test_source_openapi_matches_registered_server_routes_and_auth_policy(self) -> None:
+        contract = _load_openapi_source()
+        expected_operations = web_routes.openapi_operations()
+
+        self.assertEqual(expected_operations, _documented_operations(contract))
+        self.assertEqual(BEARER_SECURITY, contract["security"])
+        self.assertEqual(
+            {"type": "http", "scheme": "bearer", "bearerFormat": "opaque"},
+            contract["components"]["securitySchemes"]["bearerAuth"],
+        )
+
+        for path, method in expected_operations:
+            route = web_routes.route_for(method, path)
+            self.assertIsNotNone(route, f"missing server route for {method} {path}")
+            operation = contract["paths"][path][method.lower()]
+            expected_security = [] if not route.auth_required else BEARER_SECURITY
+            actual_security = operation.get("security", contract["security"])
+            self.assertEqual(expected_security, actual_security, f"{method} {path}")
+
+    def test_auth_operations_describe_server_payloads_errors_and_restore_completion(self) -> None:
+        contract = _load_openapi_source()
+        schemas = contract["components"]["schemas"]
+        responses = contract["components"]["responses"]
+        paths = contract["paths"]
+
+        self.assertEqual(["username", "password"], schemas["LoginRequest"]["required"])
+        self.assertEqual(["current_password", "new_password"], schemas["ChangePasswordRequest"]["required"])
+        self.assertEqual(8, schemas["ChangePasswordRequest"]["properties"]["new_password"]["minLength"])
+        self.assertEqual(["access_token", "token_type", "expires_in"], schemas["BearerToken"]["required"])
+        self.assertEqual("Bearer", schemas["BearerToken"]["properties"]["token_type"]["const"])
+        self.assertEqual(86400, schemas["BearerToken"]["properties"]["expires_in"]["const"])
+
+        login = paths["/api/auth/login"]["post"]
+        change_password = paths["/api/auth/change-password"]["post"]
+        self.assertEqual([], login["security"])
+        self.assertEqual(BEARER_SECURITY, change_password.get("security", contract["security"]))
+        for operation in (login, change_password):
+            self.assertEqual(
+                {"$ref": "#/components/schemas/BearerToken"},
+                operation["responses"]["200"]["content"]["application/json"]["schema"],
+            )
+            self.assertEqual({"$ref": "#/components/responses/Error"}, operation["responses"]["400"])
+            self.assertEqual({"$ref": "#/components/responses/AuthenticationRequired"}, operation["responses"]["401"])
+            self.assertEqual({"$ref": "#/components/responses/Error"}, operation["responses"]["503"])
+        self.assertEqual("Bearer", responses["AuthenticationRequired"]["headers"]["WWW-Authenticate"]["schema"]["const"])
+
+        restore = paths["/api/core/backups/restore"]["post"]
+        self.assertIn("synchronously", restore["description"])
+        self.assertIn("completed", restore["responses"]["202"]["description"])
+        self.assertEqual("success", schemas["BackupRestoreAccepted"]["properties"]["status"]["const"])
+        self.assertEqual("success", contract["components"]["examples"]["BackupRestoreAccepted"]["value"]["status"])
+
+        last_snapshot = schemas["CoreStatus"]["properties"]["last_snapshot"]
+        self.assertEqual("#/components/schemas/PostRunSnapshotOutcome", last_snapshot["$ref"])
+        success, failure = schemas["PostRunSnapshotOutcome"]["oneOf"]
+        self.assertEqual("success", success["properties"]["status"]["const"])
+        self.assertEqual("failed", failure["properties"]["status"]["const"])
+        self.assertEqual(
+            ["kind", "status", "completed_at", "error_code", "error_message"],
+            failure["required"],
+        )
+        self.assertEqual(512, failure["properties"]["error_message"]["maxLength"])
+
+    def test_served_openapi_keeps_bearer_security_usable_by_swagger(self) -> None:
+        contract = json.loads(web_docs.openapi_json_bytes().decode("utf-8"), object_pairs_hook=_without_duplicate_keys)
+
+        self.assertEqual(BEARER_SECURITY, contract["security"])
+        self.assertEqual("http", contract["components"]["securitySchemes"]["bearerAuth"]["type"])
+        self.assertEqual("bearer", contract["components"]["securitySchemes"]["bearerAuth"]["scheme"])
+        for path, method in web_routes.openapi_operations():
+            route = web_routes.route_for(method, path)
+            operation = contract["paths"][path][method.lower()]
+            self.assertEqual(
+                [] if not route.auth_required else BEARER_SECURITY,
+                operation.get("security", contract["security"]),
+                f"{method} {path}",
+            )
+
+    def test_served_openapi_preserves_source_auth_contract(self) -> None:
+        source_bytes = OPENAPI_PATH.read_bytes()
+        served_bytes = web_docs.openapi_json_bytes()
+        source = json.loads(source_bytes.decode("utf-8"), object_pairs_hook=_without_duplicate_keys)
+        served = json.loads(served_bytes.decode("utf-8"), object_pairs_hook=_without_duplicate_keys)
+
+        self.assertEqual(source_bytes, served_bytes)
+        self.assertEqual(source["security"], served["security"])
+        self.assertEqual(source["components"]["securitySchemes"], served["components"]["securitySchemes"])
+
+        for path in ("/api/auth/login", "/api/auth/change-password"):
+            self.assertEqual(source["paths"][path]["post"], served["paths"][path]["post"], path)
+
+        for schema in ("LoginRequest", "ChangePasswordRequest", "BearerToken"):
+            self.assertEqual(source["components"]["schemas"][schema], served["components"]["schemas"][schema], schema)
+
+        for response in ("Error", "AuthenticationRequired"):
+            self.assertEqual(source["components"]["responses"][response], served["components"]["responses"][response], response)
+
+    def test_headless_openapi_is_a_route_filtered_projection_of_the_source_contract(self) -> None:
+        source = _load_openapi_source()
+        headless = json.loads(
+            web_docs.openapi_json_bytes(core_only=True).decode("utf-8"),
+            object_pairs_hook=_without_duplicate_keys,
+        )
+        expected_operations = web_routes.openapi_operations(core_only=True)
+
+        self.assertEqual(expected_operations, _documented_operations(headless))
+        self.assertEqual(source["security"], headless["security"])
+        self.assertEqual(source["components"]["securitySchemes"], headless["components"]["securitySchemes"])
+        self.assertEqual(
+            {key: value for key, value in source.items() if key not in {"info", "paths", "tags"}},
+            {key: value for key, value in headless.items() if key not in {"info", "paths", "tags"}},
+        )
+        self.assertEqual(
+            {**source["info"], **web_docs.CORE_ONLY_OPENAPI_INFO},
+            headless["info"],
+        )
+
+        expected_paths = {
+            path: {
+                name: value
+                for name, value in path_item.items()
+                if name.lower() not in HTTP_METHODS or (path, name.upper()) in expected_operations
+            }
+            for path, path_item in source["paths"].items()
+            if any((path, method.upper()) in expected_operations for method in path_item)
+        }
+        self.assertEqual(expected_paths, headless["paths"])
+
+        used_tags = {
+            tag
+            for path_item in expected_paths.values()
+            for method, operation in path_item.items()
+            if method.lower() in HTTP_METHODS
+            for tag in operation.get("tags", [])
+        }
+        self.assertEqual(
+            [tag for tag in source.get("tags", []) if tag.get("name") in used_tags],
+            headless.get("tags", []),
+        )
+
+        for path, method in expected_operations:
+            operation = headless["paths"][path][method.lower()]
+            self.assertEqual(source["paths"][path][method.lower()], operation, f"{method} {path}")
+            route = web_routes.route_for(method, path)
+            self.assertEqual(
+                [] if not route.auth_required else BEARER_SECURITY,
+                operation.get("security", headless["security"]),
+                f"{method} {path}",
+            )

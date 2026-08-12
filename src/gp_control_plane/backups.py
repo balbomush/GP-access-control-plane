@@ -19,6 +19,7 @@ from .storage import connect, db_path
 SNAPSHOT_KEEP = 5
 BACKUP_SCHEMA_VERSION = "6"
 SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"5", BACKUP_SCHEMA_VERSION}
+POST_RUN_SNAPSHOT_ERROR_MESSAGE_MAX_LENGTH = 512
 SNAPSHOT_DOWNLOAD_FILES = {
     "manifest.json",
     "checksums.sha256",
@@ -47,6 +48,43 @@ def create_snapshot_if_idle(state_dir: Path) -> dict[str, Any]:
     if has_active_runtime(state_dir):
         return {"created": False, "queued": True, "reason": "job is running"}
     return create_snapshot(state_dir)
+
+
+def create_post_run_snapshot(state_dir: Path) -> dict[str, Any]:
+    """Create the post-run snapshot while JobRunner still owns the runtime lock.
+
+    This is intentionally separate from ``create_snapshot_if_idle``: the runner
+    remains active during finalization so that no second job or lock-aware
+    backup mutation can race the export. The export itself uses one deferred
+    SQLite read transaction, so ordinary HTTP mutations remain available in
+    WAL mode.
+    """
+    try:
+        created = create_snapshot(state_dir)
+    except Exception as exc:  # noqa: BLE001
+        return _post_run_snapshot_failure(exc)
+    snapshot = created.get("snapshot") if isinstance(created, dict) else None
+    snapshot_id = str(snapshot.get("id") or "").strip() if isinstance(snapshot, dict) else ""
+    if not snapshot_id:
+        return _post_run_snapshot_failure("snapshot export returned no snapshot metadata")
+    return {
+        "kind": "snapshot",
+        "status": "success",
+        "completed_at": now_iso(),
+        "snapshot_id": snapshot_id,
+        "snapshot": snapshot,
+    }
+
+
+def _post_run_snapshot_failure(error: BaseException | str) -> dict[str, str]:
+    message = str(error).strip() or (type(error).__name__ if isinstance(error, BaseException) else "snapshot export failed")
+    return {
+        "kind": "snapshot",
+        "status": "failed",
+        "completed_at": now_iso(),
+        "error_code": "snapshot_export_failed",
+        "error_message": " ".join(message.split())[:POST_RUN_SNAPSHOT_ERROR_MESSAGE_MAX_LENGTH],
+    }
 
 
 def create_snapshot(state_dir: Path, protect_ids: set[str] | None = None) -> dict[str, Any]:
@@ -452,10 +490,23 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
     (root / "strategies").mkdir()
     (root / "presets").mkdir()
     (root / "settings").mkdir()
-    domain_count = _export_domains(state_dir, root)
-    strategy_count, link_count = _export_strategies(state_dir, root)
-    preset_count, preset_link_count = _export_domain_presets(state_dir, root)
-    settings_count = _export_app_settings(state_dir, root)
+    # All NDJSON files must describe one SQLite snapshot.  A deferred read
+    # transaction starts on the first SELECT, does not acquire a write lock,
+    # and therefore lets normal HTTP mutations continue in WAL mode.
+    with connect(state_dir) as conn:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN DEFERRED")
+        try:
+            domain_count = _export_domains(conn, root)
+            strategy_count, link_count = _export_strategies(conn, root)
+            preset_count, preset_link_count = _export_domain_presets(conn, root)
+            settings_count = _export_app_settings(conn, root)
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
     manifest = {
         "schema_version": BACKUP_SCHEMA_VERSION,
         "created_at": now_iso(),
@@ -475,85 +526,82 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
     _write_checksums(root)
 
 
-def _export_domains(state_dir: Path, root: Path) -> int:
+def _export_domains(conn: Any, root: Path) -> int:
     count = 0
-    with connect(state_dir) as conn:
-        with (root / "domains" / "domains.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute(
-                """
-                SELECT d.name AS domain, d.service_group
-                FROM domains d
-                WHERE EXISTS (SELECT 1 FROM strategy_domain_results r WHERE r.domain_id = d.id)
-                   OR EXISTS (SELECT 1 FROM preset_domains pd WHERE pd.domain_id = d.id)
-                ORDER BY d.name ASC
-                """
-            ):
-                count += 1
-                handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    with (root / "domains" / "domains.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute(
+            """
+            SELECT d.name AS domain, d.service_group
+            FROM domains d
+            WHERE EXISTS (SELECT 1 FROM strategy_domain_results r WHERE r.domain_id = d.id)
+               OR EXISTS (SELECT 1 FROM preset_domains pd WHERE pd.domain_id = d.id)
+            ORDER BY d.name ASC
+            """
+        ):
+            count += 1
+            handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
     return count
 
 
-def _export_strategies(state_dir: Path, root: Path) -> tuple[int, int]:
+def _export_strategies(conn: Any, root: Path) -> tuple[int, int]:
     strategy_count = 0
     link_count = 0
-    with connect(state_dir) as conn:
-        with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute(
-                """
-                SELECT s.id, s.protocol, s.args, s.status,
-                       s.fragmentation_class, s.fragmentation_safe, s.fragmentation_reason,
-                       s.family, s.family_key, s.family_rank, s.family_reason
-                FROM strategies s
-                ORDER BY s.id ASC
-                """
-            ):
-                strategy_count += 1
-                handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
-        with (root / "strategies" / "strategy-domain-links.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute(
-                """
-                SELECT r.strategy_id AS strategy_id, d.name AS domain, r.protocol, r.source_mode
-                FROM strategy_domain_results r
-                JOIN domains d ON d.id = r.domain_id
-                ORDER BY d.name, r.strategy_id
-                """
-            ):
-                link_count += 1
-                payload = dict(row)
-                payload["candidate_id"] = payload["strategy_id"]
-                payload["scope"] = "common" if payload.pop("source_mode", "") == "multi_domain" else "domain"
-                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    with (root / "strategies" / "strategies.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute(
+            """
+            SELECT s.id, s.protocol, s.args, s.status,
+                   s.fragmentation_class, s.fragmentation_safe, s.fragmentation_reason,
+                   s.family, s.family_key, s.family_rank, s.family_reason
+            FROM strategies s
+            ORDER BY s.id ASC
+            """
+        ):
+            strategy_count += 1
+            handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    with (root / "strategies" / "strategy-domain-links.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute(
+            """
+            SELECT r.strategy_id AS strategy_id, d.name AS domain, r.protocol, r.source_mode
+            FROM strategy_domain_results r
+            JOIN domains d ON d.id = r.domain_id
+            ORDER BY d.name, r.strategy_id
+            """
+        ):
+            link_count += 1
+            payload = dict(row)
+            payload["candidate_id"] = payload["strategy_id"]
+            payload["scope"] = "common" if payload.pop("source_mode", "") == "multi_domain" else "domain"
+            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
     return strategy_count, link_count
 
 
-def _export_domain_presets(state_dir: Path, root: Path) -> tuple[int, int]:
+def _export_domain_presets(conn: Any, root: Path) -> tuple[int, int]:
     preset_count = 0
     link_count = 0
-    with connect(state_dir) as conn:
-        with (root / "presets" / "domain-presets.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute(
+    with (root / "presets" / "domain-presets.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute(
                 """
                 SELECT scope, name, kind, label, source_json
                 FROM domain_presets
                 ORDER BY scope, kind, name
                 """
-            ):
-                preset_count += 1
-                source_json = str(row["source_json"] or "{}")
-                try:
-                    source = json.loads(source_json)
-                except json.JSONDecodeError:
-                    source = {}
-                payload = {
-                    "scope": row["scope"],
-                    "name": row["name"],
-                    "kind": row["kind"],
-                    "label": row["label"],
-                    "source": source if isinstance(source, dict) else {},
-                }
-                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
-        with (root / "presets" / "preset-domains.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute(
+        ):
+            preset_count += 1
+            source_json = str(row["source_json"] or "{}")
+            try:
+                source = json.loads(source_json)
+            except json.JSONDecodeError:
+                source = {}
+            payload = {
+                "scope": row["scope"],
+                "name": row["name"],
+                "kind": row["kind"],
+                "label": row["label"],
+                "source": source if isinstance(source, dict) else {},
+            }
+            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    with (root / "presets" / "preset-domains.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute(
                 """
                 SELECT p.scope, p.name, p.kind, d.name AS domain, pd.position, pd.enabled
                 FROM domain_presets p
@@ -561,29 +609,28 @@ def _export_domain_presets(state_dir: Path, root: Path) -> tuple[int, int]:
                 JOIN domains d ON d.id = pd.domain_id
                 ORDER BY p.scope, p.kind, p.name, pd.position, d.name
                 """
-            ):
-                link_count += 1
-                handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+        ):
+            link_count += 1
+            handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
     return preset_count, link_count
 
 
-def _export_app_settings(state_dir: Path, root: Path) -> int:
+def _export_app_settings(conn: Any, root: Path) -> int:
     count = 0
-    with connect(state_dir) as conn:
-        with (root / "settings" / "app-settings.ndjson").open("w", encoding="utf-8") as handle:
-            for row in conn.execute("SELECT key, value_json, updated_at FROM app_settings ORDER BY key ASC"):
-                value_json = str(row["value_json"] or "null")
-                try:
-                    value = json.loads(value_json)
-                except json.JSONDecodeError:
-                    value = None
-                payload = {
-                    "key": str(row["key"] or ""),
-                    "value": value,
-                    "updated_at": str(row["updated_at"] or ""),
-                }
-                count += 1
-                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    with (root / "settings" / "app-settings.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute("SELECT key, value_json, updated_at FROM app_settings ORDER BY key ASC"):
+            value_json = str(row["value_json"] or "null")
+            try:
+                value = json.loads(value_json)
+            except json.JSONDecodeError:
+                value = None
+            payload = {
+                "key": str(row["key"] or ""),
+                "value": value,
+                "updated_at": str(row["updated_at"] or ""),
+            }
+            count += 1
+            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
     return count
 
 

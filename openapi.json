@@ -11,7 +11,16 @@
       "description": "Current Swagger origin. When opened from Web UI it uses the board address; when opened from Core it uses the local Core address."
     }
   ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
   "tags": [
+    {
+      "name": "Authentication",
+      "description": "Create and rotate the Bearer token used by protected API operations."
+    },
     {
       "name": "Core Status",
       "description": "Product/core runtime state."
@@ -58,6 +67,120 @@
     }
   ],
   "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "getHealth",
+        "summary": "Get API health",
+        "description": "Public health check. It does not require a Bearer token.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "API is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "login",
+        "summary": "Create a Bearer token",
+        "description": "Public login endpoint. Use the returned access token as `Authorization: Bearer <access_token>` for protected operations.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              },
+              "examples": {
+                "admin": {
+                  "value": {
+                    "username": "admin",
+                    "password": "admin"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BearerToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/auth/change-password": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "changePassword",
+        "summary": "Change the admin password and rotate Bearer tokens",
+        "description": "Requires a valid Bearer token. On success, all previous tokens are invalidated and a replacement token is returned.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed and replacement Bearer token created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BearerToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/core/status": {
       "get": {
         "tags": [
@@ -530,7 +653,7 @@
         ],
         "operationId": "restoreBackup",
         "summary": "Restore a GP data backup",
-        "description": "Restores a selected snapshot after UI/client confirmation. There is no separate restore-preview endpoint in the target contract.",
+        "description": "Restores the selected snapshot synchronously after UI/client confirmation. There is no separate restore-preview endpoint in the target contract; the response is sent only after the restore succeeds.",
         "requestBody": {
           "required": true,
           "content": {
@@ -548,7 +671,7 @@
         },
         "responses": {
           "202": {
-            "description": "Restore accepted",
+            "description": "Restore completed synchronously. The server currently returns HTTP 202 for this completed action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1928,6 +2051,13 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque"
+      }
+    },
     "parameters": {
       "Limit": {
         "name": "limit",
@@ -1954,6 +2084,25 @@
       }
     },
     "responses": {
+      "AuthenticationRequired": {
+        "description": "Bearer authentication is required or the supplied token is invalid",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "Bearer authentication challenge emitted by the server",
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
       "RuntimeBusy": {
         "description": "Runtime is busy",
         "content": {
@@ -1992,6 +2141,76 @@
       }
     },
     "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "example": "admin"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          }
+        }
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "format": "password"
+          },
+          "new_password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8
+          }
+        }
+      },
+      "BearerToken": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string",
+            "const": "Bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "const": 86400
+          }
+        },
+        "additionalProperties": false
+      },
       "BackupRestoreAccepted": {
         "type": "object",
         "required": [
@@ -2005,7 +2224,8 @@
             "const": true
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "const": "success"
           },
           "snapshot_id": {
             "type": "string"
@@ -2140,6 +2360,9 @@
           "current_run": {
             "$ref": "#/components/schemas/RunRef"
           },
+          "last_snapshot": {
+            "$ref": "#/components/schemas/PostRunSnapshotOutcome"
+          },
           "storage": {
             "$ref": "#/components/schemas/StorageStatus"
           },
@@ -2149,6 +2372,72 @@
           }
         },
         "additionalProperties": false
+      },
+      "PostRunSnapshotOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "status",
+              "completed_at",
+              "snapshot_id"
+            ],
+            "properties": {
+              "kind": {
+                "const": "snapshot"
+              },
+              "status": {
+                "const": "success"
+              },
+              "completed_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "snapshot_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "snapshot": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "status",
+              "completed_at",
+              "error_code",
+              "error_message"
+            ],
+            "properties": {
+              "kind": {
+                "const": "snapshot"
+              },
+              "status": {
+                "const": "failed"
+              },
+              "completed_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "error_code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "error_message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
       },
       "DeleteDomainListRequest": {
         "type": "object",
@@ -3046,6 +3335,7 @@
           "idle",
           "queued",
           "running",
+          "saving",
           "stopping",
           "stopped",
           "success",
@@ -4272,10 +4562,10 @@
         }
       },
       "BackupRestoreAccepted": {
-        "summary": "Асинхронное действие принято",
+        "summary": "Резервная копия восстановлена синхронно",
         "value": {
           "accepted": true,
-          "status": "queued",
+          "status": "success",
           "snapshot_id": "backup_20260722_173005"
         }
       },

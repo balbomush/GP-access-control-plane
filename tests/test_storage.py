@@ -15,11 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.storage import (
     SCHEMA_MIGRATIONS,
     append_run,
+    auth_transaction,
     connect,
     delete_custom_preset,
     delete_user_presets,
     db_path,
     get_meta,
+    is_storage_unavailable_error,
     read_custom_preset_index,
     read_custom_presets,
     read_app_setting,
@@ -36,6 +38,42 @@ from gp_control_plane.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    def test_connect_keeps_the_default_thirty_second_busy_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with connect(Path(raw)) as conn:
+                timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+        self.assertEqual(timeout_ms, 30_000)
+
+    def test_storage_unavailable_classifier_accepts_only_known_transient_sqlite_failures(self) -> None:
+        transient_messages = (
+            "database is locked",
+            "database is busy",
+            "database schema is locked",
+            "disk i/o error",
+        )
+
+        for message in transient_messages:
+            with self.subTest(message=message):
+                self.assertTrue(is_storage_unavailable_error(sqlite3.OperationalError(message)))
+
+        self.assertFalse(is_storage_unavailable_error(sqlite3.OperationalError("no such table: runs")))
+        self.assertFalse(is_storage_unavailable_error(sqlite3.OperationalError("near \"FROM\": syntax error")))
+
+    def test_auth_transaction_rolls_back_partial_settings_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            with self.assertRaisesRegex(RuntimeError, "rollback"):
+                with auth_transaction(state_dir) as conn:
+                    conn.execute(
+                        "INSERT INTO app_settings(key, value_json, updated_at) VALUES(?, ?, ?)",
+                        ("auth-rollback-test", '{"partial":true}', "2026-08-12T00:00:00Z"),
+                    )
+                    raise RuntimeError("rollback")
+
+            self.assertIsNone(read_app_setting(state_dir, "auth-rollback-test"))
+
     @unittest.skipUnless(os.name == "posix", "POSIX permission modes are not available on Windows")
     def test_sqlite_state_paths_are_owner_only_after_creation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

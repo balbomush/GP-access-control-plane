@@ -161,27 +161,29 @@ def root_command(
     helper_command: str = "run",
     run_id: str | None = None,
 ) -> list[str]:
-    if _is_root():
-        return command
     if helper_command not in {"run", "run-multidomain"}:
         raise ValueError(f"unsupported root helper command: {helper_command}")
     managed_run_id = validate_run_id(run_id) if run_id else ""
     require_root_helper_ready()
     helper = _root_helper_path()
-    sudo = shutil.which("sudo")
-    if not sudo:
-        raise RuntimeError("root-helper is not available: sudo command not found")
+    if _is_root():
+        prefix = [helper]
+    else:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            raise RuntimeError("root-helper is not available: sudo command not found")
+        prefix = [sudo, "-n", helper]
     if pass_env_keys:
         source_env = env or {}
         assignments = [f"{key}={source_env[key]}" for key in pass_env_keys if key in source_env]
         env_command = "run-multidomain-env" if helper_command == "run-multidomain" else "run-env"
         if managed_run_id:
             env_command = env_command.replace("-env", "-owned-env")
-            return [sudo, "-n", helper, env_command, managed_run_id, *assignments, "--", *command]
-        return [sudo, "-n", helper, env_command, *assignments, "--", *command]
+            return [*prefix, env_command, managed_run_id, *assignments, "--", *command]
+        return [*prefix, env_command, *assignments, "--", *command]
     if managed_run_id:
-        return [sudo, "-n", helper, f"{helper_command}-owned", managed_run_id, *command]
-    return [sudo, "-n", helper, helper_command, *command]
+        return [*prefix, f"{helper_command}-owned", managed_run_id, *command]
+    return [*prefix, helper_command, *command]
 
 
 def require_root_helper_ready() -> None:
@@ -202,8 +204,8 @@ def root_helper_status() -> dict[str, str | bool]:
             "found": found,
             "executable": executable,
             "sudo_found": bool(shutil.which("sudo")),
-            "ready": True,
-            "error": "",
+            "ready": bool(found and executable),
+            "error": "" if found and executable else f"root-helper is not executable: {helper}",
         }
     if not found:
         return {

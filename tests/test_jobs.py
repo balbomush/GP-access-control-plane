@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
+from gp_control_plane.backups import create_snapshot_if_idle
 from gp_control_plane.core_api import release_update_accepted_payload, runs_history_payload
 from gp_control_plane.jobs import JobRunner, _CancellationToken
 from gp_control_plane.state import read_state, update_state
@@ -109,6 +110,80 @@ class JobRunnerTests(unittest.TestCase):
             self.assertIsNone(state["current_run_id"])
             self.assertEqual(state["last_run_status"], "success")
             self.assertIsNone(state["last_error"])
+
+    def test_post_run_callback_keeps_runtime_busy_until_snapshot_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            callback_started = threading.Event()
+            release_callback = threading.Event()
+            snapshot_outcome = {
+                "kind": "snapshot",
+                "status": "success",
+                "completed_at": "2026-08-12T00:00:00Z",
+                "snapshot_id": "post-run-snapshot",
+                "snapshot": {"id": "post-run-snapshot"},
+            }
+
+            def blocking_snapshot() -> dict[str, object]:
+                callback_started.set()
+                self.assertTrue(release_callback.wait(timeout=2))
+                return snapshot_outcome
+
+            runner = JobRunner(state_dir, on_idle=blocking_snapshot)
+
+            def failing_job(_stop: threading.Event, _run_id: str) -> None:
+                raise RuntimeError("original final error")
+
+            run = runner.start("snapshot-finalization", failing_job)
+            self.assertTrue(callback_started.wait(timeout=1))
+
+            saving = read_state(state_dir)
+            self.assertEqual(saving["current_run_id"], run.run_id)
+            self.assertEqual(saving["current_run_status"], "saving")
+            self.assertEqual(saving["last_run_status"], "failed")
+            self.assertIn("original final error", str(saving["last_error"]))
+            self.assertTrue((state_dir / "job-runner.lock").is_file())
+            with self.assertRaisesRegex(RuntimeError, "run already running"):
+                runner.start("blocked", lambda _stop, _run_id: {"status": "success"})
+            self.assertTrue(create_snapshot_if_idle(state_dir)["queued"])
+
+            release_callback.set()
+            finished = _wait_for_idle_state(state_dir)
+            self.assertEqual(finished["last_run_status"], "failed")
+            self.assertIn("original final error", str(finished["last_error"]))
+            self.assertEqual(finished["last_snapshot"], snapshot_outcome)
+            finalization = [item for item in _job_records(state_dir) if item.get("event") == "post_run_snapshot"]
+            self.assertEqual(finalization[-1]["run_id"], run.run_id)
+            self.assertEqual(finalization[-1]["terminal_run_status"], "failed")
+            self.assertIn("original final error", str(finalization[-1]["terminal_last_error"]))
+            self.assertEqual(finalization[-1]["outcome"], finished["last_snapshot"])
+
+    def test_unexpected_snapshot_finalizer_error_is_observable_and_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+
+            def failing_snapshot() -> None:
+                raise RuntimeError("snapshot export failed")
+
+            runner = JobRunner(state_dir, on_idle=failing_snapshot)
+            runner.start("timeout", lambda _stop, _run_id: {"status": "timeout"})
+            finished = _wait_for_idle_state(state_dir)
+
+            self.assertEqual(finished["last_run_status"], "timeout")
+            self.assertIsNone(finished["last_error"])
+            last_snapshot = finished["last_snapshot"]
+            self.assertEqual(last_snapshot["kind"], "snapshot")
+            self.assertEqual(last_snapshot["status"], "failed")
+            self.assertEqual(last_snapshot["error_code"], "finalization_callback_failed")
+            self.assertEqual(last_snapshot["error_message"], "snapshot export failed")
+            self.assertTrue(str(last_snapshot["completed_at"]).endswith("Z"))
+            finalization = [item for item in _job_records(state_dir) if item.get("event") == "post_run_snapshot"]
+            self.assertEqual(finalization[-1]["status"], "saving")
+            self.assertEqual(finalization[-1]["run_id"], _job_records(state_dir)[0]["run_id"])
+            self.assertEqual(finalization[-1]["terminal_run_status"], "timeout")
+            self.assertIsNone(finalization[-1]["terminal_last_error"])
+            self.assertEqual(finalization[-1]["outcome"], finished["last_snapshot"])
+            self.assertFalse((state_dir / "job-runner.lock").exists())
 
     def test_dict_result_timeout_is_recorded_as_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

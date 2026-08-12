@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sys
 import unittest
 from contextlib import redirect_stderr
@@ -9,6 +10,58 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.cli import build_parser
+
+
+_COMMAND_RUNNERS = {
+    "subprocess.run",
+    "subprocess.Popen",
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "asyncio.create_subprocess_exec",
+    "asyncio.create_subprocess_shell",
+    "os.system",
+    "os.popen",
+}
+_ROUTER_EXECUTABLES = {"ssh", "rci", "keenetic"}
+_ROUTER_MUTATIONS = {"apply", "restart"}
+
+
+def _call_name(call: ast.Call) -> str:
+    parts: list[str] = []
+    node: ast.AST = call.func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _literal_command_terms(expression: ast.AST) -> list[str]:
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return expression.value.lower().split()
+    if isinstance(expression, (ast.List, ast.Tuple)):
+        return [
+            item.value.lower()
+            for item in expression.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        ]
+    return []
+
+
+def _router_operation_hits(source: str) -> list[str]:
+    hits: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or _call_name(node) not in _COMMAND_RUNNERS or not node.args:
+            continue
+        terms = _literal_command_terms(node.args[0])
+        executable = Path(terms[0]).name if terms else ""
+        is_router_command = executable in _ROUTER_EXECUTABLES
+        is_router_mutation = bool(set(terms) & _ROUTER_EXECUTABLES) and bool(set(terms) & _ROUTER_MUTATIONS)
+        if is_router_command or is_router_mutation:
+            hits.append(f"line {node.lineno}: {' '.join(terms)}")
+    return hits
 
 
 class CliSafetyTests(unittest.TestCase):
@@ -118,15 +171,17 @@ class CliSafetyTests(unittest.TestCase):
 
     def test_forbidden_router_operations_are_not_in_source(self) -> None:
         source_root = Path(__file__).resolve().parents[1] / "src" / "gp_control_plane"
-        forbidden = ("apply", "restart", "ssh", "rci", "keenetic")
         hits: list[str] = []
         for path in source_root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8").lower()
-            for word in forbidden:
-                if word in text:
-                    hits.append(f"{path.name}:{word}")
+            for hit in _router_operation_hits(path.read_text(encoding="utf-8")):
+                hits.append(f"{path.relative_to(source_root)}:{hit}")
 
         self.assertEqual(hits, [])
+        self.assertEqual(_router_operation_hits("def _apply_strict_helper_evidence():\n    pass\n"), [])
+        self.assertEqual(
+            _router_operation_hits("import subprocess\nsubprocess.run(['rci', 'apply'])\n"),
+            ["line 2: rci apply"],
+        )
 
 
 if __name__ == "__main__":

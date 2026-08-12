@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .state import now_iso
-from .storage import connect, read_app_setting, read_or_create_app_setting, save_app_setting
+from .storage import auth_transaction
 
 
 AUTH_SETTINGS_KEY = "auth"
@@ -36,39 +36,49 @@ class PasswordValidationError(ValueError):
 def login(state_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
     username = str(payload.get("username") or "").strip()
     password = _password_value(payload.get("password"))
-    settings = _settings(state_dir)
-    if username != DEFAULT_USERNAME or not _password_matches(settings, password):
-        raise AuthenticationError("invalid credentials")
-    return _token_payload(settings)
+    with auth_transaction(state_dir) as conn:
+        settings = _settings(conn)
+        if username != DEFAULT_USERNAME or not _password_matches(settings, password):
+            raise AuthenticationError("invalid credentials")
+        return _token_payload(settings)
 
 
-def change_password(state_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+def change_password(
+    state_dir: Path, payload: dict[str, Any], authorization: str | None = None
+) -> dict[str, Any]:
     current_password = _password_value(payload.get("current_password"))
     new_password = _password_value(payload.get("new_password"))
     if len(new_password) < PASSWORD_MIN_LENGTH:
         raise PasswordValidationError(f"new password must be at least {PASSWORD_MIN_LENGTH} characters")
-    settings = _settings(state_dir)
-    if not _password_matches(settings, current_password):
-        raise AuthenticationError("invalid current password")
-    salt = secrets.token_urlsafe(24)
-    updated = {
-        **settings,
-        "password_salt": salt,
-        "password_hash": _password_hash(new_password, salt),
-        "token_secret": secrets.token_urlsafe(32),
-        "token_version": int(settings["token_version"]) + 1,
-    }
-    save_app_setting(state_dir, AUTH_SETTINGS_KEY, updated, now_iso())
-    return _token_payload(updated)
+    with auth_transaction(state_dir) as conn:
+        settings = _settings(conn)
+        if authorization is not None:
+            _validate_bearer_token(settings, authorization)
+        if not _password_matches(settings, current_password):
+            raise AuthenticationError("invalid current password")
+        salt = secrets.token_urlsafe(24)
+        updated = {
+            **settings,
+            "password_salt": salt,
+            "password_hash": _password_hash(new_password, salt),
+            "token_secret": secrets.token_urlsafe(32),
+            "token_version": int(settings["token_version"]) + 1,
+        }
+        _save_settings(conn, updated)
+        return _token_payload(updated)
 
 
 def require_bearer_token(state_dir: Path, authorization: str | None) -> None:
+    with auth_transaction(state_dir) as conn:
+        _validate_bearer_token(_settings(conn), authorization)
+
+
+def _validate_bearer_token(settings: dict[str, Any], authorization: str | None) -> None:
     if not isinstance(authorization, str):
         raise AuthenticationError("missing bearer token")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         raise AuthenticationError("missing bearer token")
-    settings = _settings(state_dir)
     signed_payload, separator, signature = token.strip().partition(".")
     if not separator or not signature:
         raise AuthenticationError("invalid bearer token")
@@ -98,24 +108,47 @@ def health_payload() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _settings(state_dir: Path) -> dict[str, Any]:
-    raw = read_app_setting(state_dir, AUTH_SETTINGS_KEY)
-    if raw is None:
-        if _auth_setting_exists(state_dir):
-            raise AuthenticationError("auth settings are invalid")
-        raw = read_or_create_app_setting(state_dir, AUTH_SETTINGS_KEY, _initial_settings(), now_iso())
+def _settings(conn: Any) -> dict[str, Any]:
+    row = conn.execute("SELECT value_json FROM app_settings WHERE key = ?", (AUTH_SETTINGS_KEY,)).fetchone()
+    if row is None:
+        raw = _initial_settings()
+        conn.execute(
+            "INSERT INTO app_settings(key, value_json, updated_at) VALUES(?, ?, ?)",
+            (AUTH_SETTINGS_KEY, json.dumps(raw, ensure_ascii=False, separators=(",", ":")), now_iso()),
+        )
+    else:
+        try:
+            raw = json.loads(str(row["value_json"] or "null"))
+        except json.JSONDecodeError:
+            raw = None
+    if not _valid_settings(raw):
+        raise AuthenticationError("auth settings are invalid")
+    return dict(raw)
+
+
+def _valid_settings(raw: Any) -> bool:
     if not isinstance(raw, dict):
-        raise AuthenticationError("auth settings are invalid")
-    required = {"password_salt", "password_hash", "token_secret", "token_version"}
-    if not required.issubset(raw):
-        raise AuthenticationError("auth settings are invalid")
-    return raw
+        return False
+    required_text = ("password_salt", "password_hash", "token_secret")
+    if not all(isinstance(raw.get(key), str) and raw[key] for key in required_text):
+        return False
+    try:
+        return int(raw["token_version"]) > 0
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
-def _auth_setting_exists(state_dir: Path) -> bool:
-    with connect(state_dir) as conn:
-        row = conn.execute("SELECT 1 FROM app_settings WHERE key = ?", (AUTH_SETTINGS_KEY,)).fetchone()
-    return row is not None
+def _save_settings(conn: Any, settings: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value_json, updated_at)
+        VALUES(?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        """,
+        (AUTH_SETTINGS_KEY, json.dumps(settings, ensure_ascii=False, separators=(",", ":")), now_iso()),
+    )
 
 
 def _initial_settings() -> dict[str, Any]:

@@ -70,6 +70,8 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
     }
     if current_run_id:
         payload["current_run"] = {"run_id": current_run_id, "status": current_status or "running"}
+    if isinstance(state.get("last_snapshot"), dict):
+        payload["last_snapshot"] = state["last_snapshot"]
     return payload
 
 

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from ..config import AppConfig
 from ..auth import AuthenticationError, require_bearer_token
 from ..resource_budget import BACKUP_UPLOAD_MAX_BYTES, JSON_REQUEST_MAX_BYTES, PROXY_STREAM_CHUNK_BYTES
+from ..storage import is_storage_unavailable_error
 from .errors import error_payload, normalize_error_payload
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
@@ -139,6 +140,9 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 except KeyError:
                     self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 except Exception as exc:  # noqa: BLE001
+                    if is_storage_unavailable_error(exc):
+                        self._storage_unavailable()
+                        return
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             if self.command == "POST":
@@ -154,6 +158,9 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 except KeyError:
                     self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 except Exception as exc:  # noqa: BLE001
+                    if is_storage_unavailable_error(exc):
+                        self._storage_unavailable()
+                        return
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 else:
                     self._json(response, status=status)
@@ -277,10 +284,21 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                 return True
             try:
                 require_bearer_token(config.output.state_dir, self.headers.get("Authorization"))
-            except AuthenticationError as exc:
-                self._auth_error(exc)
-                return False
+            except Exception as exc:  # noqa: BLE001
+                if is_storage_unavailable_error(exc):
+                    self._storage_unavailable()
+                    return False
+                if isinstance(exc, AuthenticationError):
+                    self._auth_error(exc)
+                    return False
+                raise
             return True
+
+        def _storage_unavailable(self) -> None:
+            self._json(
+                error_payload("storage_unavailable", "Storage is temporarily unavailable."),
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
 
         def _auth_error(self, error: AuthenticationError) -> None:
             del error
@@ -339,6 +357,19 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                     self.close_connection = True
                     return
                 except Exception as exc:  # noqa: BLE001
+                    if is_storage_unavailable_error(exc):
+                        try:
+                            self._event(
+                                "event-error",
+                                {
+                                    "error": "storage_unavailable",
+                                    "message": "Storage is temporarily unavailable.",
+                                },
+                            )
+                        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                            pass
+                        self.close_connection = True
+                        return
                     try:
                         self._require_stream_authorization(authorization)
                         self._event("event-error", {"error": "event-loop", "message": str(exc)})

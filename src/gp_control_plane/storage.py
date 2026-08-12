@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import os
 import sqlite3
@@ -27,6 +29,7 @@ SCHEMA_MIGRATIONS = (
 )
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_DB_PATHS: set[Path] = set()
+AUTH_BUSY_TIMEOUT_MS = 2_000
 _OMITTED = object()
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
@@ -86,6 +89,46 @@ SYSTEM_DOMAIN_PRESET_NAMES = {
 }
 
 
+class StorageUnavailableError(RuntimeError):
+    """A transient SQLite failure that an API adapter may expose as HTTP 503."""
+
+    status_code = 503
+
+
+_TRANSIENT_SQLITE_PRIMARY_CODES = frozenset(
+    {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+        sqlite3.SQLITE_IOERR,
+    }
+)
+_TRANSIENT_SQLITE_MESSAGES = (
+    "database is locked",
+    "database is busy",
+    "database schema is locked",
+    "disk i/o error",
+)
+
+
+def is_storage_unavailable_error(error: BaseException) -> bool:
+    """Return whether *error* is a known temporary SQLite availability failure."""
+    if isinstance(error, StorageUnavailableError):
+        return True
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    error_code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and (error_code & 0xFF) in _TRANSIENT_SQLITE_PRIMARY_CODES:
+        return True
+    return any(message in str(error).lower() for message in _TRANSIENT_SQLITE_MESSAGES)
+
+
+def _raise_storage_unavailable(error: sqlite3.OperationalError) -> None:
+    """Map only known temporary SQLite availability failures to a stable error."""
+    if is_storage_unavailable_error(error):
+        raise StorageUnavailableError("storage is temporarily unavailable") from error
+    raise error
+
+
 class ClosingConnection(sqlite3.Connection):
     def __init__(self, database: str | Path, *args: Any, **kwargs: Any) -> None:
         super().__init__(database, *args, **kwargs)
@@ -93,9 +136,36 @@ class ClosingConnection(sqlite3.Connection):
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         try:
-            return bool(super().__exit__(exc_type, exc_value, traceback))
+            try:
+                return bool(super().__exit__(exc_type, exc_value, traceback))
+            except sqlite3.OperationalError as error:
+                _raise_storage_unavailable(error)
         finally:
             self.close()
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        try:
+            return super().execute(*args, **kwargs)
+        except sqlite3.OperationalError as error:
+            _raise_storage_unavailable(error)
+
+    def executemany(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        try:
+            return super().executemany(*args, **kwargs)
+        except sqlite3.OperationalError as error:
+            _raise_storage_unavailable(error)
+
+    def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        try:
+            return super().executescript(*args, **kwargs)
+        except sqlite3.OperationalError as error:
+            _raise_storage_unavailable(error)
+
+    def commit(self) -> None:
+        try:
+            super().commit()
+        except sqlite3.OperationalError as error:
+            _raise_storage_unavailable(error)
 
     def close(self) -> None:
         try:
@@ -145,27 +215,76 @@ def db_path(state_dir: Path) -> Path:
     return path
 
 
-def connect(state_dir: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
-    path = db_path(state_dir)
-    conn = sqlite3.connect(path, timeout=30, factory=ClosingConnection, check_same_thread=check_same_thread)
-    conn.row_factory = sqlite3.Row
-    migration_key = path.resolve()
-    with _MIGRATION_LOCK:
-        if migration_key not in _MIGRATED_DB_PATHS:
-            conn.execute("PRAGMA journal_mode=WAL")
+def connect(
+    state_dir: Path,
+    *,
+    check_same_thread: bool = True,
+    busy_timeout_ms: int | None = None,
+) -> sqlite3.Connection:
+    """Open storage with the default 30s timeout or a caller-specific budget."""
+    try:
+        path = db_path(state_dir)
+        timeout_seconds = 30 if busy_timeout_ms is None else max(0, busy_timeout_ms) / 1000
+        conn = sqlite3.connect(
+            path,
+            timeout=timeout_seconds,
+            factory=ClosingConnection,
+            check_same_thread=check_same_thread,
+        )
+        conn.row_factory = sqlite3.Row
+        migration_key = path.resolve()
+        with _MIGRATION_LOCK:
+            if migration_key not in _MIGRATED_DB_PATHS:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                _migrate_schema(conn)
+                _cleanup_runtime_state(conn, path.parent)
+                _ensure_system_domain_presets_conn(conn)
+                _run_deferred_vacuum(conn, state_dir)
+                _MIGRATED_DB_PATHS.add(migration_key)
+                _secure_sqlite_files(path)
+                return conn
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            _migrate_schema(conn)
-            _cleanup_runtime_state(conn, path.parent)
-            _ensure_system_domain_presets_conn(conn)
-            _run_deferred_vacuum(conn, state_dir)
-            _MIGRATED_DB_PATHS.add(migration_key)
-            _secure_sqlite_files(path)
-            return conn
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-    _secure_sqlite_files(path)
-    return conn
+        _secure_sqlite_files(path)
+        return conn
+    except sqlite3.OperationalError as error:
+        _raise_storage_unavailable(error)
+
+
+@contextmanager
+def auth_transaction(
+    state_dir: Path, *, busy_timeout_ms: int = AUTH_BUSY_TIMEOUT_MS
+) -> Iterator[sqlite3.Connection]:
+    """Run a short auth operation under a cross-process SQLite write lock."""
+    try:
+        timeout_ms = max(0, int(busy_timeout_ms))
+    except (TypeError, ValueError):
+        timeout_ms = AUTH_BUSY_TIMEOUT_MS
+    # sqlite3.connect() installs this busy timeout before the initialization
+    # PRAGMAs and migrations below can issue a blocking SQLite operation.
+    conn = connect(state_dir, busy_timeout_ms=timeout_ms)
+    try:
+        # A first connection may have just applied schema migrations. Finish that
+        # setup transaction before taking the dedicated auth write lock.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.OperationalError as error:
+                _raise_storage_unavailable(error)
+            raise
+        else:
+            conn.commit()
+    except sqlite3.OperationalError as error:
+        _raise_storage_unavailable(error)
+    finally:
+        conn.close()
 
 
 def storage_runtime_status(state_dir: Path) -> dict[str, Any]:
