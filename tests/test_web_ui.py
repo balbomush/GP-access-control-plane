@@ -3508,6 +3508,105 @@ class WebUiTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 run_stop_during_root_command(mode)
 
+    def test_strategy_discovery_stop_after_precheck_before_popen_finishes_stopped(self) -> None:
+        def run_stop_after_precheck_before_popen(mode: str) -> None:
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                original_runner = web_app.JobRunner
+                original_stdout_log_enter = strategy_finder._RotatingTextWriter.__enter__
+                stdout_log_opened = threading.Event()
+                release_stdout_log = threading.Event()
+                worker_finished = threading.Event()
+
+                class ObservingJobRunner(original_runner):
+                    def _run(self, *args: object, **kwargs: object) -> None:
+                        try:
+                            super()._run(*args, **kwargs)
+                        finally:
+                            worker_finished.set()
+
+                def open_stdout_log_at_barrier(writer: strategy_finder._RotatingTextWriter) -> strategy_finder._RotatingTextWriter:
+                    result = original_stdout_log_enter(writer)
+                    if writer._path.name.endswith(".stdout.log"):
+                        stdout_log_opened.set()
+                        if not release_stdout_log.wait(timeout=2):
+                            raise AssertionError("test did not release stdout-log barrier")
+                    return result
+
+                with (
+                    mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
+                    mock.patch.object(
+                        strategy_finder._RotatingTextWriter,
+                        "__enter__",
+                        new=open_stdout_log_at_barrier,
+                    ),
+                    mock.patch.object(
+                        strategy_finder.subprocess,
+                        "Popen",
+                        side_effect=AssertionError("privileged child must not start after stop before Popen"),
+                    ) as popen,
+                    mock.patch.object(
+                        strategy_finder,
+                        "signal_registered_process_run",
+                        side_effect=AssertionError("root signal must not run before a child is launched"),
+                    ) as root_signal,
+                ):
+                    server = _start_captured_server(serve, config)
+                    try:
+                        start_status, _headers, start_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/start-run",
+                            method="POST",
+                            body=json.dumps({"mode": mode, "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                                "utf-8"
+                            ),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
+                        accepted = json.loads(start_body.decode("utf-8"))
+                        self.assertTrue(stdout_log_opened.wait(timeout=2))
+
+                        stop_status, _headers, stop_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/stop-current-run",
+                            method="POST",
+                            body=b"{}",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
+                        self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+
+                        release_stdout_log.set()
+                        self.assertTrue(worker_finished.wait(timeout=2))
+
+                        state = read_state(config.output.state_dir)
+                        status_status, _headers, status_body = _http_request(server.port, "/api/core/status")
+                        history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
+                        self.assertEqual(status_status, 200, status_body.decode("utf-8", errors="replace"))
+                        self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
+                        status_payload = json.loads(status_body.decode("utf-8"))
+                        history = json.loads(history_body.decode("utf-8"))
+
+                        self.assertIsNone(state["current_run_id"])
+                        self.assertIsNone(state["last_error"])
+                        self.assertEqual("stopped", state["last_run_status"])
+                        self.assertEqual("idle", status_payload["state"])
+                        self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
+                        self.assertEqual("stopped", history["runs"][0]["status"])
+                        root_command.assert_called_once()
+                        popen.assert_not_called()
+                        root_signal.assert_not_called()
+                    finally:
+                        release_stdout_log.set()
+                        server.close()
+
+        for mode in ("standard", "multi_domain"):
+            with self.subTest(mode=mode):
+                run_stop_after_precheck_before_popen(mode)
+
     def test_core_strategy_discovery_start_run_rejects_unknown_protocols(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported protocols"):
             web_app._core_strategy_discovery_job_payload(

@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -2116,6 +2117,17 @@ def _stop_requested(stop_event: threading.Event | None) -> bool:
     return stop_event is not None and stop_event.is_set()
 
 
+@contextmanager
+def _claim_child_launch(stop_event: threading.Event | None) -> Iterator[bool]:
+    """Use JobRunner's atomic cancellation claim when available."""
+    claim = getattr(stop_event, "claim_child_launch", None)
+    if callable(claim):
+        with claim() as claimed:
+            yield bool(claimed)
+        return
+    yield not _stop_requested(stop_event)
+
+
 def _stopped_process_result(recorder: _LiveStdoutRecorder) -> dict[str, Any]:
     recorder.mark_phase(PHASE_SAVING)
     return {
@@ -2165,21 +2177,35 @@ def _run_process_with_live_stdout(
     reader_errors: list[BaseException] = []
 
     stdout_mode = _stdout_log_mode(env)
-    debug_writer = _RotatingTextWriter(debug_stdout_log, DEBUG_STDOUT_LOG_MAX_BYTES) if debug_stdout_log and stdout_mode == "debug" else None
-    debug_handle = debug_writer.__enter__() if debug_writer else None
-    try:
-        with _RotatingTextWriter(stdout_log, STDOUT_LOG_MAX_BYTES) as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
-            compact_writer = _CompactStdoutWriter(stdout_handle)
-            process = subprocess.Popen(
-                command,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                stdout=subprocess.PIPE,
-                stderr=stderr_handle,
-                env=env,
-                start_new_session=hasattr(os, "setsid"),
+    with ExitStack() as log_stack:
+        try:
+            debug_handle = (
+                log_stack.enter_context(_RotatingTextWriter(debug_stdout_log, DEBUG_STDOUT_LOG_MAX_BYTES))
+                if debug_stdout_log and stdout_mode == "debug"
+                else None
             )
+            stdout_handle = log_stack.enter_context(_RotatingTextWriter(stdout_log, STDOUT_LOG_MAX_BYTES))
+            stderr_handle = log_stack.enter_context(stderr_log.open("w", encoding="utf-8"))
+        except Exception:
+            if _stop_requested(stop_event):
+                return _stopped_process_result(recorder)
+            raise
+
+        compact_writer = _CompactStdoutWriter(stdout_handle)
+        try:
+            with _claim_child_launch(stop_event) as claimed:
+                if not claimed:
+                    return _stopped_process_result(recorder)
+                process = subprocess.Popen(
+                    command,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_handle,
+                    env=env,
+                    start_new_session=hasattr(os, "setsid"),
+                )
             def read_stdout() -> None:
                 try:
                     if process.stdout is None:
@@ -2240,9 +2266,8 @@ def _run_process_with_live_stdout(
                 except subprocess.TimeoutExpired:
                     continue
             reader.join(timeout=5)
-    finally:
-        if debug_writer:
-            debug_writer.__exit__(None, None, None)
+        finally:
+            compact_writer.close()
 
     if reader_errors:
         raise RuntimeError(f"failed to read blockcheck stdout: {reader_errors[0]}")

@@ -5,9 +5,10 @@ import os
 import threading
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .state import (
     JOB_RUNNER_LOCK_FILE_NAME,
@@ -31,6 +32,28 @@ class Run:
     created_at: str
 
 
+class _CancellationToken(threading.Event):
+    """Event-compatible cancellation token with an atomic child-launch claim."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._mutex = threading.Lock()
+
+    def set(self) -> None:
+        with self._mutex:
+            super().set()
+
+    def clear(self) -> None:
+        with self._mutex:
+            super().clear()
+
+    @contextmanager
+    def claim_child_launch(self) -> Iterator[bool]:
+        """Atomically check cancellation and reserve a child launch until exit."""
+        with self._mutex:
+            yield not self.is_set()
+
+
 class JobRunner:
     def __init__(self, state_dir: Path, on_idle: Callable[[], Any] | None = None):
         self.state_dir = state_dir
@@ -38,7 +61,7 @@ class JobRunner:
         self._lock = threading.Lock()
         self._active_run_id: str | None = None
         self._active_run_name: str | None = None
-        self._active_cancel: threading.Event | None = None
+        self._active_cancel: _CancellationToken | None = None
         self._active_cancel_hook: Callable[[], Any] | None = None
         self._active_state_lock: _StateDirJobLock | None = None
 
@@ -52,7 +75,7 @@ class JobRunner:
             if self._active_run_id:
                 raise RuntimeError(f"run already running: {self._active_run_id}")
             run_id = uuid.uuid4().hex
-            cancel_event = threading.Event()
+            cancel_event = _CancellationToken()
             state_lock = _StateDirJobLock.acquire(self.state_dir, run_id, name)
             self._active_run_id = run_id
             self._active_run_name = name
@@ -107,7 +130,7 @@ class JobRunner:
         name: str,
         started_at: str,
         func: Callable[[threading.Event, str], Any],
-        cancel_event: threading.Event,
+        cancel_event: _CancellationToken,
     ) -> None:
         self._record(run_id, name, "running", now_iso())
         self._set_current_run_if_active(run_id, name, "running")

@@ -13,13 +13,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.core_api import release_update_accepted_payload, runs_history_payload
-from gp_control_plane.jobs import JobRunner
+from gp_control_plane.jobs import JobRunner, _CancellationToken
 from gp_control_plane.state import read_state, update_state
 from gp_control_plane.storage import append_run, connect, read_latest_run_payloads
 from gp_control_plane.strategy_finder import latest_log_tail
 
 
 class JobRunnerTests(unittest.TestCase):
+    def test_cancellation_token_rejects_child_launch_claim_after_cancellation(self) -> None:
+        token = _CancellationToken()
+        token.set()
+        launches: list[str] = []
+
+        def launcher() -> None:
+            launches.append("called")
+
+        with token.claim_child_launch() as claimed:
+            if claimed:
+                launcher()
+
+        self.assertFalse(claimed)
+        self.assertEqual(launches, [])
+
+    def test_cancellation_token_defers_cancellation_while_child_launch_is_claimed(self) -> None:
+        token = _CancellationToken()
+        cancellation_started = threading.Event()
+        cancellation_finished = threading.Event()
+
+        def cancel() -> None:
+            cancellation_started.set()
+            token.set()
+            cancellation_finished.set()
+
+        with token.claim_child_launch() as claimed:
+            self.assertTrue(claimed)
+            canceller = threading.Thread(target=cancel)
+            canceller.start()
+            self.assertTrue(cancellation_started.wait(timeout=1))
+            self.assertFalse(cancellation_finished.wait(timeout=0.1))
+
+        self.assertTrue(cancellation_finished.wait(timeout=1))
+        canceller.join(timeout=1)
+        self.assertFalse(canceller.is_alive())
+        self.assertTrue(token.is_set())
+
     def test_current_job_is_cleared_when_job_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

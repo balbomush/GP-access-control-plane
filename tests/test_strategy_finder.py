@@ -1511,6 +1511,51 @@ pktws_check_https_tls12()
             self.assertTrue(result["stopped"])
             self.assertIsNotNone(result["returncode"])
 
+    def test_cancelled_stdout_log_open_failure_is_stopped_without_launching_child(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stdout_log = state_dir / "stdout.log"
+            stderr_log = state_dir / "stderr.log"
+            stop_event = threading.Event()
+            run = {
+                "id": "run-cancelled-log-open",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(state_dir / "progress.json"),
+                "metrics_log": str(state_dir / "metrics.ndjson"),
+                "attempt_plan": {"total": 1, "scripts": {}, "script_order": [], "source": "test"},
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            def fail_stdout_log_open(_writer: _RotatingTextWriter) -> _RotatingTextWriter:
+                stop_event.set()
+                raise OSError("stdout log is unavailable")
+
+            with (
+                patch.object(_RotatingTextWriter, "__enter__", new=fail_stdout_log_open),
+                patch.object(
+                    strategy_finder_module.subprocess,
+                    "Popen",
+                    side_effect=AssertionError("Popen must not run after cancelled log-open failure"),
+                ) as popen,
+            ):
+                result = _run_process_with_live_stdout(
+                    command=["blockcheck2.sh"],
+                    env=os.environ.copy(),
+                    stdout_log=stdout_log,
+                    stderr_log=stderr_log,
+                    debug_stdout_log=None,
+                    timeout_seconds=10,
+                    stop_event=stop_event,
+                    recorder=recorder,
+                )
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertTrue(result["stopped"])
+        self.assertIsNone(result["returncode"])
+        popen.assert_not_called()
+
     def test_live_recorder_can_close_connection_from_controller_thread(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
