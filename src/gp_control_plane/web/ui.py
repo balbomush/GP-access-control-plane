@@ -4758,6 +4758,20 @@ function eventRows(){
       message: release.error || release.log_tail || 'Обновление завершилось ошибкой.'
     });
   }
+  const cleanupStatus = String(release.cleanup_status || '').toLowerCase();
+  if (releaseStatus === 'success' && (cleanupStatus === 'deferred' || cleanupStatus === 'failed')) {
+    const cleanupPath = release.cleanup_path ? ` Путь карантина: ${release.cleanup_path}.` : '';
+    const cleanupMessage = cleanupStatus === 'deferred'
+      ? `Очистка предыдущей рабочей копии отложена. Новая версия установлена; откройте лог обновления.${cleanupPath}`
+      : `Очистка предыдущей рабочей копии завершилась ошибкой. Новая версия установлена; откройте лог обновления.${cleanupPath}`;
+    rows.push({
+      severity: 'warning',
+      time: now,
+      title: 'Очистка после обновления',
+      source: 'release update',
+      message: cleanupMessage
+    });
+  }
   const log = state.finderLog || {};
   const diagnostics = Array.isArray(log.stderr_diagnostics) ? log.stderr_diagnostics : [];
   diagnostics.slice(0, 3).forEach((item) => {
@@ -4973,6 +4987,13 @@ function renderReleaseInfo(){
       const log = queued.log_path ? ` Лог: ${queued.log_path}.` : '';
       const error = queued.error ? ` Ошибка: ${queued.error}.` : '';
       const rollback = status === 'failed' && queued.rollback_instruction ? ` Откат: ${queued.rollback_instruction}` : '';
+      const cleanupStatus = String(queued.cleanup_status || '').toLowerCase();
+      const cleanupPath = queued.cleanup_path ? ` Путь карантина: ${queued.cleanup_path}.` : '';
+      const cleanup = {
+        completed: ' Очистка предыдущей версии: выполнена.',
+        deferred: ` Внимание: очистка предыдущей рабочей копии отложена. Откройте лог обновления.${cleanupPath}`,
+        failed: ` Внимание: очистка предыдущей рабочей копии завершилась ошибкой. Новая версия установлена; откройте лог обновления.${cleanupPath}`
+      }[cleanupStatus] || '';
       const statusText = {
         queued: 'Обновление поставлено в очередь',
         running: 'Обновление выполняется',
@@ -4980,7 +5001,7 @@ function renderReleaseInfo(){
         failed: 'Обновление завершилось ошибкой'
       }[status] || `Статус обновления: ${status}`;
       const snapshotText = snapshot ? ` Перед обновлением создан бекап: ${snapshot}.` : '';
-      result.textContent = `${statusText}.${snapshotText}${installed}${verified}${log}${error}${rollback}`;
+      result.textContent = `${statusText}.${snapshotText}${installed}${verified}${log}${error}${rollback}${cleanup}`;
       return;
     }
     if (selectedRelease.checked) {

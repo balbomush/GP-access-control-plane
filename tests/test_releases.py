@@ -495,6 +495,88 @@ bbbb refs/tags/v0.3.2-alpha.2
         self.assertEqual(status["installed_version"], "0.3.1")
         self.assertEqual(persisted["installed_sha"], self._EXPECTED_SHA)
         self.assertEqual(persisted["phase"], "installed")
+        self.assertEqual(status["cleanup_status"], "completed")
+        self.assertEqual(persisted["cleanup_status"], "completed")
+
+    def test_release_update_status_preserves_valid_cleanup_evidence(self) -> None:
+        for cleanup_status, cleanup_path in (
+            ("completed", ""),
+            ("deferred", "/srv/gp/.GP-access-control-plane.strict-previous"),
+            ("failed", ""),
+        ):
+            with self.subTest(cleanup_status=cleanup_status), tempfile.TemporaryDirectory() as raw:
+                state_dir = Path(raw) / "state"
+                values = self._success_log_values()
+                success_status = values.pop("status")
+                values["cleanup_status"] = cleanup_status
+                if cleanup_path:
+                    values["cleanup_path"] = cleanup_path
+                values["status"] = success_status
+                log_path = Path(raw) / "update.log"
+                log_path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
+                write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
+
+                status = release_update_status(state_dir)
+                persisted = read_state(state_dir)["release_update"]
+
+                self.assertEqual(status["status"], "success")
+                self.assertTrue(status["verified"])
+                self.assertEqual(status["cleanup_status"], cleanup_status)
+                self.assertEqual(persisted["cleanup_status"], cleanup_status)
+                self.assertEqual(status.get("cleanup_path", ""), cleanup_path)
+                self.assertEqual(persisted.get("cleanup_path", ""), cleanup_path)
+
+    def test_release_update_status_rejects_invalid_cleanup_evidence(self) -> None:
+        cases = (
+            ({"cleanup_status": "unknown"}, "cleanup_status"),
+            ({"cleanup_status": ""}, "cleanup_status"),
+            ({"cleanup_path": "/srv/gp/.strict-previous"}, "without cleanup_status"),
+            ({"cleanup_status": "completed", "cleanup_path": "/srv/gp/.strict-previous"}, "completed cleanup"),
+            ({"cleanup_status": "failed", "cleanup_path": "/srv/gp/.strict-previous"}, "failed cleanup"),
+            ({"cleanup_status": "deferred"}, "omitted cleanup_path"),
+        )
+        for evidence, expected_error in cases:
+            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as raw:
+                state_dir = Path(raw) / "state"
+                values = self._success_log_values() | evidence
+                log_path = Path(raw) / "update.log"
+                log_path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
+                write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
+
+                status = release_update_status(state_dir)
+
+            self.assertEqual(status["status"], "failed")
+            self.assertFalse(status["verified"])
+            self.assertIn(expected_error, status["error"])
+
+    def test_release_update_status_requires_terminal_success_for_new_cleanup_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            log_path = Path(raw) / "update.log"
+            log_path.write_text(
+                "\n".join(
+                    (
+                        "phase=installed",
+                        f"verified_ref={self._CANDIDATE_REF}",
+                        f"verified_sha={self._EXPECTED_SHA}",
+                        f"checked_out_sha={self._EXPECTED_SHA}",
+                        f"installed_ref={self._CANDIDATE_REF}",
+                        f"installed_sha={self._EXPECTED_SHA}",
+                        f"installed_version={self._TAG.removeprefix('v')}",
+                        "cleanup_status=completed",
+                        "status=success",
+                        "unstructured trailing output",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            write_state(state_dir, {"release_update": self._strict_update_payload(log_path)})
+
+            status = release_update_status(state_dir)
+
+        self.assertEqual(status["status"], "failed")
+        self.assertFalse(status["verified"])
+        self.assertIn("after terminal success", status["error"])
 
     def test_release_update_status_rejects_each_missing_success_log_field(self) -> None:
         for missing_field in self._success_log_values():

@@ -1511,6 +1511,8 @@ class WebUiTests(unittest.TestCase):
                         f"checked_out_sha={expected_sha}",
                         f"installed_sha={expected_sha}",
                         "phase=installed",
+                        "cleanup_status=deferred",
+                        "cleanup_path=/srv/gp/.GP-access-control-plane.strict-previous",
                         "status=success",
                     ]
                 ),
@@ -1562,10 +1564,14 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(update["verified_sha"], expected_sha)
             self.assertEqual(update["checked_out_sha"], expected_sha)
             self.assertEqual(update["installed_sha"], expected_sha)
+            self.assertEqual(update["cleanup_status"], "deferred")
+            self.assertEqual(update["cleanup_path"], "/srv/gp/.GP-access-control-plane.strict-previous")
             persisted = read_state(config.output.state_dir)["release_update"]
             self.assertEqual(persisted["candidate_ref"], candidate_ref)
             self.assertEqual(persisted["expected_sha"], expected_sha)
             self.assertEqual(persisted["installed_sha"], expected_sha)
+            self.assertEqual(persisted["cleanup_status"], "deferred")
+            self.assertEqual(persisted["cleanup_path"], "/srv/gp/.GP-access-control-plane.strict-previous")
 
             incomplete_log_path = tmp / "incomplete-update.log"
             incomplete_log_path.write_text("installed_version=0.3.1\nstatus=success\n", encoding="utf-8")

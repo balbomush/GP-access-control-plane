@@ -136,28 +136,76 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn('refs/heads/*', validator)
         self.assertIn('expected SHA must be 40 lowercase hexadecimal characters', self.helper)
 
-    def test_strict_success_log_and_post_publication_failure_use_code_rollback_contract(self) -> None:
+    def test_strict_commit_point_reports_terminal_evidence_and_verifies_code_rollback(self) -> None:
         stage = self.helper.split("queue_strict_update() {", 1)[1].split("validate_run_id()", 1)[0]
-        success = stage.split("if run_staged_installer; then", 1)[1]
-        for key in (
+        publication = stage.split("strict_acquire_update_gate\n", 1)[1].split("USER_PUBLISH", 1)[0]
+        self.assertIn('STRICT_PREVIOUS_SHA="\\$(runuser -u "\\$STRICT_USER"', publication)
+        self.assertIn("current worktree SHA could not be verified before publication", publication)
+        self.assertIn('STRICT_PREVIOUS_DIR="\\$(dirname -- "\\$STRICT_INSTALL_DIR")/.\\$(basename -- "\\$STRICT_INSTALL_DIR").strict-previous"', publication)
+        publish_body = stage.split("USER_PUBLISH'", 1)[1].split("USER_PUBLISH\n", 1)[0]
+        self.assertIn('[ ! -e "\\$next" ] && [ ! -L "\\$next" ] && [ ! -e "\\$previous" ] && [ ! -L "\\$previous" ] || exit 126', publish_body)
+
+        success = stage.split("if run_staged_installer; then", 1)[1].split("\nelse", 1)[0]
+        phases = (
+            "phase=requested",
+            "phase=verified",
+            "phase=staged",
+            "phase=published",
+            "phase=root",
+            "phase=committed",
             "phase=installed",
-            "status=success",
+        )
+        for previous_phase, next_phase in zip(phases, phases[1:]):
+            self.assertLess(stage.index(previous_phase), stage.index(next_phase))
+
+        evidence_keys = (
+            "phase=committed",
             "verified_ref=",
             "verified_sha=",
             "checked_out_sha=",
             "installed_ref=",
             "installed_sha=",
             "installed_version=",
-        ):
+            "cleanup_status=",
+            "cleanup_path=",
+            "state_layout=",
+            "state_migration=",
+        )
+        for key in evidence_keys:
             self.assertIn(key, success)
         self.assertIn('installed_version="\\${installed_version#v}"', success)
+        post_commit = success.split("echo 'phase=committed'\n", 1)[1]
+        cleanup = post_commit.split("USER_FINALIZE\n  then", 1)[0]
+        self.assertIn('if runuser -u "\\$STRICT_USER" -- /bin/sh -s -- "\\$STRICT_INSTALL_DIR" <<\'USER_FINALIZE\'', cleanup)
+        self.assertIn('rm -rf -- "\\$previous"', cleanup)
+        self.assertNotIn("rollback_after_publication_failure", post_commit)
+        self.assertIn("cleanup_status=completed", success)
+        cleanup_failure = success.split("  else\n", 1)[1].split("  fi\n  echo \"verified_ref", 1)[0]
+        self.assertIn('[ -d "\\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\\$STRICT_PREVIOUS_DIR" ]', cleanup_failure)
+        self.assertIn("cleanup_status=deferred", cleanup_failure)
+        self.assertIn("cleanup_status=failed", cleanup_failure)
+        self.assertIn('if [ "\\$cleanup_status" = deferred ]; then echo "cleanup_path=\\$STRICT_PREVIOUS_DIR"; fi', success)
+        self.assertNotIn('rm -rf -- "\\$STRICT_PREVIOUS_DIR"', success)
+        self.assertLess(success.index('phase=committed'), success.index("USER_FINALIZE"))
+        terminal_phase = success.index("phase=installed")
+        terminal_status = success.index("echo 'status=success'")
+        self.assertLess(success.index("USER_FINALIZE"), terminal_phase)
+        for key in evidence_keys:
+            self.assertLess(success.index(key), terminal_phase)
+        self.assertLess(terminal_phase, terminal_status)
+        self.assertEqual(success[terminal_status:].strip(), "echo 'status=success'")
+
         rollback = stage.split("rollback_published_code() {", 1)[1]
         self.assertIn("USER_ROLLBACK", rollback)
         self.assertIn('mv "\\$install_dir" "\\$failed"', rollback)
         self.assertIn('mv "\\$previous" "\\$install_dir"', rollback)
+        self.assertIn('[ -d "\\$STRICT_INSTALL_DIR/.git" ] && [ ! -L "\\$STRICT_INSTALL_DIR/.git" ] || return 1', rollback)
+        self.assertIn('restored_checkout_sha="\\$(runuser -u "\\$STRICT_USER"', rollback)
+        self.assertIn('[ "\\$restored_checkout_sha" = "\\$STRICT_PREVIOUS_SHA" ] || return 1', rollback)
         self.assertIn('systemctl restart "\\$STRICT_CORE_SERVICE"', rollback)
         self.assertIn('rollback_scope=code', rollback)
         self.assertIn("restore_deployment_configuration", rollback)
+        self.assertLess(rollback.index('[ "\\$restored_checkout_sha" = "\\$STRICT_PREVIOUS_SHA" ] || return 1'), rollback.index("rollback_scope=code"))
 
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
         self.assertIn('BRANCH="${GP_BRANCH:-latest-stable}"', self.installer)

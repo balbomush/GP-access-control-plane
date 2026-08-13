@@ -30,7 +30,11 @@ def bash_executable() -> str | None:
 
 def shell_function(source: str, name: str) -> str:
     """Return one top-level Bash function without depending on its line count."""
-    match = re.search(rf"^{re.escape(name)}\(\) \{{\n(?P<body>.*?)(?=^\}}$)", source, re.MULTILINE | re.DOTALL)
+    match = re.search(
+        rf"^{re.escape(name)}\(\) \{{\n(?P<body>.*?)(?=^\}}\n\n)",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
     if not match:
         raise AssertionError(f"Bash function {name} was not found")
     return match.group("body")
@@ -66,6 +70,28 @@ stat() {{ printf '0:0:600\\n'; }}
 read_trusted_profile_state_dir
 '''
         return subprocess.run([self.bash, "-c", harness, "profile-reader", str(profile)], text=True, capture_output=True, check=False)
+
+    def run_update_success_validator(self, update_log: Path) -> subprocess.CompletedProcess[str]:
+        if not self.bash:
+            self.skipTest("real Bash is unavailable")
+        validator = shell_function(self.source, "validate_update_success_evidence")
+        harness = f'''set -o pipefail
+require_trusted_root_dir() {{ :; }}
+validate_update_success_evidence() {{
+{validator}
+}}
+CANDIDATE_REF='refs/tags/v1.2.3'
+EXPECTED_SHA='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+PYTHON=python
+stat() {{ printf '0:0:600\\n'; }}
+validate_update_success_evidence "$1"
+'''
+        return subprocess.run(
+            [self.bash, "-c", harness, "update-success-validator", str(update_log)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
     def test_bash_syntax_help_and_early_argument_validation(self) -> None:
         if not self.bash:
@@ -115,6 +141,12 @@ read_trusted_profile_state_dir
         self.assertIn('installation profile is required to derive --state-dir for $REF', resolve)
         self.assertIn('v0.[0-3].*', shell_function(self.source, "legacy_state_fallback_allowed"))
         self.assertNotIn('STATE_DIR="$(canonical_existing_dir "${STATE_DIR:-$INSTALL_DIR/build/state}")"', self.source)
+
+    def test_root_linux_test_never_writes_bytecode_in_the_installed_worktree(self) -> None:
+        root_test = shell_function(self.source, "run_root_linux_test")
+
+        self.assertIn('cd "$INSTALL_DIR"', root_test)
+        self.assertIn('PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -B -m unittest "$test_name"', root_test)
 
     def test_profile_reader_derives_trusted_state_and_refuses_malformed_or_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -225,8 +257,52 @@ read_trusted_profile_state_dir
         self.assertIn('verified_sha', self.source)
         self.assertIn('staged_sha', self.source)
         self.assertIn('installed_sha', self.source)
+        self.assertIn('"cleanup_status": ["completed"]', validate_success)
+        self.assertIn('"phase": ["requested", "verified", "staged", "published", "root", "committed", "installed"]', validate_success)
         self.assertIn('"status": ["success"]', self.source)
         self.assertIn('require_trusted_root_dir /var/lib/gp-control-plane/release-updates 0 0 700', self.source)
+
+    def test_update_success_validator_requires_completed_cleanup_and_terminal_success(self) -> None:
+        completed_log = """\
+phase=requested
+candidate_ref=refs/tags/v1.2.3
+expected_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+phase=verified
+verified_ref=refs/tags/v1.2.3
+verified_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+phase=staged
+staged_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+phase=published
+phase=root
+phase=committed
+phase=installed
+installed_ref=refs/tags/v1.2.3
+installed_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cleanup_status=completed
+status=success
+"""
+        deferred_log = completed_log.replace("cleanup_status=completed", "cleanup_status=deferred")
+        early_success_log = completed_log.replace(
+            "cleanup_status=completed\nstatus=success\n",
+            "status=success\ncleanup_status=completed\n",
+        )
+        trailing_output_log = completed_log + "unstructured trailing output\n"
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            completed_path = temporary / "completed.log"
+            deferred_path = temporary / "deferred.log"
+            early_success_path = temporary / "early-success.log"
+            trailing_output_path = temporary / "trailing-output.log"
+            completed_path.write_text(completed_log, encoding="utf-8")
+            deferred_path.write_text(deferred_log, encoding="utf-8")
+            early_success_path.write_text(early_success_log, encoding="utf-8")
+            trailing_output_path.write_text(trailing_output_log, encoding="utf-8")
+
+            self.assertEqual(self.run_update_success_validator(completed_path).returncode, 0)
+            self.assertNotEqual(self.run_update_success_validator(deferred_path).returncode, 0)
+            self.assertNotEqual(self.run_update_success_validator(early_success_path).returncode, 0)
+            self.assertNotEqual(self.run_update_success_validator(trailing_output_path).returncode, 0)
 
     def test_failure_recovery_records_evidence_stops_only_own_run_and_returns_original_failure(self) -> None:
         failure = shell_function(self.source, "cycle_failure")

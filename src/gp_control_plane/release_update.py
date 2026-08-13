@@ -228,10 +228,12 @@ def release_update_status(
         if helper_reported_success or not prior_error:
             payload["error"] = candidate_error
     elif status == "success" or log_values.get("phase") == "installed":
-        strict_error = _strict_success_error(payload, log_values)
+        strict_error = _strict_success_error(payload, log_values, log_tail)
         if strict_error:
             status = "failed"
             payload["error"] = strict_error
+        else:
+            _apply_cleanup_success_evidence(payload, log_values)
     payload["status"] = status
     payload["log_path"] = log_path
     payload["installed_version"] = installed_version
@@ -403,6 +405,16 @@ def _apply_strict_helper_evidence(payload: dict[str, Any], values: dict[str, str
             payload[key] = values[key]
 
 
+def _apply_cleanup_success_evidence(payload: dict[str, Any], values: dict[str, str]) -> None:
+    cleanup_status = str(values.get("cleanup_status") or "completed").strip().lower()
+    cleanup_path = str(values.get("cleanup_path") or "").strip()
+    payload["cleanup_status"] = cleanup_status
+    if cleanup_path:
+        payload["cleanup_path"] = cleanup_path
+    else:
+        payload.pop("cleanup_path", None)
+
+
 def _strict_candidate_error(payload: dict[str, Any], values: dict[str, str]) -> str:
     try:
         candidate = _candidate_from_payload(payload)
@@ -417,7 +429,7 @@ def _strict_candidate_error(payload: dict[str, Any], values: dict[str, str]) -> 
     return ""
 
 
-def _strict_success_error(payload: dict[str, Any], values: dict[str, str]) -> str:
+def _strict_success_error(payload: dict[str, Any], values: dict[str, str], log_text: str) -> str:
     try:
         candidate = _candidate_from_payload(payload)
     except RuntimeError as exc:
@@ -454,6 +466,38 @@ def _strict_success_error(payload: dict[str, Any], values: dict[str, str]) -> st
         return "installed SHA does not match expected SHA"
     if values["installed_version"] != _candidate_version(candidate):
         return "strict root-helper output installed a different version"
+    has_cleanup_status = "cleanup_status" in values
+    cleanup_status = str(values.get("cleanup_status") or "").strip().lower()
+    cleanup_path = str(values.get("cleanup_path") or "").strip()
+    if has_cleanup_status and cleanup_status not in {"completed", "deferred", "failed"}:
+        return "strict root-helper output has an unexpected cleanup_status"
+    if not has_cleanup_status and cleanup_path:
+        return "strict root-helper output reported cleanup_path without cleanup_status"
+    if cleanup_path and (not cleanup_path.startswith("/") or "\x00" in cleanup_path):
+        return "strict root-helper output has an unsafe cleanup_path"
+    if cleanup_status == "completed" and cleanup_path:
+        return "strict root-helper output reported cleanup_path for completed cleanup"
+    if cleanup_status == "failed" and cleanup_path:
+        return "strict root-helper output reported cleanup_path for failed cleanup"
+    if cleanup_status == "deferred" and not cleanup_path:
+        return "strict root-helper output omitted cleanup_path for deferred cleanup"
+    if "cleanup_status" in values:
+        terminal_error = _strict_success_terminal_error(log_text)
+        if terminal_error:
+            return terminal_error
+    return ""
+
+
+def _strict_success_terminal_error(log_text: str) -> str:
+    records = [line.strip() for line in str(log_text or "").splitlines() if line.strip()]
+    if not records or records[-1] != "status=success":
+        return "strict root-helper output has evidence after terminal success"
+    for record in records:
+        if "=" not in record:
+            continue
+        key, _value = record.split("=", 1)
+        if key.strip() in {"error", "rollback_scope"}:
+            return "strict root-helper output contains failure evidence"
     return ""
 
 

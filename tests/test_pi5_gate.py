@@ -64,6 +64,37 @@ read_trusted_profile_state_dir
         '''
         return subprocess.run([self.bash, "-c", harness, "profile-reader", str(profile)], text=True, capture_output=True, check=False)
 
+    def run_update_success_validation(self, log: Path) -> subprocess.CompletedProcess[str]:
+        if not self.bash:
+            self.skipTest("real Bash is unavailable")
+        validation = shell_function(self.source, "validate_update_success_evidence")
+        harness = f'''set -o pipefail
+require_trusted_root_dir() {{ return 0; }}
+stat() {{ printf '0:0:600\\n'; }}
+UPDATE_LOG_PARENT="$1"
+CANDIDATE_REF="refs/tags/v0.4.0"
+EXPECTED_SHA="{'a' * 40}"
+PYTHON="$2"
+validate_update_success_evidence() {{
+{validation}
+}}
+validate_update_success_evidence "$3"
+'''
+        return subprocess.run(
+            [
+                self.bash,
+                "-c",
+                harness,
+                "update-success-validation",
+                posix_shell_path(log.parent),
+                posix_shell_path(Path(sys.executable)),
+                posix_shell_path(log),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def run_stop_cycle_harness(self, *, history_status: str, timeout: bool) -> subprocess.CompletedProcess[str]:
         if not self.bash:
             self.skipTest("real Bash is unavailable")
@@ -305,8 +336,59 @@ start_and_stop_cycle standard
         self.assertIn('verified_sha', success_validation)
         self.assertIn('installed_sha', success_validation)
         self.assertIn('status":["success"]', success_validation)
+        self.assertIn('phase":["requested","verified","staged","published","root","committed","installed"]', success_validation)
+        self.assertIn('cleanup_status":["completed"]', success_validation)
         self.assertIn('rollback_published_code() {', rollback)
         self.assertIn('rollback_scope=code', rollback)
+
+    def test_strict_update_success_requires_completed_cleanup(self) -> None:
+        sha = "a" * 40
+        common = "\n".join(
+            (
+                "candidate_ref=refs/tags/v0.4.0",
+                f"expected_sha={sha}",
+                "verified_ref=refs/tags/v0.4.0",
+                f"verified_sha={sha}",
+                f"staged_sha={sha}",
+                "phase=requested",
+                "phase=verified",
+                "phase=staged",
+                "phase=published",
+                "phase=root",
+                "phase=committed",
+                "phase=installed",
+                "installed_ref=refs/tags/v0.4.0",
+                f"installed_sha={sha}",
+                "cleanup_status=completed",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            completed = temporary / "completed.log"
+            completed.write_text(f"{common}\nstatus=success\n", encoding="utf-8")
+            result = self.run_update_success_validation(completed)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            premature_success = temporary / "premature-success.log"
+            premature_success.write_text(
+                common.replace("phase=installed", "status=success\nphase=installed") + "\n",
+                encoding="utf-8",
+            )
+            result = self.run_update_success_validation(premature_success)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("after terminal status", result.stderr)
+
+            trailing_output = temporary / "trailing-output.log"
+            trailing_output.write_text(f"{common}\nstatus=success\nunstructured trailing output\n", encoding="utf-8")
+            result = self.run_update_success_validation(trailing_output)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("after terminal status", result.stderr)
+
+            deferred = temporary / "deferred.log"
+            deferred.write_text(f"{common.replace('cleanup_status=completed', 'cleanup_status=deferred')}\nstatus=success\n", encoding="utf-8")
+            result = self.run_update_success_validation(deferred)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("strict update success evidence is incomplete", result.stderr)
 
 
 if __name__ == "__main__":

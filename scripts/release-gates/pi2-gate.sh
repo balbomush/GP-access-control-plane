@@ -537,7 +537,7 @@ run_root_linux_test() {
   local test_name="$1"
   (
     cd "$INSTALL_DIR"
-    "$PYTHON" -m unittest "$test_name"
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -B -m unittest "$test_name"
   )
 }
 
@@ -624,20 +624,28 @@ required = {
     "staged_sha": [os.environ["GATE_EXPECTED_SHA"]],
     "installed_ref": [os.environ["GATE_CANDIDATE_REF"]],
     "installed_sha": [os.environ["GATE_EXPECTED_SHA"]],
+    "cleanup_status": ["completed"],
     "status": ["success"],
-    "phase": ["requested", "verified", "staged", "published", "root", "installed"],
+    "phase": ["requested", "verified", "staged", "published", "root", "committed", "installed"],
 }
 seen = {key: [] for key in required}
+success_seen = False
 with open(os.environ["GATE_UPDATE_LOG"], encoding="utf-8", errors="replace") as handle:
     for raw in handle:
         line = raw.rstrip("\n")
+        if success_seen:
+            if line.strip():
+                raise SystemExit("strict update log contains evidence after success")
+            continue
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key in seen:
-            seen[key].append(value)
         if key == "error":
             raise SystemExit("strict update log contains error evidence")
+        if key in seen:
+            seen[key].append(value)
+            if key == "status" and value == "success":
+                success_seen = True
 for key, expected in required.items():
     if seen[key] != expected:
         raise SystemExit("strict update log has invalid " + key + " evidence")

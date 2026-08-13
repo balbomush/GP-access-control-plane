@@ -511,13 +511,20 @@ validate_update_success_evidence() {
   [ -f "$log" ] && [ ! -L "$log" ] && [ "$(stat -c '%u:%g:%a' "$log")" = 0:0:600 ] || return 1
   GATE_LOG="$log" GATE_REF="$CANDIDATE_REF" GATE_SHA="$EXPECTED_SHA" "$PYTHON" - <<'PY'
 import os
-want = {"candidate_ref":[os.environ["GATE_REF"]], "expected_sha":[os.environ["GATE_SHA"]], "verified_ref":[os.environ["GATE_REF"]], "verified_sha":[os.environ["GATE_SHA"]], "staged_sha":[os.environ["GATE_SHA"]], "installed_ref":[os.environ["GATE_REF"]], "installed_sha":[os.environ["GATE_SHA"]], "status":["success"], "phase":["requested","verified","staged","published","root","installed"]}
+want = {"candidate_ref":[os.environ["GATE_REF"]], "expected_sha":[os.environ["GATE_SHA"]], "verified_ref":[os.environ["GATE_REF"]], "verified_sha":[os.environ["GATE_SHA"]], "staged_sha":[os.environ["GATE_SHA"]], "installed_ref":[os.environ["GATE_REF"]], "installed_sha":[os.environ["GATE_SHA"]], "status":["success"], "phase":["requested","verified","staged","published","root","committed","installed"], "cleanup_status":["completed"]}
 seen = {key: [] for key in want}
+success_seen = False
 for raw in open(os.environ["GATE_LOG"], encoding="utf-8", errors="replace"):
-    if "=" in raw:
-        key,value = raw.rstrip("\n").split("=",1)
+    line = raw.rstrip("\n")
+    if success_seen:
+        if line.strip(): raise SystemExit("strict update success evidence appears after terminal status")
+        continue
+    if "=" in line:
+        key,value = line.split("=",1)
         if key == "error" or key == "rollback_scope": raise SystemExit("success log contains failure or rollback evidence")
-        if key in seen: seen[key].append(value)
+        if key in seen:
+            seen[key].append(value)
+            if key == "status" and value == "success": success_seen = True
 if seen != want: raise SystemExit("strict update success evidence is incomplete")
 PY
 }

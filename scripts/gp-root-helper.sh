@@ -1164,6 +1164,10 @@ fi
 # service restart have either completed or the runner exits.
 strict_acquire_update_gate
 
+STRICT_PREVIOUS_SHA="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || strict_fail 'current worktree SHA could not be verified before publication'
+strict_sha "\$STRICT_PREVIOUS_SHA" || strict_fail 'current worktree SHA is invalid before publication'
+STRICT_PREVIOUS_DIR="\$(dirname -- "\$STRICT_INSTALL_DIR")/.\$(basename -- "\$STRICT_INSTALL_DIR").strict-previous"
+
 runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_BUNDLE" "\$STRICT_INSTALL_DIR" <<'USER_PUBLISH' || strict_fail 'target-user publication failed; existing worktree retained or recovery directory was left'
 set -eu
 bundle="\$1"
@@ -1245,6 +1249,9 @@ if ! mv "\$previous" "\$install_dir"; then
 fi
 USER_ROLLBACK
   then
+    [ -d "\$STRICT_INSTALL_DIR/.git" ] && [ ! -L "\$STRICT_INSTALL_DIR/.git" ] || return 1
+    restored_checkout_sha="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || return 1
+    [ "\$restored_checkout_sha" = "\$STRICT_PREVIOUS_SHA" ] || return 1
     if systemctl daemon-reload && systemctl restart "\$STRICT_CORE_SERVICE"; then
       if [ "\$STRICT_INSTALL_WEB" = on ]; then
         systemctl restart "\$STRICT_WEB_SERVICE" || return 1
@@ -1285,7 +1292,8 @@ echo 'phase=root'
 if run_staged_installer; then
   systemctl is-active --quiet "\$STRICT_CORE_SERVICE" || rollback_after_publication_failure 'updated core service did not become active'
   if [ "\$STRICT_INSTALL_WEB" = on ]; then systemctl is-active --quiet "\$STRICT_WEB_SERVICE" || rollback_after_publication_failure 'updated web service did not become active'; fi
-  runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_INSTALL_DIR" <<'USER_FINALIZE' || rollback_after_publication_failure 'installed code succeeded but previous worktree cleanup failed'
+  echo 'phase=committed'
+  if runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_INSTALL_DIR" <<'USER_FINALIZE'
 set -eu
 install_dir="\$1"
 parent="\$(dirname "\$install_dir")"
@@ -1294,18 +1302,29 @@ previous="\$parent/.\${base}.strict-previous"
 [ -d "\$previous" ] && [ ! -L "\$previous" ] || exit 126
 rm -rf -- "\$previous"
 USER_FINALIZE
-  echo 'phase=installed'
-  echo 'status=success'
+  then
+    cleanup_status=completed
+  else
+    if [ -d "\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\$STRICT_PREVIOUS_DIR" ]; then
+      cleanup_status=deferred
+    else
+      cleanup_status=failed
+    fi
+  fi
   echo "verified_ref=\$STRICT_REF"
   echo "verified_sha=\$fetch_sha"
   echo "checked_out_sha=\$stage_head"
   echo "installed_ref=\$STRICT_REF"
   echo "installed_sha=\$installed_checkout_sha"
+  echo "cleanup_status=\$cleanup_status"
+  if [ "\$cleanup_status" = deferred ]; then echo "cleanup_path=\$STRICT_PREVIOUS_DIR"; fi
   echo "state_layout=\$STRICT_STATE_LAYOUT"
   if [ "\$STRICT_STATE_LAYOUT" = internal ]; then echo 'state_migration=completed'; else echo 'state_migration=not-required'; fi
   installed_version="\${STRICT_REF#refs/tags/}"
   installed_version="\${installed_version#v}"
   echo "installed_version=\$installed_version"
+  echo 'phase=installed'
+  echo 'status=success'
 else
   rollback_after_publication_failure 'staged installer failed after publication'
 fi
