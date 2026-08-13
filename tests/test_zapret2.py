@@ -387,7 +387,7 @@ table inet blockcheck42
         self.assertIn('  run-owned)', helper)
         self.assertIn('  run-owned-env)', helper)
         self.assertIn('  signal-run)', helper)
-        self.assertIn('    signal_registered_process_run "$@"', helper)
+        self.assertIn('    with_discovery_gate signal_registered_process_run "$@"', helper)
         self.assertNotIn('  register-run)', helper)
         self.assertNotIn('  unregister-run)', helper)
         self.assertNotIn('"kill")', helper)
@@ -465,22 +465,843 @@ table inet blockcheck42
                 holder.stdin.close()
                 self.assertEqual(holder.wait(timeout=5), 0)
 
+    def test_root_helper_recovery_uses_exclusive_gate_and_explicit_artifact_removal(self) -> None:
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+
+        recovery_gate = helper.split("with_recovery_gate() {", 1)[1].split("\n}\n", 1)[0]
+        recovery = helper.split("recover_registered_process_runs() {", 1)[1].split("\n}\n\nrequire_root", 1)[0]
+        recovery_helpers = helper.split("ensure_recovery_run_registry() {", 1)[1].split("\nrequire_root", 1)[0]
+        remover = helper.split("remove_recovery_run_artifacts() {", 1)[1].split("\n}\n", 1)[0]
+
+        self.assertIn('flock -n -x 9', recovery_gate)
+        self.assertIn('return 75', recovery_gate)
+        self.assertIn('recovery blocked by active discovery or strict release update gate', recovery_gate)
+        self.assertIn('with_discovery_gate signal_registered_process_run "$@"', helper)
+        self.assertIn('with_recovery_gate recover_registered_process_runs', helper)
+        self.assertIn('recovery_validate_registry_layout || fail', recovery)
+        self.assertNotIn('rm -rf', recovery)
+        self.assertNotIn('rm -rf', recovery_helpers)
+        self.assertIn('recovery_ready_pid_is_safe_to_forget "$ready_file" || return 2', remover)
+        self.assertIn('rm -f --', remover)
+        self.assertIn('rmdir --', remover)
+        self.assertLess(remover.index('rm -f -- "$ready_file"'), remover.index('rm -f -- "$record"'))
+
+    def test_recover_runs_removes_valid_dead_paired_and_recordless_locks_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        dead_pid = "999999"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            run_id = "dead-paired"
+            lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=dead_pid, go_pid=dead_pid, status=7)
+            record = self._write_recovery_record(registry, run_id, dead_pid, "101")
+
+            completed = self._run_recovery_with_identity_shims(shell=shell, helper=helper, root=root, registry=registry)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(record.exists())
+            self.assertFalse(lock_dir.exists())
+
+            recordless_id = "dead-recordless"
+            recordless_lock = self._write_recovery_lock(
+                registry, recordless_id, ready_pid=dead_pid, go_pid=dead_pid, status=0
+            )
+            completed = self._run_recovery_with_identity_shims(shell=shell, helper=helper, root=root, registry=registry)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(recordless_lock.exists())
+
+    def test_recover_runs_blocks_before_inspecting_an_early_phase_lock_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            early_lock = registry / ".early-phase.lock"
+            early_lock.mkdir()
+            helper_copy, fake_bin, gate = self._prepare_recovery_identity_test(root, helper)
+            ready = root / "shared-holder-ready"
+            holder = subprocess.Popen(
+                [
+                    shell,
+                    "-c",
+                    'exec 9<> "$1"; flock -s 9; : > "$2"; IFS= read -r release',
+                    "shared-discovery-holder",
+                    _posix_shell_path(gate),
+                    _posix_shell_path(ready),
+                ],
+                stdin=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                _wait_for_path(ready)
+                completed = subprocess.run(
+                    [shell, _posix_shell_path(helper_copy), "recover-runs"],
+                    env=self._recovery_identity_env(fake_bin, registry, root),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertEqual(completed.returncode, 75, completed.stderr)
+                self.assertIn("recovery blocked by active discovery", completed.stderr)
+                self.assertTrue(early_lock.is_dir())
+                self.assertEqual(list(early_lock.iterdir()), [])
+            finally:
+                assert holder.stdin is not None
+                holder.stdin.write("release\n")
+                holder.stdin.close()
+                self.assertEqual(holder.wait(timeout=5), 0)
+
+    def test_recover_runs_keeps_recordless_lock_when_ready_pid_is_live_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            ready_pid = "999999"
+            lock_dir = self._write_recovery_lock(registry, "live-recordless", ready_pid=ready_pid)
+
+            completed = self._run_recovery_with_identity_shims(
+                shell=shell,
+                helper=helper,
+                root=root,
+                registry=registry,
+                extra_env={"GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid} S\\n"},
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertIn("supervisor is still live", completed.stderr)
+            self.assertTrue(lock_dir.is_dir())
+            self.assertTrue((lock_dir / "supervisor-ready").is_file())
+
+    def test_recover_runs_keeps_artifacts_when_a_live_member_survives_a_missing_or_zombie_leader_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        for layout in ("paired", "recordless"):
+            for leader_state in ("absent", "zombie"):
+                with self.subTest(layout=layout, leader_state=leader_state), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    registry = root / "runs"
+                    registry.mkdir()
+                    run_id = f"{layout}-{leader_state}-live-child"
+                    lock_dir = self._write_recovery_lock(
+                        registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7
+                    )
+                    record = None
+                    if layout == "paired":
+                        record = self._write_recovery_record(registry, run_id, ready_pid, "101")
+                    # The production query is exactly: ps -e -o pgid= -o sid= -o stat=.
+                    # It cannot report a member PID, but this row represents a non-leader
+                    # child that remains in the original process group and session.
+                    process_table = f"{ready_pid} {ready_pid} S\\n"
+                    if leader_state == "zombie":
+                        process_table = f"{ready_pid} {ready_pid} Z\\n{process_table}"
+
+                    completed = self._run_recovery_with_identity_shims(
+                        shell=shell,
+                        helper=helper,
+                        root=root,
+                        registry=registry,
+                        extra_env={"GP_TEST_RECOVERY_PROCESS_TABLE": process_table},
+                    )
+
+                    self.assertEqual(completed.returncode, 126, completed.stderr)
+                    self.assertIn("supervisor is still live", completed.stderr)
+                    if record is not None:
+                        self.assertTrue(record.exists())
+                    self.assertTrue(lock_dir.is_dir())
+                    self.assertTrue((lock_dir / "supervisor-ready").is_file())
+                    self.assertTrue((lock_dir / "supervisor-go").is_file())
+                    self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_removes_zombie_only_paired_and_recordless_locks_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        process_table = f"{ready_pid} {ready_pid} Z\\n"
+        for layout in ("paired", "recordless"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                registry = root / "runs"
+                registry.mkdir()
+                run_id = f"{layout}-zombie-only"
+                lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
+                record = None
+                if layout == "paired":
+                    record = self._write_recovery_record(registry, run_id, ready_pid, "101")
+
+                completed = self._run_recovery_with_identity_shims(
+                    shell=shell,
+                    helper=helper,
+                    root=root,
+                    registry=registry,
+                    extra_env={"GP_TEST_RECOVERY_PROCESS_TABLE": process_table},
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                if record is not None:
+                    self.assertFalse(record.exists())
+                self.assertFalse(lock_dir.exists())
+
+    def test_recover_runs_accepts_unrelated_kernel_rows_and_parked_processes_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX shell")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        cases = {
+            "zombie-with-kernel-row": (f"0 0 S\n{ready_pid} {ready_pid} Z\n", 0),
+            "parked-with-kernel-row": (f"0 0 S\n{ready_pid} {ready_pid} P\n", 126),
+        }
+        for case, (process_table, expected_code) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                registry = root / "runs"
+                registry.mkdir()
+                run_id = case
+                lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
+                record = self._write_recovery_record(registry, run_id, ready_pid, "101")
+
+                completed = self._run_recovery_with_identity_shims(
+                    shell=shell,
+                    helper=helper,
+                    root=root,
+                    registry=registry,
+                    extra_env={"GP_TEST_RECOVERY_PROCESS_TABLE": process_table},
+                )
+
+                self.assertEqual(completed.returncode, expected_code, completed.stderr)
+                if expected_code == 0:
+                    self.assertFalse(record.exists())
+                    self.assertFalse(lock_dir.exists())
+                else:
+                    self.assertIn("stale or invalid", completed.stderr)
+                    self.assertNotIn("cannot be safely inspected", completed.stderr)
+                    self.assertTrue(record.exists())
+                    self.assertTrue(lock_dir.is_dir())
+
+    def test_recover_runs_fails_closed_when_group_inspection_is_incomplete_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        inspection_failures = {
+            "empty": {"GP_TEST_RECOVERY_PROCESS_TABLE": ""},
+            "whitespace": {"GP_TEST_RECOVERY_PROCESS_TABLE": " \\t\\n"},
+            "malformed": {"GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid}\\n"},
+            "nonzero": {"GP_TEST_RECOVERY_PS_STATUS": "1"},
+        }
+        for layout in ("paired", "recordless"):
+            for case, extra_env in inspection_failures.items():
+                with self.subTest(layout=layout, case=case), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    registry = root / "runs"
+                    registry.mkdir()
+                    run_id = f"{layout}-{case}-inspection"
+                    lock_dir = self._write_recovery_lock(
+                        registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7
+                    )
+                    record = None
+                    if layout == "paired":
+                        record = self._write_recovery_record(registry, run_id, ready_pid, "101")
+
+                    completed = self._run_recovery_with_identity_shims(
+                        shell=shell,
+                        helper=helper,
+                        root=root,
+                        registry=registry,
+                        extra_env=extra_env,
+                    )
+
+                    self.assertEqual(completed.returncode, 126, completed.stderr)
+                    self.assertIn("supervisor cannot be safely inspected", completed.stderr)
+                    if record is not None:
+                        self.assertTrue(record.exists())
+                    self.assertTrue(lock_dir.is_dir())
+                    self.assertTrue((lock_dir / "supervisor-ready").is_file())
+                    self.assertTrue((lock_dir / "supervisor-go").is_file())
+                    self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_preserves_paired_artifacts_when_registered_identity_is_unavailable_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None or not Path(f"/proc/{os.getpid()}/stat").is_file():
+            self.skipTest("requires a POSIX shell with flock and procfs")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = str(os.getpid())
+        marker = Path(f"/proc/{ready_pid}/stat").read_text(encoding="utf-8").split()[21]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            run_id = "registered-identity-unavailable"
+            lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
+            record = self._write_recovery_record(registry, run_id, ready_pid, marker)
+
+            completed = self._run_recovery_with_identity_shims(
+                shell=shell,
+                helper=helper,
+                root=root,
+                registry=registry,
+                extra_env={"GP_TEST_RECOVERY_MANAGED_PGID_PS_STATUS": "1"},
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertIn("registered process cannot be safely inspected", completed.stderr)
+            self.assertTrue(record.exists())
+            self.assertTrue(lock_dir.is_dir())
+            self.assertTrue((lock_dir / "supervisor-ready").is_file())
+            self.assertTrue((lock_dir / "supervisor-go").is_file())
+            self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_fails_closed_on_malformed_group_zombie_stat_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        for layout in ("paired", "recordless"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                registry = root / "runs"
+                registry.mkdir()
+                run_id = f"{layout}-malformed-group-zombie"
+                lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
+                record = (
+                    self._write_recovery_record(registry, run_id, ready_pid, "101")
+                    if layout == "paired"
+                    else None
+                )
+                ps_query_log = root / "ps-query-log"
+
+                completed = self._run_recovery_with_identity_shims(
+                    shell=shell,
+                    helper=helper,
+                    root=root,
+                    registry=registry,
+                    extra_env={
+                        "GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid} Zbad\\n",
+                        "GP_TEST_RECOVERY_PS_QUERY_LOG": _posix_shell_path(ps_query_log),
+                    },
+                )
+
+                self.assertEqual(completed.returncode, 126, completed.stderr)
+                self.assertIn("cannot be safely inspected", completed.stderr)
+                self.assertEqual(ps_query_log.read_text(encoding="utf-8").splitlines(), ["-e -o pgid= -o sid= -o stat="])
+                if record is not None:
+                    self.assertTrue(record.exists())
+                self.assertTrue(lock_dir.is_dir())
+                self.assertTrue((lock_dir / "supervisor-ready").is_file())
+                self.assertTrue((lock_dir / "supervisor-go").is_file())
+                self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_validates_leader_specific_zombie_inspection_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None or not Path(f"/proc/{os.getpid()}/stat").is_file():
+            self.skipTest("requires a POSIX shell with procfs")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = str(os.getpid())
+        marker = Path(f"/proc/{ready_pid}/stat").read_text(encoding="utf-8").split()[21]
+        leader_query = f"-o pgid= -o sid= -o stat= -p {ready_pid}"
+        cases = {
+            "empty-group": (f"{ready_pid} {ready_pid} Z\\n", f"{ready_pid} {ready_pid} Z+\\n", 0),
+            "live-group-member": (
+                f"{ready_pid} {ready_pid} Z\\n{ready_pid} {ready_pid} S\\n",
+                f"{ready_pid} {ready_pid} Z+\\n",
+                126,
+            ),
+            "malformed-leader": (f"{ready_pid} {ready_pid} Z\\n", f"{ready_pid} {ready_pid} Zbad\\n", 126),
+            "nonzero-leader": (f"{ready_pid} {ready_pid} Z\\n", "", 126),
+        }
+        for layout in ("paired", "recordless"):
+            for case, (process_table, leader_output, expected_code) in cases.items():
+                with self.subTest(layout=layout, case=case), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    registry = root / "runs"
+                    registry.mkdir()
+                    run_id = f"{layout}-{case}-leader-zombie"
+                    lock_dir = self._write_recovery_lock(
+                        registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7
+                    )
+                    record = self._write_recovery_record(registry, run_id, ready_pid, marker) if layout == "paired" else None
+                    ps_query_log = root / "ps-query-log"
+                    extra_env = {
+                        "GP_TEST_RECOVERY_PROCESS_TABLE": process_table,
+                        "GP_TEST_RECOVERY_LEADER_PROCESS_TABLE": leader_output,
+                        "GP_TEST_RECOVERY_PS_QUERY_LOG": _posix_shell_path(ps_query_log),
+                    }
+                    if case == "nonzero-leader":
+                        extra_env["GP_TEST_RECOVERY_LEADER_PS_STATUS"] = "1"
+
+                    completed = self._run_recovery_with_identity_shims(
+                        shell=shell,
+                        helper=helper,
+                        root=root,
+                        registry=registry,
+                        extra_env=extra_env,
+                    )
+
+                    self.assertEqual(completed.returncode, expected_code, completed.stderr)
+                    queries = ps_query_log.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(queries[0], "-e -o pgid= -o sid= -o stat=")
+                    if case == "live-group-member":
+                        self.assertEqual(queries, ["-e -o pgid= -o sid= -o stat="])
+                    else:
+                        self.assertIn(leader_query, queries)
+                    if expected_code == 0:
+                        if record is not None:
+                            self.assertFalse(record.exists())
+                        self.assertFalse(lock_dir.exists())
+                    else:
+                        self.assertIn("supervisor", completed.stderr)
+                        if record is not None:
+                            self.assertTrue(record.exists())
+                        self.assertTrue(lock_dir.is_dir())
+                        self.assertTrue((lock_dir / "supervisor-ready").is_file())
+                        self.assertTrue((lock_dir / "supervisor-go").is_file())
+                        self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_revalidates_liveness_before_deleting_paired_artifacts_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            run_id = "liveness-changes-before-removal"
+            lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
+            record = self._write_recovery_record(registry, run_id, ready_pid, "101")
+            ps_call_count = root / "ps-call-count"
+            ps_call_count.write_text("0\\n", encoding="utf-8")
+
+            completed = self._run_recovery_with_identity_shims(
+                shell=shell,
+                helper=helper,
+                root=root,
+                registry=registry,
+                extra_env={
+                    "GP_TEST_RECOVERY_PS_CALL_COUNT_PATH": _posix_shell_path(ps_call_count),
+                    "GP_TEST_RECOVERY_FIRST_PROCESS_TABLE": f"{ready_pid} {ready_pid} Z\\n",
+                    "GP_TEST_RECOVERY_NEXT_PROCESS_TABLE": f"{ready_pid} {ready_pid} S\\n",
+                },
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertIn("artifacts changed or cannot be safely inspected", completed.stderr)
+            self.assertEqual(ps_call_count.read_text(encoding="utf-8"), "2\\n")
+            self.assertTrue(record.exists())
+            self.assertTrue(lock_dir.is_dir())
+            self.assertTrue((lock_dir / "supervisor-ready").is_file())
+            self.assertTrue((lock_dir / "supervisor-go").is_file())
+            self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_leaves_suspicious_artifacts_untouched_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        dead_pid = "999999"
+        cases = (
+            "unexpected-hidden",
+            "nested-layout",
+            "lifecycle-directory",
+            "lifecycle-symlink",
+            "bad-mode",
+            "bad-owner",
+            "bad-ready-content",
+            "ready-go-pid-mismatch",
+            "status-before-go",
+            "bad-record-content",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                registry = root / "runs"
+                registry.mkdir()
+                run_id = f"suspicious-{case}"
+                record: Path | None = None
+                extra_env: dict[str, str] = {}
+
+                if case == "lifecycle-directory":
+                    lock_dir = registry / f".{run_id}.lock"
+                    lock_dir.mkdir()
+                    (lock_dir / "supervisor-ready").mkdir()
+                elif case == "lifecycle-symlink":
+                    lock_dir = registry / f".{run_id}.lock"
+                    lock_dir.mkdir()
+                    target = root / "ready-target"
+                    target.write_text(f"helper-ready-v1 {dead_pid}\n", encoding="utf-8")
+                    try:
+                        (lock_dir / "supervisor-ready").symlink_to(target)
+                    except OSError as exc:
+                        self.skipTest(f"requires symlink support: {exc}")
+                elif case == "bad-ready-content":
+                    lock_dir = registry / f".{run_id}.lock"
+                    lock_dir.mkdir()
+                    (lock_dir / "supervisor-ready").write_text("not-a-ready-record\n", encoding="utf-8")
+                elif case == "ready-go-pid-mismatch":
+                    lock_dir = self._write_recovery_lock(
+                        registry, run_id, ready_pid=dead_pid, go_pid="999998"
+                    )
+                elif case == "status-before-go":
+                    lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=dead_pid, status=7)
+                elif case == "bad-record-content":
+                    lock_dir = self._write_recovery_lock(
+                        registry, run_id, ready_pid=dead_pid, go_pid=dead_pid, status=7
+                    )
+                    record = registry / run_id
+                    record.write_text("not-a-run-record\n", encoding="utf-8")
+                    record.chmod(0o600)
+                else:
+                    lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=dead_pid)
+                    if case == "unexpected-hidden":
+                        (lock_dir / ".unexpected").write_text("keep\n", encoding="utf-8")
+                    elif case == "nested-layout":
+                        (lock_dir / "nested").mkdir()
+                    elif case == "bad-mode":
+                        extra_env = {
+                            "GP_TEST_RECOVERY_BAD_STAT_PATH": _posix_shell_path(lock_dir / "supervisor-ready"),
+                            "GP_TEST_RECOVERY_BAD_STAT_VALUE": "0:0:644",
+                        }
+                    elif case == "bad-owner":
+                        extra_env = {
+                            "GP_TEST_RECOVERY_BAD_STAT_PATH": _posix_shell_path(lock_dir / "supervisor-ready"),
+                            "GP_TEST_RECOVERY_BAD_STAT_VALUE": "1:0:600",
+                        }
+
+                completed = self._run_recovery_with_identity_shims(
+                    shell=shell,
+                    helper=helper,
+                    root=root,
+                    registry=registry,
+                    extra_env=extra_env,
+                )
+
+                self.assertEqual(completed.returncode, 126, completed.stderr)
+                self.assertTrue(lock_dir.is_dir())
+                if record is not None:
+                    self.assertTrue(record.exists())
+
+    def test_root_recover_runs_removes_valid_dead_artifacts_with_real_metadata(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("flock"):
+            self.skipTest("requires a root Linux test environment with flock")
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX shell")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        dead_pid = "999999"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir(mode=0o750)
+            registry.chmod(0o750)
+            helper_copy = root / "gp-root-helper-recovery-real.sh"
+            helper_copy.write_text(
+                helper.read_text(encoding="utf-8").replace(
+                    "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                    f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
+                ),
+                encoding="utf-8",
+            )
+            run_id = "real-dead-paired"
+            lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=dead_pid, go_pid=dead_pid, status=7)
+            record = self._write_recovery_record(registry, run_id, dead_pid, "101")
+            env = {
+                **os.environ,
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+                "GP_ROOT_HELPER_CONFIG": str(root / "missing-config"),
+            }
+
+            completed = subprocess.run(
+                [shell, str(helper_copy), "recover-runs"], env=env, text=True, capture_output=True, check=False
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(record.exists())
+            self.assertFalse(lock_dir.exists())
+
+            recordless_lock = self._write_recovery_lock(registry, "real-dead-recordless", ready_pid=dead_pid)
+            completed = subprocess.run(
+                [shell, str(helper_copy), "recover-runs"], env=env, text=True, capture_output=True, check=False
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(recordless_lock.exists())
+
+    def _write_recovery_lock(
+        self,
+        registry: Path,
+        run_id: str,
+        *,
+        ready_pid: str,
+        go_pid: str | None = None,
+        status: int | None = None,
+    ) -> Path:
+        lock_dir = registry / f".{run_id}.lock"
+        lock_dir.mkdir()
+        lock_dir.chmod(0o700)
+        ready_file = lock_dir / "supervisor-ready"
+        ready_file.write_text(f"helper-ready-v1 {ready_pid}\n", encoding="utf-8")
+        ready_file.chmod(0o600)
+        if go_pid is not None:
+            go_file = lock_dir / "supervisor-go"
+            go_file.write_text(f"helper-go-v1 {go_pid}\n", encoding="utf-8")
+            go_file.chmod(0o600)
+        if status is not None:
+            status_file = lock_dir / "target-status"
+            status_file.write_text(f"helper-status-v1 {status}\n", encoding="utf-8")
+            status_file.chmod(0o600)
+        return lock_dir
+
+    def _write_recovery_record(self, registry: Path, run_id: str, pid: str, marker: str) -> Path:
+        record = registry / run_id
+        record.write_text(f"helper-v1 {pid} {pid} {marker}\n", encoding="utf-8")
+        record.chmod(0o600)
+        return record
+
+    def _prepare_recovery_identity_test(self, root: Path, helper: Path) -> tuple[Path, Path, Path]:
+        fake_bin = root / "recovery-fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        self._write_recovery_identity_shims(fake_bin)
+        gate_dir = root / "gates"
+        gate_dir.mkdir(exist_ok=True)
+        gate = gate_dir / "discovery-update.lock"
+        gate.touch()
+        helper_copy = root / "gp-root-helper-recovery-test.sh"
+        helper_copy.write_text(
+            helper.read_text(encoding="utf-8").replace(
+                "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                f"DISCOVERY_GATE_DIR='{_posix_shell_path(gate_dir)}'",
+            ),
+            encoding="utf-8",
+        )
+        return helper_copy, fake_bin, gate
+
+    def _write_recovery_identity_shims(self, fake_bin: Path) -> None:
+        (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+        (fake_bin / "install").write_text(
+            "#!/bin/sh\nfor destination do :; done\n[ -d \"$destination\" ] || mkdir -p \"$destination\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "stat").write_text(
+            "#!/bin/sh\n"
+            "if [ -n \"${GP_TEST_RECOVERY_BAD_STAT_PATH:-}\" ]; then\n"
+            "  case \"$*\" in\n"
+            "    *\"$GP_TEST_RECOVERY_BAD_STAT_PATH\"*) printf '%s\\n' \"$GP_TEST_RECOVERY_BAD_STAT_VALUE\"; exit 0 ;;\n"
+            "  esac\n"
+            "fi\n"
+            "case \"$*\" in\n"
+            "  *discovery-update.lock*) printf '0:0:600\\n' ;;\n"
+            "  */gates) printf '0:0:700\\n' ;;\n"
+            "  */runs) printf '0:0:750\\n' ;;\n"
+            "  *.lock) printf '0:0:700\\n' ;;\n"
+            "  *) printf '0:0:600\\n' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "ps").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  '-e -o pgid= -o sid= -o stat=')\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_PS_QUERY_LOG:-}\" ]; then\n"
+            "      printf '%s\\n' \"$*\" >> \"$GP_TEST_RECOVERY_PS_QUERY_LOG\"\n"
+            "    fi\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_PS_STATUS:-}\" ]; then\n"
+            "      exit \"$GP_TEST_RECOVERY_PS_STATUS\"\n"
+            "    fi\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_PS_CALL_COUNT_PATH:-}\" ]; then\n"
+            "      count=$(cat \"$GP_TEST_RECOVERY_PS_CALL_COUNT_PATH\")\n"
+            "      count=$((count + 1))\n"
+            "      printf '%s\\n' \"$count\" > \"$GP_TEST_RECOVERY_PS_CALL_COUNT_PATH\"\n"
+            "      if [ \"$count\" -eq 1 ]; then\n"
+            "        printf '%s' \"${GP_TEST_RECOVERY_FIRST_PROCESS_TABLE:-}\"\n"
+            "      else\n"
+            "        printf '%s' \"${GP_TEST_RECOVERY_NEXT_PROCESS_TABLE:-}\"\n"
+            "      fi\n"
+            "      exit 0\n"
+            "    fi\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_PROCESS_TABLE+x}\" ]; then\n"
+            "      printf '%s' \"$GP_TEST_RECOVERY_PROCESS_TABLE\"\n"
+            "      exit 0\n"
+            "    fi\n"
+            "    ;;\n"
+            "  '-o pgid= -p '*)\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_MANAGED_PGID_PS_STATUS:-}\" ]; then\n"
+            "      exit \"$GP_TEST_RECOVERY_MANAGED_PGID_PS_STATUS\"\n"
+            "    fi\n"
+            "    ;;\n"
+            "  '-o pgid= -o sid= -o stat= -p '*)\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_PS_QUERY_LOG:-}\" ]; then\n"
+            "      printf '%s\\n' \"$*\" >> \"$GP_TEST_RECOVERY_PS_QUERY_LOG\"\n"
+            "    fi\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_LEADER_PS_STATUS:-}\" ]; then\n"
+            "      exit \"$GP_TEST_RECOVERY_LEADER_PS_STATUS\"\n"
+            "    fi\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_LEADER_PROCESS_TABLE+x}\" ]; then\n"
+            "      printf '%s' \"$GP_TEST_RECOVERY_LEADER_PROCESS_TABLE\"\n"
+            "      exit 0\n"
+            "    fi\n"
+            "    ;;\n"
+            "esac\n"
+            "exec /usr/bin/ps \"$@\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for shim in fake_bin.iterdir():
+            shim.chmod(0o700)
+
+    def _recovery_identity_env(
+        self, fake_bin: Path, registry: Path, root: Path, extra_env: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        return {
+            **os.environ,
+            **(extra_env or {}),
+            "PATH": f"{_posix_shell_path(fake_bin)}:/usr/bin:/bin",
+            "GP_ROOT_HELPER_RUN_DIR": _posix_shell_path(registry),
+            "GP_ROOT_HELPER_CONFIG": _posix_shell_path(root / "missing-config"),
+        }
+
+    def _run_recovery_with_identity_shims(
+        self,
+        *,
+        shell: str,
+        helper: Path,
+        root: Path,
+        registry: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        helper_copy, fake_bin, _gate = self._prepare_recovery_identity_test(root, helper)
+        return subprocess.run(
+            [shell, _posix_shell_path(helper_copy), "recover-runs"],
+            env=self._recovery_identity_env(fake_bin, registry, root, extra_env),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_root_helper_cleanup_is_limited_to_a_validated_isolated_process_group(self) -> None:
         helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
 
         self.assertIn('process_session_id() {', helper)
-        self.assertIn('[ "$known_pid" = "$known_pgid" ] || fail "managed process group is not isolated"', helper)
-        self.assertIn('$1 == pgid && $2 == sid', helper)
+        self.assertIn('is_valid_ps_identifier() {', helper)
+        self.assertIn('0) return 0 ;;', helper)
+        self.assertIn('D|I|P|R|S|T|t|W|X|Z', helper)
+        self.assertIn('[ "$listed_pgid" = "$known_pgid" ] &&', helper)
+        self.assertIn('[ "$listed_sid" = "$known_pid" ]', helper)
         self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"', helper)
         self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" TERM', helper)
-        self.assertIn('rm -f "$record"', helper)
+        self.assertIn('rm -f -- "$record"', helper)
         signal_handler = helper.split("signal_registered_process_run() {", 1)[1].split(
-            "recover_registered_process_runs() {", 1
+            "\n}\n\nensure_recovery_run_registry() {", 1
         )[0]
         self.assertLess(
             signal_handler.index('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"'),
-            signal_handler.rindex('rm -f "$record"'),
+            signal_handler.rindex('rm -f -- "$record"'),
         )
+
+    def test_signal_run_preserves_record_and_skips_signal_when_identity_inspection_is_unavailable(self) -> None:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX shell with procfs")
+        if subprocess.run([shell, "-c", "[ -r /proc/$$/stat ]"], check=False).returncode != 0:
+            self.skipTest("requires a POSIX shell with procfs")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            gate_dir = root / "gates"
+            helper_copy = root / "gp-root-helper-unsafe-signal-test.sh"
+            helper_copy.write_text(
+                helper.read_text(encoding="utf-8").replace(
+                    "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                    f"DISCOVERY_GATE_DIR='{_posix_shell_path(gate_dir)}'",
+                ),
+                encoding="utf-8",
+            )
+            signal_log = root / "signals.log"
+            (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+            (fake_bin / "install").write_text(
+                "#!/bin/sh\nfor destination do :; done\nmkdir -p \"$destination\"\n", encoding="utf-8"
+            )
+            (fake_bin / "stat").write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *discovery-update.lock*) printf '0:0:600\\n' ;;\n"
+                "  *) printf '0:0:700\\n' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "chmod").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "ps").write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'-o pgid= -p '*) exit 1 ;;\n"
+                "esac\n"
+                "exec /usr/bin/ps \"$@\"\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "awk").write_text("#!/bin/sh\nprintf '101\\n'\n", encoding="utf-8")
+            for shim in fake_bin.iterdir():
+                shim.chmod(0o700)
+
+            harness = """
+fake_bin=$1
+registry=$2
+signal_log=$3
+helper=$4
+PATH="$fake_bin:/usr/bin:/bin"
+GP_ROOT_HELPER_RUN_DIR="$registry"
+pid=$$
+printf 'helper-v1 %s %s 101\n' "$pid" "$pid" > "$registry/unsafe-identity"
+export PATH GP_ROOT_HELPER_RUN_DIR
+kill() { printf '%s\n' "$*" >> "$signal_log"; }
+set -- signal-run unsafe-identity TERM
+. "$helper"
+"""
+            completed = subprocess.run(
+                [
+                    shell,
+                    "-c",
+                    harness,
+                    "root-helper-unsafe-signal",
+                    _posix_shell_path(fake_bin),
+                    _posix_shell_path(registry),
+                    _posix_shell_path(signal_log),
+                    _posix_shell_path(helper_copy),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertIn("registered process cannot be safely inspected", completed.stderr)
+            self.assertTrue((registry / "unsafe-identity").is_file())
+            self.assertFalse(signal_log.exists())
 
     def test_root_helper_does_not_signal_when_marker_changes_at_revalidation_boundary(self) -> None:
         shell = _posix_shell()
@@ -493,6 +1314,14 @@ table inet blockcheck42
             root = Path(raw)
             registry = root / "runs"
             registry.mkdir()
+            helper_copy = root / "gp-root-helper-marker-test.sh"
+            helper_copy.write_text(
+                helper.read_text(encoding="utf-8").replace(
+                    "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                    f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
+                ),
+                encoding="utf-8",
+            )
             fake_bin = root / "fake-bin"
             fake_bin.mkdir()
             marker_state = root / "marker-count"
@@ -508,12 +1337,10 @@ table inet blockcheck42
                     marker_state.write_text("0", encoding="utf-8")
                     signal_log.unlink(missing_ok=True)
                     lock_dir = registry / f".{run_id}.lock"
-                    lock_dir.mkdir()
                     status_file = lock_dir / "target-status"
-                    status_file.write_text("helper-status-v1 7\n", encoding="utf-8")
                     completed = self._run_root_helper_with_marker_shims(
                         shell=shell,
-                        helper=helper,
+                        helper=helper_copy,
                         fake_bin=fake_bin,
                         registry=registry,
                         marker_state=marker_state,
@@ -526,23 +1353,43 @@ table inet blockcheck42
                     if helper_command == "signal-run":
                         self.assertEqual(completed.returncode, 126, completed.stderr)
                         self.assertIn("stale or invalid", completed.stderr)
+                        self.assertFalse((registry / run_id).exists())
                     else:
-                        self.assertEqual(completed.returncode, 0, completed.stderr)
+                        self.assertEqual(completed.returncode, 126, completed.stderr)
+                        self.assertIn("stale or invalid", completed.stderr)
+                        self.assertTrue((registry / run_id).exists())
                     actual_signals = signal_log.read_text(encoding="utf-8").splitlines() if signal_log.exists() else []
                     self.assertEqual(actual_signals, [])
-                    self.assertFalse((registry / run_id).exists())
                     # A stale marker must never authorize deleting the private status/lock:
                     # it may still describe an unverified active supervisor group.
                     self.assertTrue(lock_dir.is_dir())
                     self.assertEqual(status_file.read_text(encoding="utf-8"), "helper-status-v1 7\n")
+                    shutil.rmtree(lock_dir)
 
     def _write_root_helper_marker_shims(self, fake_bin: Path) -> None:
         (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
-        (fake_bin / "install").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "install").write_text(
+            "#!/bin/sh\nfor destination do :; done\nmkdir -p \"$destination\"\n", encoding="utf-8"
+        )
+        (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "chmod").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "stat").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *discovery-update.lock*) printf '0:0:600\\n' ;;\n"
+            "  */gates) printf '0:0:700\\n' ;;\n"
+            "  */runs) printf '0:0:750\\n' ;;\n"
+            "  *.lock) printf '0:0:700\\n' ;;\n"
+            "  *) printf '0:0:600\\n' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "ps").write_text(
             "#!/bin/sh\n"
             "case \"$*\" in\n"
+            "  *'-e -o pid= -o pgid= -o sid='*) printf '%s %s %s\\n' \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" ;;\n"
             "  *'-e -o pgid= -o sid= -o stat='*) printf '%s %s S\\n' \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" ;;\n"
             "  *'-e -o pgid= -o sid='*) printf '%s %s\\n' \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" ;;\n"
             "  *'-o pgid='*) printf '%s\\n' \"$FAKE_PROCESS_ID\" ;;\n"
@@ -559,9 +1406,9 @@ table inet blockcheck42
             "count=$((count + 1))\n"
             "printf '%s\\n' \"$count\" > \"$FAKE_MARKER_STATE\"\n"
             "if [ \"$count\" -le \"$FAKE_VALID_MARKERS\" ]; then\n"
-            "  printf 'good-marker\\n'\n"
+            "  printf '101\\n'\n"
             "else\n"
-            "  printf 'stale-marker\\n'\n"
+            "  printf '202\\n'\n"
             "fi\n",
             encoding="utf-8",
         )
@@ -598,9 +1445,14 @@ FAKE_MARKER_STATE="$marker_state"
 FAKE_SIGNAL_LOG="$signal_log"
 FAKE_VALID_MARKERS="$valid_markers"
 FAKE_PROCESS_ID=$$
-printf 'helper-v1 %s %s good-marker\n' "$FAKE_PROCESS_ID" "$FAKE_PROCESS_ID" > "$registry/$run_id"
+printf 'helper-v1 %s %s 101\n' "$FAKE_PROCESS_ID" "$FAKE_PROCESS_ID" > "$registry/$run_id"
 export PATH GP_ROOT_HELPER_RUN_DIR FAKE_MARKER_STATE FAKE_SIGNAL_LOG FAKE_VALID_MARKERS FAKE_PROCESS_ID
 kill() { printf '%s\\n' "$*" >> "$FAKE_SIGNAL_LOG"; }
+lock_dir="$registry/.$run_id.lock"
+mkdir "$lock_dir"
+printf 'helper-ready-v1 %s\n' "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-ready"
+printf 'helper-go-v1 %s\n' "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-go"
+printf 'helper-status-v1 7\n' > "$lock_dir/target-status"
 case "$helper_command" in
   signal-run) set -- signal-run "$run_id" TERM ;;
   recover-runs) set -- recover-runs ;;
@@ -694,7 +1546,7 @@ esac
 
                     if expected_code is None:
                         self.assertNotEqual(completed.returncode, 0, completed.stderr)
-                        self.assertIn("managed process group did not exit after KILL", completed.stderr)
+                        self.assertIn("managed process group could not be safely cleaned up (status 2)", completed.stderr)
                     else:
                         self.assertEqual(completed.returncode, expected_code, completed.stderr)
                     self.assertEqual(signal_log.read_text(encoding="utf-8").splitlines(), ["TERM", "KILL"])
@@ -1151,7 +2003,7 @@ set -- run-owned "${13}" "${14}" "$4"
                 registry=registry,
                 signal_log=signal_log,
                 run_id="snapshot-child-leader-reused",
-                leader_after_term_marker="reused-leader-marker",
+                leader_after_term_marker="202",
             )
 
             self.assertEqual(completed.returncode, 126, completed.stderr)
@@ -1163,14 +2015,32 @@ set -- run-owned "${13}" "${14}" "$4"
 
     def _write_root_helper_snapshot_shims(self, fake_bin: Path) -> None:
         (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
-        (fake_bin / "install").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "install").write_text(
+            "#!/bin/sh\nfor destination do :; done\nmkdir -p \"$destination\"\n", encoding="utf-8"
+        )
+        (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "chmod").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "stat").write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *discovery-update.lock*) printf '0:0:600\\n' ;;\n"
+            "  */gates) printf '0:0:700\\n' ;;\n"
+            "  *) printf '0:0:600\\n' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "ps").write_text(
             "#!/bin/sh\n"
             "case \"$*\" in\n"
             "  *'-e -o pid= -o pgid= -o sid='*) printf '%s %s %s\\n%s %s %s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_CHILD_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" ;;\n"
             "  *'-e -o pgid= -o sid= -o stat='*)\n"
-            "    [ \"$(cat \"$FAKE_PHASE\")\" = killed ] || printf '%s %s S\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\"\n"
+            "    if [ \"$(cat \"$FAKE_PHASE\")\" = killed ]; then\n"
+            "      printf '%s %s Z\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\"\n"
+            "    else\n"
+            "      printf '%s %s S\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\"\n"
+            "    fi\n"
             "    ;;\n"
             "  *'-o pgid='*) printf '%s\\n' \"$FAKE_LEADER_PID\" ;;\n"
             "  *'-o sid='*) printf '%s\\n' \"$FAKE_LEADER_PID\" ;;\n"
@@ -1186,10 +2056,10 @@ set -- run-owned "${13}" "${14}" "$4"
             "    if [ \"$(cat \"$FAKE_PHASE\")\" = after-term ]; then\n"
             "      [ -n \"$FAKE_LEADER_AFTER_TERM_MARKER\" ] && printf '%s\\n' \"$FAKE_LEADER_AFTER_TERM_MARKER\"\n"
             "    else\n"
-            "      printf 'leader-marker\\n'\n"
+            "      printf '101\\n'\n"
             "    fi\n"
             "    ;;\n"
-            "  *\"/proc/$FAKE_CHILD_PID/stat\"*) printf 'child-marker\\n' ;;\n"
+            "  *\"/proc/$FAKE_CHILD_PID/stat\"*) printf '102\\n' ;;\n"
             "esac\n",
             encoding="utf-8",
         )
@@ -1207,6 +2077,14 @@ set -- run-owned "${13}" "${14}" "$4"
         run_id: str,
         leader_after_term_marker: str | None,
     ) -> subprocess.CompletedProcess[str]:
+        helper_copy = registry.parent / "gp-root-helper-snapshot-test.sh"
+        helper_copy.write_text(
+            helper.read_text(encoding="utf-8").replace(
+                "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                f"DISCOVERY_GATE_DIR='{_posix_shell_path(registry.parent / 'gates')}'",
+            ),
+            encoding="utf-8",
+        )
         harness = """
 fake_bin=$1
 registry=$2
@@ -1215,7 +2093,8 @@ helper=$4
 run_id=$5
 leader_after_term_marker=$6
 python_executable=$7
-FAKE_LEADER_PID=$$
+"$python_executable" -c 'import time; time.sleep(300)' &
+FAKE_LEADER_PID=$!
 "$python_executable" -c 'import time; time.sleep(300)' &
 FAKE_CHILD_PID=$!
 PATH="$fake_bin:/usr/bin:/bin"
@@ -1224,14 +2103,25 @@ FAKE_SIGNAL_LOG="$signal_log"
 FAKE_PHASE="$registry/phase"
 FAKE_LEADER_AFTER_TERM_MARKER="$leader_after_term_marker"
 printf 'before-term\n' > "$FAKE_PHASE"
-printf 'helper-v1 %s %s leader-marker\n' "$FAKE_LEADER_PID" "$FAKE_LEADER_PID" > "$registry/$run_id"
+printf 'helper-v1 %s %s 101\n' "$FAKE_LEADER_PID" "$FAKE_LEADER_PID" > "$registry/$run_id"
 export PATH GP_ROOT_HELPER_RUN_DIR FAKE_SIGNAL_LOG FAKE_LEADER_PID FAKE_CHILD_PID FAKE_PHASE FAKE_LEADER_AFTER_TERM_MARKER
-cleanup() { command kill -KILL "$FAKE_CHILD_PID" 2>/dev/null || true; wait "$FAKE_CHILD_PID" 2>/dev/null || true; }
+cleanup() {
+  for process_pid in "$FAKE_LEADER_PID" "$FAKE_CHILD_PID"; do
+    command kill -KILL "$process_pid" 2>/dev/null || true
+    wait "$process_pid" 2>/dev/null || true
+  done
+}
 trap cleanup EXIT
 kill() {
   printf '%s\n' "$*" >> "$FAKE_SIGNAL_LOG"
   case "$*" in
-    *-TERM*) printf 'after-term\n' > "$FAKE_PHASE" ;;
+    *-TERM*)
+      printf 'after-term\n' > "$FAKE_PHASE"
+      if [ -z "$FAKE_LEADER_AFTER_TERM_MARKER" ]; then
+        command kill -KILL "$FAKE_LEADER_PID" 2>/dev/null || true
+        wait "$FAKE_LEADER_PID" 2>/dev/null || true
+      fi
+      ;;
     *-KILL*) printf 'killed\n' > "$FAKE_PHASE" ;;
   esac
 }
@@ -1247,7 +2137,7 @@ set -- signal-run "$run_id" TERM
                 _posix_shell_path(fake_bin),
                 _posix_shell_path(registry),
                 _posix_shell_path(signal_log),
-                _posix_shell_path(helper),
+                _posix_shell_path(helper_copy),
                 run_id,
                 leader_after_term_marker or "",
                 _posix_shell_path(Path(sys.executable)),
@@ -1381,7 +2271,7 @@ set -- signal-run "$run_id" TERM
                     stale_record = registry / stale_id
                     _wait_for_path(stale_record)
                     version, pid, pgid, _marker = stale_record.read_text(encoding="utf-8").split()
-                    stale_record.write_text(f"{version} {pid} {pgid} stale-marker\n", encoding="utf-8")
+                    stale_record.write_text(f"{version} {pid} {pgid} 202\n", encoding="utf-8")
 
                     stale_signal = subprocess.run(
                         ["sh", str(helper), "signal-run", stale_id, "TERM"],

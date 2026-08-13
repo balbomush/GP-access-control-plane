@@ -33,11 +33,23 @@ validate_signal() {
   esac
 }
 
-validate_pid() {
+is_valid_pid() {
   case "$1" in
-    ''|0|0*|*[!0-9]*) fail "invalid pid: $1" ;;
-    *) printf '%s\n' "$1" ;;
+    ''|0|0*|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
   esac
+}
+
+is_valid_process_start_marker() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+validate_pid() {
+  is_valid_pid "$1" || fail "invalid pid: $1"
+  printf '%s\n' "$1"
 }
 
 validate_env_assignment() {
@@ -133,12 +145,23 @@ with_discovery_gate() {
   "$@"
 }
 
+with_recovery_gate() {
+  ensure_discovery_gate
+  command -v flock >/dev/null 2>&1 || fail "flock is required for recovery gate"
+  exec 9<>"$DISCOVERY_GATE_FILE"
+  flock -n -x 9 || {
+    printf 'gp-root-helper: recovery blocked by active discovery or strict release update gate\n' >&2
+    return 75
+  }
+  "$@"
+}
+
 write_owned_run_record() {
   run_id="$(validate_run_id "$1")"
   pid="$(validate_pid "$2")"
   pgid="$(validate_pid "$3")"
   marker="$4"
-  [ -n "$marker" ] || fail "process start marker is required"
+  is_valid_process_start_marker "$marker" || fail "invalid process start marker"
   ensure_run_registry
   record="$(registry_record_path "$run_id")"
   umask 077
@@ -238,7 +261,13 @@ wait_for_owned_run_status() {
       status_result="$?"
     fi
     [ "$status_result" -eq 1 ] || return 2
-    managed_process_matches "$known_pid" "$known_pgid" "$known_marker" || return 1
+    if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
+      :
+    else
+      managed_status="$?"
+      [ "$managed_status" -eq 1 ] && return 1
+      return 2
+    fi
     sleep 1
   done
 }
@@ -274,20 +303,32 @@ run_owned_process() {
   remove_unattested_run_lock() {
     [ "$lock_created" = 1 ] || return 0
     [ "$supervisor_started" = 0 ] || return 1
-    rm -f "$ready_file" "$go_file"
-    rmdir "$lock_dir" 2>/dev/null || return 1
+    rm -f -- "$ready_file" "$go_file"
+    rmdir -- "$lock_dir" 2>/dev/null || return 1
     lock_created=0
   }
   remove_owned_run_artifacts() {
     [ "$supervisor_attested" = 1 ] || return 1
-    known_process_group_exists "$pid" "$pgid" && return 1
+    if known_process_group_is_empty "$pid" "$pgid"; then
+      :
+    else
+      return "$?"
+    fi
     set +e
     wait "$pid" 2>/dev/null
     set -e
-    known_process_group_exists "$pid" "$pgid" && return 1
-    managed_process_is_gone "$pid" || return 1
-    rm -f "$record" "$ready_file" "$go_file" "$status_file"
-    rmdir "$lock_dir" 2>/dev/null || return 1
+    if known_process_group_is_empty "$pid" "$pgid"; then
+      :
+    else
+      return "$?"
+    fi
+    if managed_process_is_gone "$pid"; then
+      :
+    else
+      return "$?"
+    fi
+    rm -f -- "$record" "$ready_file" "$go_file" "$status_file"
+    rmdir -- "$lock_dir" 2>/dev/null || return 1
     supervisor_attested=0
   }
   stop_unattested_supervisor() {
@@ -296,7 +337,11 @@ run_owned_process() {
     set +e
     wait "$pid" 2>/dev/null
     set -e
-    managed_process_is_gone "$pid" || return 1
+    if managed_process_is_gone "$pid"; then
+      :
+    else
+      return "$?"
+    fi
     supervisor_started=0
   }
   cleanup_owned_run() {
@@ -305,7 +350,7 @@ run_owned_process() {
         remove_owned_run_artifacts
       else
         cleanup_status="$?"
-        if ! known_process_group_exists "$pid" "$pgid" && managed_process_is_gone "$pid"; then
+        if known_process_group_is_empty "$pid" "$pgid" && managed_process_is_gone "$pid"; then
           remove_owned_run_artifacts || return "$cleanup_status"
           return 0
         fi
@@ -352,6 +397,9 @@ run_owned_process() {
   lock_created=1
   if registered_process_matches "$run_id" >/dev/null 2>&1; then
     fail "run is already active"
+  else
+    registered_status="$?"
+    [ "$registered_status" -eq 1 ] || fail "registered process cannot be safely inspected"
   fi
   [ ! -e "$record" ] && [ ! -L "$record" ] || fail "run record exists; recover it before starting a new run"
   command -v setsid >/dev/null 2>&1 || fail "setsid is required for managed runs"
@@ -1290,76 +1338,245 @@ ensure_run_registry() {
 }
 
 process_start_time() {
-  pid="$(validate_pid "${1:-}")"
-  [ -r "/proc/$pid/stat" ] || return 1
-  awk '{ sub(/^.*\\) /, ""); print $20 }' "/proc/$pid/stat"
+  pid="${1:-}"
+  is_valid_pid "$pid" || return 2
+  if [ ! -r "/proc/$pid/stat" ]; then
+    [ ! -e "/proc/$pid" ] && [ ! -L "/proc/$pid" ] && return 1
+    return 2
+  fi
+  if start_marker="$(awk '{ sub(/^.*\\) /, ""); print $20 }' "/proc/$pid/stat")"; then
+    :
+  else
+    [ ! -e "/proc/$pid" ] && [ ! -L "/proc/$pid" ] && return 1
+    return 2
+  fi
+  is_valid_process_start_marker "$start_marker" || return 2
+  printf '%s\n' "$start_marker"
 }
 
 process_group_id() {
-  pid="$(validate_pid "${1:-}")"
-  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+  pid="${1:-}"
+  is_valid_pid "$pid" || return 2
+  process_group_listing="$(ps -o pgid= -p "$pid" 2>/dev/null)" || return 2
+  set -- $process_group_listing
+  [ "$#" -eq 0 ] && return 1
+  [ "$#" -eq 1 ] || return 2
+  is_valid_pid "$1" || return 2
+  printf '%s\n' "$1"
 }
 
 process_session_id() {
-  pid="$(validate_pid "${1:-}")"
-  ps -o sid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+  pid="${1:-}"
+  is_valid_pid "$pid" || return 2
+  process_session_listing="$(ps -o sid= -p "$pid" 2>/dev/null)" || return 2
+  set -- $process_session_listing
+  [ "$#" -eq 0 ] && return 1
+  [ "$#" -eq 1 ] || return 2
+  is_valid_pid "$1" || return 2
+  printf '%s\n' "$1"
+}
+
+is_valid_ps_identifier() {
+  case "$1" in
+    0) return 0 ;;
+    *) is_valid_pid "$1" ;;
+  esac
+}
+
+classify_linux_ps_stat() {
+  linux_ps_stat="${1:-}"
+  [ -n "$linux_ps_stat" ] || return 2
+  linux_ps_state="${linux_ps_stat%"${linux_ps_stat#?}"}"
+  linux_ps_modifiers="${linux_ps_stat#?}"
+  case "$linux_ps_state" in
+    D|I|P|R|S|T|t|W|X|Z) ;;
+    *) return 2 ;;
+  esac
+
+  # Linux ps documents modifiers in this order after the state letter:
+  # < or N, L, s, l, then +.  Reject unknown, repeated, and reordered values.
+  linux_ps_modifier_stage=0
+  while [ -n "$linux_ps_modifiers" ]; do
+    linux_ps_modifier="${linux_ps_modifiers%"${linux_ps_modifiers#?}"}"
+    linux_ps_modifiers="${linux_ps_modifiers#?}"
+    case "$linux_ps_modifier" in
+      '<'|N)
+        [ "$linux_ps_modifier_stage" -eq 0 ] || return 2
+        linux_ps_modifier_stage=1
+        ;;
+      L)
+        [ "$linux_ps_modifier_stage" -le 1 ] || return 2
+        linux_ps_modifier_stage=2
+        ;;
+      s)
+        [ "$linux_ps_modifier_stage" -le 2 ] || return 2
+        linux_ps_modifier_stage=3
+        ;;
+      l)
+        [ "$linux_ps_modifier_stage" -le 3 ] || return 2
+        linux_ps_modifier_stage=4
+        ;;
+      +)
+        [ "$linux_ps_modifier_stage" -le 4 ] || return 2
+        linux_ps_modifier_stage=5
+        ;;
+      *) return 2 ;;
+    esac
+  done
+
+  [ "$linux_ps_state" = Z ] && return 0
+  return 1
 }
 
 known_process_group_exists() {
   known_pid="$(validate_pid "${1:-}")"
   known_pgid="$(validate_pid "${2:-}")"
   [ "$known_pid" = "$known_pgid" ] || return 1
-  ps -e -o pgid= -o sid= -o stat= 2>/dev/null | awk -v pgid="$known_pgid" -v sid="$known_pid" '
-    $1 == pgid && $2 == sid && $3 !~ /^Z/ { found = 1; exit }
-    END { exit !found }
-  '
+  known_group_listing="$(ps -e -o pgid= -o sid= -o stat= 2>/dev/null)" || return 2
+  [ -n "$known_group_listing" ] || return 2
+  known_group_saw_data=0
+  known_group_found=0
+  while IFS= read -r known_group_line || [ -n "$known_group_line" ]; do
+    IFS=' 	' read -r listed_pgid listed_sid listed_stat listed_extra <<EOF
+$known_group_line
+EOF
+    [ -n "${listed_pgid:-}" ] && [ -n "${listed_sid:-}" ] && [ -n "${listed_stat:-}" ] &&
+      [ -z "${listed_extra:-}" ] || return 2
+    # Kernel threads legitimately appear as unrelated PGID/SID 0 rows.
+    is_valid_ps_identifier "$listed_pgid" && is_valid_ps_identifier "$listed_sid" || return 2
+    if classify_linux_ps_stat "$listed_stat"; then
+      listed_stat_class=0
+    else
+      listed_stat_class="$?"
+    fi
+    [ "$listed_stat_class" -le 1 ] || return 2
+    known_group_saw_data=1
+    if [ "$listed_pgid" = "$known_pgid" ] && [ "$listed_sid" = "$known_pid" ] &&
+      [ "$listed_stat_class" -ne 0 ]; then
+      known_group_found=1
+    fi
+  done <<EOF
+$known_group_listing
+EOF
+  [ "$known_group_saw_data" = 1 ] || return 2
+  [ "$known_group_found" = 1 ]
+}
+
+known_process_group_is_empty() {
+  if known_process_group_exists "$@"; then
+    return 1
+  else
+    known_group_status="$?"
+  fi
+  [ "$known_group_status" -eq 1 ] || return 2
 }
 
 managed_process_matches() {
-  known_pid="$(validate_pid "${1:-}")"
-  known_pgid="$(validate_pid "${2:-}")"
+  # 0 is a confirmed identity match; 1 is confirmed stale/reused/gone;
+  # 2 means the identity cannot be safely inspected.
+  known_pid="${1:-}"
+  known_pgid="${2:-}"
   known_marker="${3:-}"
-  [ -n "$known_marker" ] || return 1
-  [ "$known_pid" = "$known_pgid" ] || return 1
-  [ "$(process_start_time "$known_pid" 2>/dev/null || true)" = "$known_marker" ] || return 1
-  [ "$(process_group_id "$known_pid" 2>/dev/null || true)" = "$known_pgid" ] || return 1
-  [ "$(process_session_id "$known_pid" 2>/dev/null || true)" = "$known_pid" ] || return 1
+  is_valid_pid "$known_pid" && is_valid_pid "$known_pgid" &&
+    is_valid_process_start_marker "$known_marker" || return 2
+  [ "$known_pid" = "$known_pgid" ] || return 2
+  if observed_marker="$(process_start_time "$known_pid")"; then
+    :
+  else
+    process_status="$?"
+    [ "$process_status" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$observed_marker" = "$known_marker" ] || return 1
+  if observed_pgid="$(process_group_id "$known_pid")"; then
+    :
+  else
+    process_status="$?"
+    [ "$process_status" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$observed_pgid" = "$known_pgid" ] || return 1
+  if observed_sid="$(process_session_id "$known_pid")"; then
+    :
+  else
+    process_status="$?"
+    [ "$process_status" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$observed_sid" = "$known_pid" ] || return 1
 }
 
 managed_process_group_snapshot() {
-  known_pid="$(validate_pid "${1:-}")"
-  known_pgid="$(validate_pid "${2:-}")"
-  [ "$known_pid" = "$known_pgid" ] || return 1
-  ps -e -o pid= -o pgid= -o sid= 2>/dev/null | awk -v pgid="$known_pgid" -v sid="$known_pid" '
-    $2 == pgid && $3 == sid { print $1 }
-  ' | while IFS= read -r known_member_pid; do
-    known_member_marker="$(process_start_time "$known_member_pid" 2>/dev/null || true)"
-    [ -n "$known_member_marker" ] && printf '%s %s\n' "$known_member_pid" "$known_member_marker"
-  done
+  known_pid="${1:-}"
+  known_pgid="${2:-}"
+  is_valid_pid "$known_pid" && is_valid_pid "$known_pgid" && [ "$known_pid" = "$known_pgid" ] || return 2
+  known_snapshot_listing="$(ps -e -o pid= -o pgid= -o sid= 2>/dev/null)" || return 2
+  [ -n "$known_snapshot_listing" ] || return 2
+  while IFS= read -r known_snapshot_line || [ -n "$known_snapshot_line" ]; do
+    IFS=' 	' read -r listed_pid listed_pgid listed_sid listed_extra <<EOF
+$known_snapshot_line
+EOF
+    [ -n "${listed_pid:-}" ] && [ -n "${listed_pgid:-}" ] && [ -n "${listed_sid:-}" ] &&
+      [ -z "${listed_extra:-}" ] || return 2
+    is_valid_pid "$listed_pid" && is_valid_ps_identifier "$listed_pgid" && is_valid_ps_identifier "$listed_sid" || return 2
+    [ "$listed_pgid" = "$known_pgid" ] && [ "$listed_sid" = "$known_pid" ] || continue
+    if known_member_marker="$(process_start_time "$listed_pid")"; then
+      printf '%s %s\n' "$listed_pid" "$known_member_marker"
+    else
+      process_status="$?"
+      [ "$process_status" -eq 1 ] || return 2
+    fi
+  done <<EOF
+$known_snapshot_listing
+EOF
 }
 
 snapshot_member_matches() {
-  known_pid="$(validate_pid "${1:-}")"
-  known_pgid="$(validate_pid "${2:-}")"
-  known_member_pid="$(validate_pid "${3:-}")"
+  known_pid="${1:-}"
+  known_pgid="${2:-}"
+  known_member_pid="${3:-}"
   known_member_marker="${4:-}"
-  [ -n "$known_member_marker" ] || return 1
-  [ "$known_pid" = "$known_pgid" ] || return 1
-  [ "$(process_start_time "$known_member_pid" 2>/dev/null || true)" = "$known_member_marker" ] || return 1
-  [ "$(process_group_id "$known_member_pid" 2>/dev/null || true)" = "$known_pgid" ] || return 1
-  [ "$(process_session_id "$known_member_pid" 2>/dev/null || true)" = "$known_pid" ] || return 1
+  is_valid_pid "$known_pid" && is_valid_pid "$known_pgid" && is_valid_pid "$known_member_pid" &&
+    is_valid_process_start_marker "$known_member_marker" && [ "$known_pid" = "$known_pgid" ] || return 2
+  if observed_marker="$(process_start_time "$known_member_pid")"; then
+    :
+  else
+    process_status="$?"
+    [ "$process_status" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$observed_marker" = "$known_member_marker" ] || return 1
+  if observed_pgid="$(process_group_id "$known_member_pid")"; then
+    :
+  else
+    process_status="$?"
+    [ "$process_status" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$observed_pgid" = "$known_pgid" ] || return 1
+  if observed_sid="$(process_session_id "$known_member_pid")"; then
+    :
+  else
+    process_status="$?"
+    [ "$process_status" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$observed_sid" = "$known_pid" ] || return 1
 }
 
 snapshot_has_live_member() {
-  known_pid="$(validate_pid "${1:-}")"
-  known_pgid="$(validate_pid "${2:-}")"
+  known_pid="${1:-}"
+  known_pgid="${2:-}"
   known_snapshot="${3:-}"
-  [ "$known_pid" = "$known_pgid" ] || return 1
+  is_valid_pid "$known_pid" && is_valid_pid "$known_pgid" && [ "$known_pid" = "$known_pgid" ] || return 2
   while IFS=' ' read -r known_member_pid known_member_marker known_extra; do
     [ -n "$known_member_pid" ] || continue
-    [ -z "${known_extra:-}" ] || continue
+    [ -z "${known_extra:-}" ] || return 2
     if snapshot_member_matches "$known_pid" "$known_pgid" "$known_member_pid" "$known_member_marker"; then
       return 0
+    else
+      snapshot_status="$?"
+      [ "$snapshot_status" -eq 1 ] || return 2
     fi
   done <<EOF
 $known_snapshot
@@ -1368,63 +1585,115 @@ EOF
 }
 
 managed_process_is_gone() {
-  known_pid="$(validate_pid "${1:-}")"
-  [ -z "$(process_start_time "$known_pid" 2>/dev/null || true)" ]
+  known_pid="${1:-}"
+  is_valid_pid "$known_pid" || return 2
+  if process_start_time "$known_pid" >/dev/null; then
+    return 1
+  else
+    process_status="$?"
+  fi
+  [ "$process_status" -eq 1 ] && return 0
+  return 2
 }
 
 terminate_known_process_group() {
-  known_pid="$(validate_pid "${1:-}")"
-  known_pgid="$(validate_pid "${2:-}")"
+  known_pid="${1:-}"
+  known_pgid="${2:-}"
   known_marker="${3:-}"
   known_signal="$(validate_signal "${4:-}")"
-  [ "$known_pid" = "$known_pgid" ] || fail "managed process group is not isolated"
-  [ -n "$known_marker" ] || return 2
+  is_valid_pid "$known_pid" && is_valid_pid "$known_pgid" && [ "$known_pid" = "$known_pgid" ] || return 2
+  is_valid_process_start_marker "$known_marker" || return 2
   known_waited=0
-  managed_process_matches "$known_pid" "$known_pgid" "$known_marker" || return 2
+  if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
+    :
+  else
+    return "$?"
+  fi
   if [ "$known_signal" = KILL ]; then
-    managed_process_matches "$known_pid" "$known_pgid" "$known_marker" || return 2
+    if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
+      :
+    else
+      return "$?"
+    fi
     kill -KILL -- "-$known_pgid" 2>/dev/null || true
   else
-    known_snapshot="$(managed_process_group_snapshot "$known_pid" "$known_pgid")"
-    managed_process_matches "$known_pid" "$known_pgid" "$known_marker" || return 2
-    kill "-$known_signal" -- "-$known_pgid" 2>/dev/null || true
-    while known_process_group_exists "$known_pid" "$known_pgid"; do
-      [ "$known_waited" -ge 2 ] && break
-      sleep 1
-      known_waited=$((known_waited + 1))
-    done
-    if ! known_process_group_exists "$known_pid" "$known_pgid"; then
-      return 0
+    if known_snapshot="$(managed_process_group_snapshot "$known_pid" "$known_pgid")"; then
+      :
+    else
+      return "$?"
     fi
     if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
       :
-    elif managed_process_is_gone "$known_pid" && snapshot_has_live_member "$known_pid" "$known_pgid" "$known_snapshot"; then
+    else
+      return "$?"
+    fi
+    kill "-$known_signal" -- "-$known_pgid" 2>/dev/null || true
+    while :; do
+      if known_process_group_exists "$known_pid" "$known_pgid"; then
+        [ "$known_waited" -ge 2 ] && break
+        sleep 1
+        known_waited=$((known_waited + 1))
+      else
+        known_group_status="$?"
+        [ "$known_group_status" -eq 1 ] && return 0
+        return 2
+      fi
+    done
+    if ! known_process_group_exists "$known_pid" "$known_pgid"; then
+      known_group_status="$?"
+      [ "$known_group_status" -eq 1 ] && return 0
+      return 2
+    fi
+    if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
       :
     else
-      return 2
+      managed_status="$?"
+      if [ "$managed_status" -eq 1 ] && managed_process_is_gone "$known_pid" &&
+        snapshot_has_live_member "$known_pid" "$known_pgid" "$known_snapshot"; then
+        :
+      else
+        process_status="$?"
+        [ "$managed_status" -eq 1 ] && [ "$process_status" -eq 1 ] && return 1
+        return 2
+      fi
     fi
     kill -KILL -- "-$known_pgid" 2>/dev/null || true
   fi
   known_waited=0
-  while known_process_group_exists "$known_pid" "$known_pgid"; do
-    [ "$known_waited" -ge 2 ] && fail "managed process group did not exit after KILL"
-    sleep 1
-    known_waited=$((known_waited + 1))
+  while :; do
+    if known_process_group_exists "$known_pid" "$known_pgid"; then
+      [ "$known_waited" -ge 2 ] && return 2
+      sleep 1
+      known_waited=$((known_waited + 1))
+    else
+      known_group_status="$?"
+      [ "$known_group_status" -eq 1 ] && return 0
+      return 2
+    fi
   done
-  return 0
 }
 
 registered_process_matches() {
   run_id="$(validate_run_id "${1:-}")"
   record="$(registry_record_path "$run_id")"
-  [ -f "$record" ] && [ ! -L "$record" ] || return 1
-  IFS=' ' read -r version pid pgid marker extra < "$record" || return 1
-  [ "$version" = "helper-v1" ] || return 1
-  [ -z "${extra:-}" ] || return 1
-  validate_pid "$pid" >/dev/null
-  validate_pid "$pgid" >/dev/null
-  [ -n "$marker" ] || return 1
-  managed_process_matches "$pid" "$pgid" "$marker" || return 1
+  if [ ! -e "$record" ] && [ ! -L "$record" ]; then
+    return 1
+  fi
+  [ -f "$record" ] && [ ! -L "$record" ] || return 2
+  if record_target="$(read_recovery_run_record "$record")"; then
+    :
+  else
+    return 2
+  fi
+  pid="${record_target%% *}"
+  record_target="${record_target#* }"
+  pgid="${record_target%% *}"
+  marker="${record_target#* }"
+  if managed_process_matches "$pid" "$pgid" "$marker"; then
+    :
+  else
+    return "$?"
+  fi
   printf '%s %s %s\n' "$pid" "$pgid" "$marker"
 }
 
@@ -1433,9 +1702,12 @@ signal_registered_process_run() {
   run_id="$(validate_run_id "$1")"
   signal="$(validate_signal "$2")"
   record="$(registry_record_path "$run_id")"
-  target="$(registered_process_matches "$run_id" || true)"
-  if [ -z "$target" ]; then
-    rm -f "$record"
+  if target="$(registered_process_matches "$run_id")"; then
+    :
+  else
+    registered_status="$?"
+    [ "$registered_status" -eq 1 ] || fail "registered process cannot be safely inspected"
+    rm -f -- "$record"
     fail "registered process is stale or invalid"
   fi
   pid="${target%% *}"
@@ -1443,33 +1715,282 @@ signal_registered_process_run() {
   pgid="${target%% *}"
   marker="${target#* }"
   if terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"; then
-    rm -f "$record"
+    rm -f -- "$record"
   else
     termination_status="$?"
-    [ "$termination_status" -eq 2 ] || return "$termination_status"
-    rm -f "$record"
+    [ "$termination_status" -eq 1 ] || fail "registered process cannot be safely inspected"
+    rm -f -- "$record"
     fail "registered process is stale or invalid"
   fi
 }
 
+ensure_recovery_run_registry() {
+  [ ! -L "$RUN_REGISTRY_DIR" ] || fail "run registry must not be a symlink: $RUN_REGISTRY_DIR"
+  install -d -m 0750 -o root -g root "$RUN_REGISTRY_DIR" || fail "cannot create run registry: $RUN_REGISTRY_DIR"
+  [ -d "$RUN_REGISTRY_DIR" ] && [ ! -L "$RUN_REGISTRY_DIR" ] || fail "run registry is unsafe: $RUN_REGISTRY_DIR"
+  [ "$(stat -c '%u:%g:%a' "$RUN_REGISTRY_DIR" 2>/dev/null || true)" = '0:0:750' ] ||
+    fail "run registry must be root:root mode 0750: $RUN_REGISTRY_DIR"
+}
+
+recovery_lifecycle_file_is_safe() {
+  lifecycle_file="$1"
+  [ -f "$lifecycle_file" ] && [ ! -L "$lifecycle_file" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$lifecycle_file" 2>/dev/null || true)" = '0:0:600' ] || return 1
+}
+
+read_owned_run_go() {
+  go_file="$1"
+  [ -e "$go_file" ] || return 1
+  go_contents="$(cat "$go_file")" || return 2
+  case "$go_contents" in
+    'helper-go-v1 '*) ;;
+    *) return 2 ;;
+  esac
+  go_pid="${go_contents#helper-go-v1 }"
+  [ "$go_contents" = "helper-go-v1 $go_pid" ] || return 2
+  is_valid_pid "$go_pid" || return 2
+  printf '%s\n' "$go_pid"
+}
+
+read_recovery_run_record() {
+  record="$1"
+  record_contents="$(cat "$record")" || return 1
+  IFS=' ' read -r version pid pgid marker extra <<EOF
+$record_contents
+EOF
+  [ "$version" = helper-v1 ] || return 1
+  [ -n "${pid:-}" ] && [ -n "${pgid:-}" ] && is_valid_process_start_marker "$marker" || return 1
+  [ -z "${extra:-}" ] || return 1
+  [ "$record_contents" = "helper-v1 $pid $pgid $marker" ] || return 1
+  is_valid_pid "$pid" && is_valid_pid "$pgid" || return 1
+  [ "$pid" = "$pgid" ] || return 1
+  printf '%s %s %s\n' "$pid" "$pgid" "$marker"
+}
+
+recovery_lock_path() {
+  run_id="$(validate_run_id "${1:-}")"
+  printf '%s/.%s.lock\n' "$RUN_REGISTRY_DIR" "$run_id"
+}
+
+recovery_validate_run_lock() {
+  run_id="$(validate_run_id "${1:-}")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  go_file="$lock_dir/supervisor-go"
+  status_file="$lock_dir/target-status"
+  ready_present=0
+  go_present=0
+  status_present=0
+
+  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$lock_dir" 2>/dev/null || true)" = '0:0:700' ] || return 1
+  for lifecycle_file in "$lock_dir"/* "$lock_dir"/.[!.]* "$lock_dir"/..?*; do
+    [ -e "$lifecycle_file" ] || [ -L "$lifecycle_file" ] || continue
+    lifecycle_name="${lifecycle_file##*/}"
+    case "$lifecycle_name" in
+      supervisor-ready)
+        [ "$ready_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        ready_present=1
+        ;;
+      supervisor-go)
+        [ "$go_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        go_present=1
+        ;;
+      target-status)
+        [ "$status_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        status_present=1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+
+  if [ "$ready_present" = 0 ]; then
+    [ "$go_present" = 0 ] && [ "$status_present" = 0 ] || return 1
+    return 0
+  fi
+  ready_pid="$(read_owned_run_ready "$ready_file")" || return 1
+  if [ "$go_present" = 0 ]; then
+    [ "$status_present" = 0 ] || return 1
+    return 0
+  fi
+  go_pid="$(read_owned_run_go "$go_file")" || return 1
+  [ "$go_pid" = "$ready_pid" ] || return 1
+  if [ "$status_present" = 1 ]; then
+    read_owned_run_status "$status_file" >/dev/null || return 1
+  fi
+}
+
+recovery_validate_record() {
+  run_id="$(validate_run_id "${1:-}")"
+  record="$(registry_record_path "$run_id")"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$record" 2>/dev/null || true)" = '0:0:600' ] || return 1
+  read_recovery_run_record "$record" >/dev/null
+}
+
+recovery_validate_registry_layout() {
+  for artifact in "$RUN_REGISTRY_DIR"/* "$RUN_REGISTRY_DIR"/.[!.]* "$RUN_REGISTRY_DIR"/..?*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    artifact_name="${artifact##*/}"
+    case "$artifact_name" in
+      .*.lock)
+        lock_run_id="${artifact_name#.}"
+        lock_run_id="${lock_run_id%.lock}"
+        [ ".${lock_run_id}.lock" = "$artifact_name" ] || return 1
+        validate_run_id "$lock_run_id" >/dev/null 2>&1 || return 1
+        recovery_validate_run_lock "$lock_run_id" || return 1
+        ;;
+      *)
+        validate_run_id "$artifact_name" >/dev/null 2>&1 || return 1
+        recovery_validate_record "$artifact_name" || return 1
+        ;;
+    esac
+  done
+}
+
+remove_recovery_run_artifacts() {
+  run_id="$(validate_run_id "${1:-}")"
+  expected_ready_pid="$(validate_pid "${2:-}")"
+  expected_marker="${3:-}"
+  expected_record_target="${4:-}"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  record="$(registry_record_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  go_file="$lock_dir/supervisor-go"
+  status_file="$lock_dir/target-status"
+
+  # Repeat every ownership and liveness check immediately before destructive cleanup.
+  recovery_validate_run_lock "$run_id" || return 2
+  ready_pid="$(read_owned_run_ready "$ready_file")" || return 2
+  [ "$ready_pid" = "$expected_ready_pid" ] || return 2
+  if [ -n "$expected_record_target" ]; then
+    [ -n "$expected_marker" ] || return 2
+    [ "$expected_record_target" = "$expected_ready_pid $expected_ready_pid $expected_marker" ] || return 2
+    recovery_validate_record "$run_id" || return 2
+    [ "$(read_recovery_run_record "$record")" = "$expected_record_target" ] || return 2
+  else
+    [ -z "$expected_marker" ] || return 2
+    [ ! -e "$record" ] && [ ! -L "$record" ] || return 2
+  fi
+  recovery_ready_pid_is_safe_to_forget "$ready_file" || return 2
+
+  rm -f -- "$ready_file" "$go_file" "$status_file" || return 1
+  rmdir -- "$lock_dir" 2>/dev/null || return 1
+  if [ -n "$expected_record_target" ]; then
+    recovery_validate_record "$run_id" || return 2
+    [ "$(read_recovery_run_record "$record")" = "$expected_record_target" ] || return 2
+    rm -f -- "$record" || return 1
+  fi
+}
+
+recovery_ready_pid_is_safe_to_forget() {
+  ready_pid="$(read_owned_run_ready "$1")" || return 1
+  if known_process_group_exists "$ready_pid" "$ready_pid"; then
+    return 1
+  else
+    recovery_group_status="$?"
+  fi
+  [ "$recovery_group_status" -eq 1 ] || return 2
+
+  if ! kill -0 "$ready_pid" 2>/dev/null; then
+    [ ! -e "/proc/$ready_pid" ] && [ ! -L "/proc/$ready_pid" ] || return 2
+    return 0
+  fi
+
+  recovery_leader="$(ps -o pgid= -o sid= -o stat= -p "$ready_pid" 2>/dev/null)" || return 2
+  set -- $recovery_leader
+  [ "$#" -eq 3 ] || return 2
+  is_valid_pid "$1" && is_valid_pid "$2" || return 2
+  [ "$1" = "$ready_pid" ] && [ "$2" = "$ready_pid" ] || return 2
+  classify_linux_ps_stat "$3"
+}
+
+recover_paired_run() {
+  run_id="$(validate_run_id "${1:-}")"
+  record="$(registry_record_path "$run_id")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || fail "run record has no paired lock: $run_id"
+  recovery_validate_run_lock "$run_id" || fail "run lock is unsafe: $run_id"
+  record_target="$(read_recovery_run_record "$record")" || fail "run record is unsafe: $run_id"
+  pid="${record_target%% *}"
+  record_target="${record_target#* }"
+  pgid="${record_target%% *}"
+  marker="${record_target#* }"
+  ready_pid="$(read_owned_run_ready "$ready_file")" || fail "run lock is unsafe: $run_id"
+  [ "$ready_pid" = "$pid" ] || fail "run record and lock PID mismatch: $run_id"
+  registered_stale=0
+
+  if registered_target="$(registered_process_matches "$run_id")"; then
+    if terminate_known_process_group "$pid" "$pgid" "$marker" TERM; then
+      :
+    else
+      termination_status="$?"
+      [ "$termination_status" -eq 1 ] || fail "registered process cannot be safely inspected: $run_id"
+      registered_stale=1
+    fi
+  else
+    registered_status="$?"
+    [ "$registered_status" -eq 1 ] || fail "registered process cannot be safely inspected: $run_id"
+    registered_stale=1
+  fi
+
+  if recovery_ready_pid_is_safe_to_forget "$ready_file"; then
+    :
+  else
+    recovery_status="$?"
+    [ "$registered_stale" -eq 1 ] && [ "$recovery_status" -eq 1 ] &&
+      fail "registered process is stale or invalid"
+    [ "$recovery_status" -eq 1 ] && fail "run lock supervisor is still live: $run_id"
+    fail "run lock supervisor cannot be safely inspected: $run_id"
+  fi
+  if remove_recovery_run_artifacts "$run_id" "$ready_pid" "$marker" "$pid $pgid $marker"; then
+    :
+  else
+    removal_status="$?"
+    [ "$removal_status" -eq 2 ] && fail "recovered run artifacts changed or cannot be safely inspected: $run_id"
+    fail "cannot remove recovered run artifacts: $run_id"
+  fi
+}
+
+recover_recordless_run_lock() {
+  run_id="$(validate_run_id "${1:-}")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  recovery_validate_run_lock "$run_id" || fail "run lock is unsafe: $run_id"
+  [ -e "$ready_file" ] || fail "recordless run lock is still starting: $run_id"
+  if recovery_ready_pid_is_safe_to_forget "$ready_file"; then
+    :
+  else
+    recovery_status="$?"
+    [ "$recovery_status" -eq 1 ] && fail "run lock supervisor is still live: $run_id"
+    fail "run lock supervisor cannot be safely inspected: $run_id"
+  fi
+  if remove_recovery_run_artifacts "$run_id" "$ready_pid" "" ""; then
+    :
+  else
+    removal_status="$?"
+    [ "$removal_status" -eq 2 ] && fail "recovered run lock changed or cannot be safely inspected: $run_id"
+    fail "cannot remove recovered run lock: $run_id"
+  fi
+}
+
 recover_registered_process_runs() {
-  ensure_run_registry
+  ensure_recovery_run_registry
+  recovery_validate_registry_layout || fail "run registry contains unsafe recovery artifacts"
   for record in "$RUN_REGISTRY_DIR"/*; do
     [ -e "$record" ] || continue
     run_id="$(basename "$record")"
-    if target="$(registered_process_matches "$run_id" 2>/dev/null || true)" && [ -n "$target" ]; then
-      pid="${target%% *}"
-      target="${target#* }"
-      pgid="${target%% *}"
-      marker="${target#* }"
-      if terminate_known_process_group "$pid" "$pgid" "$marker" TERM; then
-        :
-      else
-        termination_status="$?"
-        [ "$termination_status" -eq 2 ] || return "$termination_status"
-      fi
-    fi
-    rm -f "$record"
+    recover_paired_run "$run_id"
+  done
+  for lock_dir in "$RUN_REGISTRY_DIR"/.[!.]*.lock "$RUN_REGISTRY_DIR"/..?*.lock; do
+    [ -e "$lock_dir" ] || [ -L "$lock_dir" ] || continue
+    lock_name="${lock_dir##*/}"
+    run_id="${lock_name#.}"
+    run_id="${run_id%.lock}"
+    record="$(registry_record_path "$run_id")"
+    [ ! -e "$record" ] && [ ! -L "$record" ] || continue
+    recover_recordless_run_lock "$run_id"
   done
 }
 
@@ -1485,11 +2006,11 @@ case "$command" in
     exit 0
     ;;
   signal-run)
-    signal_registered_process_run "$@"
+    with_discovery_gate signal_registered_process_run "$@"
     ;;
   recover-runs)
     [ "$#" -eq 0 ] || fail "recover-runs accepts no arguments"
-    recover_registered_process_runs
+    with_recovery_gate recover_registered_process_runs
     ;;
   run)
     with_discovery_gate run_target "$@"
