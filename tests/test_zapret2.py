@@ -1209,6 +1209,8 @@ table inet blockcheck42
         self.assertIn('[ "$listed_sid" = "$known_pid" ]', helper)
         self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"', helper)
         self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" TERM', helper)
+        self.assertIn('for known_kill_binary in /bin/kill /usr/bin/kill; do', helper)
+        self.assertIn('"$known_kill_binary" "-$known_signal" -- "-$known_pgid"', helper)
         self.assertIn('rm -f -- "$record"', helper)
         signal_handler = helper.split("signal_registered_process_run() {", 1)[1].split(
             "\n}\n\nensure_recovery_run_registry() {", 1
@@ -1217,6 +1219,92 @@ table inet blockcheck42
             signal_handler.index('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"'),
             signal_handler.rindex('rm -f -- "$record"'),
         )
+
+    def test_process_start_time_parser_uses_field_22_after_the_final_comm_delimiter(self) -> None:
+        if sys.platform == "linux":
+            dash = Path("/bin/dash")
+            if not dash.is_file():
+                self.skipTest("requires /bin/dash for the POSIX parser fixture on Linux")
+            shell = str(dash)
+        else:
+            shell = _posix_shell()
+            if shell is None:
+                self.skipTest("requires a POSIX sh interpreter")
+        parser_env = dict(os.environ)
+        if os.name == "nt":
+            git_usr_bin = Path(r"C:\Program Files\Git\usr\bin")
+            if not (git_usr_bin / "awk.exe").is_file():
+                self.skipTest("requires awk for the POSIX parser fixture")
+            parser_env["PATH"] = f"{git_usr_bin}{os.pathsep}{parser_env.get('PATH', '')}"
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            library = root / "root-helper-library.sh"
+            library.write_text(helper.read_text(encoding="utf-8").split("\nrequire_root\n", 1)[0] + "\n", encoding="utf-8")
+            stat_fields = ["S", *map(str, range(1, 20))]
+            stat_fields[19] = "197364730"
+            for name, comm in (("simple", "sh"), ("spaces-and-parens", "worker ) name)")):
+                fixture = root / name
+                fixture.write_text(f"7187 ({comm}) {' '.join(stat_fields)}\n", encoding="utf-8")
+                completed = subprocess.run(
+                    [shell, "-c", '. "$1"; process_start_time_from_stat "$2"', "root-helper-parser", str(library), str(fixture)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=parser_env,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout, "197364730\n")
+
+            missing_stat_fixture = root / "missing-stat"
+            completed = subprocess.run(
+                [
+                    shell,
+                    "-c",
+                    '''
+awk() {
+  printf '%s\n' 'unexpected awk invocation' >&2
+  return 0
+}
+. "$1"
+process_start_time_from_stat "$2"
+''',
+                    "root-helper-missing-stat",
+                    str(library),
+                    str(missing_stat_fixture),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=parser_env,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertNotIn("unexpected awk invocation", completed.stderr)
+
+            invalid_fixtures = {
+                "missing-delimiter": f"7187 sh {' '.join(stat_fields)}\n",
+                "multiline": f"7187 (sh) {' '.join(stat_fields)}\nextra\n",
+                "non-numeric": f"7187 (sh) {' '.join([*stat_fields[:19], 'not-a-marker'])}\n",
+            }
+            for name, contents in invalid_fixtures.items():
+                fixture = root / name
+                fixture.write_text(contents, encoding="utf-8")
+                completed = subprocess.run(
+                    [shell, "-c", '. "$1"; process_start_time_from_stat "$2"', "root-helper-parser", str(library), str(fixture)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=parser_env,
+                )
+                self.assertEqual(completed.returncode, 2, name)
+            completed = subprocess.run(
+                [shell, "-c", '. "$1"; process_start_time_from_stat "$2"', "root-helper-parser", str(library), str(root / "missing")],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=parser_env,
+            )
+            self.assertEqual(completed.returncode, 2)
 
     def test_signal_run_preserves_record_and_skips_signal_when_identity_inspection_is_unavailable(self) -> None:
         shell = _posix_shell()
@@ -1319,6 +1407,9 @@ set -- signal-run unsafe-identity TERM
                 helper.read_text(encoding="utf-8").replace(
                     "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
                     f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
+                ).replace(
+                    "\nrequire_root\n",
+                    '\nsignal_known_process_group() { kill "-$1" -- "-$2"; }\n\nrequire_root\n',
                 ),
                 encoding="utf-8",
             )
@@ -1523,6 +1614,9 @@ esac
                         helper.read_text(encoding="utf-8").replace(
                             "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
                             f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
+                        ).replace(
+                            "\nrequire_root\n",
+                            '\nsignal_known_process_group() { kill "-$1" -- "$2"; }\n\nrequire_root\n',
                         ),
                         encoding="utf-8",
                     )
@@ -1552,6 +1646,8 @@ esac
                     self.assertEqual(signal_log.read_text(encoding="utf-8").splitlines(), ["TERM", "KILL"])
                     self.assertEqual((root / "term-observed-status").read_text(encoding="utf-8"), "live\n")
                     self.assertEqual((root / "child-killed").read_text(encoding="utf-8"), "yes\n")
+                    self.assertEqual((root / "child-reaped").read_text(encoding="utf-8"), "yes\n")
+                    self.assertFalse((root / "emergency-cleanup-used").exists())
                     self.assertEqual((registry / run_id).exists(), not artifacts_removed)
                     self.assertEqual(status_file.exists(), not artifacts_removed)
                     self.assertEqual(lock_dir.exists(), not artifacts_removed)
@@ -1835,27 +1931,6 @@ run_owned_multidomain_target "$2" "$3"
             "esac\n",
             encoding="utf-8",
         )
-        (fake_bin / "kill").write_text(
-            "#!/bin/sh\n"
-            "case \"$*\" in\n"
-            "  *-TERM*)\n"
-            "    printf 'TERM\\n' >> \"$FAKE_SIGNAL_LOG\"\n"
-            "    supervisor=$(cat \"$FAKE_SUPERVISOR_PID_PATH\")\n"
-            "    if [ -f \"$FAKE_STATUS_FILE\" ] && command kill -0 \"$supervisor\" 2>/dev/null; then\n"
-            "      printf 'live\\n' > \"$FAKE_TERM_OBSERVED_STATUS\"\n"
-            "    fi\n"
-            "    ;;\n"
-            "  *-KILL*)\n"
-            "    printf 'KILL\\n' >> \"$FAKE_SIGNAL_LOG\"\n"
-            "    printf '%s\\n' \"$FAKE_AFTER_KILL_STATE\" > \"$FAKE_PHASE_PATH\"\n"
-            "    for path in \"$FAKE_SUPERVISOR_PID_PATH\" \"$FAKE_SLEEP_PID_PATH\" \"$FAKE_CHILD_PID_PATH\"; do\n"
-            "      [ -s \"$path\" ] && command kill -KILL \"$(cat \"$path\")\" 2>/dev/null || true\n"
-            "    done\n"
-            "    printf 'yes\\n' > \"$(dirname \"$FAKE_CHILD_PID_PATH\")/child-killed\"\n"
-            "    ;;\n"
-            "esac\n",
-            encoding="utf-8",
-        )
         for shim in fake_bin.iterdir():
             shim.chmod(0o700)
 
@@ -1890,9 +1965,75 @@ FAKE_PHASE_PATH="$8"
 FAKE_STATUS_FILE="$9"
 FAKE_TERM_OBSERVED_STATUS="${10}"
 FAKE_AFTER_KILL_STATE="${11}"
-FAKE_KILL_SHIM="$1/kill"
-export PATH ZAPRET_DIR GP_ROOT_HELPER_RUN_DIR FAKE_CHILD_PID_PATH FAKE_SIGNAL_LOG FAKE_SUPERVISOR_PID_PATH FAKE_SLEEP_PID_PATH FAKE_PHASE_PATH FAKE_STATUS_FILE FAKE_TERM_OBSERVED_STATUS FAKE_AFTER_KILL_STATE FAKE_KILL_SHIM
-kill() { "$FAKE_KILL_SHIM" "$@"; }
+FAKE_CHILD_REAPED_PATH="$(dirname "$FAKE_CHILD_PID_PATH")/child-reaped"
+FAKE_EMERGENCY_CLEANUP_PATH="$(dirname "$FAKE_CHILD_PID_PATH")/emergency-cleanup-used"
+export PATH ZAPRET_DIR GP_ROOT_HELPER_RUN_DIR FAKE_CHILD_PID_PATH FAKE_SIGNAL_LOG FAKE_SUPERVISOR_PID_PATH FAKE_SLEEP_PID_PATH FAKE_PHASE_PATH FAKE_STATUS_FILE FAKE_TERM_OBSERVED_STATUS FAKE_AFTER_KILL_STATE FAKE_CHILD_REAPED_PATH FAKE_EMERGENCY_CLEANUP_PATH
+fixture_member_is_reaped() {
+  fixture_pid="$1"
+  if [ -r "/proc/$fixture_pid/stat" ]; then
+    fixture_stat="$(command cat "/proc/$fixture_pid/stat" 2>/dev/null)" || return 0
+    case "$fixture_stat" in
+      *') Z '*|*') X '*) return 0 ;;
+    esac
+    return 1
+  fi
+  command kill -0 "$fixture_pid" 2>/dev/null && return 1
+  return 0
+}
+wait_for_fixture_member() {
+  fixture_pid="$1"
+  fixture_waited=0
+  # The supervisor is a child of this harness; the sleep and target children
+  # can be reparented after KILL, so verify their disappearance after wait too.
+  wait "$fixture_pid" 2>/dev/null || true
+  while ! fixture_member_is_reaped "$fixture_pid"; do
+    [ "$fixture_waited" -lt 200 ] || return 1
+    /usr/bin/sleep 0.01 2>/dev/null || true
+    fixture_waited=$((fixture_waited + 1))
+  done
+}
+kill_fixture_member() {
+  fixture_path="$1"
+  [ -s "$fixture_path" ] || return 0
+  fixture_pid="$(command cat "$fixture_path")" || return 1
+  if ! fixture_member_is_reaped "$fixture_pid"; then
+    command kill -KILL "$fixture_pid" 2>/dev/null || return 1
+  fi
+  wait_for_fixture_member "$fixture_pid"
+}
+emergency_cleanup_fixture_members() {
+  for fixture_path in "$FAKE_SUPERVISOR_PID_PATH" "$FAKE_SLEEP_PID_PATH" "$FAKE_CHILD_PID_PATH"; do
+    [ -s "$fixture_path" ] || continue
+    fixture_pid="$(command cat "$fixture_path")" || continue
+    if ! fixture_member_is_reaped "$fixture_pid"; then
+      printf 'yes\n' > "$FAKE_EMERGENCY_CLEANUP_PATH"
+      command kill -KILL "$fixture_pid" 2>/dev/null || true
+      wait_for_fixture_member "$fixture_pid" || true
+    fi
+  done
+}
+trap emergency_cleanup_fixture_members EXIT
+kill() {
+  case "$*" in
+    *-TERM*)
+      printf 'TERM\n' >> "$FAKE_SIGNAL_LOG"
+      supervisor="$(command cat "$FAKE_SUPERVISOR_PID_PATH")"
+      if [ -f "$FAKE_STATUS_FILE" ] && command kill -0 "$supervisor" 2>/dev/null; then
+        printf 'live\n' > "$FAKE_TERM_OBSERVED_STATUS"
+      fi
+      ;;
+    *-KILL*)
+      printf 'KILL\n' >> "$FAKE_SIGNAL_LOG"
+      kill_fixture_member "$FAKE_SUPERVISOR_PID_PATH" || return 1
+      kill_fixture_member "$FAKE_SLEEP_PID_PATH" || return 1
+      kill_fixture_member "$FAKE_CHILD_PID_PATH" || return 1
+      printf '%s\n' "$FAKE_AFTER_KILL_STATE" > "$FAKE_PHASE_PATH"
+      printf 'yes\n' > "$(dirname "$FAKE_CHILD_PID_PATH")/child-killed"
+      printf 'yes\n' > "$FAKE_CHILD_REAPED_PATH"
+      ;;
+    *) command kill "$@" ;;
+  esac
+}
 helper="${12}"
 set -- run-owned "${13}" "${14}" "$4"
 . "$helper"
@@ -1921,6 +2062,7 @@ set -- run-owned "${13}" "${14}" "$4"
             text=True,
             capture_output=True,
             check=False,
+            timeout=8,
         )
 
     def test_run_owned_handshake_refuses_to_start_target_before_attestation(self) -> None:
@@ -2082,6 +2224,9 @@ set -- run-owned "${13}" "${14}" "$4"
             helper.read_text(encoding="utf-8").replace(
                 "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
                 f"DISCOVERY_GATE_DIR='{_posix_shell_path(registry.parent / 'gates')}'",
+            ).replace(
+                "\nrequire_root\n",
+                '\nsignal_known_process_group() { kill "-$1" -- "-$2"; }\n\nrequire_root\n',
             ),
             encoding="utf-8",
         )
@@ -2183,8 +2328,15 @@ set -- signal-run "$run_id" TERM
                     managed.wait(timeout=5)
 
     def test_root_signal_after_go_reaps_term_ignoring_target_and_child(self) -> None:
-        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
-            self.skipTest("requires a root Linux test environment with setsid")
+        dash = Path("/bin/dash")
+        if (
+            sys.platform != "linux"
+            or not hasattr(os, "geteuid")
+            or os.geteuid() != 0
+            or not shutil.which("setsid")
+            or not dash.is_file()
+        ):
+            self.skipTest("requires a root Linux test environment with setsid and /bin/dash")
         helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -2206,7 +2358,7 @@ set -- signal-run "$run_id" TERM
             env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
             run_id = "signal-after-go-term-ignored"
             managed = subprocess.Popen(
-                ["sh", str(helper), "run-owned", run_id, str(target), str(started), str(child_pid_path)], env=env
+                [str(dash), str(helper), "run-owned", run_id, str(target), str(started), str(child_pid_path)], env=env
             )
             record = registry / run_id
             lock_dir = registry / f".{run_id}.lock"
@@ -2214,20 +2366,29 @@ set -- signal-run "$run_id" TERM
                 _wait_for_path(started)
                 _wait_for_path(child_pid_path)
                 _wait_for_path(record)
-                self.assertEqual(record.read_text(encoding="utf-8").split()[0], "helper-v1")
+                version, pid, pgid, marker = record.read_text(encoding="utf-8").split()
+                self.assertEqual(version, "helper-v1")
+                self.assertEqual(pgid, pid)
+                self.assertEqual(marker, Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rpartition(") ")[2].split()[19])
                 child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+                unrelated_record = registry / "unrelated"
+                unrelated_lock = registry / ".unrelated.lock"
+                unrelated_record.write_text("leave this record alone\n", encoding="utf-8")
+                unrelated_lock.mkdir()
 
                 stopped = subprocess.run(
-                    ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
+                    [str(dash), str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
                 )
                 self.assertEqual(stopped.returncode, 0, stopped.stderr)
                 self.assertEqual(managed.wait(timeout=8), 126)
                 self.assertFalse(record.exists())
                 self.assertFalse(lock_dir.exists())
+                self.assertEqual(unrelated_record.read_text(encoding="utf-8"), "leave this record alone\n")
+                self.assertTrue(unrelated_lock.is_dir())
                 _wait_for_pid_to_exit(child_pid)
             finally:
                 if managed.poll() is None:
-                    subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
+                    subprocess.run([str(dash), str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
                     managed.wait(timeout=5)
 
     def test_root_helper_creates_the_only_signalable_record_and_rejects_direct_registration(self) -> None:

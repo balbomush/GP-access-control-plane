@@ -387,9 +387,10 @@ class TestServerLifecycleTests(unittest.TestCase):
             startup_thread = threading.Thread(target=start_server)
             startup_thread.start()
             try:
-                self.assertTrue(bind_started.wait(timeout=1))
-                self.assertTrue(server._startup_cancelled.wait(timeout=1))
+                self.assertTrue(bind_started.wait(timeout=5), "DelayedServer construction did not begin")
+                self.assertTrue(server._startup_cancelled.wait(timeout=5), "startup cancellation did not begin")
             finally:
+                server._startup_cancelled.set()
                 allow_bind.set()
                 startup_thread.join(timeout=5)
 

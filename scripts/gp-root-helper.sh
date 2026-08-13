@@ -1337,6 +1337,39 @@ ensure_run_registry() {
   install -d -m 0750 -o root -g root "$RUN_REGISTRY_DIR"
 }
 
+process_start_time_from_stat() {
+  stat_file="${1:-}"
+  [ -n "$stat_file" ] && [ -r "$stat_file" ] || return 2
+  awk '
+    NR != 1 { malformed = 1; exit }
+    {
+      separator = 0
+      for (position = length($0) - 1; position >= 1; position--) {
+        if (substr($0, position, 2) == ") ") {
+          separator = position
+          break
+        }
+      }
+      if (!separator) {
+        malformed = 1
+        exit
+      }
+      stat_tail = substr($0, separator + 2)
+      if (stat_tail !~ /^[A-Za-z] /) {
+        malformed = 1
+        exit
+      }
+      field_count = split(stat_tail, stat_fields, /[[:space:]]+/)
+      if (field_count < 20 || stat_fields[20] !~ /^[0-9]+$/) {
+        malformed = 1
+        exit
+      }
+      print stat_fields[20]
+    }
+    END { if (NR != 1 || malformed) exit 2 }
+  ' "$stat_file"
+}
+
 process_start_time() {
   pid="${1:-}"
   is_valid_pid "$pid" || return 2
@@ -1344,7 +1377,7 @@ process_start_time() {
     [ ! -e "/proc/$pid" ] && [ ! -L "/proc/$pid" ] && return 1
     return 2
   fi
-  if start_marker="$(awk '{ sub(/^.*\\) /, ""); print $20 }' "/proc/$pid/stat")"; then
+  if start_marker="$(process_start_time_from_stat "/proc/$pid/stat")"; then
     :
   else
     [ ! -e "/proc/$pid" ] && [ ! -L "/proc/$pid" ] && return 1
@@ -1596,6 +1629,17 @@ managed_process_is_gone() {
   return 2
 }
 
+signal_known_process_group() {
+  known_signal="$1"
+  known_pgid="$2"
+  for known_kill_binary in /bin/kill /usr/bin/kill; do
+    [ -x "$known_kill_binary" ] || continue
+    "$known_kill_binary" "-$known_signal" -- "-$known_pgid"
+    return "$?"
+  done
+  return 2
+}
+
 terminate_known_process_group() {
   known_pid="${1:-}"
   known_pgid="${2:-}"
@@ -1615,7 +1659,9 @@ terminate_known_process_group() {
     else
       return "$?"
     fi
-    kill -KILL -- "-$known_pgid" 2>/dev/null || true
+    signal_known_process_group KILL "$known_pgid" 2>/dev/null || {
+      [ "$?" -eq 2 ] && return 2
+    }
   else
     if known_snapshot="$(managed_process_group_snapshot "$known_pid" "$known_pgid")"; then
       :
@@ -1627,7 +1673,9 @@ terminate_known_process_group() {
     else
       return "$?"
     fi
-    kill "-$known_signal" -- "-$known_pgid" 2>/dev/null || true
+    signal_known_process_group "$known_signal" "$known_pgid" 2>/dev/null || {
+      [ "$?" -eq 2 ] && return 2
+    }
     while :; do
       if known_process_group_exists "$known_pid" "$known_pgid"; then
         [ "$known_waited" -ge 2 ] && break
@@ -1657,7 +1705,9 @@ terminate_known_process_group() {
         return 2
       fi
     fi
-    kill -KILL -- "-$known_pgid" 2>/dev/null || true
+    signal_known_process_group KILL "$known_pgid" 2>/dev/null || {
+      [ "$?" -eq 2 ] && return 2
+    }
   fi
   known_waited=0
   while :; do
