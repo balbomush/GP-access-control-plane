@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +26,17 @@ def shell_function(source: str, name: str) -> str:
     if not match:
         raise AssertionError(f"Bash function {name} was not found")
     return match.group("body")
+
+
+def posix_shell_path(path: Path) -> str:
+    value = str(path)
+    if os.name != "nt":
+        return value
+    drive, tail = os.path.splitdrive(value)
+    if drive:
+        posix_tail = tail.replace("\\", "/")
+        return f"/{drive[0].lower()}{posix_tail}"
+    return value.replace("\\", "/")
 
 
 class Pi5GateTests(unittest.TestCase):
@@ -48,8 +61,73 @@ read_trusted_profile_state_dir() {{
 INSTALL_PROFILE="$1"
 stat() {{ printf '0:0:600\\n'; }}
 read_trusted_profile_state_dir
-'''
+        '''
         return subprocess.run([self.bash, "-c", harness, "profile-reader", str(profile)], text=True, capture_output=True, check=False)
+
+    def run_stop_cycle_harness(self, *, history_status: str, timeout: bool) -> subprocess.CompletedProcess[str]:
+        if not self.bash:
+            self.skipTest("real Bash is unavailable")
+        functions = {
+            name: shell_function(self.source, name)
+            for name in ("current_run_id", "current_run_status", "history_run_status", "run_is_stopped", "start_and_stop_cycle")
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            clock = Path(raw) / "clock"
+            clock.write_text("0\n", encoding="utf-8")
+            history = "stopping" if timeout else history_status
+            harness = f'''\
+PYTHON="$1"
+POLL_TIMEOUT_SECONDS=10
+API_URL="http://gate.test"
+TEST_DOMAIN="example.com"
+CLOCK="$2"
+current_run_id() {{
+{functions["current_run_id"]}
+}}
+current_run_status() {{
+{functions["current_run_status"]}
+}}
+history_run_status() {{
+{functions["history_run_status"]}
+}}
+run_is_stopped() {{
+{functions["run_is_stopped"]}
+}}
+api_post() {{
+  case "$2" in
+    */start-run) printf '%s\\n' '{{"run_id":"run-1","status":"queued"}}' ;;
+    */stop-current-run) printf '%s\\n' '{{"run_id":"run-1","status":"stopping"}}' ;;
+  esac
+}}
+api_get() {{
+  case "$2" in
+    */current-run-progress) printf '%s\\n' '{{"run_id":"run-1","status":"stopping"}}' ;;
+    */runs/history*) printf '%s\\n' '{{"runs":[{{"run_id":"run-1","status":"{history}"}}]}}' ;;
+  esac
+}}
+json_assert() {{ return 0; }}
+inspect_leftovers() {{ return 0; }}
+cycle_error() {{ printf 'cycle-error stage=%s code=%s\\n' "$2" "$3" >&2; return "$3"; }}
+sleep() {{ printf 'sleep-called\\n' >&2; return 0; }}
+date() {{
+  value="$(cat "$CLOCK")"
+  case "$value" in
+    0) printf '1\\n' > "$CLOCK"; printf '0\\n' ;;
+    1) printf '2\\n' > "$CLOCK"; printf '0\\n' ;;
+    *) printf '3\\n' > "$CLOCK"; printf '11\\n' ;;
+  esac
+}}
+start_and_stop_cycle() {{
+{functions["start_and_stop_cycle"]}
+}}
+start_and_stop_cycle standard
+'''
+            return subprocess.run(
+                [self.bash, "-c", harness, "stop-cycle-harness", posix_shell_path(Path(sys.executable)), posix_shell_path(clock)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
 
     def test_syntax_help_and_required_arguments_fail_before_hardware_access(self) -> None:
         if not self.bash:
@@ -189,6 +267,30 @@ read_trusted_profile_state_dir
             self.assertIn(evidence, leftovers)
         executable = "\n".join(line for line in self.source.splitlines() if not line.lstrip().startswith("#"))
         self.assertNotRegex(executable, r"(?m)^\s*(?:kill|pkill|killall|nft\s+delete)\b")
+
+    def test_stop_cycle_reports_timeout_state_and_fails_early_for_unexpected_terminal_history(self) -> None:
+        cycle = shell_function(self.source, "start_and_stop_cycle")
+        self.assertIn("current_run_status", cycle)
+        self.assertIn("history_run_status", cycle)
+        self.assertIn("success|failed|timeout", cycle)
+        self.assertIn("stop timeout: target_run_id=%s current_run_id=%s current_run_status=%s target_history_status=%s", cycle)
+
+        terminal = self.run_stop_cycle_harness(history_status="failed", timeout=False)
+        self.assertEqual(terminal.returncode, 1, terminal.stderr)
+        self.assertIn("stop reached unexpected terminal status", terminal.stderr)
+        self.assertIn("target_run_id=run-1", terminal.stderr)
+        self.assertIn("current_run_id=run-1", terminal.stderr)
+        self.assertIn("current_run_status=stopping", terminal.stderr)
+        self.assertIn("target_history_status=failed", terminal.stderr)
+        self.assertNotIn("sleep-called", terminal.stderr)
+
+        timeout = self.run_stop_cycle_harness(history_status="stopping", timeout=True)
+        self.assertEqual(timeout.returncode, 1, timeout.stderr)
+        self.assertIn("stop timeout", timeout.stderr)
+        self.assertIn("target_run_id=run-1", timeout.stderr)
+        self.assertIn("current_run_id=run-1", timeout.stderr)
+        self.assertIn("current_run_status=stopping", timeout.stderr)
+        self.assertIn("target_history_status=stopping", timeout.stderr)
 
     def test_strict_update_requires_typed_queue_success_and_rollback_contract_evidence(self) -> None:
         queue = shell_function(self.source, "queue_dirty_update")

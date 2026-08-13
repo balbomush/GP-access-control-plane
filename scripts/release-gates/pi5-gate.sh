@@ -383,12 +383,33 @@ finally: conn.close()
 PY
 }
 
-current_run_id() { "$PYTHON" - "$1" <<'PY'
+current_run_id() {
+  "$PYTHON" - "$1" <<'PY'
 import json, sys
 print(str(json.loads(sys.argv[1]).get("run_id") or ""))
 PY
 }
-run_is_stopped() { "$PYTHON" - "$1" "$2" <<'PY'
+current_run_status() {
+  "$PYTHON" - "$1" <<'PY'
+import json, sys
+print(str(json.loads(sys.argv[1]).get("status") or "unknown"))
+PY
+}
+history_run_status() {
+  "$PYTHON" - "$1" "$2" <<'PY'
+import json, sys
+run_id, data = sys.argv[1], json.loads(sys.argv[2])
+assert isinstance(data.get("runs"), list)
+for run in data["runs"]:
+    if run.get("run_id") == run_id:
+        print(str(run.get("status") or "unknown"))
+        break
+else:
+    print("not-found")
+PY
+}
+run_is_stopped() {
+  "$PYTHON" - "$1" "$2" <<'PY'
 import json, sys
 run_id, data = sys.argv[1], json.loads(sys.argv[2])
 assert isinstance(data.get("runs"), list)
@@ -430,7 +451,7 @@ cycle_error() {
 }
 
 start_and_stop_cycle() {
-  local mode="$1" payload response run_id="" stopped deadline current history code
+  local mode="$1" payload response run_id="" stopped deadline current='{"run_id":"","status":"not-polled"}' history='{"runs":[]}' current_status=not-polled history_status=not-polled code
   payload="$(GATE_MODE="$mode" GATE_DOMAIN="$TEST_DOMAIN" "$PYTHON" - <<'PY'
 import json, os
 print(json.dumps({"mode": os.environ["GATE_MODE"], "domains": [os.environ["GATE_DOMAIN"]], "protocols": ["tcp"], "curl_parallelism": 1,
@@ -448,9 +469,21 @@ PY
   while [ "$(date +%s)" -lt "$deadline" ]; do
     current="$(api_get "$API_URL" /api/core/strategy-discovery/current-run-progress)" || { code=$?; cycle_error "$run_id" current-run "$code"; return "$code"; }
     history="$(api_get "$API_URL" '/api/core/runs/history?limit=1000')" || { code=$?; cycle_error "$run_id" history "$code"; return "$code"; }
+    current_status="$(current_run_status "$current")" || { code=$?; cycle_error "$run_id" current-status "$code"; return "$code"; }
+    history_status="$(history_run_status "$run_id" "$history")" || { code=$?; cycle_error "$run_id" history-status "$code"; return "$code"; }
     if [ -z "$(current_run_id "$current")" ] && run_is_stopped "$run_id" "$history"; then inspect_leftovers; return; fi
+    case "$history_status" in
+      success|failed|timeout)
+        printf 'stop reached unexpected terminal status: target_run_id=%s current_run_id=%s current_run_status=%s target_history_status=%s\n' \
+          "$run_id" "$(current_run_id "$current")" "$current_status" "$history_status" >&2
+        cycle_error "$run_id" "stop-terminal-$history_status" 1
+        return 1
+        ;;
+    esac
     sleep 1
   done
+  printf 'stop timeout: target_run_id=%s current_run_id=%s current_run_status=%s target_history_status=%s\n' \
+    "$run_id" "$(current_run_id "$current")" "${current_status:-unknown}" "${history_status:-not-polled}" >&2
   cycle_error "$run_id" stop-timeout 1
 }
 

@@ -1309,8 +1309,8 @@ known_process_group_exists() {
   known_pid="$(validate_pid "${1:-}")"
   known_pgid="$(validate_pid "${2:-}")"
   [ "$known_pid" = "$known_pgid" ] || return 1
-  ps -e -o pgid= -o sid= 2>/dev/null | awk -v pgid="$known_pgid" -v sid="$known_pid" '
-    $1 == pgid && $2 == sid { found = 1; exit }
+  ps -e -o pgid= -o sid= -o stat= 2>/dev/null | awk -v pgid="$known_pgid" -v sid="$known_pid" '
+    $1 == pgid && $2 == sid && $3 !~ /^Z/ { found = 1; exit }
     END { exit !found }
   '
 }

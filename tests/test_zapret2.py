@@ -543,6 +543,7 @@ table inet blockcheck42
         (fake_bin / "ps").write_text(
             "#!/bin/sh\n"
             "case \"$*\" in\n"
+            "  *'-e -o pgid= -o sid= -o stat='*) printf '%s %s S\\n' \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" ;;\n"
             "  *'-e -o pgid= -o sid='*) printf '%s %s\\n' \"$FAKE_PROCESS_ID\" \"$FAKE_PROCESS_ID\" ;;\n"
             "  *'-o pgid='*) printf '%s\\n' \"$FAKE_PROCESS_ID\" ;;\n"
             "  *'-o sid='*) printf '%s\\n' \"$FAKE_PROCESS_ID\" ;;\n"
@@ -626,8 +627,8 @@ esac
             check=False,
         )
 
-    def test_run_owned_supervisor_reaps_after_target_status_with_portable_shell_shims(self) -> None:
-        """Exercise the real helper body where Linux setsid/root are unavailable.
+    def test_run_owned_cleanup_ignores_zombies_but_preserves_live_groups_with_portable_shell_shims(self) -> None:
+        """Exercise the real helper body using deterministic ps states rather than real zombies.
 
         The shims model only host process inspection and group delivery.  The production
         supervisor, target-status protocol, record writing, and cleanup paths run unchanged.
@@ -636,61 +637,72 @@ esac
         if shell is None:
             self.skipTest("requires a POSIX sh interpreter")
         helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            registry = root / "runs"
-            fake_bin = root / "fake-bin"
-            fake_bin.mkdir()
-            child_pid_path = root / "child.pid"
-            signal_log = root / "signals.log"
-            supervisor_pid_path = root / "supervisor.pid"
-            sleep_pid_path = root / "supervisor-sleep.pid"
-            phase_path = root / "phase"
-            run_id = "portable-target-status"
-            lock_dir = registry / f".{run_id}.lock"
-            status_file = lock_dir / "target-status"
-            target = root / "blockcheck2.sh"
-            target.write_text(
-                "#!/bin/sh\n"
-                "(trap '' TERM; exec tail -f /dev/null >/dev/null 2>&1) &\n"
-                "printf '%s\\n' \"$!\" > \"$1\"\n"
-                "exit 7\n",
-                encoding="utf-8",
-            )
-            target.chmod(0o700)
-            self._write_run_owned_lifecycle_shims(fake_bin)
-            helper_copy = root / "gp-root-helper-with-test-gate.sh"
-            helper_copy.write_text(
-                helper.read_text(encoding="utf-8").replace(
-                    "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
-                    f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
-                ),
-                encoding="utf-8",
-            )
+        for after_kill_state, expected_code, artifacts_removed in (
+            ("Z", 7, True),
+            ("Z+", 7, True),
+            ("S", None, False),
+        ):
+            with self.subTest(after_kill_state=after_kill_state):
+                with tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    registry = root / "runs"
+                    fake_bin = root / "fake-bin"
+                    fake_bin.mkdir()
+                    child_pid_path = root / "child.pid"
+                    signal_log = root / "signals.log"
+                    supervisor_pid_path = root / "supervisor.pid"
+                    sleep_pid_path = root / "supervisor-sleep.pid"
+                    phase_path = root / "phase"
+                    run_id = "portable-target-status"
+                    lock_dir = registry / f".{run_id}.lock"
+                    status_file = lock_dir / "target-status"
+                    target = root / "blockcheck2.sh"
+                    target.write_text(
+                        "#!/bin/sh\n"
+                        "(trap '' TERM; exec tail -f /dev/null >/dev/null 2>&1) &\n"
+                        "printf '%s\\n' \"$!\" > \"$1\"\n"
+                        "exit 7\n",
+                        encoding="utf-8",
+                    )
+                    target.chmod(0o700)
+                    self._write_run_owned_lifecycle_shims(fake_bin)
+                    helper_copy = root / "gp-root-helper-with-test-gate.sh"
+                    helper_copy.write_text(
+                        helper.read_text(encoding="utf-8").replace(
+                            "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'",
+                            f"DISCOVERY_GATE_DIR='{_posix_shell_path(root / 'gates')}'",
+                        ),
+                        encoding="utf-8",
+                    )
 
-            completed = self._run_owned_with_lifecycle_shims(
-                shell=shell,
-                helper=helper_copy,
-                fake_bin=fake_bin,
-                root=root,
-                registry=registry,
-                target=target,
-                child_pid_path=child_pid_path,
-                signal_log=signal_log,
-                supervisor_pid_path=supervisor_pid_path,
-                sleep_pid_path=sleep_pid_path,
-                phase_path=phase_path,
-                status_file=status_file,
-                run_id=run_id,
-            )
+                    completed = self._run_owned_with_lifecycle_shims(
+                        shell=shell,
+                        helper=helper_copy,
+                        fake_bin=fake_bin,
+                        root=root,
+                        registry=registry,
+                        target=target,
+                        child_pid_path=child_pid_path,
+                        signal_log=signal_log,
+                        supervisor_pid_path=supervisor_pid_path,
+                        sleep_pid_path=sleep_pid_path,
+                        phase_path=phase_path,
+                        status_file=status_file,
+                        run_id=run_id,
+                        after_kill_state=after_kill_state,
+                    )
 
-            self.assertEqual(completed.returncode, 7, completed.stderr)
-            self.assertEqual(signal_log.read_text(encoding="utf-8").splitlines(), ["TERM", "KILL"])
-            self.assertEqual((root / "term-observed-status").read_text(encoding="utf-8"), "live\n")
-            self.assertFalse((registry / run_id).exists())
-            self.assertFalse(status_file.exists())
-            self.assertFalse(lock_dir.exists())
-            self.assertEqual((root / "child-killed").read_text(encoding="utf-8"), "yes\n")
+                    if expected_code is None:
+                        self.assertNotEqual(completed.returncode, 0, completed.stderr)
+                        self.assertIn("managed process group did not exit after KILL", completed.stderr)
+                    else:
+                        self.assertEqual(completed.returncode, expected_code, completed.stderr)
+                    self.assertEqual(signal_log.read_text(encoding="utf-8").splitlines(), ["TERM", "KILL"])
+                    self.assertEqual((root / "term-observed-status").read_text(encoding="utf-8"), "live\n")
+                    self.assertEqual((root / "child-killed").read_text(encoding="utf-8"), "yes\n")
+                    self.assertEqual((registry / run_id).exists(), not artifacts_removed)
+                    self.assertEqual(status_file.exists(), not artifacts_removed)
+                    self.assertEqual(lock_dir.exists(), not artifacts_removed)
 
     def test_owned_multidomain_setup_failure_removes_only_its_generated_directory_portably(self) -> None:
         """The wrapper must clean its private directory even before ownership starts."""
@@ -965,7 +977,7 @@ run_owned_multidomain_target "$2" "$3"
             "supervisor=$(cat \"$FAKE_SUPERVISOR_PID_PATH\")\n"
             "case \"$*\" in\n"
             "  *'-e -o pid= -o pgid= -o sid='*) [ \"$(cat \"$FAKE_PHASE_PATH\")\" = gone ] || printf '%s %s %s\\n' \"$supervisor\" \"$supervisor\" \"$supervisor\" ;;\n"
-            "  *'-e -o pgid= -o sid='*) [ \"$(cat \"$FAKE_PHASE_PATH\")\" = gone ] || printf '%s %s\\n' \"$supervisor\" \"$supervisor\" ;;\n"
+            "  *'-e -o pgid= -o sid= -o stat='*) printf '%s %s %s\\n' \"$supervisor\" \"$supervisor\" \"$(cat \"$FAKE_PHASE_PATH\")\" ;;\n"
             "  *'-o pgid='*) printf '%s\\n' \"$supervisor\" ;;\n"
             "  *'-o sid='*) printf '%s\\n' \"$supervisor\" ;;\n"
             "esac\n",
@@ -983,7 +995,7 @@ run_owned_multidomain_target "$2" "$3"
             "    ;;\n"
             "  *-KILL*)\n"
             "    printf 'KILL\\n' >> \"$FAKE_SIGNAL_LOG\"\n"
-            "    printf 'gone\\n' > \"$FAKE_PHASE_PATH\"\n"
+            "    printf '%s\\n' \"$FAKE_AFTER_KILL_STATE\" > \"$FAKE_PHASE_PATH\"\n"
             "    for path in \"$FAKE_SUPERVISOR_PID_PATH\" \"$FAKE_SLEEP_PID_PATH\" \"$FAKE_CHILD_PID_PATH\"; do\n"
             "      [ -s \"$path\" ] && command kill -KILL \"$(cat \"$path\")\" 2>/dev/null || true\n"
             "    done\n"
@@ -1011,8 +1023,9 @@ run_owned_multidomain_target "$2" "$3"
         phase_path: Path,
         status_file: Path,
         run_id: str,
+        after_kill_state: str,
     ) -> subprocess.CompletedProcess[str]:
-        phase_path.write_text("active\n", encoding="utf-8")
+        phase_path.write_text("S\n", encoding="utf-8")
         harness = """
 PATH="$1:/usr/bin:/bin"
 ZAPRET_DIR="$2"
@@ -1024,11 +1037,12 @@ FAKE_SLEEP_PID_PATH="$7"
 FAKE_PHASE_PATH="$8"
 FAKE_STATUS_FILE="$9"
 FAKE_TERM_OBSERVED_STATUS="${10}"
+FAKE_AFTER_KILL_STATE="${11}"
 FAKE_KILL_SHIM="$1/kill"
-export PATH ZAPRET_DIR GP_ROOT_HELPER_RUN_DIR FAKE_CHILD_PID_PATH FAKE_SIGNAL_LOG FAKE_SUPERVISOR_PID_PATH FAKE_SLEEP_PID_PATH FAKE_PHASE_PATH FAKE_STATUS_FILE FAKE_TERM_OBSERVED_STATUS FAKE_KILL_SHIM
+export PATH ZAPRET_DIR GP_ROOT_HELPER_RUN_DIR FAKE_CHILD_PID_PATH FAKE_SIGNAL_LOG FAKE_SUPERVISOR_PID_PATH FAKE_SLEEP_PID_PATH FAKE_PHASE_PATH FAKE_STATUS_FILE FAKE_TERM_OBSERVED_STATUS FAKE_AFTER_KILL_STATE FAKE_KILL_SHIM
 kill() { "$FAKE_KILL_SHIM" "$@"; }
-helper="${11}"
-set -- run-owned "${12}" "${13}" "$4"
+helper="${12}"
+set -- run-owned "${13}" "${14}" "$4"
 . "$helper"
 """
         return subprocess.run(
@@ -1047,6 +1061,7 @@ set -- run-owned "${12}" "${13}" "$4"
                 _posix_shell_path(phase_path),
                 _posix_shell_path(status_file),
                 _posix_shell_path(root / "term-observed-status"),
+                after_kill_state,
                 _posix_shell_path(helper),
                 run_id,
                 _posix_shell_path(target),
@@ -1154,8 +1169,8 @@ set -- run-owned "${12}" "${13}" "$4"
             "#!/bin/sh\n"
             "case \"$*\" in\n"
             "  *'-e -o pid= -o pgid= -o sid='*) printf '%s %s %s\\n%s %s %s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_CHILD_PID\" \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\" ;;\n"
-            "  *'-e -o pgid= -o sid='*)\n"
-            "    [ \"$(cat \"$FAKE_PHASE\")\" = killed ] || printf '%s %s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\"\n"
+            "  *'-e -o pgid= -o sid= -o stat='*)\n"
+            "    [ \"$(cat \"$FAKE_PHASE\")\" = killed ] || printf '%s %s S\\n' \"$FAKE_LEADER_PID\" \"$FAKE_LEADER_PID\"\n"
             "    ;;\n"
             "  *'-o pgid='*) printf '%s\\n' \"$FAKE_LEADER_PID\" ;;\n"
             "  *'-o sid='*) printf '%s\\n' \"$FAKE_LEADER_PID\" ;;\n"
