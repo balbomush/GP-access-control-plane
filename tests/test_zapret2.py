@@ -1818,9 +1818,12 @@ run_owned_multidomain_target "$2" "$3"
             source.write_text(_minimal_multidomain_blockcheck_source(), encoding="utf-8")
             source.chmod(0o700)
             registry = root / "runs"
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
             env = {
                 **os.environ,
                 "ZAPRET_DIR": str(root),
+                "GP_ROOT_HELPER_CONFIG": str(config),
                 "TMPDIR": str(temp_root),
                 "GP_ROOT_HELPER_RUN_DIR": str(registry),
                 "GP_TEST_RUNNER_PATH": str(runner_path),
@@ -1862,9 +1865,12 @@ run_owned_multidomain_target "$2" "$3"
             source.write_text(_minimal_multidomain_blockcheck_source(wait_for_release=True), encoding="utf-8")
             source.chmod(0o700)
             registry = root / "runs"
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
             env = {
                 **os.environ,
                 "ZAPRET_DIR": str(root),
+                "GP_ROOT_HELPER_CONFIG": str(config),
                 "TMPDIR": str(temp_root),
                 "GP_ROOT_HELPER_RUN_DIR": str(registry),
                 "GP_TEST_RUNNER_PATH": str(runner_path),
@@ -2310,7 +2316,14 @@ set -- signal-run "$run_id" TERM
             )
             target.chmod(0o700)
             registry = root / "runs"
-            env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "ZAPRET_DIR": str(root),
+                "GP_ROOT_HELPER_CONFIG": str(config),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+            }
             run_id = "reap-background-child"
             managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target), str(child_pid_path)], env=env)
             record = registry / run_id
@@ -2355,7 +2368,14 @@ set -- signal-run "$run_id" TERM
                 encoding="utf-8",
             )
             target.chmod(0o700)
-            env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "ZAPRET_DIR": str(root),
+                "GP_ROOT_HELPER_CONFIG": str(config),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+            }
             run_id = "signal-after-go-term-ignored"
             managed = subprocess.Popen(
                 [str(dash), str(helper), "run-owned", run_id, str(target), str(started), str(child_pid_path)], env=env
@@ -2401,7 +2421,14 @@ set -- signal-run "$run_id" TERM
             target.write_text("#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30\n", encoding="utf-8")
             target.chmod(0o700)
             registry = root / "runs"
-            env = {**os.environ, "ZAPRET_DIR": str(root), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "ZAPRET_DIR": str(root),
+                "GP_ROOT_HELPER_CONFIG": str(config),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+            }
             run_id = "helper-owned-run"
             managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target)], env=env)
             try:
@@ -2453,6 +2480,60 @@ set -- signal-run "$run_id" TERM
                 if managed.poll() is None:
                     subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
                     managed.wait(timeout=5)
+
+    def test_root_helper_config_zapret_dir_overrides_caller_and_rejects_untrusted_target(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            trusted_zapret = root / "trusted-zapret"
+            caller_zapret = root / "caller-zapret"
+            trusted_zapret.mkdir()
+            caller_zapret.mkdir()
+            trusted_started = root / "trusted-started"
+            untrusted_started = root / "untrusted-started"
+            trusted_target = trusted_zapret / "blockcheck2.sh"
+            trusted_target.write_text('#!/bin/sh\nprintf trusted > "$1"\n', encoding="utf-8")
+            trusted_target.chmod(0o700)
+            untrusted_target = caller_zapret / "blockcheck2.sh"
+            untrusted_target.write_text('#!/bin/sh\nprintf untrusted > "$1"\n', encoding="utf-8")
+            untrusted_target.chmod(0o700)
+            registry = root / "runs"
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(trusted_zapret)}'\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "ZAPRET_DIR": str(caller_zapret),
+                "GP_ROOT_HELPER_CONFIG": str(config),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+            }
+
+            trusted = subprocess.run(
+                ["sh", str(helper), "run-owned", "trusted-config-target", str(trusted_target), str(trusted_started)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(trusted.returncode, 0, trusted.stderr)
+            self.assertEqual(trusted_started.read_text(encoding="utf-8"), "trusted")
+
+            untrusted_run_id = "caller-config-target"
+            untrusted = subprocess.run(
+                ["sh", str(helper), "run-owned", untrusted_run_id, str(untrusted_target), str(untrusted_started)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(untrusted.returncode, 126)
+            self.assertIn("unsupported run target", untrusted.stderr)
+            self.assertFalse(untrusted_started.exists())
+            self.assertFalse((registry / untrusted_run_id).exists())
+            self.assertFalse((registry / f".{untrusted_run_id}.lock").exists())
 
 
 def _minimal_multidomain_blockcheck_source(*, wait_for_release: bool = False) -> str:
