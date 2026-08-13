@@ -374,6 +374,7 @@ class TestServerLifecycleTests(unittest.TestCase):
                 AppConfig(output=OutputConfig(state_dir=Path(raw) / "state")),
                 startup_timeout=0.01,
                 server_type=DelayedServer,
+                startup_timeout_gate=bind_started,
             )
             startup_error: list[BaseException] = []
 
@@ -416,10 +417,18 @@ def _edge_executable() -> Path | None:
 
 
 class _TestServer:
-    def __init__(self, config: AppConfig, *, startup_timeout: float = 5, server_type: type[Any] | None = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        startup_timeout: float = 5,
+        server_type: type[Any] | None = None,
+        startup_timeout_gate: threading.Event | None = None,
+    ):
         self._config = config
         self._startup_timeout = startup_timeout
         self._server_type = server_type
+        self._startup_timeout_gate = startup_timeout_gate
         self.port = _free_port()
         self._server: Any | None = None
         self._thread: threading.Thread | None = None
@@ -462,6 +471,8 @@ class _TestServer:
             try:
                 self._thread = threading.Thread(target=run_server, daemon=True)
                 self._thread.start()
+                if self._startup_timeout_gate is not None and not self._startup_timeout_gate.wait(timeout=5):
+                    raise AssertionError("test server did not reach the startup timeout gate")
                 if not ready.wait(timeout=self._startup_timeout):
                     raise AssertionError("test server did not bind its HTTP listener")
                 _wait_for_http(f"http://127.0.0.1:{self.port}/api/health")

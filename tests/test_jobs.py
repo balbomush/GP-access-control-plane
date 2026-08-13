@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -18,6 +19,76 @@ from gp_control_plane.jobs import JobRunner, _CancellationToken
 from gp_control_plane.state import read_state, update_state
 from gp_control_plane.storage import append_run, connect, read_latest_run_payloads
 from gp_control_plane.strategy_finder import latest_log_tail
+
+
+class _JobRunnerWorkerCapture:
+    """Keep JobRunner daemon workers inside the lifetime of their test resources."""
+
+    _JOIN_TIMEOUT_SECONDS = 2
+
+    def __init__(self, *release_events: threading.Event) -> None:
+        self._release_events = list(release_events)
+        self._workers: list[tuple[JobRunner, threading.Thread]] = []
+        self._thread_factory = threading.Thread
+        self._thread_patch = None
+
+    def __enter__(self) -> "_JobRunnerWorkerCapture":
+        def capture_thread(*args: object, **kwargs: object) -> threading.Thread:
+            thread = self._thread_factory(*args, **kwargs)
+            target = kwargs.get("target")
+            if (
+                getattr(target, "__func__", None) is JobRunner._run
+                and isinstance(getattr(target, "__self__", None), JobRunner)
+            ):
+                self._workers.append((target.__self__, thread))
+            return thread
+
+        self._thread_patch = mock.patch(
+            "gp_control_plane.jobs.threading.Thread",
+            side_effect=capture_thread,
+        )
+        self._thread_patch.start()
+        return self
+
+    def release_on_exit(self, *events: threading.Event) -> None:
+        self._release_events.extend(events)
+
+    def worker_for(self, runner: JobRunner) -> threading.Thread:
+        workers = [thread for owner, thread in self._workers if owner is runner]
+        if len(workers) != 1:
+            raise AssertionError(f"expected one JobRunner worker, found {len(workers)}")
+        return workers[0]
+
+    def wait_for_completion(self) -> None:
+        unfinished = []
+        for _runner, worker in self._workers:
+            worker.join(timeout=self._JOIN_TIMEOUT_SECONDS)
+            if worker.is_alive():
+                unfinished.append(worker.name)
+        if unfinished:
+            raise AssertionError(
+                "JobRunner worker did not finish before test cleanup: " + ", ".join(unfinished)
+            )
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+        cleanup_error: BaseException | None = None
+        try:
+            for event in self._release_events:
+                event.set()
+            for runner, _worker in self._workers:
+                try:
+                    runner.cancel_active()
+                except RuntimeError:
+                    pass
+            self.wait_for_completion()
+        except BaseException as error:  # Keep a test's original assertion as its primary failure.
+            cleanup_error = error
+        finally:
+            if self._thread_patch:
+                self._thread_patch.stop()
+        if cleanup_error and exc_type is None:
+            raise cleanup_error
+        return False
 
 
 class JobRunnerTests(unittest.TestCase):
@@ -59,7 +130,7 @@ class JobRunnerTests(unittest.TestCase):
         self.assertTrue(token.is_set())
 
     def test_current_job_is_cleared_when_job_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -80,7 +151,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertIn("completed_at", persisted)
 
     def test_history_api_returns_one_failed_run_after_early_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -97,7 +168,7 @@ class JobRunnerTests(unittest.TestCase):
             )
 
     def test_current_job_is_cleared_before_idle_hook_errors_are_swallowed(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
 
             def failing_idle() -> None:
@@ -112,10 +183,11 @@ class JobRunnerTests(unittest.TestCase):
             self.assertIsNone(state["last_error"])
 
     def test_post_run_callback_keeps_runtime_busy_until_snapshot_finishes(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             callback_started = threading.Event()
             release_callback = threading.Event()
+            workers.release_on_exit(release_callback)
             snapshot_outcome = {
                 "kind": "snapshot",
                 "status": "success",
@@ -159,7 +231,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(finalization[-1]["outcome"], finished["last_snapshot"])
 
     def test_unexpected_snapshot_finalizer_error_is_observable_and_releases_lock(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
 
             def failing_snapshot() -> None:
@@ -186,7 +258,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertFalse((state_dir / "job-runner.lock").exists())
 
     def test_dict_result_timeout_is_recorded_as_timeout(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -200,7 +272,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertIn("timeout", [item["status"] for item in records])
 
     def test_dict_result_failed_is_recorded_as_failed_without_exception(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -214,7 +286,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertIn("failed", [item["status"] for item in records])
 
     def test_current_job_is_cleared_when_cancelled_job_fails_during_save(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -231,7 +303,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertIn("postprocess failed", state["last_error"])
 
     def test_cancel_active_runs_cancel_hook_immediately(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
             hook_called = threading.Event()
@@ -250,12 +322,13 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["last_run_status"], "stopped")
 
     def test_cancel_active_runs_hook_only_once_for_duplicate_cancels(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
             hook_called = threading.Event()
             job_stopping = threading.Event()
             release = threading.Event()
+            workers.release_on_exit(release)
             hook_calls: list[str] = []
 
             def stoppable_job(stop: threading.Event, _run_id: str) -> dict[str, str]:
@@ -281,7 +354,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["last_run_status"], "stopped")
 
     def test_cancel_hook_error_does_not_block_stop(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -300,7 +373,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["last_run_status"], "stopped")
 
     def test_job_result_is_compacted_in_jsonl(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
 
@@ -325,52 +398,62 @@ class JobRunnerTests(unittest.TestCase):
             self.assertNotIn("summary", success["result"])
 
     def test_failed_job_preserves_existing_log_metadata_beyond_history_page(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        release_failure = threading.Event()
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture(release_failure) as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
-            log_dir = state_dir / "strategy-finder" / "logs"
-            log_dir.mkdir(parents=True)
 
             def failing_job(_stop: threading.Event, run_id: str) -> None:
-                stdout_log = log_dir / f"{run_id}.stdout.log"
-                stderr_log = log_dir / f"{run_id}.stderr.log"
-                stdout_log.write_text("before failure\n", encoding="utf-8")
-                stderr_log.write_text("root helper failed\n", encoding="utf-8")
-                append_run(
-                    state_dir,
-                    {
-                        "id": run_id,
-                        "kind": "zapret-standard-discovery",
-                        "status": "running",
-                        "stdout_log": str(stdout_log),
-                        "stderr_log": str(stderr_log),
-                        "debug_stdout": False,
-                    },
-                )
-                with connect(state_dir) as conn:
-                    conn.executemany(
-                        "INSERT INTO runs(id, kind, status, timestamp, payload_json) VALUES(?, ?, ?, ?, ?)",
-                        [
-                            (
-                                f"newer-run-{index}",
-                                "zapret-standard-discovery",
-                                "success",
-                                "",
-                                json.dumps(
-                                    {
-                                        "id": f"newer-run-{index}",
-                                        "kind": "zapret-standard-discovery",
-                                        "status": "success",
-                                    }
-                                ),
-                            )
-                            for index in range(1_001)
-                        ],
-                    )
+                release_failure.wait()
                 raise RuntimeError("registered process is stale or invalid")
 
             run = runner.start("zapret-standard-discovery", failing_job)
-            _wait_for_idle_state(state_dir)
+            worker = workers.worker_for(runner)
+            log_dir = state_dir / "strategy-finder" / "logs"
+            log_dir.mkdir(parents=True)
+            stdout_log = log_dir / f"{run.run_id}.stdout.log"
+            stderr_log = log_dir / f"{run.run_id}.stderr.log"
+            stdout_log.write_text("before failure\n", encoding="utf-8")
+            stderr_log.write_text("root helper failed\n", encoding="utf-8")
+            append_run(
+                state_dir,
+                {
+                    "id": run.run_id,
+                    "kind": "zapret-standard-discovery",
+                    "status": "running",
+                    "stdout_log": str(stdout_log),
+                    "stderr_log": str(stderr_log),
+                    "debug_stdout": False,
+                },
+            )
+            with connect(state_dir) as conn:
+                conn.executemany(
+                    "INSERT INTO runs(id, kind, status, timestamp, payload_json) VALUES(?, ?, ?, ?, ?)",
+                    [
+                        (
+                            f"newer-run-{index}",
+                            "zapret-standard-discovery",
+                            "success",
+                            "",
+                            json.dumps(
+                                {
+                                    "id": f"newer-run-{index}",
+                                    "kind": "zapret-standard-discovery",
+                                    "status": "success",
+                                }
+                            ),
+                        )
+                        for index in range(1_001)
+                    ],
+                )
+            self.assertNotIn(
+                run.run_id,
+                [payload["id"] for payload in read_latest_run_payloads(state_dir, limit=1_000)],
+            )
+
+            release_failure.set()
+            worker.join()
+            self.assertFalse(worker.is_alive())
             persisted = read_latest_run_payloads(state_dir, limit=1)[0]
             tail = latest_log_tail(state_dir, run_id=run.run_id)
 
@@ -382,12 +465,44 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(tail["stdout_tail"], "before failure")
             self.assertEqual(tail["stderr_tail"], "root helper failed")
 
+    def test_worker_cleanup_releases_barrier_after_assertion_failure(self) -> None:
+        release_failure = threading.Event()
+        worker: threading.Thread | None = None
+        state_dir: Path | None = None
+
+        def fail_before_worker_finishes() -> None:
+            nonlocal state_dir, worker
+            with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture(release_failure) as workers:
+                state_dir = Path(raw)
+                runner = JobRunner(state_dir)
+                started = threading.Event()
+
+                def blocked_failing_job(_stop: threading.Event, _run_id: str) -> None:
+                    started.set()
+                    release_failure.wait()
+                    raise RuntimeError("registered process is stale or invalid")
+
+                runner.start("blocked", blocked_failing_job)
+                self.assertTrue(started.wait(timeout=1))
+                worker = workers.worker_for(runner)
+                self.fail("intentional assertion failure")
+
+        with self.assertRaisesRegex(AssertionError, "intentional assertion failure"):
+            fail_before_worker_finishes()
+
+        self.assertTrue(release_failure.is_set())
+        self.assertIsNotNone(worker)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNotNone(state_dir)
+        self.assertFalse(state_dir.exists())
+
     def test_one_run_id_is_persisted_before_start_returns_and_used_by_events(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
             started = threading.Event()
             release = threading.Event()
+            workers.release_on_exit(release)
             observed_run_ids: list[str] = []
 
             def blocking_run(_stop: threading.Event, run_id: str) -> dict[str, str]:
@@ -421,12 +536,13 @@ class JobRunnerTests(unittest.TestCase):
             release_update_accepted_payload({"status": "queued"})
 
     def test_state_dir_lock_blocks_parallel_runners(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             first = JobRunner(state_dir)
             second = JobRunner(state_dir)
             started = threading.Event()
             release = threading.Event()
+            workers.release_on_exit(release)
 
             def long_job(_stop: threading.Event, _run_id: str) -> dict[str, str]:
                 started.set()
@@ -445,11 +561,12 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["last_run_status"], "success")
 
     def test_job_completion_preserves_state_written_while_job_runs(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             runner = JobRunner(state_dir)
             started = threading.Event()
             release = threading.Event()
+            workers.release_on_exit(release)
 
             def long_job(_stop: threading.Event, _run_id: str) -> dict[str, str]:
                 started.set()
@@ -467,7 +584,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertEqual(state["settings"], {"curl_parallelism_max": 12})
 
     def test_state_dir_lock_reclaims_stale_foreign_pid_lock(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             lock_path = state_dir / "job-runner.lock"
             state_dir.mkdir(parents=True, exist_ok=True)
@@ -484,7 +601,7 @@ class JobRunnerTests(unittest.TestCase):
             self.assertFalse(lock_path.exists())
 
     def test_state_dir_lock_does_not_reclaim_corrupt_or_current_pid_lock(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
             state_dir = Path(raw)
             lock_path = state_dir / "job-runner.lock"
             state_dir.mkdir(parents=True, exist_ok=True)

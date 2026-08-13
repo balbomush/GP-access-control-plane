@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import ast
+import contextlib
 import errno
 import importlib
 import json
@@ -21,6 +22,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
+import gp_control_plane.jobs as jobs
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
 import gp_control_plane.strategy_finder as strategy_finder
@@ -140,6 +142,7 @@ class WebUiTests(unittest.TestCase):
             release_worker = threading.Event()
             snapshot_started = threading.Event()
             release_snapshot = threading.Event()
+            snapshot_finished = threading.Event()
 
             def active_run(
                 _config: AppConfig, _payload: dict[str, Any], _stop_event: threading.Event, _run_id: str
@@ -151,20 +154,25 @@ class WebUiTests(unittest.TestCase):
             def snapshot_after_run(_state_dir: Path) -> dict[str, object]:
                 snapshot_started.set()
                 self.assertTrue(release_snapshot.wait(timeout=2))
-                return {
-                    "kind": "snapshot",
-                    "status": "success",
-                    "completed_at": "2026-08-12T00:00:00Z",
-                    "snapshot_id": "post-run-snapshot",
-                    "snapshot": {"id": "post-run-snapshot"},
-                }
+                try:
+                    return {
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-08-12T00:00:00Z",
+                        "snapshot_id": "post-run-snapshot",
+                        "snapshot": {"id": "post-run-snapshot"},
+                    }
+                finally:
+                    snapshot_finished.set()
 
             with (
                 mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run),
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=snapshot_after_run),
             ):
                 server = _start_captured_server(serve, config)
-                try:
+                with server, _JobRunnerThreadTracker() as runner_threads:
+                    runner_threads.release_barrier(release_worker)
+                    runner_threads.release_barrier(release_snapshot, "release post-run snapshot barrier")
                     status, _headers, body = _http_request(
                         server.port,
                         "/api/core/strategy-discovery/start-run",
@@ -183,27 +191,19 @@ class WebUiTests(unittest.TestCase):
 
                     self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
                     self.assertEqual(json.loads(body.decode("utf-8"))["current_run"]["status"], "saving")
-                finally:
-                    release_worker.set()
-                    release_snapshot.set()
-                    try:
-                        deadline = time.monotonic() + 2
-                        while time.monotonic() < deadline:
-                            if read_state(config.output.state_dir).get("current_run_id") is None:
-                                break
-                            time.sleep(0.01)
-                        self.assertEqual(
-                            read_state(config.output.state_dir).get("last_snapshot"),
-                            {
-                                "kind": "snapshot",
-                                "status": "success",
-                                "completed_at": "2026-08-12T00:00:00Z",
-                                "snapshot_id": "post-run-snapshot",
-                                "snapshot": {"id": "post-run-snapshot"},
-                            },
-                        )
-                    finally:
-                        server.close()
+                    self.assertEqual(runner_threads.tracked_count, 1)
+
+                self.assertTrue(snapshot_finished.is_set())
+                self.assertEqual(
+                    read_state(config.output.state_dir).get("last_snapshot"),
+                    {
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-08-12T00:00:00Z",
+                        "snapshot_id": "post-run-snapshot",
+                        "snapshot": {"id": "post-run-snapshot"},
+                    },
+                )
 
     def test_active_run_http_contract_keeps_one_public_run_id_for_ui(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -233,11 +233,15 @@ class WebUiTests(unittest.TestCase):
                 release.wait(timeout=2)
                 return {"id": run_id, "status": "stopped" if stop_event.is_set() else "success"}
 
-            original_create_post_run_snapshot = web_app.create_post_run_snapshot
-
-            def create_snapshot_after_run(state_dir: Path) -> dict[str, Any]:
+            def create_snapshot_after_run(_state_dir: Path) -> dict[str, Any]:
                 try:
-                    return original_create_post_run_snapshot(state_dir)
+                    return {
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-08-12T00:00:00Z",
+                        "snapshot_id": "post-run-snapshot",
+                        "snapshot": {"id": "post-run-snapshot"},
+                    }
                 finally:
                     snapshot_completed.set()
 
@@ -246,7 +250,8 @@ class WebUiTests(unittest.TestCase):
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
             ):
                 server = _start_captured_server(serve, config)
-                try:
+                with server, _JobRunnerThreadTracker() as runner_threads:
+                    runner_threads.release_barrier(release)
                     status, _headers, body = _http_request(
                         server.port,
                         "/api/core/strategy-discovery/start-run",
@@ -285,21 +290,13 @@ class WebUiTests(unittest.TestCase):
                     self.assertEqual(log_payload["run_id"], run_id)
                     self.assertEqual(stop_status, 202)
                     self.assertEqual(json.loads(stop_body.decode("utf-8"))["run_id"], run_id)
-                finally:
-                    release.set()
-                    try:
-                        deadline = time.monotonic() + 2
-                        while time.monotonic() < deadline:
-                            if read_state(config.output.state_dir).get("current_run_id") is None:
-                                break
-                            time.sleep(0.01)
-                        self.assertIsNone(read_state(config.output.state_dir).get("current_run_id"))
-                        self.assertTrue(snapshot_completed.wait(timeout=2))
-                    finally:
-                        server.close()
+                    self.assertEqual(runner_threads.tracked_count, 1)
+
+                self.assertIsNone(read_state(config.output.state_dir).get("current_run_id"))
+                self.assertTrue(snapshot_completed.is_set())
 
     def test_current_run_endpoints_do_not_fall_back_to_previous_run_log(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             old_stdout = tmp / "old.stdout.log"
@@ -317,20 +314,39 @@ class WebUiTests(unittest.TestCase):
             )
             started = threading.Event()
             release = threading.Event()
+            worker_finished = threading.Event()
+            snapshot_finished = threading.Event()
 
             def queued_run(
                 _config: AppConfig, _payload: dict[str, Any], _stop_event: threading.Event, _run_id: str
             ) -> dict[str, str]:
                 started.set()
-                release.wait(timeout=2)
-                return {"status": "success"}
-
-            port = _free_port()
-            with mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=queued_run):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                _wait_for_server(port, "/openapi.json")
                 try:
+                    self.assertTrue(release.wait(timeout=2))
+                    return {"status": "success"}
+                finally:
+                    worker_finished.set()
+
+            def create_snapshot_after_run(_state_dir: Path) -> dict[str, Any]:
+                try:
+                    return {
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-08-12T00:00:00Z",
+                        "snapshot_id": "post-run-snapshot",
+                        "snapshot": {"id": "post-run-snapshot"},
+                    }
+                finally:
+                    snapshot_finished.set()
+
+            with (
+                mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=queued_run),
+                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
+            ):
+                server = start_server(serve, config)
+                port = server.port
+                with _JobRunnerThreadTracker() as runner_threads:
+                    runner_threads.release_barrier(release)
                     status, _headers, body = _http_request(
                         port,
                         "/api/core/strategy-discovery/start-run",
@@ -371,8 +387,10 @@ class WebUiTests(unittest.TestCase):
                     self.assertEqual(unknown_log["run_id"], "unknown-run")
                     self.assertEqual(unknown_log["stdout_tail"], "")
                     self.assertTrue(started.wait(timeout=2))
-                finally:
-                    release.set()
+                    self.assertEqual(runner_threads.tracked_count, 1)
+
+                self.assertTrue(worker_finished.is_set())
+                self.assertTrue(snapshot_finished.is_set())
 
     def test_ui_runtime_uses_public_current_run_without_legacy_job_fields(self) -> None:
         html = index_html()
@@ -1410,17 +1428,14 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("Ошибка обновления пресетов", html)
 
     def test_head_root_returns_ok_for_curl_i(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             connection.request("HEAD", "/")
@@ -1433,7 +1448,7 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.getheader("Cache-Control"), "no-store")
 
     def test_serve_clears_stale_current_job_on_start(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw:
+        with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
@@ -1442,10 +1457,8 @@ class WebUiTests(unittest.TestCase):
             )
             write_state(config.output.state_dir, {"current_run_id": "stale-job", "last_error": None})
             server = _start_captured_server(serve, config)
-            try:
+            with server:
                 self.assertIsNone(read_state(config.output.state_dir)["current_run_id"])
-            finally:
-                server.close()
 
     def test_serve_does_not_clear_current_job_when_runtime_lock_exists(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1458,23 +1471,18 @@ class WebUiTests(unittest.TestCase):
                 encoding="utf-8",
             )
             server = _start_captured_server(serve, config)
-            try:
+            with server:
                 self.assertEqual(read_state(config.output.state_dir)["current_run_id"], "active-job")
-            finally:
-                server.close()
 
     def test_legacy_diagnostics_endpoint_is_removed_from_alpha_api(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             connection.request("GET", "/api/diagnostics", headers=_authenticated_headers(port))
@@ -1486,7 +1494,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("not found", body)
 
     def test_web_events_return_candidate_version_and_release_update(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             log_path = tmp / "update.log"
             candidate_ref = "refs/tags/v0.3.1"
@@ -1525,10 +1533,7 @@ class WebUiTests(unittest.TestCase):
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            _wait_for_server(port)
+            port = start_server(serve, config).port
 
             response_status, _headers, response_body = _http_request(
                 port,
@@ -1589,17 +1594,14 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("pinned candidate", invalid_events["status"]["release_update"]["error"])
 
     def test_core_mode_serves_api_without_web_ui(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve_core, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             connection.request("GET", "/")
@@ -1619,7 +1621,7 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("not found", web_body.decode("utf-8"))
 
     def test_history_routes_use_run_id_without_legacy_id(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             append_run(
@@ -1632,19 +1634,8 @@ class WebUiTests(unittest.TestCase):
                 },
             )
             authorization = _bearer_authorization_for_state(config.output.state_dir)
-            core_port = _free_port()
-            web_port = _free_port()
-            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
-            web_thread = threading.Thread(
-                target=serve_web_proxy,
-                args=(config, "127.0.0.1", web_port),
-                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                daemon=True,
-            )
-            core_thread.start()
-            web_thread.start()
-            _wait_for_server(core_port)
-            _wait_for_server(web_port)
+            core_port = start_server(serve_core, config).port
+            web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
             contract = json.loads(web_app.openapi_json_bytes().decode("utf-8"))
             item_schema = contract["components"]["schemas"]["RunHistoryItem"]
@@ -1660,13 +1651,10 @@ class WebUiTests(unittest.TestCase):
 
     def test_openapi_and_swagger_are_served_by_monolith_and_core_mode(self) -> None:
         for target in (serve, serve_core):
-            with tempfile.TemporaryDirectory() as raw:
+            with _captured_server_temporary_directory() as (raw, start_server):
                 tmp = Path(raw)
                 config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-                port = _free_port()
-                thread = threading.Thread(target=target, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
+                port = start_server(target, config).port
 
                 status, headers, body = _http_request(port, "/openapi.json")
                 head_status, head_headers, head_body = _http_request(port, "/openapi.json", method="HEAD")
@@ -1957,23 +1945,13 @@ class WebUiTests(unittest.TestCase):
             ("GET", "/api/releases/update-plan", None, {}),
         ]
 
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            monolith_port = _free_port()
-            core_port = _free_port()
-            proxy_port = _free_port()
             with mock.patch.object(web_app, "MAX_JSON_REQUEST_BYTES", 10):
-                threading.Thread(target=serve, args=(config, "127.0.0.1", monolith_port), daemon=True).start()
-                threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True).start()
-                threading.Thread(
-                    target=serve_web_proxy,
-                    args=(config, "127.0.0.1", proxy_port),
-                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                    daemon=True,
-                ).start()
-                for port in (monolith_port, core_port, proxy_port):
-                    _wait_for_server(port, "/openapi.json")
+                monolith_port = start_server(serve, config).port
+                core_port = start_server(serve_core, config).port
+                proxy_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
                 for port in (monolith_port, core_port, proxy_port):
                     for method, path, payload, headers in representative_legacy_requests:
@@ -2021,12 +1999,11 @@ class WebUiTests(unittest.TestCase):
         self.assertIs(app_module, api_module)
 
     def test_openapi_paths_are_callable_through_web_runtime(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             web_app.save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
             snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
-            port = _free_port()
             release = {
                 "channel": "stable",
                 "available_version": "v0.0.0-test",
@@ -2048,9 +2025,7 @@ class WebUiTests(unittest.TestCase):
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
             ):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
+                port = start_server(serve, config).port
 
                 cases = [
                     ("GET", "/api/health", None, {}),
@@ -2229,19 +2204,26 @@ class WebUiTests(unittest.TestCase):
                 self.assertIn("not found", old_body.decode("utf-8"))
 
     def test_openapi_paths_are_callable_through_split_core_and_web_proxy_runtime(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             web_app.save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
             snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
-            core_port = _free_port()
-            web_port = _free_port()
             release = {
                 "channel": "stable",
                 "available_version": "v0.0.0-test",
                 "url": "https://example.invalid/release",
                 "published_at": "",
             }
+
+            def create_post_run_snapshot(_state_dir: Path) -> dict[str, object]:
+                return {
+                    "kind": "snapshot",
+                    "status": "success",
+                    "completed_at": "2026-08-13T00:00:00Z",
+                    "snapshot_id": "openapi-contract-post-run-snapshot",
+                    "snapshot": {"id": "openapi-contract-post-run-snapshot"},
+                }
 
             with (
                 mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}),
@@ -2259,18 +2241,11 @@ class WebUiTests(unittest.TestCase):
                 ),
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
+                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_post_run_snapshot) as post_run_snapshot,
+                _JobRunnerThreadTracker() as runner_threads,
             ):
-                core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
-                web_thread = threading.Thread(
-                    target=serve_web_proxy,
-                    args=(config, "127.0.0.1", web_port),
-                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                    daemon=True,
-                )
-                core_thread.start()
-                web_thread.start()
-                _wait_for_server(core_port, "/openapi.json")
-                _wait_for_server(web_port, "/openapi.json")
+                core_port = start_server(serve_core, config).port
+                web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
                 openapi_contract = json.loads(
                     web_app.openapi_json_bytes().decode("utf-8"),
@@ -2317,6 +2292,7 @@ class WebUiTests(unittest.TestCase):
                 }
                 core_checked: set[tuple[str, str]] = set()
                 proxy_checked: set[tuple[str, str]] = set()
+                successful_start_requests = 0
                 for runtime, port in (("core", core_port), ("proxy", web_port)):
                     for path, operations in openapi_contract["paths"].items():
                         for raw_method, operation in operations.items():
@@ -2372,6 +2348,10 @@ class WebUiTests(unittest.TestCase):
                             )
                             if path == "/api/core/backups/download-archive" and status == 200:
                                 self.assertGreater(len(response_body), 0, message)
+                            if path == "/api/core/strategy-discovery/start-run" and method == "POST":
+                                self.assertEqual(status, 202, message)
+                                successful_start_requests += 1
+                                runner_threads.join_tracked()
 
                 core_head_status, core_head_headers, core_head_body = _http_request(
                     core_port,
@@ -2391,6 +2371,9 @@ class WebUiTests(unittest.TestCase):
                 self.assertEqual(proxy_head_body, b"")
                 self.assertEqual(expected - web_expected, core_checked)
                 self.assertEqual(expected, proxy_checked)
+                self.assertEqual(successful_start_requests, 2)
+                self.assertEqual(runner_threads.tracked_count, successful_start_requests)
+                self.assertEqual(post_run_snapshot.call_count, successful_start_requests)
 
                 for runtime, port in (("core", core_port), ("proxy", web_port)):
                     old_status, old_headers, old_body = _http_request(
@@ -2402,13 +2385,10 @@ class WebUiTests(unittest.TestCase):
                     self.assertIn("not found", old_body.decode("utf-8"), runtime)
 
     def test_core_delete_user_domain_lists_requires_explicit_non_empty_ids(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             status, _headers, _body = _http_request(
                 port,
@@ -2455,13 +2435,10 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn("user:games", list_ids)
 
     def test_core_error_contract_returns_plain_error_payloads(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            _wait_for_server(port, "/openapi.json")
+            port = start_server(serve, config).port
 
             status, headers, body = _http_request(
                 port,
@@ -2512,7 +2489,7 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(core_payload["last_update_check"]["remote_revision"], "remote-revision")
 
     def test_service_release_install_uses_config_install_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             install_dir = tmp / "install"
             wrong_cwd = tmp / "wrong-cwd"
@@ -2526,13 +2503,10 @@ class WebUiTests(unittest.TestCase):
                 calls.append({"config": config_arg, "settings": settings, "payload": payload})
                 return {"update": {"status": "queued", "target_ref": "v0.4.0", "update_id": "test-update"}}
 
-            port = _free_port()
             with mock.patch.object(web_app.service_api, "queue_release_update_payload", fake_queue), mock.patch(
                 "pathlib.Path.cwd", return_value=wrong_cwd
             ):
-                thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                _wait_for_server(port, "/openapi.json")
+                port = start_server(serve_core, config).port
 
                 status, _headers, body = _http_request(
                     port,
@@ -2573,7 +2547,7 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(calls[0]["kwargs"]["install_dir"], config.install.root_dir)
 
     def test_service_v2fly_update_conflicts_when_runtime_lock_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             config.output.state_dir.mkdir(parents=True, exist_ok=True)
@@ -2581,15 +2555,12 @@ class WebUiTests(unittest.TestCase):
                 json.dumps({"pid": os.getpid(), "run_id": "lock-only"}),
                 encoding="utf-8",
             )
-            port = _free_port()
             with mock.patch.object(
                 web_app.service_api,
                 "prepare_v2fly_local_storage",
                 side_effect=AssertionError("storage update must not run while runtime lock exists"),
             ):
-                thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                _wait_for_server(port, "/openapi.json")
+                port = start_server(serve_core, config).port
 
                 status, headers, body = _http_request(
                     port,
@@ -2617,7 +2588,7 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn("accepted", dry_payload)
 
     def test_core_start_run_conflicts_when_state_idle_but_runner_lock_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             config.output.state_dir.mkdir(parents=True, exist_ok=True)
@@ -2625,10 +2596,7 @@ class WebUiTests(unittest.TestCase):
                 json.dumps({"pid": os.getpid(), "run_id": "lock-only"}),
                 encoding="utf-8",
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            _wait_for_server(port, "/openapi.json")
+            port = start_server(serve_core, config).port
 
             status, headers, body = _http_request(
                 port,
@@ -2645,15 +2613,12 @@ class WebUiTests(unittest.TestCase):
             self.assertIsNone(read_state(config.output.state_dir)["current_run_id"])
 
     def test_ingress_budget_rejects_oversize_json_without_mutating_state(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            port = _free_port()
             authorization = _bearer_authorization_for_state(config.output.state_dir)
             with mock.patch.object(web_app, "MAX_JSON_REQUEST_BYTES", 10):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                _wait_for_server(port, "/openapi.json")
+                port = start_server(serve, config).port
 
                 status, headers, body = _http_request(
                     port,
@@ -2669,17 +2634,14 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn("settings", read_state(config.output.state_dir))
 
     def test_backup_upload_rejects_oversize_before_import(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            port = _free_port()
             with (
                 mock.patch.object(web_app, "MAX_BACKUP_UPLOAD_BYTES", 10),
                 mock.patch.object(web_app, "import_snapshot_archive") as import_mock,
             ):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                _wait_for_server(port, "/openapi.json")
+                port = start_server(serve, config).port
 
                 status, _headers, body = _http_request(
                     port,
@@ -2694,7 +2656,7 @@ class WebUiTests(unittest.TestCase):
             import_mock.assert_not_called()
 
     def test_backup_mutations_return_runtime_busy_while_list_and_download_remain_available(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             snapshot = web_app.create_snapshot_if_idle(config.output.state_dir)["snapshot"]["id"]
@@ -2703,10 +2665,7 @@ class WebUiTests(unittest.TestCase):
                 json.dumps({"pid": os.getpid(), "run_id": "active-job"}),
                 encoding="utf-8",
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            _wait_for_server(port, "/openapi.json")
+            port = start_server(serve_core, config).port
 
             allowed_requests = [
                 ("GET", "/api/core/backups/list", None, {}),
@@ -2744,26 +2703,15 @@ class WebUiTests(unittest.TestCase):
                 self.assertApiError(json.loads(response_body.decode("utf-8")), "runtime_busy")
 
     def test_web_proxy_serves_ui_and_forwards_api_to_core(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            core_port = _free_port()
-            web_port = _free_port()
-            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
-            web_thread = threading.Thread(
-                target=serve_web_proxy,
-                args=(config, "127.0.0.1", web_port),
-                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                daemon=True,
-            )
-            core_thread.start()
-            web_thread.start()
-            _wait_for_server(core_port, "/openapi.json")
-            _wait_for_server(web_port, "/openapi.json")
+            core_port = start_server(serve_core, config).port
+            web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
             connection = http.client.HTTPConnection("127.0.0.1", web_port, timeout=5)
             connection.request("GET", "/")
@@ -2788,22 +2736,11 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("not found", legacy_body.decode("utf-8"))
 
     def test_web_proxy_forwards_post_body_and_query_to_core(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            core_port = _free_port()
-            web_port = _free_port()
-            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
-            web_thread = threading.Thread(
-                target=serve_web_proxy,
-                args=(config, "127.0.0.1", web_port),
-                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                daemon=True,
-            )
-            core_thread.start()
-            web_thread.start()
-            _wait_for_server(core_port, "/openapi.json")
-            _wait_for_server(web_port, "/openapi.json")
+            core_port = start_server(serve_core, config).port
+            web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
             status, headers, body = _http_request(
                 web_port,
@@ -2825,24 +2762,13 @@ class WebUiTests(unittest.TestCase):
     def test_web_proxy_rejects_oversize_api_body_without_forwarding_to_core(self) -> None:
         from gp_control_plane.web import proxy as proxy_module
 
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            core_port = _free_port()
-            web_port = _free_port()
-            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
             authorization = _bearer_authorization_for_state(config.output.state_dir)
             with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 10):
-                web_thread = threading.Thread(
-                    target=serve_web_proxy,
-                    args=(config, "127.0.0.1", web_port),
-                    kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                    daemon=True,
-                )
-                core_thread.start()
-                web_thread.start()
-                _wait_for_server(core_port, "/openapi.json")
-                _wait_for_server(web_port, "/openapi.json")
+                core_port = start_server(serve_core, config).port
+                web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
                 status, headers, body = _http_request(
                     web_port,
@@ -2858,22 +2784,11 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn("settings", read_state(config.output.state_dir))
 
     def test_web_proxy_serves_head_requests_without_body(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            core_port = _free_port()
-            web_port = _free_port()
-            core_thread = threading.Thread(target=serve_core, args=(config, "127.0.0.1", core_port), daemon=True)
-            web_thread = threading.Thread(
-                target=serve_web_proxy,
-                args=(config, "127.0.0.1", web_port),
-                kwargs={"core_url": f"http://127.0.0.1:{core_port}"},
-                daemon=True,
-            )
-            core_thread.start()
-            web_thread.start()
-            _wait_for_server(core_port, "/openapi.json")
-            _wait_for_server(web_port, "/openapi.json")
+            core_port = start_server(serve_core, config).port
+            web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
             root_status, root_headers, root_body = _http_request(web_port, "/", method="HEAD")
             openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json", method="HEAD")
@@ -2892,22 +2807,16 @@ class WebUiTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
 
             with self.assertRaisesRegex(ValueError, "core_url must be an http\\(s\\) URL with host"):
-                serve_web_proxy(config, "127.0.0.1", _free_port(), core_url="127.0.0.1:8081")
+                serve_web_proxy(config, "127.0.0.1", 0, core_url="127.0.0.1:8081")
 
     def test_web_proxy_reports_bad_gateway_when_core_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with (
+            _captured_server_temporary_directory() as (raw, start_server),
+            _reserved_unavailable_loopback_port() as unused_core_port,
+        ):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            unused_core_port = _free_port()
-            web_port = _free_port()
-            thread = threading.Thread(
-                target=serve_web_proxy,
-                args=(config, "127.0.0.1", web_port),
-                kwargs={"core_url": f"http://127.0.0.1:{unused_core_port}"},
-                daemon=True,
-            )
-            thread.start()
-            _wait_for_server(web_port, "/")
+            web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{unused_core_port}").port
             protected_headers = {"Authorization": _bearer_authorization_for_state(config.output.state_dir)}
 
             openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json")
@@ -2938,21 +2847,15 @@ class WebUiTests(unittest.TestCase):
     def test_web_proxy_returns_local_404_for_unknown_core_service_routes_with_dead_core(self) -> None:
         from gp_control_plane.web import proxy as proxy_module
 
-        with tempfile.TemporaryDirectory() as raw:
+        with (
+            _captured_server_temporary_directory() as (raw, start_server),
+            _reserved_unavailable_loopback_port() as unused_core_port,
+        ):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            unused_core_port = _free_port()
-            web_port = _free_port()
             authorization = _bearer_authorization_for_state(config.output.state_dir)
             with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 8):
-                thread = threading.Thread(
-                    target=serve_web_proxy,
-                    args=(config, "127.0.0.1", web_port),
-                    kwargs={"core_url": f"http://127.0.0.1:{unused_core_port}"},
-                    daemon=True,
-                )
-                thread.start()
-                _wait_for_server(web_port, "/")
+                web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{unused_core_port}").port
 
                 cases = (
                     ("GET", "/api/core/not-a-route", None, {}),
@@ -2979,13 +2882,10 @@ class WebUiTests(unittest.TestCase):
                     self.assertNotIn("request body is too large", response_body.decode("utf-8"), message)
 
     def test_protected_api_requires_bearer_token_before_app_logic(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            _wait_for_server(port, "/api/health")
+            port = start_server(serve, config).port
 
             anonymous_status, anonymous_headers, anonymous_body = _http_request(
                 port,
@@ -3009,11 +2909,17 @@ class WebUiTests(unittest.TestCase):
             )
             server = _start_captured_server(serve, config)
             connection = response = None
-            test_error: BaseException | None = None
-            try:
+            with _cleanup_scope() as cleanup:
+                cleanup.add("SSE server close", server.close)
                 connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
                 connection.request("GET", "/api/web/events/stream", headers=_authenticated_headers(server.port))
                 response = connection.getresponse()
+                cleanup.add(
+                    "SSE status write after disconnect",
+                    lambda: web_app.save_run_settings(config, {"curl_parallelism_default": 17}),
+                )
+                cleanup.add("SSE active request connection close", server.close_active_request_connections)
+                cleanup.add("SSE stream close", lambda: _close_sse_stream(connection, response))
                 first_line = response.readline().decode("utf-8").strip()
                 second_line = response.readline().decode("utf-8").strip()
 
@@ -3021,35 +2927,6 @@ class WebUiTests(unittest.TestCase):
                 self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
                 self.assertEqual(first_line, "event: status")
                 self.assertTrue(second_line.startswith("data:"))
-            except BaseException as error:
-                test_error = error
-                raise
-            finally:
-                cleanup_error: BaseException | None = None
-
-                def run_cleanup(action: Any) -> None:
-                    nonlocal cleanup_error
-                    try:
-                        action()
-                    except BaseException as error:
-                        if cleanup_error is None:
-                            cleanup_error = error
-                        else:
-                            cleanup_error.add_note(f"Additional SSE cleanup failure: {error!r}")
-
-                try:
-                    run_cleanup(lambda: _close_sse_stream(connection, response))
-                    run_cleanup(server.close_active_request_connections)
-                    # Prompt the disconnected stream to write once more, so its
-                    # handler observes the closed connection before temp cleanup.
-                    run_cleanup(lambda: web_app.save_run_settings(config, {"curl_parallelism_default": 17}))
-                finally:
-                    run_cleanup(server.close)
-                if cleanup_error is not None:
-                    if test_error is not None:
-                        test_error.add_note(f"SSE cleanup also failed: {cleanup_error!r}")
-                    else:
-                        raise cleanup_error
 
     def test_captured_server_close_keeps_handler_timeout_bounded(self) -> None:
         server = mock.Mock()
@@ -3072,6 +2949,586 @@ class WebUiTests(unittest.TestCase):
         self.assertLess(timeout, float("inf"))
         server.server_close.assert_not_called()
         base_server_close.assert_called_once_with(server)
+
+    def test_captured_server_context_flattens_handler_wait_and_raw_close_leaves(self) -> None:
+        server = mock.Mock()
+        server.request_handlers_idle.wait.return_value = False
+        server.active_request_handler_count = 1
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        captured = _CapturedTestServer(12345, server, thread)
+
+        with mock.patch.object(
+            socketserver.TCPServer,
+            "server_close",
+            side_effect=ValueError("raw listener close leaf failure"),
+        ):
+            with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
+                with captured:
+                    self.fail("original test failure")
+
+        notes = getattr(raised.exception, "__notes__", ())
+        self.assertEqual(len(notes), 2)
+        self.assertTrue(
+            any(
+                "captured HTTP request handler wait listener 1" in note
+                and "request handlers did not stop on port 12345: 1 still active" in note
+                for note in notes
+            )
+        )
+        self.assertTrue(
+            any(
+                "captured HTTP raw listener close listener 1" in note
+                and "ValueError('raw listener close leaf failure')" in note
+                for note in notes
+            )
+        )
+
+    def test_captured_server_close_retains_each_active_socket_failure_leaf(self) -> None:
+        shutdown_failure = mock.Mock()
+        shutdown_failure.shutdown.side_effect = OSError(errno.EIO, "socket shutdown leaf failure")
+        close_failure = mock.Mock()
+        close_failure.close.side_effect = OSError(errno.EIO, "socket close leaf failure")
+
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            captured = _start_captured_server(serve, config)
+            with captured._server._request_handlers_lock:
+                captured._server._active_request_sockets.update((shutdown_failure, close_failure))
+
+            with self.assertRaises(_CleanupFailureRecords) as raised:
+                captured.close()
+
+        self.assertEqual(len(raised.exception.records), 2)
+        descriptions_by_error = {str(error): description for description, error in raised.exception.records}
+        self.assertIn("[Errno 5] socket shutdown leaf failure", descriptions_by_error)
+        self.assertIn("[Errno 5] socket close leaf failure", descriptions_by_error)
+        self.assertIn(
+            "shutdown",
+            descriptions_by_error["[Errno 5] socket shutdown leaf failure"],
+        )
+        self.assertIn(
+            "close",
+            descriptions_by_error["[Errno 5] socket close leaf failure"],
+        )
+
+    def test_captured_server_context_flattens_active_socket_failure_leaves(self) -> None:
+        shutdown_failure = mock.Mock()
+        shutdown_failure.shutdown.side_effect = OSError(errno.EIO, "socket shutdown context failure")
+        close_failure = mock.Mock()
+        close_failure.close.side_effect = OSError(errno.EIO, "socket close context failure")
+
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            captured = _start_captured_server(serve, config)
+            with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
+                with captured:
+                    with captured._server._request_handlers_lock:
+                        captured._server._active_request_sockets.update((shutdown_failure, close_failure))
+                    self.fail("original test failure")
+
+        notes = getattr(raised.exception, "__notes__", ())
+        self.assertEqual(len(notes), 2)
+        self.assertTrue(
+            any(
+                "captured HTTP active request socket" in note
+                and "shutdown" in note
+                and "socket shutdown context failure" in note
+                for note in notes
+            )
+        )
+        self.assertTrue(
+            any(
+                "captured HTTP active request socket" in note
+                and "close" in note
+                and "socket close context failure" in note
+                for note in notes
+            )
+        )
+
+    def test_captured_server_context_manager_closes_server(self) -> None:
+        server = mock.Mock()
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        captured = _CapturedTestServer(12345, server, thread)
+
+        with captured as entered:
+            self.assertIs(captured, entered)
+
+        server.shutdown.assert_called_once()
+        thread.join.assert_called_once_with(timeout=5)
+        server.close_active_request_connections.assert_called_once()
+        server.server_close.assert_called_once()
+
+    def test_captured_server_startup_failure_closes_constructed_listener(self) -> None:
+        constructed_servers: list[Any] = []
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def startup_failure(_config: AppConfig, host: str, port: int) -> None:
+            constructed_servers.append(web_app.ThreadingHTTPServer((host, port), NoopRequestHandler))
+            raise RuntimeError("intentional startup failure")
+
+        startup_failure.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with self.assertRaisesRegex(AssertionError, "server failed during startup") as raised:
+                _start_captured_server(startup_failure, config)
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(str(raised.exception.__cause__), "intentional startup failure")
+        self.assertEqual(len(constructed_servers), 1)
+        self.assertEqual(constructed_servers[0].socket.fileno(), -1)
+
+    def test_captured_server_abort_closes_listener_after_late_registration(self) -> None:
+        constructed_servers: list[Any] = []
+        construction_threads: list[threading.Thread] = []
+        constructor_passed_abandon_check = threading.Event()
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def wait_until_startup_is_abandoned(server: Any, startup_abandoned: threading.Event) -> None:
+            constructed_servers.append(server)
+            construction_threads.append(threading.current_thread())
+            constructor_passed_abandon_check.set()
+            self.assertTrue(startup_abandoned.wait(timeout=2))
+
+        def startup_server(_config: AppConfig, host: str, port: int) -> None:
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+
+        startup_server.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with self.assertRaisesRegex(AssertionError, "server (did not start serving|exited during startup)"):
+                _start_captured_server(
+                    startup_server,
+                    config,
+                    _startup_timeout=0.1,
+                    _after_constructor_abandon_check=wait_until_startup_is_abandoned,
+                )
+
+        self.assertTrue(constructor_passed_abandon_check.is_set())
+        self.assertEqual(len(constructed_servers), 1)
+        self.assertEqual(constructed_servers[0].socket.fileno(), -1)
+        self.assertEqual(len(construction_threads), 1)
+        self.assertFalse(construction_threads[0].is_alive())
+
+    def test_captured_server_startup_failure_closes_two_bound_listeners_in_reverse_order(self) -> None:
+        constructed_servers: list[Any] = []
+        close_order: list[Any] = []
+        raw_server_close = socketserver.TCPServer.server_close
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def record_raw_close(server: Any) -> None:
+            close_order.append(server)
+            raw_server_close(server)
+
+        def startup_failure(_config: AppConfig, host: str, port: int) -> None:
+            constructed_servers.append(web_app.ThreadingHTTPServer((host, port), NoopRequestHandler))
+            constructed_servers.append(web_app.ThreadingHTTPServer((host, port), NoopRequestHandler))
+            raise RuntimeError("intentional two-listener startup failure")
+
+        startup_failure.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.object(
+                socketserver.TCPServer,
+                "server_close",
+                side_effect=record_raw_close,
+            ):
+                with self.assertRaisesRegex(AssertionError, "server failed during startup") as raised:
+                    _start_captured_server(startup_failure, config)
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(len(constructed_servers), 2)
+        self.assertEqual(close_order, list(reversed(constructed_servers)))
+        self.assertTrue(all(server.socket.fileno() == -1 for server in constructed_servers))
+
+    def test_captured_server_abort_closes_late_listener_after_registration_is_abandoned(self) -> None:
+        constructed_servers: list[Any] = []
+        first_listener_registered = threading.Event()
+        original_server = web_app.ThreadingHTTPServer
+
+        class RecordingServer(original_server):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                constructed_servers.append(self)
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def wait_for_abort(_server: Any, startup_abandoned: threading.Event) -> None:
+            if len(constructed_servers) == 1:
+                first_listener_registered.set()
+                self.assertTrue(startup_abandoned.wait(timeout=2))
+
+        def startup_server(_config: AppConfig, host: str, port: int) -> None:
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+
+        startup_server.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with self.assertRaisesRegex(AssertionError, "server did not start serving"):
+                _start_captured_server(
+                    startup_server,
+                    config,
+                    _startup_timeout=0.1,
+                    _after_constructor_abandon_check=wait_for_abort,
+                    _server_type=RecordingServer,
+                )
+
+        self.assertTrue(first_listener_registered.is_set())
+        self.assertEqual(len(constructed_servers), 2)
+        self.assertTrue(all(server.socket.fileno() == -1 for server in constructed_servers))
+
+    def test_captured_listener_registry_claims_late_listener_before_concurrent_pre_join_drain(self) -> None:
+        registry = _CapturedListenerRegistry(threading.Event())
+        listener = mock.Mock(server_address=("127.0.0.1", 12345), serve_forever_started=None)
+        late_registration_complete = threading.Event()
+        release_direct_close = threading.Event()
+        direct_close_errors: list[BaseException] = []
+
+        registry.abandon()
+
+        def close_late_listener() -> None:
+            try:
+                self.assertFalse(registry.register(listener))
+                late_registration_complete.set()
+                self.assertTrue(release_direct_close.wait(timeout=2))
+                registry.close_after_abandonment(listener)
+            except BaseException as error:
+                direct_close_errors.append(error)
+
+        direct_close_thread = threading.Thread(target=close_late_listener)
+        with mock.patch.object(socketserver.TCPServer, "server_close") as raw_server_close:
+            direct_close_thread.start()
+            try:
+                self.assertTrue(late_registration_complete.wait(timeout=2))
+                registry.close_all("pre-join")
+            finally:
+                release_direct_close.set()
+                direct_close_thread.join(timeout=2)
+
+        self.assertFalse(direct_close_thread.is_alive())
+        self.assertEqual(direct_close_errors, [])
+        raw_server_close.assert_called_once_with(listener)
+        self.assertEqual(registry.snapshot(), ())
+
+    def test_captured_server_abort_retries_late_listener_after_early_close_failure(self) -> None:
+        constructed_servers: list[Any] = []
+        construction_threads: list[threading.Thread] = []
+        close_attempts: list[Any] = []
+        first_listener_registered = threading.Event()
+        original_server = web_app.ThreadingHTTPServer
+        raw_server_close = socketserver.TCPServer.server_close
+
+        class RecordingServer(original_server):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                constructed_servers.append(self)
+                construction_threads.append(threading.current_thread())
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def wait_for_abort(_server: Any, startup_abandoned: threading.Event) -> None:
+            if len(constructed_servers) == 1:
+                first_listener_registered.set()
+                self.assertTrue(startup_abandoned.wait(timeout=2))
+
+        def fail_first_late_listener_close(server: Any) -> None:
+            close_attempts.append(server)
+            if (
+                len(constructed_servers) > 1
+                and server is constructed_servers[1]
+                and close_attempts.count(server) == 1
+            ):
+                raise OSError(errno.EIO, "late listener early close failure")
+            raw_server_close(server)
+
+        def startup_server(_config: AppConfig, host: str, port: int) -> None:
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+
+        startup_server.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.object(
+                socketserver.TCPServer,
+                "server_close",
+                side_effect=fail_first_late_listener_close,
+            ):
+                with self.assertRaisesRegex(AssertionError, "server did not start serving") as raised:
+                    _start_captured_server(
+                        startup_server,
+                        config,
+                        _startup_timeout=0.1,
+                        _after_constructor_abandon_check=wait_for_abort,
+                        _server_type=RecordingServer,
+                    )
+
+        self.assertTrue(first_listener_registered.is_set())
+        self.assertEqual(len(constructed_servers), 2)
+        self.assertEqual(close_attempts.count(constructed_servers[1]), 2)
+        self.assertTrue(all(server.socket.fileno() == -1 for server in constructed_servers))
+        self.assertTrue(all(not thread.is_alive() for thread in construction_threads))
+        self.assertIsInstance(raised.exception.__cause__, _CleanupFailureRecords)
+        self.assertEqual(
+            [
+                (description, type(error), str(error))
+                for description, error in raised.exception.__cause__.records
+            ],
+            [
+                (
+                    "captured server abandoned listener raw close",
+                    OSError,
+                    "[Errno 5] late listener early close failure",
+                )
+            ],
+        )
+
+    def test_captured_server_abort_retries_registered_listener_after_pre_join_failure(self) -> None:
+        constructed_servers: list[Any] = []
+        construction_threads: list[threading.Thread] = []
+        close_attempts: list[Any] = []
+        listener_registered = threading.Event()
+        original_server = web_app.ThreadingHTTPServer
+        raw_server_close = socketserver.TCPServer.server_close
+
+        class RecordingServer(original_server):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                constructed_servers.append(self)
+                construction_threads.append(threading.current_thread())
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def wait_for_abort(_server: Any, startup_abandoned: threading.Event) -> None:
+            listener_registered.set()
+            self.assertTrue(startup_abandoned.wait(timeout=2))
+
+        def fail_first_close(server: Any) -> None:
+            close_attempts.append(server)
+            if close_attempts.count(server) == 1:
+                raise OSError(errno.EIO, "pre-join listener close failure")
+            raw_server_close(server)
+
+        def startup_server(_config: AppConfig, host: str, port: int) -> None:
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+
+        startup_server.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.object(
+                socketserver.TCPServer,
+                "server_close",
+                side_effect=fail_first_close,
+            ):
+                with self.assertRaisesRegex(AssertionError, "server did not start serving") as raised:
+                    _start_captured_server(
+                        startup_server,
+                        config,
+                        _startup_timeout=0.1,
+                        _after_constructor_abandon_check=wait_for_abort,
+                        _server_type=RecordingServer,
+                    )
+
+        self.assertTrue(listener_registered.is_set())
+        self.assertEqual(len(constructed_servers), 1)
+        self.assertEqual(close_attempts, [constructed_servers[0], constructed_servers[0]])
+        self.assertEqual(constructed_servers[0].socket.fileno(), -1)
+        self.assertTrue(all(not thread.is_alive() for thread in construction_threads))
+        self.assertTrue(
+            any(
+                "pre-join listener" in note
+                and "OSError(5, 'pre-join listener close failure')" in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_captured_server_successfully_owns_all_listeners_and_uses_serving_port(self) -> None:
+        constructed_servers: list[Any] = []
+        close_order: list[Any] = []
+        original_server = web_app.ThreadingHTTPServer
+        raw_server_close = socketserver.TCPServer.server_close
+
+        class RecordingServer(original_server):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                constructed_servers.append(self)
+
+        class NoopRequestHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                return
+
+        def record_raw_close(server: Any) -> None:
+            close_order.append(server)
+            raw_server_close(server)
+
+        def serve_second_listener(_config: AppConfig, host: str, port: int) -> None:
+            web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+            serving_listener = web_app.ThreadingHTTPServer((host, port), NoopRequestHandler)
+            serving_listener.serve_forever()
+
+        serve_second_listener.__module__ = web_app.__name__
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with mock.patch.object(
+                socketserver.TCPServer,
+                "server_close",
+                autospec=True,
+                side_effect=record_raw_close,
+            ):
+                captured = _start_captured_server(
+                    serve_second_listener,
+                    config,
+                    _server_type=RecordingServer,
+                )
+                try:
+                    self.assertEqual(len(constructed_servers), 2)
+                    self.assertEqual(captured.port, constructed_servers[1].server_address[1])
+                    self.assertNotEqual(captured.port, constructed_servers[0].server_address[1])
+                    self.assertTrue(constructed_servers[1].serve_forever_started.is_set())
+                finally:
+                    captured.close()
+
+        self.assertEqual(close_order, list(reversed(constructed_servers)))
+        self.assertTrue(all(server.socket.fileno() == -1 for server in constructed_servers))
+
+    def test_captured_server_context_preserves_primary_failure_when_cleanup_fails(self) -> None:
+        server = mock.Mock()
+        server.request_handlers_idle.wait.return_value = True
+        server.shutdown.side_effect = RuntimeError("cleanup failure")
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        captured = _CapturedTestServer(12345, server, thread)
+
+        with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
+            with captured:
+                self.fail("original test failure")
+
+        self.assertTrue(any("Cleanup also failed" in note for note in getattr(raised.exception, "__notes__", ())))
+
+    def test_captured_server_context_flattens_nested_cleanup_failures(self) -> None:
+        server = mock.Mock()
+        server.request_handlers_idle.wait.return_value = True
+        server.shutdown.side_effect = RuntimeError("shutdown leaf failure")
+        server.server_close.side_effect = ValueError("listener close leaf failure")
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+        captured = _CapturedTestServer(12345, server, thread)
+
+        with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
+            with captured:
+                self.fail("original test failure")
+
+        notes = getattr(raised.exception, "__notes__", ())
+        self.assertEqual(len(notes), 2)
+        self.assertTrue(
+            any(
+                "captured HTTP server shutdown listener 1" in note
+                and "RuntimeError('shutdown leaf failure')" in note
+                for note in notes
+            )
+        )
+        self.assertTrue(
+            any(
+                "captured HTTP listener close listener 1" in note
+                and "ValueError('listener close leaf failure')" in note
+                for note in notes
+            )
+        )
+
+    def test_cleanup_scope_preserves_primary_failure_and_all_cleanup_failure_details(self) -> None:
+        def fail_first_cleanup() -> None:
+            raise RuntimeError("first cleanup failure")
+
+        def fail_second_cleanup() -> None:
+            raise ValueError("second cleanup failure")
+
+        with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
+            with _cleanup_scope() as cleanup:
+                cleanup.add("first cleanup action", fail_first_cleanup)
+                cleanup.add("second cleanup action", fail_second_cleanup)
+                self.fail("original test failure")
+
+        self.assertEqual(str(raised.exception), "original test failure")
+        notes = getattr(raised.exception, "__notes__", ())
+        self.assertTrue(any("second cleanup action" in note and "ValueError('second cleanup failure')" in note for note in notes))
+        self.assertTrue(any("first cleanup action" in note and "RuntimeError('first cleanup failure')" in note for note in notes))
+
+    def test_cleanup_scope_raises_all_nested_leaf_records_without_primary_error(self) -> None:
+        def fail_nested_first_cleanup() -> None:
+            raise RuntimeError("nested first failure")
+
+        def fail_nested_second_cleanup() -> None:
+            raise ValueError("nested second failure")
+
+        def nested_cleanup() -> None:
+            with _cleanup_scope() as cleanup:
+                cleanup.add("nested first cleanup action", fail_nested_first_cleanup)
+                cleanup.add("nested second cleanup action", fail_nested_second_cleanup)
+
+        with self.assertRaises(_CleanupFailureRecords) as raised:
+            with _cleanup_scope() as cleanup:
+                cleanup.add("outer nested cleanup", nested_cleanup)
+
+        self.assertEqual(
+            [(description, type(error), str(error)) for description, error in raised.exception.records],
+            [
+                ("nested second cleanup action", ValueError, "nested second failure"),
+                ("nested first cleanup action", RuntimeError, "nested first failure"),
+            ],
+        )
+
+    def test_job_runner_tracker_preserves_primary_failure_when_join_fails(self) -> None:
+        stuck_thread = mock.Mock()
+        stuck_thread.is_alive.return_value = True
+
+        with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
+            with _JobRunnerThreadTracker() as tracker:
+                tracker._register(stuck_thread)
+                self.fail("original test failure")
+
+        stuck_thread.join.assert_called_once_with(timeout=2)
+        self.assertTrue(any("Cleanup also failed" in note for note in getattr(raised.exception, "__notes__", ())))
+
+    def test_job_runner_tracker_raises_join_failure_without_primary_error(self) -> None:
+        stuck_thread = mock.Mock()
+        stuck_thread.is_alive.return_value = True
+
+        with self.assertRaisesRegex(AssertionError, "JobRunner worker thread did not stop"):
+            with _JobRunnerThreadTracker() as tracker:
+                tracker._register(stuck_thread)
+
+    def test_job_runner_tracker_joins_worker_registered_during_cleanup(self) -> None:
+        worker_finished = threading.Event()
+        late_worker: list[threading.Thread] = []
+
+        def start_late_worker(tracker: _JobRunnerThreadTracker) -> None:
+            thread = threading.Thread(target=worker_finished.set, daemon=True)
+            late_worker.append(thread)
+            tracker._register(thread)
+            thread.start()
+
+        with _JobRunnerThreadTracker() as tracker:
+            tracker.add_release_action("start late JobRunner worker", lambda: start_late_worker(tracker))
+
+        self.assertTrue(worker_finished.is_set())
+        self.assertEqual(len(late_worker), 1)
+        self.assertFalse(late_worker[0].is_alive())
 
     def test_core_and_web_events_have_separate_payloads_and_cursors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3138,17 +3595,14 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(["strategy-candidates"], [event["type"] for event in candidate_changed["events"]])
 
     def test_split_settings_endpoints_save_runtime_defaults(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps(
@@ -3325,79 +3779,79 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(2, runner.call_args.kwargs["curl_parallelism"])
 
     def test_core_strategy_discovery_start_run_routes_swagger_payload(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             save_settings = web_app.save_settings
             save_settings(config, {"curl_parallelism_max": 50, "curl_parallelism_default": 10})
-            port = _free_port()
             finished = threading.Event()
+            snapshot_finished = threading.Event()
 
             def fake_run(*args: object, **kwargs: object) -> dict[str, str]:
-                finished.set()
-                return {"status": "success"}
+                try:
+                    return {"status": "success"}
+                finally:
+                    finished.set()
 
-            with (
-                mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=fake_run) as runner,
-                mock.patch.object(
-                    web_app,
-                    "create_post_run_snapshot",
-                    return_value={
+            def create_snapshot_after_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+                try:
+                    return {
                         "kind": "snapshot",
                         "status": "success",
                         "completed_at": "2026-08-12T00:00:00Z",
                         "snapshot_id": "post-run-snapshot",
-                    },
-                ),
-            ):
-                thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-                thread.start()
-                time.sleep(0.1)
-
-                body = json.dumps(
-                    {
-                        "mode": "multi_domain",
-                        "domains": ["youtube.com", "discord.com", "airhorn.solutions"],
-                        "protocols": ["tcp", "quic"],
-                        "curl_parallelism": 30,
-                        "timeout_seconds": 172800,
-                        "settings": {
-                            "curl_max_time": 7,
-                            "curl_max_time_quic": 7,
-                            "enable_ipv6": False,
-                            "skip_ipblock": False,
-                        },
                     }
-                )
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request(
-                    "POST",
-                    "/api/core/strategy-discovery/start-run",
-                    body=body,
-                    headers=_authenticated_headers(port, {"Content-Type": "application/json", "Accept": "application/json"}),
-                )
-                response = connection.getresponse()
-                raw_response = response.read().decode("utf-8")
-                connection.close()
+                finally:
+                    snapshot_finished.set()
 
-                self.assertEqual(response.status, 202)
-                accepted = json.loads(raw_response)
-                self.assertTrue(accepted["accepted"])
-                self.assertTrue(accepted["run_id"])
-                self.assertEqual("queued", accepted["status"])
-                self.assertTrue(finished.wait(2))
-                self.assertEqual(30, runner.call_args.kwargs["curl_parallelism"])
-                self.assertEqual(7, runner.call_args.kwargs["curl_max_time"])
-                self.assertEqual(7, runner.call_args.kwargs["curl_max_time_quic"])
-                self.assertFalse(runner.call_args.kwargs["enable_ipv6"])
-                self.assertFalse(runner.call_args.kwargs["skip_ipblock"])
-                self.assertTrue(runner.call_args.kwargs["include_quic"])
-                self.assertTrue(runner.call_args.kwargs["enable_tls12"])
-                deadline = time.time() + 2
-                while time.time() < deadline:
-                    if read_state(config.output.state_dir).get("current_run_id") is None:
-                        break
-                    time.sleep(0.02)
+            with (
+                mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=fake_run) as runner,
+                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
+            ):
+                with _JobRunnerThreadTracker() as runner_threads:
+                    port = start_server(serve, config).port
+                    body = json.dumps(
+                        {
+                            "mode": "multi_domain",
+                            "domains": ["youtube.com", "discord.com", "airhorn.solutions"],
+                            "protocols": ["tcp", "quic"],
+                            "curl_parallelism": 30,
+                            "timeout_seconds": 172800,
+                            "settings": {
+                                "curl_max_time": 7,
+                                "curl_max_time_quic": 7,
+                                "enable_ipv6": False,
+                                "skip_ipblock": False,
+                            },
+                        }
+                    )
+                    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                    connection.request(
+                        "POST",
+                        "/api/core/strategy-discovery/start-run",
+                        body=body,
+                        headers=_authenticated_headers(port, {"Content-Type": "application/json", "Accept": "application/json"}),
+                    )
+                    response = connection.getresponse()
+                    raw_response = response.read().decode("utf-8")
+                    connection.close()
+
+                    self.assertEqual(response.status, 202)
+                    accepted = json.loads(raw_response)
+                    self.assertTrue(accepted["accepted"])
+                    self.assertTrue(accepted["run_id"])
+                    self.assertEqual("queued", accepted["status"])
+                    self.assertTrue(finished.wait(timeout=2))
+                    runner_threads.join_tracked()
+                    self.assertEqual(30, runner.call_args.kwargs["curl_parallelism"])
+                    self.assertEqual(7, runner.call_args.kwargs["curl_max_time"])
+                    self.assertEqual(7, runner.call_args.kwargs["curl_max_time_quic"])
+                    self.assertFalse(runner.call_args.kwargs["enable_ipv6"])
+                    self.assertFalse(runner.call_args.kwargs["skip_ipblock"])
+                    self.assertTrue(runner.call_args.kwargs["include_quic"])
+                    self.assertTrue(runner.call_args.kwargs["enable_tls12"])
+                    self.assertEqual(runner_threads.tracked_count, 1)
+                    self.assertTrue(snapshot_finished.is_set())
 
     def test_strategy_discovery_start_leaves_root_signal_cancellation_to_worker(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3432,13 +3886,15 @@ class WebUiTests(unittest.TestCase):
                     worker_finished.set()
 
             def create_snapshot_when_idle(*_args: object, **_kwargs: object) -> dict[str, object]:
-                snapshot_completed.set()
-                return {
-                    "kind": "snapshot",
-                    "status": "success",
-                    "completed_at": "2026-08-12T00:00:00Z",
-                    "snapshot_id": "post-run-snapshot",
-                }
+                try:
+                    return {
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-08-12T00:00:00Z",
+                        "snapshot_id": "post-run-snapshot",
+                    }
+                finally:
+                    snapshot_completed.set()
 
             with (
                 mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
@@ -3447,7 +3903,12 @@ class WebUiTests(unittest.TestCase):
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_when_idle),
             ):
                 server = _start_captured_server(serve, config)
-                try:
+                with server, _JobRunnerThreadTracker() as runner_threads:
+                    runner_threads.release_barrier(release_worker)
+                    runner_threads.add_release_action(
+                        "cancel active JobRunner before releasing worker",
+                        lambda: _stop_current_run_if_started(server.port, worker_started, worker_finished),
+                    )
                     status, _headers, body = _http_request(
                         server.port,
                         "/api/core/strategy-discovery/start-run",
@@ -3474,23 +3935,10 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
                     self.assertTrue(worker_cancelled.wait(timeout=2))
                     root_signal.assert_called_once_with(accepted["run_id"], "TERM")
-                finally:
-                    try:
-                        if worker_started.is_set() and not worker_finished.is_set():
-                            _http_request(
-                                server.port,
-                                "/api/core/strategy-discovery/stop-current-run",
-                                method="POST",
-                                body=b"{}",
-                                headers={"Content-Type": "application/json"},
-                            )
-                    finally:
-                        release_worker.set()
-                        try:
-                            self.assertTrue(worker_finished.wait(timeout=2))
-                            self.assertTrue(snapshot_completed.wait(timeout=2))
-                        finally:
-                            server.close()
+                    self.assertEqual(runner_threads.tracked_count, 1)
+
+                self.assertTrue(worker_finished.is_set())
+                self.assertTrue(snapshot_completed.is_set())
 
     def test_strategy_discovery_immediate_stop_finishes_without_privileged_child(self) -> None:
         def run_immediate_stop(mode: str) -> None:
@@ -3514,6 +3962,16 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", BarrierJobRunner),
+                    mock.patch.object(
+                        web_app,
+                        "create_post_run_snapshot",
+                        return_value={
+                            "kind": "snapshot",
+                            "status": "success",
+                            "completed_at": "2026-08-12T00:00:00Z",
+                            "snapshot_id": "post-run-snapshot",
+                        },
+                    ),
                     mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
                     mock.patch.object(
                         strategy_finder,
@@ -3530,7 +3988,8 @@ class WebUiTests(unittest.TestCase):
                     ) as root_signal,
                 ):
                     server = _start_captured_server(serve, config)
-                    try:
+                    with server, _JobRunnerThreadTracker() as runner_threads:
+                        runner_threads.release_barrier(release_worker)
                         start_status, _headers, start_body = _http_request(
                             server.port,
                             "/api/core/strategy-discovery/start-run",
@@ -3556,6 +4015,7 @@ class WebUiTests(unittest.TestCase):
 
                         release_worker.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
+                        runner_threads.join_tracked()
 
                         state = read_state(config.output.state_dir)
                         status_status, _headers, status_body = _http_request(server.port, "/api/core/status")
@@ -3574,9 +4034,7 @@ class WebUiTests(unittest.TestCase):
                         root_command.assert_not_called()
                         popen.assert_not_called()
                         root_signal.assert_not_called()
-                    finally:
-                        release_worker.set()
-                        server.close()
+                        self.assertEqual(runner_threads.tracked_count, 1)
 
         for mode in ("standard", "multi_domain"):
             with self.subTest(mode=mode):
@@ -3607,6 +4065,16 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(
+                        web_app,
+                        "create_post_run_snapshot",
+                        return_value={
+                            "kind": "snapshot",
+                            "status": "success",
+                            "completed_at": "2026-08-12T00:00:00Z",
+                            "snapshot_id": "post-run-snapshot",
+                        },
+                    ),
                     mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
                     mock.patch.object(
                         strategy_finder,
@@ -3625,7 +4093,8 @@ class WebUiTests(unittest.TestCase):
                     ) as root_signal,
                 ):
                     server = _start_captured_server(serve, config)
-                    try:
+                    with server, _JobRunnerThreadTracker() as runner_threads:
+                        runner_threads.release_barrier(release_root_command)
                         start_status, _headers, start_body = _http_request(
                             server.port,
                             "/api/core/strategy-discovery/start-run",
@@ -3651,6 +4120,7 @@ class WebUiTests(unittest.TestCase):
 
                         release_root_command.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
+                        runner_threads.join_tracked()
 
                         state = read_state(config.output.state_dir)
                         history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
@@ -3663,9 +4133,7 @@ class WebUiTests(unittest.TestCase):
                         root_command.assert_called_once()
                         popen.assert_not_called()
                         root_signal.assert_not_called()
-                    finally:
-                        release_root_command.set()
-                        server.close()
+                        self.assertEqual(runner_threads.tracked_count, 1)
 
         for mode in ("standard", "multi_domain"):
             with self.subTest(mode=mode):
@@ -3699,6 +4167,16 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(
+                        web_app,
+                        "create_post_run_snapshot",
+                        return_value={
+                            "kind": "snapshot",
+                            "status": "success",
+                            "completed_at": "2026-08-12T00:00:00Z",
+                            "snapshot_id": "post-run-snapshot",
+                        },
+                    ),
                     mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
                     mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(
@@ -3718,7 +4196,8 @@ class WebUiTests(unittest.TestCase):
                     ) as root_signal,
                 ):
                     server = _start_captured_server(serve, config)
-                    try:
+                    with server, _JobRunnerThreadTracker() as runner_threads:
+                        runner_threads.release_barrier(release_stdout_log)
                         start_status, _headers, start_body = _http_request(
                             server.port,
                             "/api/core/strategy-discovery/start-run",
@@ -3744,6 +4223,7 @@ class WebUiTests(unittest.TestCase):
 
                         release_stdout_log.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
+                        runner_threads.join_tracked()
 
                         state = read_state(config.output.state_dir)
                         status_status, _headers, status_body = _http_request(server.port, "/api/core/status")
@@ -3762,9 +4242,7 @@ class WebUiTests(unittest.TestCase):
                         root_command.assert_called_once()
                         popen.assert_not_called()
                         root_signal.assert_not_called()
-                    finally:
-                        release_stdout_log.set()
-                        server.close()
+                        self.assertEqual(runner_threads.tracked_count, 1)
 
         for mode in ("standard", "multi_domain"):
             with self.subTest(mode=mode):
@@ -3908,17 +4386,14 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(payload["data_state"]["v2fly"]["group_count"], 0)
 
     def test_run_preferences_endpoint_saves_last_finder_form(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps(
@@ -3970,17 +4445,14 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn('"settings_preset"', status)
 
     def test_web_preset_domain_endpoints_save_and_page_domains(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps({"scope": "finder", "name": "mine", "domains": ["youtube.com", "discord.com", "discordcdn.com"]})
@@ -4001,17 +4473,14 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"has_more":true', page)
 
     def test_system_preset_api_allows_empty_save_and_user_only_delete(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps({"scope": "finder", "name": "required", "kind": "system", "domains": []})
@@ -4051,17 +4520,14 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"kind":"system"', deleted)
 
     def test_discovery_profiles_endpoint_is_removed(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(
                 output=OutputConfig(
                     state_dir=tmp / "state",
                 ),
             )
-            port = _free_port()
-            thread = threading.Thread(target=serve, args=(config, "127.0.0.1", port), daemon=True)
-            thread.start()
-            time.sleep(0.1)
+            port = start_server(serve, config).port
 
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             body = json.dumps(
@@ -4096,67 +4562,379 @@ class WebUiTests(unittest.TestCase):
             self.assertNotIn("Changed built-in", saved)
 
 
+class _CleanupFailureRecords(AssertionError):
+    """Structured leaf cleanup failures that survive nested cleanup scopes."""
+
+    def __init__(self, records: list[tuple[str, BaseException]]) -> None:
+        self.records = tuple(records)
+        super().__init__(
+            "\n".join(
+                f"Cleanup failed during {description}: {error!r}"
+                for description, error in self.records
+            )
+        )
+
+
+def _cleanup_failure_records(error: BaseException, description: str) -> tuple[tuple[str, BaseException], ...]:
+    if isinstance(error, _CleanupFailureRecords):
+        return error.records
+    return ((description, error),)
+
+
+class _CleanupActions:
+    """Run every cleanup action without hiding the test's primary failure."""
+
+    def __init__(self) -> None:
+        self._actions: list[tuple[str, Any]] = []
+
+    def add(self, description: str, action: Any) -> None:
+        self._actions.append((description, action))
+
+    def run(self, primary_error: BaseException | None = None) -> None:
+        cleanup_failures: list[tuple[str, BaseException]] = []
+        for description, action in reversed(self._actions):
+            try:
+                action()
+            except BaseException as error:
+                cleanup_failures.extend(_cleanup_failure_records(error, description))
+        if not cleanup_failures:
+            return
+        if primary_error is not None:
+            for description, error in cleanup_failures:
+                primary_error.add_note(f"Cleanup also failed during {description}: {error!r}")
+            return
+        raise _CleanupFailureRecords(cleanup_failures)
+
+
+@contextlib.contextmanager
+def _cleanup_scope() -> Any:
+    cleanup = _CleanupActions()
+    primary_error: BaseException | None = None
+    try:
+        yield cleanup
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        cleanup.run(primary_error)
+
+
 class _CapturedTestServer:
-    def __init__(self, port: int, server: Any, thread: threading.Thread) -> None:
+    def __init__(
+        self,
+        port: int,
+        server: Any,
+        thread: threading.Thread,
+        listener_registry: _CapturedListenerRegistry | None = None,
+    ) -> None:
         self.port = port
         self._server = server
         self._thread = thread
+        self._listener_registry = listener_registry
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    def __enter__(self) -> _CapturedTestServer:
+        return self
+
+    def __exit__(self, _exc_type: Any, exc_value: BaseException | None, _traceback: Any) -> None:
+        cleanup = _CleanupActions()
+        cleanup.add("captured HTTP server close", self.close)
+        cleanup.run(exc_value)
 
     def close(self) -> None:
-        teardown_error: BaseException | None = None
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
 
-        def record_teardown_error(error: BaseException, step: str) -> None:
-            nonlocal teardown_error
-            if teardown_error is None:
-                teardown_error = error
-            else:
-                teardown_error.add_note(f"Additional server teardown failure during {step}: {error!r}")
+        listeners = self._owned_listeners()
 
-        try:
-            self._server.shutdown()
+        def join_server_thread() -> None:
             self._thread.join(timeout=5)
             if self._thread.is_alive():
                 raise AssertionError(f"server thread did not stop on port {self.port}")
-        except BaseException as error:
-            record_teardown_error(error, "shutdown")
 
-        try:
-            self.close_active_request_connections()
-        except BaseException as error:
-            record_teardown_error(error, "active connection close")
+        def close_listener_after_handlers(listener: Any, index: int) -> None:
+            if not self._listener_started_serving(listener):
+                try:
+                    socketserver.TCPServer.server_close(listener)
+                except BaseException as error:
+                    raise _CleanupFailureRecords(
+                        _cleanup_failure_records(
+                            error,
+                            f"captured HTTP raw listener close listener {index}",
+                        )
+                    ) from error
+                self._release_listener_after_close(listener)
+                return
 
-        try:
-            self._wait_for_request_handlers()
-        except BaseException as error:
-            # ThreadingMixIn.server_close() joins every registered request
-            # handler without a timeout.  The bounded wait above is the
-            # diagnostic boundary, so only close the listening socket here.
-            if teardown_error is not None:
-                error.add_note(f"Additional server teardown failure: {teardown_error!r}")
+            cleanup_failures: list[tuple[str, BaseException]] = []
             try:
-                socketserver.TCPServer.server_close(self._server)
-            except BaseException as close_error:
-                error.add_note(f"Additional server teardown failure during listening socket close: {close_error!r}")
-            raise
+                self._wait_for_request_handlers(listener)
+            except BaseException as error:
+                cleanup_failures.extend(
+                    _cleanup_failure_records(
+                        error,
+                        f"captured HTTP request handler wait listener {index}",
+                    )
+                )
+                # ThreadingMixIn.server_close() joins every registered request
+                # handler without a timeout. The bounded wait is the diagnostic
+                # boundary, so only close the listening socket on this path.
+                try:
+                    socketserver.TCPServer.server_close(listener)
+                except BaseException as error:
+                    cleanup_failures.extend(
+                        _cleanup_failure_records(
+                            error,
+                            f"captured HTTP raw listener close listener {index}",
+                        )
+                    )
+                else:
+                    self._release_listener_after_close(listener)
+                raise _CleanupFailureRecords(cleanup_failures)
+            try:
+                listener.server_close()
+            except BaseException:
+                raise
+            self._release_listener_after_close(listener)
 
         try:
-            self._server.server_close()
-        except BaseException as error:
-            record_teardown_error(error, "server close")
-
-        if teardown_error is not None:
-            raise teardown_error
+            with _cleanup_scope() as cleanup:
+                # Add in creation order so every listener phase runs in LIFO order.
+                for index, listener in enumerate(listeners, start=1):
+                    cleanup.add(
+                        f"captured HTTP listener close listener {index}",
+                        lambda listener=listener, index=index: close_listener_after_handlers(listener, index),
+                    )
+                for index, listener in enumerate(listeners, start=1):
+                    if self._listener_started_serving(listener):
+                        cleanup.add(
+                            f"captured HTTP active connection close listener {index}",
+                            listener.close_active_request_connections,
+                        )
+                cleanup.add("captured HTTP server thread join", join_server_thread)
+                for index, listener in enumerate(listeners, start=1):
+                    if self._listener_started_serving(listener):
+                        cleanup.add(f"captured HTTP server shutdown listener {index}", listener.shutdown)
+        finally:
+            self._finalize_owned_listeners()
 
     def close_active_request_connections(self) -> None:
         self._server.close_active_request_connections()
 
-    def _wait_for_request_handlers(self, timeout: float = 5) -> None:
-        if self._server.request_handlers_idle.wait(timeout):
+    def _owned_listeners(self) -> tuple[Any, ...]:
+        if self._listener_registry is None:
+            return (self._server,)
+        self._listener_registry.abandon()
+        return self._listener_registry.snapshot()
+
+    def _release_listener_after_close(self, listener: Any) -> None:
+        if self._listener_registry is not None:
+            self._listener_registry.release(listener)
+
+    def _finalize_owned_listeners(self) -> None:
+        if self._listener_registry is not None:
+            self._listener_registry.finalize()
+
+    @staticmethod
+    def _listener_started_serving(listener: Any) -> bool:
+        serving_started = getattr(listener, "serve_forever_started", None)
+        return serving_started is None or bool(serving_started.is_set())
+
+    def _wait_for_request_handlers(self, listener: Any, timeout: float = 5) -> None:
+        if listener.request_handlers_idle.wait(timeout):
             return
+        port = self.port if self._listener_registry is None else listener.server_address[1]
         raise AssertionError(
-            f"request handlers did not stop on port {self.port}: "
-            f"{self._server.active_request_handler_count} still active"
+            f"request handlers did not stop on port {port}: "
+            f"{listener.active_request_handler_count} still active"
         )
+
+
+class _CapturedListenerRegistry:
+    def __init__(self, startup_abandoned: threading.Event) -> None:
+        self._startup_abandoned = startup_abandoned
+        self._lock = threading.Lock()
+        self._listeners: list[Any] = []
+
+    def register(self, listener: Any) -> bool:
+        with self._lock:
+            self._listeners.append(listener)
+            return not self._startup_abandoned.is_set()
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._startup_abandoned.set()
+
+    def snapshot(self) -> tuple[Any, ...]:
+        with self._lock:
+            return tuple(self._listeners)
+
+    def release(self, listener: Any) -> None:
+        with self._lock:
+            self._listeners.remove(listener)
+
+    def finalize(self) -> None:
+        with self._lock:
+            self._listeners.clear()
+
+    def close_after_abandonment(self, listener: Any) -> None:
+        claim_index = self._claim(listener)
+        if claim_index is None:
+            return
+        try:
+            socketserver.TCPServer.server_close(listener)
+        except BaseException as error:
+            self._requeue(listener, claim_index)
+            raise _CleanupFailureRecords(
+                _cleanup_failure_records(error, "captured server abandoned listener raw close")
+            ) from error
+
+    def close_all(self, phase: str, *, final: bool = False) -> None:
+        listeners = self.snapshot()
+
+        try:
+            with _cleanup_scope() as cleanup:
+                # Register in creation order so _CleanupActions closes in LIFO order.
+                for listener in listeners:
+                    cleanup.add(
+                        f"{phase} listener {listener.server_address!r}",
+                        lambda listener=listener: self._close_claimed(listener),
+                    )
+        finally:
+            if final:
+                self.finalize()
+
+    def _claim(self, listener: Any) -> int | None:
+        with self._lock:
+            for index, pending_listener in enumerate(self._listeners):
+                if pending_listener is listener:
+                    self._listeners.pop(index)
+                    return index
+        return None
+
+    def _requeue(self, listener: Any, index: int) -> None:
+        with self._lock:
+            self._listeners.insert(min(index, len(self._listeners)), listener)
+
+    def _close_claimed(self, listener: Any) -> None:
+        claim_index = self._claim(listener)
+        if claim_index is None:
+            return
+        try:
+            self._close(listener)
+        except BaseException:
+            self._requeue(listener, claim_index)
+            raise
+
+    @staticmethod
+    def _close(listener: Any) -> None:
+        serving_started = getattr(listener, "serve_forever_started", None)
+        if serving_started is None or not serving_started.is_set():
+            socketserver.TCPServer.server_close(listener)
+            return
+
+        with _cleanup_scope() as cleanup:
+            cleanup.add("serving listener close", listener.server_close)
+            cleanup.add("serving listener active connection close", listener.close_active_request_connections)
+            cleanup.add("serving listener shutdown", listener.shutdown)
+
+
+class _JobRunnerThreadTracker:
+    """Scoped capture of JobRunner worker threads without changing production code."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        self._release_actions: list[tuple[str, Any]] = []
+        self._joined_thread_ids: set[int] = set()
+        self._patch: Any | None = None
+
+    def __enter__(self) -> _JobRunnerThreadTracker:
+        original_threading = jobs.threading
+        tracker = self
+
+        class ThreadingProxy:
+            def Thread(self, *args: Any, **kwargs: Any) -> threading.Thread:
+                thread = original_threading.Thread(*args, **kwargs)
+                if tracker._is_job_runner_worker(kwargs.get("target")):
+                    tracker._register(thread)
+                return thread
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(original_threading, name)
+
+        self._patch = mock.patch.object(jobs, "threading", ThreadingProxy())
+        self._patch.start()
+        return self
+
+    def __exit__(self, _exc_type: Any, exc_value: BaseException | None, _traceback: Any) -> None:
+        assert self._patch is not None
+        cleanup = _CleanupActions()
+        cleanup.add("restore JobRunner threading module", self._patch.stop)
+        cleanup.add("JobRunner worker thread join", self.join_tracked)
+        for description, action in self._release_actions:
+            cleanup.add(description, action)
+        cleanup.run(exc_value)
+
+    @property
+    def threads(self) -> tuple[threading.Thread, ...]:
+        with self._lock:
+            return tuple(self._threads)
+
+    @property
+    def tracked_count(self) -> int:
+        with self._lock:
+            return len(self._threads)
+
+    def release_barrier(self, barrier: threading.Event, description: str = "release JobRunner test barrier") -> None:
+        self._release_actions.append((description, barrier.set))
+
+    def add_release_action(self, description: str, action: Any) -> None:
+        self._release_actions.append((description, action))
+
+    def join_tracked(self) -> None:
+        while True:
+            with self._lock:
+                pending = [thread for thread in self._threads if id(thread) not in self._joined_thread_ids]
+            if not pending:
+                return
+            for thread in pending:
+                if thread is threading.current_thread():
+                    raise AssertionError("JobRunner tracker attempted to join its current thread")
+                try:
+                    thread.join(timeout=2)
+                except BaseException as error:
+                    raise AssertionError(f"JobRunner worker thread could not be joined: {thread!r}") from error
+                if thread.is_alive():
+                    raise AssertionError(f"JobRunner worker thread did not stop: {thread!r}")
+                with self._lock:
+                    self._joined_thread_ids.add(id(thread))
+
+    @staticmethod
+    def _is_job_runner_worker(target: Any) -> bool:
+        return (
+            getattr(target, "__name__", "") == "_run"
+            and isinstance(getattr(target, "__self__", None), jobs.JobRunner)
+        )
+
+    def _register(self, thread: threading.Thread) -> None:
+        with self._lock:
+            self._threads.append(thread)
+
+
+@contextlib.contextmanager
+def _captured_server_temporary_directory() -> Any:
+    with tempfile.TemporaryDirectory() as raw:
+        with _cleanup_scope() as cleanup:
+            def start_server(function: Any, config: AppConfig, **kwargs: Any) -> _CapturedTestServer:
+                server = _start_captured_server(function, config, **kwargs)
+                cleanup.add("captured HTTP server close", server.close)
+                return server
+
+            yield raw, start_server
 
 
 def _is_expected_socket_teardown_error(error: OSError) -> bool:
@@ -4173,17 +4951,34 @@ def _is_expected_socket_teardown_error(error: OSError) -> bool:
     }
 
 
-def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _CapturedTestServer:
-    port = _free_port()
+def _start_captured_server(
+    function: Any,
+    config: AppConfig,
+    *,
+    _startup_timeout: float = 5,
+    _after_constructor_abandon_check: Any | None = None,
+    _server_type: type[Any] | None = None,
+    **kwargs: Any,
+) -> _CapturedTestServer:
     module = sys.modules[function.__module__]
-    server_type = getattr(module, "ThreadingHTTPServer")
-    server_created = threading.Event()
-    server_holder: dict[str, Any] = {}
+    server_type = _server_type or getattr(module, "ThreadingHTTPServer")
+    server_modules = (
+        module,
+        importlib.import_module("gp_control_plane.web.api_server"),
+        importlib.import_module("gp_control_plane.web.proxy"),
+    )
+    startup_abandoned = threading.Event()
+    listeners = _CapturedListenerRegistry(startup_abandoned)
+    startup_condition = threading.Condition()
+    listener_constructed = False
+    serving_listener: Any | None = None
+    startup_finished = False
     startup_errors: list[BaseException] = []
 
     class CapturingThreadingHTTPServer(server_type):
         def __init__(self, *args: Any, **server_kwargs: Any) -> None:
             server_address, request_handler_class, *server_args = args
+            server_address = (server_address[0], 0)
 
             class CapturingRequestHandler(request_handler_class):
                 def handle_one_request(self) -> None:
@@ -4192,13 +4987,34 @@ def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _
                         self.close_connection = True
 
             super().__init__(server_address, CapturingRequestHandler, *server_args, **server_kwargs)
+            if not listeners.register(self):
+                # The registry owns this listener before observing abandonment.
+                # A failed early raw close therefore remains available to the
+                # post-join drain instead of disappearing from cleanup.
+                listeners.close_after_abandonment(self)
+                raise RuntimeError("captured server startup was abandoned during listener registration")
+            with startup_condition:
+                nonlocal listener_constructed
+                listener_constructed = True
+                startup_condition.notify_all()
+            if _after_constructor_abandon_check is not None:
+                _after_constructor_abandon_check(self, startup_abandoned)
             self._request_handlers_lock = threading.Lock()
             self._active_request_handler_count = 0
             self._active_request_sockets: set[socket.socket] = set()
             self.request_handlers_idle = threading.Event()
             self.request_handlers_idle.set()
-            server_holder["server"] = self
-            server_created.set()
+            self.serve_forever_started = threading.Event()
+
+        def serve_forever(self, *args: Any, **server_kwargs: Any) -> None:
+            if startup_abandoned.is_set():
+                return
+            self.serve_forever_started.set()
+            with startup_condition:
+                nonlocal serving_listener
+                serving_listener = self
+                startup_condition.notify_all()
+            super().serve_forever(*args, **server_kwargs)
 
         @property
         def active_request_handler_count(self) -> int:
@@ -4235,56 +5051,122 @@ def _start_captured_server(function: Any, config: AppConfig, **kwargs: Any) -> _
         def close_active_request_connections(self) -> None:
             with self._request_handlers_lock:
                 active_request_sockets = tuple(self._active_request_sockets)
-            cleanup_error: OSError | None = None
+            cleanup_failures: list[tuple[str, BaseException]] = []
 
-            def record_cleanup_error(error: OSError, operation: str) -> None:
-                nonlocal cleanup_error
-                if cleanup_error is None:
-                    cleanup_error = error
-                else:
-                    cleanup_error.add_note(
-                        f"Additional active request socket {operation} failure: {error!r}"
-                    )
-
-            for request in active_request_sockets:
+            for index, request in enumerate(active_request_sockets, start=1):
                 try:
                     request.shutdown(socket.SHUT_RDWR)
                 except OSError as error:
                     if not _is_expected_socket_teardown_error(error):
-                        record_cleanup_error(error, "shutdown")
+                        cleanup_failures.extend(
+                            _cleanup_failure_records(
+                                error,
+                                f"captured HTTP active request socket {index} shutdown",
+                            )
+                        )
                 try:
                     request.close()
                 except OSError as error:
                     if not _is_expected_socket_teardown_error(error):
-                        record_cleanup_error(error, "close")
-            if cleanup_error is not None:
-                raise cleanup_error
+                        cleanup_failures.extend(
+                            _cleanup_failure_records(
+                                error,
+                                f"captured HTTP active request socket {index} close",
+                            )
+                        )
+            if cleanup_failures:
+                raise _CleanupFailureRecords(cleanup_failures)
 
     def run() -> None:
+        nonlocal startup_finished
         try:
-            function(config, "127.0.0.1", port, **kwargs)
+            with contextlib.ExitStack() as patches:
+                patched_modules: set[int] = set()
+                for server_module in server_modules:
+                    if id(server_module) in patched_modules:
+                        continue
+                    patched_modules.add(id(server_module))
+                    patches.enter_context(
+                        mock.patch.object(server_module, "ThreadingHTTPServer", CapturingThreadingHTTPServer)
+                    )
+                function(config, "127.0.0.1", 0, **kwargs)
         except BaseException as error:
-            startup_errors.append(error)
-            server_created.set()
+            with startup_condition:
+                startup_errors.append(error)
+                startup_condition.notify_all()
+        finally:
+            with startup_condition:
+                startup_finished = True
+                startup_condition.notify_all()
+
+    def abort_startup() -> BaseException | None:
+        listeners.abandon()
+
+        def join_startup_thread() -> None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise AssertionError("server startup thread did not stop")
+
+        cleanup = _CleanupActions()
+        # LIFO execution produces the required pre-join then post-join sweep.
+        cleanup.add(
+            "captured server post-join listener close",
+            lambda: listeners.close_all("post-join", final=True),
+        )
+        cleanup.add("captured server startup thread join", join_startup_thread)
+        cleanup.add("captured server pre-join listener close", lambda: listeners.close_all("pre-join"))
+        try:
+            cleanup.run()
+        except BaseException as error:
+            return error
+        return None
+
+    def raise_startup_failure(message: str, cause: BaseException | None = None) -> None:
+        cleanup_error = abort_startup()
+        if cause is None:
+            with startup_condition:
+                if startup_errors:
+                    cause = startup_errors[0]
+        failure = AssertionError(message)
+        if cleanup_error is not None:
+            for description, error in _cleanup_failure_records(cleanup_error, "captured server startup cleanup"):
+                failure.add_note(f"Captured server startup cleanup also failed during {description}: {error!r}")
+        if cause is not None:
+            raise failure from cause
+        raise failure
 
     thread = threading.Thread(target=run, daemon=True)
-    with mock.patch.object(module, "ThreadingHTTPServer", CapturingThreadingHTTPServer):
-        thread.start()
-        if not server_created.wait(timeout=5):
-            raise AssertionError(f"server on port {port} did not construct")
+    thread.start()
+    startup_deadline = time.monotonic() + _startup_timeout
+    startup_failure: tuple[str, BaseException | None] | None = None
+    with startup_condition:
+        while not listener_constructed and not startup_errors and not startup_finished:
+            remaining = startup_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            startup_condition.wait(timeout=remaining)
+        if startup_errors:
+            startup_failure = ("server failed during startup", startup_errors[0])
+        elif not listener_constructed:
+            startup_failure = ("server did not construct", None)
+        while startup_failure is None and serving_listener is None and not startup_errors and not startup_finished:
+            remaining = startup_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            startup_condition.wait(timeout=remaining)
+        if startup_failure is None and startup_errors:
+            startup_failure = ("server failed during startup", startup_errors[0])
+        elif startup_failure is None and serving_listener is None:
+            message = "server exited during startup" if startup_finished else "server did not start serving"
+            startup_failure = (message, None)
 
-    if startup_errors:
-        raise AssertionError(f"server on port {port} failed during startup") from startup_errors[0]
-    server = server_holder.get("server")
-    if server is None:
-        raise AssertionError(f"server on port {port} was not captured")
-    captured = _CapturedTestServer(port, server, thread)
-    try:
-        _wait_for_server(port, "/api/health")
-    except BaseException:
-        captured.close()
-        raise
-    return captured
+    if startup_failure is not None:
+        raise_startup_failure(*startup_failure)
+
+    if serving_listener is None:
+        raise_startup_failure("server listener registry was empty")
+    port = int(serving_listener.server_address[1])
+    return _CapturedTestServer(port, serving_listener, thread, listeners)
 
 
 def _close_sse_stream(
@@ -4305,11 +5187,28 @@ def _close_sse_stream(
             connection.close()
 
 
+def _stop_current_run_if_started(port: int, worker_started: threading.Event, worker_finished: threading.Event) -> None:
+    if not worker_started.is_set() or worker_finished.is_set():
+        return
+    status, _headers, body = _http_request(
+        port,
+        "/api/core/strategy-discovery/stop-current-run",
+        method="POST",
+        body=b"{}",
+        headers={"Content-Type": "application/json"},
+    )
+    if status != 202:
+        raise AssertionError(f"test cleanup could not stop active JobRunner: HTTP {status}: {body!r}")
 
-def _free_port() -> int:
+
+
+@contextlib.contextmanager
+def _reserved_unavailable_loopback_port() -> Any:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+        # Holding a bound-but-not-listening socket guarantees connection refusal
+        # while preventing another test or process from claiming this port.
+        yield int(sock.getsockname()[1])
 
 
 def _openapi_test_request(
@@ -4608,22 +5507,6 @@ def _bearer_authorization(port: int, *, timeout: float = 5) -> str:
     authorization = f"Bearer {json.loads(body)['access_token']}"
     _BEARER_AUTHORIZATION_BY_PORT[port] = authorization
     return authorization
-
-
-def _wait_for_server(port: int, path: str = "/openapi.json", *, timeout: float = 2.0) -> None:
-    deadline = time.time() + timeout
-    last_error: BaseException | None = None
-    while time.time() < deadline:
-        try:
-            status, _headers, _body = _http_request(port, path, timeout=0.5)
-        except OSError as exc:
-            last_error = exc
-        else:
-            if status < 500:
-                return
-            last_error = AssertionError(f"{path} returned HTTP {status}")
-        time.sleep(0.02)
-    raise AssertionError(f"server on 127.0.0.1:{port} did not become ready: {last_error}")
 
 
 if __name__ == "__main__":
