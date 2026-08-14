@@ -75,14 +75,23 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn("showLogin('Your session has expired. Sign in again.');", self.html)
         self.assertIn("data-action=\"logout\"", self.html)
 
-    def test_password_change_uses_agreed_contract_and_replaces_token(self) -> None:
+    def test_password_change_uses_agreed_contract_and_logs_out_without_storing_replacement_token(self) -> None:
+        password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
+        logout = self.script_block('function logout(){', 'async function authFetch(url, options){')
+
         self.assertIn('id="change-password-form"', self.html)
         self.assertIn('name="current_password"', self.html)
         self.assertIn('name="new_password"', self.html)
-        self.assertIn("postJson('/api/auth/change-password'", self.html)
-        self.assertIn('current_password: currentPassword', self.html)
-        self.assertIn('new_password: newPassword', self.html)
-        self.assertIn('storeAuthToken(data);', self.html)
+        self.assertIn("await postJson('/api/auth/change-password'", password_change)
+        self.assertIn('current_password: currentPassword', password_change)
+        self.assertIn('new_password: newPassword', password_change)
+        self.assertIn('logout();', password_change)
+        self.assertNotIn('storeAuthToken(', password_change)
+        self.assertNotIn('renewRealtimeEvents(', password_change)
+        self.assertIn('localStorage.removeItem(AUTH_TOKEN_KEY);', logout)
+        self.assertIn('stopRealtimeEvents();', logout)
+        self.assertIn('stopRealtimeFallback();', logout)
+        self.assertIn('showLogin();', logout)
 
     def test_password_change_panel_is_independent_accessible_and_has_its_own_lifecycle_messages(self) -> None:
         password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
@@ -107,10 +116,6 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn('submitButton.disabled = true;', password_change)
         self.assertIn('submitButton.disabled = false;', password_change)
         self.assertIn("status.textContent = 'Пароль изменяется…';", password_change)
-        self.assertIn(
-            "status.textContent = 'Пароль изменён. Текущая сессия продолжится; на остальных устройствах войдите заново.';",
-            password_change,
-        )
         self.assertIn(
             "status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.';",
             password_change,
@@ -140,22 +145,21 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn('function scheduleRealtimeReconnect()', self.html)
         self.assertNotIn('new EventSource(', self.html)
 
-    def test_password_rotation_renews_exactly_one_realtime_stream_with_fresh_token(self) -> None:
+    def test_password_change_uses_logout_to_stop_realtime_activity(self) -> None:
         password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
         stop = self.script_block('function stopRealtimeEvents(){', 'function renewRealtimeEvents(){')
-        renew = self.script_block('function renewRealtimeEvents(){', 'function stopRealtimeFallback(){')
-        realtime_connect = self.script_block('async function connectRealtimeEvents(controller){', 'function startRealtimeEvents(options){')
-        realtime_start = self.script_block('function startRealtimeEvents(options){', 'function startRealtimeFallback(){')
+        fallback = self.script_block('function stopRealtimeFallback(){', 'function handleUnauthorized(){')
+        logout = self.script_block('function logout(){', 'async function authFetch(url, options){')
 
-        self.assertLess(password_change.index('storeAuthToken(data);'), password_change.index('renewRealtimeEvents();'))
+        self.assertIn('logout();', password_change)
+        self.assertNotIn('storeAuthToken(', password_change)
+        self.assertNotIn('renewRealtimeEvents(', password_change)
         self.assertIn('if (realtimeReconnectTimer) clearTimeout(realtimeReconnectTimer);', stop)
         self.assertIn('realtimeReconnectTimer = null;', stop)
-        self.assertRegex(renew, r"stopRealtimeEvents\(\);[\s\S]*realtimeReconnectDelay = 1000;[\s\S]*startRealtimeEvents\(\{ alreadyStopped: true \}\);")
-        self.assertEqual(1, renew.count('startRealtimeEvents({ alreadyStopped: true });'))
-        self.assertEqual(1, realtime_start.count('connectRealtimeEvents(controller);'))
-        self.assertIn("authFetch(apiEndpoint('web', 'eventsStream')", realtime_connect)
-        self.assertIn('const alreadyStopped = Boolean(options && options.alreadyStopped);', realtime_start)
-        self.assertIn('if (!alreadyStopped) stopRealtimeEvents();', realtime_start)
+        self.assertIn('if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);', fallback)
+        self.assertIn('realtimeFallbackTimer = null;', fallback)
+        self.assertIn('stopRealtimeEvents();', logout)
+        self.assertIn('stopRealtimeFallback();', logout)
 
 class EdgeBearerAuthBrowserTests(unittest.TestCase):
     @classmethod
@@ -164,7 +168,7 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
         if cls.edge_executable is None:
             raise unittest.SkipTest("Microsoft Edge headless is not installed")
 
-    def test_login_auth_fetch_blob_download_and_password_rotation_restart_sse(self) -> None:
+    def test_login_auth_fetch_blob_download_and_password_change_logs_out(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
             with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
@@ -241,27 +245,47 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
                         sse: [],
                         blob: null,
                         anchor: null,
-                        passwordChange: { requests: 0, held: false, release: null }
+                        passwordChange: { requests: 0, held: false, release: null },
+                        fallbackTimers: [],
+                        clearedFallbackTimers: []
                       };
                       const originalFetch = window.fetch.bind(window);
                       window.fetch = async (input, init) => {
                         const url = typeof input === 'string' ? input : input.url;
                         const headers = Array.from(new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined)).entries());
                         if (url.includes('/api/core/backups/download-archive')) state.downloads.push({ url, headers });
-                        if (url.includes('/api/web/events/stream')) state.sse.push({ url, headers });
+                        if (url.includes('/api/web/events/stream')) {
+                          const entry = { url, headers, aborted: Boolean(init?.signal?.aborted) };
+                          init?.signal?.addEventListener('abort', () => { entry.aborted = true; });
+                          state.sse.push(entry);
+                        }
                         if (url.includes('/api/auth/change-password')) {
                           state.passwordChange.requests += 1;
                           if (state.passwordChange.requests === 1) {
+                            return new Response(JSON.stringify({ error: { message: 'wrong password' } }), {
+                              status: 400,
+                              headers: { 'Content-Type': 'application/json' }
+                            });
+                          }
+                          if (state.passwordChange.requests === 2) {
                             state.passwordChange.held = true;
                             await new Promise((resolve) => { state.passwordChange.release = resolve; });
                             return originalFetch(input, init);
                           }
-                          return new Response(JSON.stringify({ error: { message: 'wrong password' } }), {
-                            status: 400,
-                            headers: { 'Content-Type': 'application/json' }
-                          });
+                          return originalFetch(input, init);
                         }
                         return originalFetch(input, init);
+                      };
+                      const originalSetInterval = window.setInterval.bind(window);
+                      const originalClearInterval = window.clearInterval.bind(window);
+                      window.setInterval = (callback, delay) => {
+                        const timer = originalSetInterval(callback, delay);
+                        state.fallbackTimers.push(timer);
+                        return timer;
+                      };
+                      window.clearInterval = (timer) => {
+                        state.clearedFallbackTimers.push(timer);
+                        return originalClearInterval(timer);
                       };
                       const originalObjectUrl = URL.createObjectURL.bind(URL);
                       URL.createObjectURL = (blob) => {
@@ -291,7 +315,36 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
 
                 page.evaluate("stopRealtimeEvents(); startRealtimeEvents();")
                 page.wait_for("window.__bearerAuthE2E.sse.length === 1", "initial authenticated SSE stream")
+                page.evaluate(
+                    """
+                    stopRealtimeFallback();
+                    startRealtimeFallback();
+                    window.__bearerAuthE2E.fallbackTimer = window.__bearerAuthE2E.fallbackTimers.at(-1);
+                    window.__bearerAuthE2E.clearedFallbackTimers = [];
+                    """
+                )
                 old_token = page.evaluate("localStorage.getItem('gp-control-plane-auth-token')")
+                page.evaluate(
+                    """
+                    document.getElementById('settings-current-password').value = 'wrongpass';
+                    document.getElementById('settings-new-password').value = 'another8';
+                    document.getElementById('change-password-form').requestSubmit();
+                    """
+                )
+                page.wait_for(
+                    f"""
+                    window.__bearerAuthE2E.passwordChange.requests === 1
+                      && localStorage.getItem('gp-control-plane-auth-token') === {json.dumps(old_token)}
+                      && document.getElementById('login-screen').hidden
+                      && !document.getElementById('app-shell').hidden
+                      && !document.getElementById('change-password-form').hasAttribute('aria-busy')
+                      && !document.querySelector('#change-password-form [type="submit"]').disabled
+                      && document.getElementById('settings-current-password').value === ''
+                      && document.getElementById('settings-new-password').value === ''
+                      && document.getElementById('change-password-status').textContent === 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.'
+                    """,
+                    "password change failure leaves the authenticated session intact",
+                )
                 page.evaluate(
                     """
                     document.getElementById('settings-current-password').value = 'admin';
@@ -306,40 +359,24 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
                       && document.querySelector('#change-password-form [type="submit"]').disabled
                       && document.getElementById('change-password-status').textContent === 'Пароль изменяется…'
                     """,
-                    "password rotation pending lifecycle",
+                    "successful password change pending lifecycle",
                 )
                 page.evaluate("window.__bearerAuthE2E.passwordChange.release()")
                 page.wait_for(
                     """
-                    window.__bearerAuthE2E.sse.length >= 2
-                      && localStorage.getItem('gp-control-plane-auth-token') !== null
-                      && !document.getElementById('change-password-form').hasAttribute('aria-busy')
-                      && !document.querySelector('#change-password-form [type="submit"]').disabled
-                      && document.getElementById('settings-current-password').value === ''
-                      && document.getElementById('settings-new-password').value === ''
-                      && document.getElementById('change-password-status').textContent === 'Пароль изменён. Текущая сессия продолжится; на остальных устройствах войдите заново.'
-                      && window.__bearerAuthE2E.sse[0].headers.find(([key]) => key === 'authorization')[1] !== window.__bearerAuthE2E.sse[1].headers.find(([key]) => key === 'authorization')[1]
-                    """,
-                    "password rotation success lifecycle and SSE restart with the new token",
-                )
-                new_token = page.evaluate("localStorage.getItem('gp-control-plane-auth-token')")
-                page.evaluate(
-                    """
-                    document.getElementById('settings-current-password').value = 'wrongpass';
-                    document.getElementById('settings-new-password').value = 'another8';
-                    document.getElementById('change-password-form').requestSubmit();
-                    """
-                )
-                page.wait_for(
-                    """
                     window.__bearerAuthE2E.passwordChange.requests === 2
+                      && localStorage.getItem('gp-control-plane-auth-token') === null
+                      && !document.getElementById('login-screen').hidden
+                      && document.getElementById('app-shell').hidden
                       && !document.getElementById('change-password-form').hasAttribute('aria-busy')
                       && !document.querySelector('#change-password-form [type="submit"]').disabled
                       && document.getElementById('settings-current-password').value === ''
                       && document.getElementById('settings-new-password').value === ''
-                      && document.getElementById('change-password-status').textContent === 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.'
+                      && window.__bearerAuthE2E.sse.length === 1
+                      && window.__bearerAuthE2E.sse[0].aborted
+                      && window.__bearerAuthE2E.clearedFallbackTimers.includes(window.__bearerAuthE2E.fallbackTimer)
                     """,
-                    "password rotation error lifecycle",
+                    "successful password change clears the session and stops realtime activity",
                 )
                 result = page.evaluate("JSON.parse(JSON.stringify(window.__bearerAuthE2E))")
 
@@ -350,10 +387,9 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
             self.assertTrue(dict(download["headers"])["authorization"].startswith("Bearer "))
             self.assertGreater(result["blob"]["size"], 0)
             self.assertTrue(result["anchor"]["href"].startswith("blob:"))
-            self.assertEqual(len(result["sse"]), 2)
-            self.assertTrue(dict(result["sse"][1]["headers"])["authorization"].startswith("Bearer "))
-            self.assertNotEqual(old_token, new_token)
-            self.assertEqual(f"Bearer {new_token}", dict(result["sse"][1]["headers"])["authorization"])
+            self.assertEqual(len(result["sse"]), 1)
+            self.assertTrue(result["sse"][0]["aborted"])
+            self.assertIn(result["fallbackTimer"], result["clearedFallbackTimers"])
 
 
 class TestServerLifecycleTests(unittest.TestCase):
@@ -591,15 +627,25 @@ class _EdgeCdp:
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         if self._client is not None:
+            try:
+                self._client.command("Browser.close")
+            except (AssertionError, OSError):
+                pass
             self._client.close()
         if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
             try:
                 self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._process.kill()
+                self._process.terminate()
                 self._process.wait(timeout=5)
-        self._profile.cleanup()
+        for attempt in range(20):
+            try:
+                self._profile.cleanup()
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.1)
 
     def navigate(self, url: str) -> None:
         self._command("Page.navigate", {"url": url})

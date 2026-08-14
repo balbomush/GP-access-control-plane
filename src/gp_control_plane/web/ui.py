@@ -2311,13 +2311,11 @@ async function changePassword(){
   submitButton.disabled = true;
   status.textContent = 'Пароль изменяется…';
   try {
-    const data = await postJson('/api/auth/change-password', {
+    await postJson('/api/auth/change-password', {
       current_password: currentPassword,
       new_password: newPassword
     });
-    storeAuthToken(data);
-    renewRealtimeEvents();
-    status.textContent = 'Пароль изменён. Текущая сессия продолжится; на остальных устройствах войдите заново.';
+    logout();
   } catch (error) {
     status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.';
   } finally {
