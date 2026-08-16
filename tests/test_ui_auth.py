@@ -514,6 +514,90 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
         self.assertEqual([5], processes[0].wait_calls)
         self.assertTrue(profile.cleaned)
 
+    def test_cleanup_succeeds_when_process_reaps_after_terminate(self) -> None:
+        class FakePopen:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self.wait_calls: list[float] = []
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+            def wait(self, timeout: float) -> int:
+                self.wait_calls.append(timeout)
+                self.returncode = 0
+                return self.returncode
+
+        process = FakePopen()
+        edge = _EdgeCdp(Path("fake-msedge.exe"))
+        edge._process = process  # type: ignore[assignment]
+
+        edge.__exit__(None, None, None)
+
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(0, process.kill_calls)
+        self.assertEqual([5], process.wait_calls)
+        self.assertIsNone(edge._process)
+
+    def test_cleanup_failure_after_second_timeout_fails_or_notes_primary_error(self) -> None:
+        class FakePopen:
+            def __init__(self) -> None:
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self.wait_calls: list[float] = []
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+            def wait(self, timeout: float) -> int:
+                self.wait_calls.append(timeout)
+                raise subprocess.TimeoutExpired("fake-msedge.exe", timeout)
+
+        def edge_with_unreaped_process() -> tuple[_EdgeCdp, FakePopen]:
+            process = FakePopen()
+            edge = _EdgeCdp(Path("fake-msedge.exe"))
+            edge._process = process  # type: ignore[assignment]
+            return edge, process
+
+        edge, process = edge_with_unreaped_process()
+        with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: process did not exit after kill"):
+            edge.__exit__(None, None, None)
+
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(1, process.kill_calls)
+        self.assertEqual([5, 5], process.wait_calls)
+        self.assertIsNone(edge._process)
+
+        edge, process = edge_with_unreaped_process()
+        primary_error = AssertionError("primary test failure")
+
+        edge.__exit__(AssertionError, primary_error, None)
+
+        self.assertEqual("primary test failure", str(primary_error))
+        self.assertEqual(
+            ["Edge CDP cleanup failed: process did not exit after kill; process exit code None"],
+            primary_error.__notes__,
+        )
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(1, process.kill_calls)
+        self.assertEqual([5, 5], process.wait_calls)
+        self.assertIsNone(edge._process)
+
 
 def _edge_executable() -> Path | None:
     program_files_x86 = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
@@ -708,17 +792,25 @@ class _EdgeCdp:
             )
             self._client.command("Runtime.enable", session_id=self._session_id)
         except BaseException as error:
-            diagnostics = self._cleanup()
+            diagnostics, _ = self._cleanup()
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
             raise AssertionError(f"Edge CDP startup failed: {error}; {diagnostics}") from error
         return self
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
-        self._cleanup()
+        diagnostics, cleanup_failed = self._cleanup()
+        if not cleanup_failed:
+            return
+        message = f"Edge CDP cleanup failed: {diagnostics}"
+        if isinstance(_value, BaseException):
+            _value.add_note(message)
+            return
+        raise AssertionError(message)
 
-    def _cleanup(self) -> str:
+    def _cleanup(self) -> tuple[str, bool]:
         diagnostics: list[str] = []
+        cleanup_failed = False
         if self._client is not None:
             try:
                 self._client.close()
@@ -739,6 +831,7 @@ class _EdgeCdp:
                             exit_code = process.wait(timeout=5)
                         except subprocess.TimeoutExpired:
                             diagnostics.append("process did not exit after kill")
+                            cleanup_failed = True
                             exit_code = process.poll()
                 diagnostics.append(f"process exit code {exit_code}")
             except OSError as error:
@@ -762,7 +855,7 @@ class _EdgeCdp:
                     diagnostics.append(f"profile cleanup failed: {error}")
                     break
             self._profile = None
-        return "; ".join(diagnostics) or "no process was created"
+        return "; ".join(diagnostics) or "no process was created", cleanup_failed
 
     @staticmethod
     def _close_browser_log(stream: Any | None, name: str, diagnostics: list[str]) -> None:
