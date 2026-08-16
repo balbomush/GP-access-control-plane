@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import subprocess
 import tempfile
@@ -71,7 +72,12 @@ read_trusted_profile_state_dir
 '''
         return subprocess.run([self.bash, "-c", harness, "profile-reader", str(profile)], text=True, capture_output=True, check=False)
 
-    def run_update_success_validator(self, update_log: Path) -> subprocess.CompletedProcess[str]:
+    def run_update_success_validator(
+        self,
+        update_log: Path,
+        candidate_ref: str = "refs/tags/v1.2.3",
+        expected_sha: str = "a" * 40,
+    ) -> subprocess.CompletedProcess[str]:
         if not self.bash:
             self.skipTest("real Bash is unavailable")
         validator = shell_function(self.source, "validate_update_success_evidence")
@@ -80,18 +86,169 @@ require_trusted_root_dir() {{ :; }}
 validate_update_success_evidence() {{
 {validator}
 }}
-CANDIDATE_REF='refs/tags/v1.2.3'
-EXPECTED_SHA='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+CANDIDATE_REF="$2"
+EXPECTED_SHA="$3"
 PYTHON=python
 stat() {{ printf '0:0:600\\n'; }}
 validate_update_success_evidence "$1"
 '''
         return subprocess.run(
-            [self.bash, "-c", harness, "update-success-validator", str(update_log)],
+            [self.bash, "-c", harness, "update-success-validator", str(update_log), candidate_ref, expected_sha],
             text=True,
             capture_output=True,
             check=False,
         )
+
+    def run_cli_validator(self, *args: str) -> subprocess.CompletedProcess[str]:
+        if not self.bash:
+            self.skipTest("real Bash is unavailable")
+        functions = "\n".join(
+            f"{name}() {{\n{shell_function(self.source, name)}\n}}"
+            for name in (
+                "die",
+                "require_value",
+                "validate_url",
+                "validate_name",
+                "validate_domain",
+                "parse_arguments",
+                "validate_arguments",
+            )
+        )
+        harness = f'''set -Eeuo pipefail
+{functions}
+REF=''
+CANDIDATE=''
+EXPECTED_SHA=''
+MODE='installed'
+BASE_URL='http://127.0.0.1:8080'
+CORE_URL='http://127.0.0.1:8081'
+PASSWORD_ENV='GP_GATE_PASSWORD'
+TEST_DOMAIN='example.com'
+POLL_TIMEOUT_SECONDS=90
+parse_arguments "$@"
+validate_arguments
+printf 'candidate=%s expected_sha=%s\n' "$CANDIDATE" "$EXPECTED_SHA"
+'''
+        return subprocess.run(
+            [self.bash, "-c", harness, "pi2-cli-validator", *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def run_pretag_update_harness(
+        self,
+        temporary: Path,
+        *,
+        head: str,
+        post_status: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        if not self.bash:
+            self.skipTest("real Bash is unavailable")
+        fake_bin = temporary / "fake-bin"
+        install_dir = temporary / "install"
+        fake_bin.mkdir()
+        install_dir.mkdir()
+        events = temporary / "events.log"
+        update_log = temporary / "update.log"
+        expected_sha = "a" * 40
+        update_log.write_text("status=success\n", encoding="utf-8")
+
+        def write_executable(name: str, source: str) -> Path:
+            path = fake_bin / name
+            path.write_text(source, encoding="utf-8")
+            path.chmod(0o755)
+            return path
+
+        write_executable(
+            "git",
+            """#!/usr/bin/env bash
+set -eu
+printf 'git %s\n' "$*" >> "$GATE_EVENTS"
+case " $* " in
+  *" check-ref-format refs/heads/dev "*) exit 0 ;;
+  *" status --porcelain "*)
+    count_file="$GATE_DIR/status-count"
+    count=0
+    [ -f "$count_file" ] && count="$(cat "$count_file")"
+    count=$((count + 1))
+    printf '%s' "$count" > "$count_file"
+    [ "$count" -gt 1 ] && printf '%s' "$GATE_POST_STATUS"
+    exit 0
+    ;;
+  *" rev-parse --verify HEAD "*) printf '%s\n' "$GATE_HEAD"; exit 0 ;;
+  *) printf 'unexpected fake git call: %s\n' "$*" >&2; exit 64 ;;
+esac
+""",
+        )
+        write_executable(
+            "runuser",
+            """#!/usr/bin/env bash
+set -eu
+[ "$1" = '-u' ]
+shift 3
+exec "$@"
+""",
+        )
+        root_helper = write_executable(
+            "root-helper",
+            """#!/usr/bin/env bash
+set -eu
+printf 'root-helper %s\n' "$*" >> "$GATE_EVENTS"
+rm -f "$GATE_DIR"/.pi2-gate-dirty-marker-*
+printf 'queued=true\nstatus=queued\nphase=queued\ncandidate_ref=refs/heads/dev\nexpected_sha=%s\nunit=gp-control-plane-update-20260816T120000Z-1\nlog=/unused\n' "$GATE_EXPECTED_SHA"
+""",
+        )
+        queue = f"queue_dirty_update() {{\n{shell_function(self.source, 'queue_dirty_update')}\n}}"
+        resolve = f"resolve_pre_tag_candidate() {{\n{shell_function(self.source, 'resolve_pre_tag_candidate')}\n}}"
+        identity = f"check_installed_ref() {{\n{shell_function(self.source, 'check_installed_ref')}\n}}"
+        harness = f'''set -Eeuo pipefail
+{resolve}
+{queue}
+{identity}
+validate_queue_evidence() {{ printf 'gp-control-plane-update-20260816T120000Z-1\t%s\n' "$GATE_UPDATE_LOG"; }}
+validate_update_success_evidence() {{ printf 'update-evidence\n' >> "$GATE_EVENTS"; }}
+to_shell_path() {{
+  if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+}}
+fake_bin="$(to_shell_path "$1")"
+INSTALL_DIR="$(to_shell_path "$2")"
+ROOT_HELPER="$(to_shell_path "$3")"
+GATE_DIR="$(to_shell_path "$GATE_DIR")"
+GATE_EVENTS="$(to_shell_path "$GATE_EVENTS")"
+GATE_UPDATE_LOG="$(to_shell_path "$GATE_UPDATE_LOG")"
+export GATE_DIR GATE_EVENTS GATE_UPDATE_LOG
+PATH="$fake_bin:$PATH"
+APP_USER='gate-test'
+RUN_STAMP='20260816T120000Z-1'
+REF=''
+CANDIDATE='origin/dev'
+CANDIDATE_REF=''
+EXPECTED_SHA="$GATE_EXPECTED_SHA"
+PYTHON=python
+DIRTY_MARKER=''
+resolve_pre_tag_candidate
+queue_dirty_update
+check_installed_ref
+'''
+        environment = {
+            **os.environ,
+            "GATE_DIR": str(install_dir),
+            "GATE_EVENTS": str(events),
+            "GATE_UPDATE_LOG": str(update_log),
+            "GATE_EXPECTED_SHA": expected_sha,
+            "GATE_HEAD": head,
+            "GATE_POST_STATUS": post_status,
+        }
+        result = subprocess.run(
+            [self.bash, "-c", harness, "pi2-pretag-update", str(fake_bin), str(install_dir), str(root_helper)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        result.events = events.read_text(encoding="utf-8") if events.exists() else ""  # type: ignore[attr-defined]
+        return result
 
     def test_bash_syntax_help_and_early_argument_validation(self) -> None:
         if not self.bash:
@@ -115,6 +272,54 @@ validate_update_success_evidence "$1"
                 result = self.run_gate(*args)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(expected_error, result.stderr)
+
+    def test_pretag_cli_accepts_only_origin_dev_with_a_lowercase_pinned_sha(self) -> None:
+        expected_sha = "a" * 40
+        accepted = self.run_cli_validator("--candidate", "origin/dev", "--expected-sha", expected_sha)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertIn(f"candidate=origin/dev expected_sha={expected_sha}", accepted.stdout)
+
+        for args, error in (
+            (("--candidate", "refs/heads/dev", "--expected-sha", expected_sha), "--candidate must be canonical origin/dev"),
+            (("--candidate", "origin/dev", "--expected-sha", "A" * 40), "--expected-sha must be 40 lowercase hexadecimal characters"),
+            (("--candidate", "origin/dev"), "use --ref TAG or --candidate origin/dev --expected-sha SHA"),
+            (("--ref", "v1.2.3", "--candidate", "origin/dev", "--expected-sha", expected_sha), "--ref cannot be combined"),
+        ):
+            with self.subTest(args=args):
+                rejected = self.run_cli_validator(*args)
+                self.assertEqual(rejected.returncode, 2)
+                self.assertIn(error, rejected.stderr)
+
+    def test_pretag_dirty_update_queues_before_post_update_identity_check_and_never_uses_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = self.run_pretag_update_harness(Path(temporary_directory), head="a" * 40)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = result.events  # type: ignore[attr-defined]
+        self.assertIn("git -C", events)
+        self.assertIn("check-ref-format refs/heads/dev", events)
+        self.assertIn("root-helper queue-update --candidate-ref refs/heads/dev --expected-sha " + "a" * 40, events)
+        self.assertLess(events.index("status --porcelain"), events.index("root-helper queue-update"))
+        self.assertLess(events.index("root-helper queue-update"), events.index("rev-parse --verify HEAD"))
+        self.assertNotIn("refs/tags/", events)
+        self.assertNotIn("ls-remote", events)
+        self.assertNotIn(" tag ", events)
+
+    def test_pretag_dirty_update_rejects_post_update_sha_or_cleanliness_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            sha_mismatch = self.run_pretag_update_harness(Path(temporary_directory), head="b" * 40)
+        self.assertNotEqual(sha_mismatch.returncode, 0)
+        self.assertIn("root-helper queue-update", sha_mismatch.events)  # type: ignore[attr-defined]
+        self.assertIn("does not match candidate refs/heads/dev", sha_mismatch.stderr)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            dirty = self.run_pretag_update_harness(
+                Path(temporary_directory),
+                head="a" * 40,
+                post_status=" M scripts/release-gates/pi2-gate.sh",
+            )
+        self.assertNotEqual(dirty.returncode, 0)
+        self.assertIn("installed checkout has local changes", dirty.stderr)
 
     def test_state_dir_uses_explicit_override_or_a_trusted_install_profile(self) -> None:
         resolve = shell_function(self.source, "resolve_state_dir")
@@ -303,6 +508,40 @@ status=success
             self.assertNotEqual(self.run_update_success_validator(deferred_path).returncode, 0)
             self.assertNotEqual(self.run_update_success_validator(early_success_path).returncode, 0)
             self.assertNotEqual(self.run_update_success_validator(trailing_output_path).returncode, 0)
+
+    def test_pretag_update_evidence_rejects_remote_sha_mismatch(self) -> None:
+        expected_sha = "a" * 40
+        candidate_ref = "refs/heads/dev"
+        completed_log = f"""\
+phase=requested
+candidate_ref={candidate_ref}
+expected_sha={expected_sha}
+phase=verified
+verified_ref={candidate_ref}
+verified_sha={expected_sha}
+phase=staged
+staged_sha={expected_sha}
+phase=published
+phase=root
+phase=committed
+phase=installed
+installed_ref={candidate_ref}
+installed_sha={expected_sha}
+cleanup_status=completed
+status=success
+"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "update.log"
+            path.write_text(completed_log, encoding="utf-8")
+            self.assertEqual(
+                self.run_update_success_validator(path, candidate_ref, expected_sha).returncode,
+                0,
+            )
+            path.write_text(completed_log.replace(f"verified_sha={expected_sha}", "verified_sha=" + "b" * 40), encoding="utf-8")
+            self.assertNotEqual(
+                self.run_update_success_validator(path, candidate_ref, expected_sha).returncode,
+                0,
+            )
 
     def test_failure_recovery_records_evidence_stops_only_own_run_and_returns_original_failure(self) -> None:
         failure = shell_function(self.source, "cycle_failure")

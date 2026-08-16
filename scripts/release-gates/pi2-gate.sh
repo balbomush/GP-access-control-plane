@@ -16,6 +16,7 @@ readonly WEB_RSS_LIMIT_KIB=$((120 * 1024))
 readonly COMBINED_RSS_LIMIT_KIB=$((300 * 1024))
 
 REF=""
+CANDIDATE=""
 MODE="installed"
 INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 STATE_DIR=""
@@ -58,6 +59,7 @@ usage() {
   cat <<'EOF'
 Usage:
   sudo GP_GATE_PASSWORD='...' bash scripts/release-gates/pi2-gate.sh --ref vX.Y.Z [options]
+  sudo GP_GATE_PASSWORD='...' bash scripts/release-gates/pi2-gate.sh --candidate origin/dev --expected-sha SHA [options]
 
 Manual Raspberry Pi 2 release gate. Run it only after the target ref has been
 installed on a real Pi 2. A clean install/reimage is a manual prerequisite;
@@ -66,6 +68,10 @@ this gate never performs a clean installation, reimage, or data reset.
 Required:
   --ref TAG                 Existing release tag, not a branch. Its commit SHA is
                             resolved before the gate and must match after the gate.
+  --candidate origin/dev    Pre-tag candidate. Only the canonical origin/dev
+                            candidate is accepted and passed as refs/heads/dev.
+  --expected-sha SHA        Pinned 40-character lowercase commit SHA required
+                            with --candidate.
 
 Modes:
   --mode installed          Validate the already installed release (default).
@@ -257,9 +263,12 @@ detect_topology() {
   esac
 }
 
+parse_arguments() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ref) require_value "$1" "${2:-}"; REF="$2"; shift 2 ;;
+    --candidate) require_value "$1" "${2:-}"; CANDIDATE="$2"; shift 2 ;;
+    --expected-sha) require_value "$1" "${2:-}"; EXPECTED_SHA="$2"; shift 2 ;;
     --mode) require_value "$1" "${2:-}"; MODE="$2"; shift 2 ;;
     --install-dir) require_value "$1" "${2:-}"; INSTALL_DIR="$2"; shift 2 ;;
     --state-dir) require_value "$1" "${2:-}"; STATE_DIR="$2"; shift 2 ;;
@@ -278,14 +287,27 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$REF" ] || die "--ref is required"
+}
+
+validate_arguments() {
+if [ -n "$REF" ]; then
+  [ -z "$CANDIDATE" ] && [ -z "$EXPECTED_SHA" ] || die "--ref cannot be combined with --candidate or --expected-sha"
+  case "$REF" in *..*|/*|*\\*|*[!A-Za-z0-9._/-]*) die "invalid release tag: $REF" ;; esac
+else
+  [ -n "$CANDIDATE" ] && [ -n "$EXPECTED_SHA" ] || die "use --ref TAG or --candidate origin/dev --expected-sha SHA"
+  [ "$CANDIDATE" = "origin/dev" ] || die "--candidate must be canonical origin/dev"
+  [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "--expected-sha must be 40 lowercase hexadecimal characters"
+fi
 case "$MODE" in installed|dirty-update) ;; *) die "--mode must be installed or dirty-update" ;; esac
-case "$REF" in *..*|/*|*\\*|*[!A-Za-z0-9._/-]*) die "invalid release tag: $REF" ;; esac
 [[ "$POLL_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && [ "$POLL_TIMEOUT_SECONDS" -ge 10 ] && [ "$POLL_TIMEOUT_SECONDS" -le 900 ] || die "--poll-timeout must be 10..900"
 validate_url "$BASE_URL"
 validate_url "$CORE_URL"
 validate_name "--password-env" "$PASSWORD_ENV"
 validate_domain "$TEST_DOMAIN"
+}
+
+parse_arguments "$@"
+validate_arguments
 
 INSTALL_DIR="$(canonical_existing_dir "$INSTALL_DIR")"
 [ -d "$INSTALL_DIR/.git" ] || die "--install-dir is not a git checkout: $INSTALL_DIR"
@@ -521,10 +543,29 @@ resolve_immutable_tag() {
   [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
 }
 
+resolve_pre_tag_candidate() {
+  # The root helper independently verifies this pinned ref against canonical upstream.
+  [ "$CANDIDATE" = "origin/dev" ] || {
+    printf 'pre-tag candidate must be canonical origin/dev\n' >&2
+    return 1
+  }
+  CANDIDATE_REF="refs/heads/dev"
+  git -C "$INSTALL_DIR" check-ref-format "$CANDIDATE_REF"
+  [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+}
+
+resolve_update_candidate() {
+  if [ -n "$REF" ]; then
+    resolve_immutable_tag
+  else
+    resolve_pre_tag_candidate
+  fi
+}
+
 check_installed_ref() {
   INSTALLED_SHA="$(git -C "$INSTALL_DIR" rev-parse --verify HEAD)"
   [ "$INSTALLED_SHA" = "$EXPECTED_SHA" ] || {
-    printf 'installed SHA %s does not match tag %s (%s)\n' "$INSTALLED_SHA" "$REF" "$EXPECTED_SHA" >&2
+    printf 'installed SHA %s does not match candidate %s (%s)\n' "$INSTALLED_SHA" "$CANDIDATE_REF" "$EXPECTED_SHA" >&2
     return 1
   }
   [ -z "$(git -C "$INSTALL_DIR" status --porcelain)" ] || {
@@ -1016,10 +1057,11 @@ check_resource_budget() {
 }
 
 report_event metadata pi2-gate started "mode=$MODE state_dir=$STATE_DIR run_registry_dir=$RUN_REGISTRY_DIR" ""
-require_step immutable-ref resolve_immutable_tag
+require_step immutable-ref resolve_update_candidate
 report_event candidate update-candidate resolved "candidate_ref=$CANDIDATE_REF expected_sha=$EXPECTED_SHA" ""
-require_step installed-ref-before check_installed_ref
-if [ "$MODE" = dirty-update ]; then
+if [ "$MODE" = installed ]; then
+  require_step installed-ref check_installed_ref
+else
   require_step dirty-update queue_dirty_update
   require_step installed-ref-after check_installed_ref
   require_step dirty-update-services check_required_services
