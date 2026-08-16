@@ -4,6 +4,7 @@ import base64
 import http.client
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -441,6 +442,63 @@ class TestServerLifecycleTests(unittest.TestCase):
                 probe.bind(("127.0.0.1", server.port))
 
 
+class EdgeCdpLifecycleTests(unittest.TestCase):
+    def test_startup_failure_cleans_its_process_profile_and_reports_redacted_diagnostics(self) -> None:
+        class FakeProfile:
+            name = "fake-edge-profile"
+
+            def __init__(self) -> None:
+                self.cleaned = False
+
+            def cleanup(self) -> None:
+                self.cleaned = True
+
+        class FakePopen:
+            def __init__(self, *_args: Any, **kwargs: Any) -> None:
+                self.returncode: int | None = None
+                self.terminate_calls = 0
+                self.wait_calls: list[float] = []
+                kwargs["stderr"].write(b"headless startup failed; token=top-secret\\n")
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def wait(self, timeout: float) -> int:
+                self.wait_calls.append(timeout)
+                self.returncode = 17
+                return self.returncode
+
+        profile = FakeProfile()
+        processes: list[FakePopen] = []
+
+        def popen(*args: Any, **kwargs: Any) -> FakePopen:
+            process = FakePopen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with (
+            patch.object(tempfile, "TemporaryDirectory", return_value=profile),
+            patch.object(subprocess, "Popen", side_effect=popen) as mock_popen,
+            patch(__name__ + "._free_port", return_value=9222),
+            patch(__name__ + "._wait_for_http", side_effect=AssertionError("connection refused")),
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"Edge CDP startup failed: connection refused; process exit code 17; stderr: .*token=\[REDACTED\]",
+            ) as raised:
+                _EdgeCdp(Path("fake-msedge.exe")).__enter__()
+
+        self.assertNotIn("top-secret", str(raised.exception))
+        self.assertEqual(1, mock_popen.call_count)
+        self.assertEqual(1, len(processes))
+        self.assertEqual(1, processes[0].terminate_calls)
+        self.assertEqual([5], processes[0].wait_calls)
+        self.assertTrue(profile.cleaned)
+
+
 def _edge_executable() -> Path | None:
     program_files_x86 = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
     program_files = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
@@ -599,53 +657,119 @@ class _EdgeCdp:
         self._process: subprocess.Popen[bytes] | None = None
         self._client: _CdpClient | None = None
         self._session_id: str | None = None
+        self._profile: Any | None = None
+        self._stdout: Any | None = None
+        self._stderr: Any | None = None
 
     def __enter__(self) -> "_EdgeCdp":
         self._debug_port = _free_port()
         self._profile = tempfile.TemporaryDirectory()
-        self._process = subprocess.Popen(
-            [
-                str(self._executable),
-                "--headless=new",
-                f"--remote-debugging-port={self._debug_port}",
-                f"--user-data-dir={self._profile.name}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        version = _wait_for_http(f"http://127.0.0.1:{self._debug_port}/json/version")
-        self._client = _CdpClient(str(version["webSocketDebuggerUrl"]))
-        target_id = str(self._client.command("Target.createTarget", {"url": "about:blank"})["targetId"])
-        self._session_id = str(
-            self._client.command("Target.attachToTarget", {"targetId": target_id, "flatten": True})["sessionId"]
-        )
-        self._client.command("Runtime.enable", session_id=self._session_id)
+        self._stdout = tempfile.TemporaryFile()
+        self._stderr = tempfile.TemporaryFile()
+        try:
+            self._process = subprocess.Popen(
+                [
+                    str(self._executable),
+                    "--headless=new",
+                    f"--remote-debugging-port={self._debug_port}",
+                    f"--user-data-dir={self._profile.name}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "about:blank",
+                ],
+                stdout=self._stdout,
+                stderr=self._stderr,
+            )
+            version = _wait_for_http(f"http://127.0.0.1:{self._debug_port}/json/version")
+            self._client = _CdpClient(str(version["webSocketDebuggerUrl"]))
+            target_id = str(self._client.command("Target.createTarget", {"url": "about:blank"})["targetId"])
+            self._session_id = str(
+                self._client.command("Target.attachToTarget", {"targetId": target_id, "flatten": True})["sessionId"]
+            )
+            self._client.command("Runtime.enable", session_id=self._session_id)
+        except BaseException as error:
+            diagnostics = self._cleanup()
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise AssertionError(f"Edge CDP startup failed: {error}; {diagnostics}") from error
         return self
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self._cleanup()
+
+    def _cleanup(self) -> str:
+        diagnostics: list[str] = []
         if self._client is not None:
             try:
-                self._client.command("Browser.close")
-            except (AssertionError, OSError):
-                pass
-            self._client.close()
-        if self._process is not None and self._process.poll() is None:
+                self._client.close()
+            except OSError as error:
+                diagnostics.append(f"CDP close failed: {error}")
+            self._client = None
+        if self._process is not None:
+            process = self._process
             try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.terminate()
-                self._process.wait(timeout=5)
-        for attempt in range(20):
+                exit_code = process.poll()
+                if exit_code is None:
+                    process.terminate()
+                    try:
+                        exit_code = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        try:
+                            exit_code = process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            diagnostics.append("process did not exit after kill")
+                            exit_code = process.poll()
+                diagnostics.append(f"process exit code {exit_code}")
+            except OSError as error:
+                diagnostics.append(f"process cleanup failed: {error}")
+            self._process = None
+        self._close_browser_log(self._stdout, "stdout", diagnostics)
+        self._stdout = None
+        self._close_browser_log(self._stderr, "stderr", diagnostics)
+        self._stderr = None
+        if self._profile is not None:
+            for attempt in range(20):
+                try:
+                    self._profile.cleanup()
+                    break
+                except PermissionError as error:
+                    if attempt == 19:
+                        diagnostics.append(f"profile cleanup failed: {error}")
+                    else:
+                        time.sleep(0.1)
+                except OSError as error:
+                    diagnostics.append(f"profile cleanup failed: {error}")
+                    break
+            self._profile = None
+        return "; ".join(diagnostics) or "no process was created"
+
+    @staticmethod
+    def _close_browser_log(stream: Any | None, name: str, diagnostics: list[str]) -> None:
+        if stream is None:
+            return
+        try:
+            stream.seek(0)
+            output = stream.read()
+            if output:
+                diagnostics.append(f"{name}: {_EdgeCdp._redact_browser_output(output)}")
+        except OSError as error:
+            diagnostics.append(f"{name} capture failed: {error}")
+        finally:
             try:
-                self._profile.cleanup()
-                break
-            except PermissionError:
-                if attempt == 19:
-                    raise
-                time.sleep(0.1)
+                stream.close()
+            except OSError as error:
+                diagnostics.append(f"{name} close failed: {error}")
+
+    @staticmethod
+    def _redact_browser_output(output: bytes | str) -> str:
+        text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
+        text = re.sub(
+            r"(?i)\b(authorization\s*[:=]\s*(?:bearer\s+)?|(?:cookie|password|token|secret)\s*[:=]\s*)[^\s,;]+",
+            r"\1[REDACTED]",
+            text.strip(),
+        )
+        return text[:2000] + ("... [truncated]" if len(text) > 2000 else "")
 
     def navigate(self, url: str) -> None:
         self._command("Page.navigate", {"url": url})
