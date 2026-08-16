@@ -598,6 +598,83 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
         self.assertEqual([5, 5], process.wait_calls)
         self.assertIsNone(edge._process)
 
+    def test_terminal_permission_error_during_profile_cleanup_fails_or_notes_primary_error(self) -> None:
+        class LockedProfile:
+            def __init__(self) -> None:
+                self.cleanup_calls = 0
+
+            def cleanup(self) -> None:
+                self.cleanup_calls += 1
+                raise PermissionError("profile is locked")
+
+        def edge_with_locked_profile() -> tuple[_EdgeCdp, LockedProfile]:
+            profile = LockedProfile()
+            edge = _EdgeCdp(Path("fake-msedge.exe"))
+            edge._profile = profile
+            return edge, profile
+
+        edge, profile = edge_with_locked_profile()
+        with patch(__name__ + ".time.sleep") as sleep:
+            with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: profile cleanup failed: profile is locked"):
+                edge.__exit__(None, None, None)
+
+        self.assertEqual(20, profile.cleanup_calls)
+        self.assertEqual(19, sleep.call_count)
+        self.assertIsNone(edge._profile)
+
+        edge, profile = edge_with_locked_profile()
+        primary_error = AssertionError("primary test failure")
+
+        with patch(__name__ + ".time.sleep") as sleep:
+            edge.__exit__(AssertionError, primary_error, None)
+
+        self.assertEqual("primary test failure", str(primary_error))
+        self.assertEqual(
+            ["Edge CDP cleanup failed: profile cleanup failed: profile is locked"],
+            primary_error.__notes__,
+        )
+        self.assertEqual(20, profile.cleanup_calls)
+        self.assertEqual(19, sleep.call_count)
+        self.assertIsNone(edge._profile)
+
+    def test_os_error_during_profile_cleanup_fails_or_notes_primary_error(self) -> None:
+        class BrokenProfile:
+            def __init__(self) -> None:
+                self.cleanup_calls = 0
+
+            def cleanup(self) -> None:
+                self.cleanup_calls += 1
+                raise OSError("profile cleanup unavailable")
+
+        def edge_with_broken_profile() -> tuple[_EdgeCdp, BrokenProfile]:
+            profile = BrokenProfile()
+            edge = _EdgeCdp(Path("fake-msedge.exe"))
+            edge._profile = profile
+            return edge, profile
+
+        edge, profile = edge_with_broken_profile()
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"Edge CDP cleanup failed: profile cleanup failed: profile cleanup unavailable",
+        ):
+            edge.__exit__(None, None, None)
+
+        self.assertEqual(1, profile.cleanup_calls)
+        self.assertIsNone(edge._profile)
+
+        edge, profile = edge_with_broken_profile()
+        primary_error = AssertionError("primary test failure")
+
+        edge.__exit__(AssertionError, primary_error, None)
+
+        self.assertEqual("primary test failure", str(primary_error))
+        self.assertEqual(
+            ["Edge CDP cleanup failed: profile cleanup failed: profile cleanup unavailable"],
+            primary_error.__notes__,
+        )
+        self.assertEqual(1, profile.cleanup_calls)
+        self.assertIsNone(edge._profile)
+
 
 def _edge_executable() -> Path | None:
     program_files_x86 = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
@@ -849,10 +926,12 @@ class _EdgeCdp:
                 except PermissionError as error:
                     if attempt == 19:
                         diagnostics.append(f"profile cleanup failed: {error}")
+                        cleanup_failed = True
                     else:
                         time.sleep(0.1)
                 except OSError as error:
                     diagnostics.append(f"profile cleanup failed: {error}")
+                    cleanup_failed = True
                     break
             self._profile = None
         return "; ".join(diagnostics) or "no process was created", cleanup_failed
