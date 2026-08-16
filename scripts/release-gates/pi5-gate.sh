@@ -14,7 +14,7 @@ readonly UPDATE_LOG_PARENT="/var/lib/gp-control-plane/release-updates"
 readonly INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"
 readonly CANONICAL_UPSTREAM_URL="https://github.com/balbomush/GP-access-control-plane.git"
 
-REF=""
+REF="" CANDIDATE="" REQUESTED_EXPECTED_SHA=""
 MODE="installed"
 TOPOLOGY=""
 ACK_CLEAN_INSTALL=0
@@ -32,7 +32,7 @@ TEST_DOMAIN="example.com"
 POLL_TIMEOUT_SECONDS=90
 
 APP_USER="" APP_GROUP="" APP_GID="" API_URL="" WEB_ENABLED=0
-EXPECTED_SHA="" INSTALLED_SHA="" CANDIDATE_REF="" DIRTY_MARKER=""
+EXPECTED_SHA="" CANDIDATE_SHA="" VERIFIED_SHA="" STAGED_SHA="" INSTALLED_SHA="" CANDIDATE_REF="" TERMINAL_STATUS="" DIRTY_MARKER=""
 PASSWORD="" TOKEN="" CURL_AUTH_HEADER_FILE="" REPORT_DIR="" REPORT="" RUN_STAMP=""
 LEFTOVER_SUMMARY="" REPORT_READY=0
 
@@ -41,6 +41,8 @@ usage() {
 Usage:
   sudo --preserve-env=GP_GATE_PASSWORD bash scripts/release-gates/pi5-gate.sh \
     --ref v0.4.0 --topology web|headless [options]
+  sudo --preserve-env=GP_GATE_PASSWORD bash scripts/release-gates/pi5-gate.sh \
+    --candidate origin/dev --expected-sha COMMIT_SHA --topology web|headless [options]
 
 Manual topology-aware Raspberry Pi 5 functional release gate.  It is designed
 for execution over SSH and writes root-owned JSONL evidence under
@@ -48,7 +50,12 @@ for execution over SSH and writes root-owned JSONL evidence under
 installation, uninstallation, data reset, or rollback.
 
 Required:
-  --ref TAG                    Existing immutable release tag.
+  --ref TAG                    Existing immutable release tag. Mutually exclusive
+                               with the pre-tag candidate interface.
+  --candidate origin/dev       Canonical pre-tag candidate. Only origin/dev is
+                               accepted and is passed as refs/heads/dev.
+  --expected-sha SHA           Expected 40-character lowercase commit SHA for
+                               --candidate origin/dev.
   --topology web|headless      Expected installed topology; the gate rejects a
                                deployed topology that does not match.
 
@@ -159,6 +166,8 @@ reload_state_dir_from_install_profile() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ref) require_value "$1" "${2:-}"; REF="$2"; shift 2 ;;
+    --candidate) require_value "$1" "${2:-}"; CANDIDATE="$2"; shift 2 ;;
+    --expected-sha) require_value "$1" "${2:-}"; REQUESTED_EXPECTED_SHA="$2"; shift 2 ;;
     --mode) require_value "$1" "${2:-}"; MODE="$2"; shift 2 ;;
     --topology) require_value "$1" "${2:-}"; TOPOLOGY="$2"; shift 2 ;;
     --ack-clean-install) ACK_CLEAN_INSTALL=1; shift ;;
@@ -179,13 +188,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$REF" ] || die "--ref is required"
+[ -n "$REF" ] || [ -n "$CANDIDATE" ] || die "--ref or --candidate is required"
+[ -z "$REF" ] || [ -z "$CANDIDATE" ] || die "--ref and --candidate are mutually exclusive"
 [ -n "$TOPOLOGY" ] || die "--topology is required"
 case "$MODE" in installed|dirty-update|clean-install) ;; *) die "--mode must be installed, dirty-update, or clean-install" ;; esac
 case "$TOPOLOGY" in web|headless) ;; *) die "--topology must be web or headless" ;; esac
 [ "$MODE" != clean-install ] || [ "$ACK_CLEAN_INSTALL" -eq 1 ] || die "--mode clean-install requires --ack-clean-install"
 [ "$MODE" = clean-install ] || [ "$ACK_CLEAN_INSTALL" -eq 0 ] || die "--ack-clean-install is valid only with --mode clean-install"
-case "$REF" in *..*|/*|*\\*|*[!A-Za-z0-9._/-]*) die "invalid release tag: $REF" ;; esac
+if [ -n "$REF" ]; then
+  [ -z "$REQUESTED_EXPECTED_SHA" ] || die "--expected-sha is valid only with --candidate origin/dev"
+  case "$REF" in *..*|/*|*\\*|*[!A-Za-z0-9._/-]*) die "invalid release tag: $REF" ;; esac
+else
+  [ "$CANDIDATE" = origin/dev ] || die "--candidate must be the canonical origin/dev"
+  [[ "$REQUESTED_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "--expected-sha must be 40 lowercase hexadecimal characters"
+  CANDIDATE_REF="refs/heads/dev"
+  EXPECTED_SHA="$REQUESTED_EXPECTED_SHA"
+  CANDIDATE_SHA="$EXPECTED_SHA"
+fi
 [[ "$POLL_TIMEOUT_SECONDS" =~ ^[0-9]+$ && "$POLL_TIMEOUT_SECONDS" -ge 10 && "$POLL_TIMEOUT_SECONDS" -le 900 ]] || die "--poll-timeout must be 10..900"
 validate_url "$BASE_URL"; validate_url "$CORE_URL"; validate_env_name "$PASSWORD_ENV"; validate_domain "$TEST_DOMAIN"
 
@@ -233,15 +252,17 @@ REPORT_READY=1
 report_event() {
   local kind="$1" name="$2" status="$3" detail="${4:-}" log_path="${5:-}"
   GATE_KIND="$kind" GATE_NAME="$name" GATE_STATUS="$status" GATE_DETAIL="$detail" GATE_LOG="$log_path" \
-    GATE_REF="$REF" GATE_TOPOLOGY="$TOPOLOGY" GATE_EXPECTED_SHA="$EXPECTED_SHA" GATE_INSTALLED_SHA="$INSTALLED_SHA" \
+    GATE_REF="$REF" GATE_TOPOLOGY="$TOPOLOGY" GATE_CANDIDATE_REF="$CANDIDATE_REF" GATE_CANDIDATE_SHA="$CANDIDATE_SHA" GATE_EXPECTED_SHA="$EXPECTED_SHA" GATE_VERIFIED_SHA="$VERIFIED_SHA" GATE_STAGED_SHA="$STAGED_SHA" GATE_INSTALLED_SHA="$INSTALLED_SHA" GATE_TERMINAL_STATUS="$TERMINAL_STATUS" \
     "$PYTHON" - "$REPORT" <<'PY'
 import json, os, sys, time
 payload = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "kind": os.environ["GATE_KIND"], "name": os.environ["GATE_NAME"],
            "status": os.environ["GATE_STATUS"], "detail": os.environ["GATE_DETAIL"],
            "log": os.environ["GATE_LOG"], "ref": os.environ["GATE_REF"],
-           "topology": os.environ["GATE_TOPOLOGY"], "expected_sha": os.environ["GATE_EXPECTED_SHA"],
-           "installed_sha": os.environ["GATE_INSTALLED_SHA"]}
+           "topology": os.environ["GATE_TOPOLOGY"], "candidate_ref": os.environ["GATE_CANDIDATE_REF"],
+           "candidate_sha": os.environ["GATE_CANDIDATE_SHA"], "expected_sha": os.environ["GATE_EXPECTED_SHA"],
+           "verified_sha": os.environ["GATE_VERIFIED_SHA"], "staged_sha": os.environ["GATE_STAGED_SHA"],
+           "installed_sha": os.environ["GATE_INSTALLED_SHA"], "terminal_status": os.environ["GATE_TERMINAL_STATUS"]}
 with open(sys.argv[1], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(payload, sort_keys=True) + "\n")
 PY
@@ -254,6 +275,7 @@ finish() {
   [ -z "$CURL_AUTH_HEADER_FILE" ] || rm -f -- "$CURL_AUTH_HEADER_FILE" || true
   if [ "$REPORT_READY" -eq 1 ]; then
     INSTALLED_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
+    TERMINAL_STATUS="$([ "$code" -eq 0 ] && printf success || printf failed)"
     report_event summary pi5-gate "$([ "$code" -eq 0 ] && printf success || printf failed)" "exit=$code" "" || true
     printf 'pi5-gate: %s; report: %s\n' "$([ "$code" -eq 0 ] && printf PASS || printf FAIL)" "$REPORT" >&2
   fi
@@ -330,10 +352,19 @@ resolve_immutable_tag() {
   [ -n "$direct_sha" ] || { printf 'release tag is absent from canonical upstream: %s\n' "$REF" >&2; return 1; }
   EXPECTED_SHA="${peeled_sha:-$direct_sha}"
   [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+  CANDIDATE_SHA="$EXPECTED_SHA"
+}
+resolve_pre_tag_candidate() {
+  [ "$CANDIDATE" = origin/dev ] || return 1
+  [ "$CANDIDATE_REF" = refs/heads/dev ] || return 1
+  [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+  CANDIDATE_SHA="$EXPECTED_SHA"
 }
 check_installed_ref() {
+  local require_detached="${1:-0}"
   INSTALLED_SHA="$(git -C "$INSTALL_DIR" rev-parse --verify HEAD)"
-  [ "$INSTALLED_SHA" = "$EXPECTED_SHA" ] || { printf 'installed SHA does not match tag %s\n' "$REF" >&2; return 1; }
+  [ "$INSTALLED_SHA" = "$EXPECTED_SHA" ] || { printf 'installed SHA does not match expected candidate\n' >&2; return 1; }
+  [ "$require_detached" -eq 0 ] || ! git -C "$INSTALL_DIR" symbolic-ref -q HEAD >/dev/null || { printf 'installed checkout is not detached\n' >&2; return 1; }
   [ -z "$(git -C "$INSTALL_DIR" status --porcelain)" ] || { printf 'installed checkout has local changes\n' >&2; return 1; }
 }
 check_services() {
@@ -526,6 +557,7 @@ for raw in open(os.environ["GATE_LOG"], encoding="utf-8", errors="replace"):
             seen[key].append(value)
             if key == "status" and value == "success": success_seen = True
 if seen != want: raise SystemExit("strict update success evidence is incomplete")
+print("\t".join((seen["verified_sha"][0], seen["staged_sha"][0], seen["installed_sha"][0])))
 PY
 }
 check_rollback_contract() {
@@ -538,15 +570,20 @@ for required in ("rollback_published_code() {", "phase=rollback", "rollback_scop
 PY
 }
 queue_dirty_update() {
-  local response evidence unit log deadline state
+  local response evidence unit log deadline state update_evidence
   [ -z "$(git -C "$INSTALL_DIR" status --porcelain)" ] || { printf 'worktree must be clean before dirty-update mode\n' >&2; return 1; }
   DIRTY_MARKER="$(runuser -u "$APP_USER" -- mktemp "$INSTALL_DIR/.pi5-gate-dirty-marker-$RUN_STAMP.XXXXXX")"
-  printf 'owned Pi5 release-gate marker for %s\n' "$REF" | runuser -u "$APP_USER" -- tee "$DIRTY_MARKER" >/dev/null
+  printf 'owned Pi5 release-gate marker for %s\n' "$CANDIDATE_REF" | runuser -u "$APP_USER" -- tee "$DIRTY_MARKER" >/dev/null
   response="$("$ROOT_HELPER" queue-update --candidate-ref "$CANDIDATE_REF" --expected-sha "$EXPECTED_SHA")"
   evidence="$(validate_queue_evidence "$response")"; IFS=$'\t' read -r unit log <<< "$evidence"
   deadline=$(( $(date +%s) + 900 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -qx 'status=success' "$log"; then validate_update_success_evidence "$log"; break; fi
+    if grep -qx 'status=success' "$log"; then
+      update_evidence="$(validate_update_success_evidence "$log")"
+      IFS=$'\t' read -r VERIFIED_SHA STAGED_SHA INSTALLED_SHA <<< "$update_evidence"
+      TERMINAL_STATUS=success
+      break
+    fi
     if grep -q '^status=' "$log" || [ "$(systemctl show --property=ActiveState --value "$unit" 2>/dev/null || true)" = failed ]; then
       printf 'strict update failed; inspect rollback evidence in %s\n' "$log" >&2; return 1
     fi
@@ -558,14 +595,19 @@ queue_dirty_update() {
 }
 
 report_event metadata pi5-gate started "mode=$MODE topology=$TOPOLOGY" ""
-require_step immutable-ref resolve_immutable_tag
-report_event candidate immutable-tag resolved "candidate_ref=$CANDIDATE_REF expected_sha=$EXPECTED_SHA" ""
-require_step installed-ref-before check_installed_ref
+if [ -n "$REF" ]; then
+  require_step immutable-ref resolve_immutable_tag
+  report_event candidate immutable-tag resolved "candidate_ref=$CANDIDATE_REF candidate_sha=$CANDIDATE_SHA expected_sha=$EXPECTED_SHA" ""
+else
+  require_step pre-tag-candidate resolve_pre_tag_candidate
+  report_event candidate pre-tag resolved "candidate_ref=$CANDIDATE_REF candidate_sha=$CANDIDATE_SHA expected_sha=$EXPECTED_SHA" ""
+fi
+[ "$MODE" = dirty-update ] || require_step installed-ref-before check_installed_ref
 if [ "$MODE" = dirty-update ]; then
   require_step strict-update-rollback-contract check_rollback_contract
   require_step strict-update-queue-success-evidence queue_dirty_update
   require_step state-dir-after-strict-update reload_state_dir_from_install_profile
-  require_step installed-ref-after check_installed_ref
+  require_step installed-ref-after check_installed_ref 1
 fi
 if [ "$MODE" = clean-install ]; then report_event operator clean-install-acknowledged verified "operator performed reimage/install outside this gate" ""; fi
 require_step services check_services
