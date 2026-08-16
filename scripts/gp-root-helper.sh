@@ -88,8 +88,8 @@ validate_update_ref() {
 validate_update_candidate_ref() {
   candidate_ref="${1:-}"
   case "$candidate_ref" in
-    refs/tags/*) ;;
-    *) fail "candidate ref must be a typed tag under refs/tags/: $candidate_ref" ;;
+    refs/tags/*|refs/heads/dev) ;;
+    *) fail "candidate ref must be a typed tag under refs/tags/ or the canonical pre-tag ref refs/heads/dev: $candidate_ref" ;;
   esac
   case "$candidate_ref" in
     *..*|*@\{*|*//|*/.|*/|*\\*|*[!A-Za-z0-9._/-]*) fail "unsupported candidate ref: $candidate_ref" ;;
@@ -1055,6 +1055,30 @@ exec > $(shell_quote "$log_file") 2>&1
 strict_fail() { echo 'status=failed'; echo "error=\$1"; exit 126; }
 strict_git() { env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git "\$@"; }
 strict_sha() { strict_sha_value="\${1:-}"; case "\$strict_sha_value" in ''|*[!0-9a-f]*) return 1 ;; esac; [ "\${#strict_sha_value}" -eq 40 ]; }
+strict_verify_remote_candidate() {
+  strict_remote_refs="\$(strict_git ls-remote "\$STRICT_UPSTREAM" "\$STRICT_REF" "\${STRICT_REF}^{}")" || strict_fail 'cannot read canonical candidate ref'
+  strict_direct_sha="\$(printf '%s\\n' "\$strict_remote_refs" | awk -v ref="\$STRICT_REF" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 1 }')" || strict_fail 'canonical candidate ref is ambiguous'
+  strict_peeled_sha="\$(printf '%s\\n' "\$strict_remote_refs" | awk -v ref="\${STRICT_REF}^{}" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 0 }')" || strict_fail 'canonical candidate peeled ref is ambiguous'
+  strict_sha "\$strict_direct_sha" >/dev/null || strict_fail 'canonical candidate ref SHA is invalid'
+  if [ -n "\$strict_peeled_sha" ]; then strict_sha "\$strict_peeled_sha" >/dev/null || strict_fail 'canonical candidate peeled SHA is invalid'; fi
+  strict_verified_sha="\$strict_direct_sha"
+  [ -n "\$strict_peeled_sha" ] && strict_verified_sha="\$strict_peeled_sha"
+  [ "\$strict_verified_sha" = "\$STRICT_SHA" ] || strict_fail 'canonical candidate ref does not match expected SHA'
+  printf '%s\\n' "\$strict_verified_sha"
+}
+strict_fetch_pinned_candidate() {
+  strict_fetch_repo="\$1"
+  strict_fetch_label="\$2"
+  strict_git -C "\$strict_fetch_repo" fetch --no-tags "\$STRICT_UPSTREAM" "\$STRICT_REF" >/dev/null || strict_fail "\$strict_fetch_label fetch failed"
+  strict_fetch_sha="\$(strict_git -C "\$strict_fetch_repo" rev-parse --verify FETCH_HEAD^{commit})" || strict_fail "\$strict_fetch_label fetch did not resolve a commit"
+  [ "\$strict_fetch_sha" = "\$STRICT_SHA" ] || strict_fail "\$strict_fetch_label fetch SHA does not match expected SHA"
+  strict_git -C "\$strict_fetch_repo" checkout --detach "\$STRICT_SHA" >/dev/null || strict_fail "cannot check out \$strict_fetch_label"
+  strict_checkout_ref="\$(strict_git -C "\$strict_fetch_repo" symbolic-ref -q HEAD || true)"
+  [ -z "\$strict_checkout_ref" ] || strict_fail "\$strict_fetch_label checkout is not detached"
+  strict_checkout_sha="\$(strict_git -C "\$strict_fetch_repo" rev-parse --verify HEAD^{commit})" || strict_fail "cannot resolve \$strict_fetch_label commit"
+  [ "\$strict_checkout_sha" = "\$STRICT_SHA" ] || strict_fail "\$strict_fetch_label checkout does not match expected SHA"
+  printf '%s\\n' "\$strict_checkout_sha"
+}
 strict_safe_config_parent_chain() {
   strict_parent="\$1"
   while :; do
@@ -1115,21 +1139,12 @@ echo "expected_sha=\$STRICT_SHA"
 install -d -m 0700 -o root -g root "\$STRICT_STAGE_ROOT" || strict_fail 'cannot create strict stage'
 [ "\$(stat -c '%u:%a' "\$STRICT_STAGE_ROOT" 2>/dev/null || true)" = '0:700' ] || strict_fail 'strict stage ownership check failed'
 
-remote_refs="\$(strict_git ls-remote "\$STRICT_UPSTREAM" "\$STRICT_REF" "\${STRICT_REF}^{}")" || strict_fail 'cannot read canonical tag'
-direct_sha="\$(printf '%s\\n' "\$remote_refs" | awk -v ref="\$STRICT_REF" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 1 }')" || strict_fail 'canonical direct tag is ambiguous'
-peeled_sha="\$(printf '%s\\n' "\$remote_refs" | awk -v ref="\${STRICT_REF}^{}" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 0 }')" || strict_fail 'canonical peeled tag is ambiguous'
-strict_sha "\$direct_sha" >/dev/null || strict_fail 'canonical direct tag SHA is invalid'
-if [ -n "\$peeled_sha" ]; then strict_sha "\$peeled_sha" >/dev/null || strict_fail 'canonical peeled tag SHA is invalid'; fi
-verified_sha="\$direct_sha"
-[ -n "\$peeled_sha" ] && verified_sha="\$peeled_sha"
-[ "\$verified_sha" = "\$STRICT_SHA" ] || strict_fail 'canonical tag does not match expected SHA'
+verified_sha="\$(strict_verify_remote_candidate)"
 
 verify_repo="\$STRICT_STAGE_ROOT/verify"
 strict_git init "\$verify_repo" >/dev/null || strict_fail 'cannot initialize verification repository'
 chown root:root "\$verify_repo" && chmod 0700 "\$verify_repo" || strict_fail 'cannot protect verification repository'
-strict_git -C "\$verify_repo" fetch --no-tags "\$STRICT_UPSTREAM" "\$STRICT_REF" >/dev/null || strict_fail 'verification fetch failed'
-fetch_sha="\$(strict_git -C "\$verify_repo" rev-parse --verify FETCH_HEAD^{commit})" || strict_fail 'verification fetch did not resolve a commit'
-[ "\$fetch_sha" = "\$STRICT_SHA" ] || strict_fail 'verification fetch SHA does not match expected SHA'
+fetch_sha="\$(strict_fetch_pinned_candidate "\$verify_repo" verification)"
 echo 'phase=verified'
 echo "verified_ref=\$STRICT_REF"
 echo "verified_sha=\$fetch_sha"
@@ -1137,12 +1152,7 @@ echo "verified_sha=\$fetch_sha"
 stage_repo="\$STRICT_STAGE_ROOT/repo"
 strict_git init "\$stage_repo" >/dev/null || strict_fail 'cannot initialize fresh strict stage repository'
 chown root:root "\$stage_repo" && chmod 0700 "\$stage_repo" || strict_fail 'cannot protect strict stage repository'
-strict_git -C "\$stage_repo" fetch --no-tags "\$STRICT_UPSTREAM" "\$STRICT_REF" >/dev/null || strict_fail 'stage fetch failed'
-stage_fetch_sha="\$(strict_git -C "\$stage_repo" rev-parse --verify FETCH_HEAD^{commit})" || strict_fail 'stage fetch did not resolve a commit'
-[ "\$stage_fetch_sha" = "\$STRICT_SHA" ] || strict_fail 'stage fetch SHA does not match expected SHA'
-strict_git -C "\$stage_repo" checkout --detach "\$STRICT_SHA" >/dev/null || strict_fail 'cannot check out strict stage'
-stage_head="\$(strict_git -C "\$stage_repo" rev-parse --verify HEAD^{commit})" || strict_fail 'cannot resolve staged commit'
-[ "\$stage_head" = "\$STRICT_SHA" ] || strict_fail 'staged commit does not match expected SHA'
+stage_head="\$(strict_fetch_pinned_candidate "\$stage_repo" strict-stage)"
 [ -f "\$stage_repo/scripts/install-linux.sh" ] || [ -f "\$stage_repo/scripts/install-raspberry-pi.sh" ] || strict_fail 'staged installer is missing'
 installer="\$stage_repo/scripts/install-linux.sh"
 [ -f "\$installer" ] || installer="\$stage_repo/scripts/install-raspberry-pi.sh"
@@ -1277,6 +1287,8 @@ snapshot_deployment_configuration || rollback_after_publication_failure 'cannot 
 
 installed_checkout_sha="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || rollback_after_publication_failure 'published worktree SHA could not be verified'
 [ "\$installed_checkout_sha" = "\$STRICT_SHA" ] || rollback_after_publication_failure 'published worktree SHA does not match expected SHA'
+installed_checkout_ref="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" symbolic-ref -q HEAD || true)"
+[ -z "\$installed_checkout_ref" ] || rollback_after_publication_failure 'published worktree checkout is not detached'
 
 run_staged_installer() {
   if [ "\$STRICT_STATE_LAYOUT" = internal ]; then
@@ -2146,7 +2158,7 @@ case "$command" in
     with_discovery_gate run_owned_multidomain_target "$run_id" "$@"
     ;;
   queue-update)
-    [ "$#" -eq 4 ] && [ "$1" = --candidate-ref ] && [ "$3" = --expected-sha ] || fail "queue-update requires exactly --candidate-ref refs/tags/NAME --expected-sha 40-lowercase-hex"
+    [ "$#" -eq 4 ] && [ "$1" = --candidate-ref ] && [ "$3" = --expected-sha ] || fail "queue-update requires exactly --candidate-ref refs/tags/NAME-or-refs/heads/dev --expected-sha 40-lowercase-hex"
     queue_strict_update "$2" "$4"
     ;;
   nft-list-tables)

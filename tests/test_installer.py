@@ -40,7 +40,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("systemd-run", self.helper)
         self.assertIn("STRICT_UPSTREAM='https://github.com/balbomush/GP-access-control-plane.git'", self.helper)
         self.assertIn("STRICT_INSTALL_PROFILE='/etc/default/gp-control-plane-install-profile'", self.helper)
-        self.assertIn('strict_git -C "\\$stage_repo" fetch --no-tags "\\$STRICT_UPSTREAM" "\\$STRICT_REF"', self.helper)
+        self.assertIn('strict_fetch_pinned_candidate "\\$stage_repo" strict-stage', self.helper)
         self.assertIn('GP_TRUSTED_SOURCE_DIR="\\$stage_repo" bash "\\$installer" --strict-preflight', self.helper)
         self.assertIn("installed_version=", self.helper)
         self.assertIn("status=success", self.helper)
@@ -63,10 +63,20 @@ class InstallerTests(unittest.TestCase):
 
     def test_strict_release_runner_fetches_and_verifies_a_canonical_root_owned_stage_before_publication(self) -> None:
         stage = self.helper.split("queue_strict_update() {", 1)[1].split("validate_run_id()", 1)[0]
-        self.assertIn('strict_git ls-remote "\\$STRICT_UPSTREAM" "\\$STRICT_REF"', stage)
-        self.assertIn('strict_git -C "\\$stage_repo" fetch --no-tags "\\$STRICT_UPSTREAM" "\\$STRICT_REF"', stage)
-        self.assertIn('strict_git -C "\\$stage_repo" checkout --detach "\\$STRICT_SHA"', stage)
-        self.assertIn('[ "\\$stage_head" = "\\$STRICT_SHA" ]', stage)
+        self.assertIn('strict_verify_remote_candidate()', stage)
+        self.assertIn('strict_git ls-remote "\\$STRICT_UPSTREAM" "\\$STRICT_REF" "\\${STRICT_REF}^{}"', stage)
+        self.assertIn('strict_fetch_pinned_candidate()', stage)
+        self.assertIn('strict_fetch_pinned_candidate "\\$stage_repo" strict-stage', stage)
+        self.assertIn('checkout --detach "\\$STRICT_SHA"', stage)
+        self.assertIn('symbolic-ref -q HEAD', stage)
+        self.assertIn('[ -z "\\$strict_checkout_ref" ]', stage)
+        self.assertIn('[ "\\$strict_checkout_sha" = "\\$STRICT_SHA" ]', stage)
+        self.assertIn('installed_checkout_ref="\\$(runuser -u "\\$STRICT_USER"', stage)
+        self.assertIn('[ -z "\\$installed_checkout_ref" ]', stage)
+        self.assertLess(
+            stage.index("published worktree SHA does not match expected SHA"),
+            stage.index("published worktree checkout is not detached"),
+        )
         self.assertIn("strict stage ownership check failed", stage)
         self.assertLess(stage.index('GP_TRUSTED_SOURCE_DIR="\\$stage_repo" bash "\\$installer" --strict-preflight'), stage.index("USER_PUBLISH"))
         self.assertLess(stage.index("USER_PUBLISH"), stage.index("phase=published"))
@@ -132,9 +142,139 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn('resolve-update-candidate', self.helper)
         self.assertNotIn('queue_update_legacy', self.helper)
         validator = self.helper.split('validate_update_candidate_ref() {', 1)[1].split('\n}\n', 1)[0]
-        self.assertIn('refs/tags/*)', validator)
-        self.assertNotIn('refs/heads/*', validator)
+        self.assertIn('refs/tags/*|refs/heads/dev)', validator)
+        self.assertNotIn('refs/heads/*)', validator)
         self.assertIn('expected SHA must be 40 lowercase hexadecimal characters', self.helper)
+
+    def test_pre_tag_candidate_validation_is_hermetic(self) -> None:
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is required for strict update candidate validation")
+
+        definitions = self.helper.rsplit("\nrequire_root\n\ncommand=", 1)[0]
+        with tempfile.TemporaryDirectory() as raw:
+            probe = Path(raw) / "candidate-validation.sh"
+            probe.write_text(
+                definitions + "\nvalidate_update_candidate_ref \"$1\"\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            probe.chmod(0o755)
+
+            for accepted in ("refs/tags/v0.4.0-rc.1", "refs/heads/dev"):
+                with self.subTest(accepted=accepted):
+                    result = subprocess.run([bash, str(probe), accepted], check=False, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), accepted)
+
+            for rejected in (
+                "refs/heads/main",
+                "refs/heads/feature/test",
+                "refs/heads/dev/",
+                "refs/heads/../dev",
+                "refs/heads/dev^{}",
+                "refs/tags/",
+                "refs/tags/v0.4.0..rc.1",
+            ):
+                with self.subTest(rejected=rejected):
+                    result = subprocess.run([bash, str(probe), rejected], check=False, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 126)
+                    self.assertIn("candidate ref", result.stderr)
+
+    def test_pre_tag_runner_is_hermetic_remote_pinned_and_performs_no_tag_operations(self) -> None:
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is required for strict update runner probe")
+
+        stage = self.helper.split("queue_strict_update() {", 1)[1].split("validate_run_id()", 1)[0]
+
+        def runner_function(name: str) -> str:
+            body = self.shell_function(stage, name).replace("\\$", "$")
+            return f"{name}() {{\n{body}\n}}\n"
+
+        expected_sha = "a" * 40
+        alternate_sha = "b" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            work_dir = Path(raw)
+            probe = work_dir / "strict-runner-probe.sh"
+            git_log = work_dir / "git.log"
+            source = (
+                "#!/bin/sh\n"
+                "set -eu\n"
+                f"STRICT_UPSTREAM='https://example.invalid/gp.git'\n"
+                "STRICT_REF='refs/heads/dev'\n"
+                f"STRICT_SHA='{expected_sha}'\n"
+                "strict_fail() { printf 'error=%s\\n' \"$1\" >&2; exit 126; }\n"
+                "strict_sha() { value=\"${1:-}\"; case \"$value\" in ''|*[!0-9a-f]*) return 1 ;; esac; [ \"${#value}\" -eq 40 ]; }\n"
+                "strict_git() {\n"
+                "  printf '%s\\n' \"$*\" >> \"$FAKE_GIT_LOG\"\n"
+                "  case \"${1:-}\" in\n"
+                "    ls-remote) printf '%s\\t%s\\n' \"$FAKE_REMOTE_SHA\" \"$3\" ;;\n"
+                "    -C)\n"
+                "      case \"${3:-}\" in\n"
+                "        fetch|checkout) : ;;\n"
+                "        symbolic-ref)\n"
+                "          [ -z \"${FAKE_HEAD_REF:-}\" ] || { printf '%s\\n' \"$FAKE_HEAD_REF\"; return 0; }\n"
+                "          return 1\n"
+                "          ;;\n"
+                "        rev-parse)\n"
+                "          if [ \"${5:-}\" = 'HEAD^{commit}' ]; then printf '%s\\n' \"$FAKE_HEAD_SHA\"; else printf '%s\\n' \"$FAKE_FETCH_SHA\"; fi\n"
+                "          ;;\n"
+                "        *) return 99 ;;\n"
+                "      esac\n"
+                "      ;;\n"
+                "    *) return 99 ;;\n"
+                "  esac\n"
+                "}\n"
+                + runner_function("strict_verify_remote_candidate")
+                + runner_function("strict_fetch_pinned_candidate")
+                + "strict_verify_remote_candidate >/dev/null\n"
+                + "strict_fetch_pinned_candidate /fresh-stage strict-stage >/dev/null\n"
+            )
+            probe.write_text(source, encoding="utf-8", newline="\n")
+            probe.chmod(0o755)
+
+            def run_probe(
+                remote_sha: str,
+                fetch_sha: str,
+                head_sha: str,
+                head_ref: str = "",
+            ) -> subprocess.CompletedProcess[str]:
+                git_log.unlink(missing_ok=True)
+                return subprocess.run(
+                    [bash, str(probe)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ
+                    | {
+                        "FAKE_GIT_LOG": str(git_log),
+                        "FAKE_REMOTE_SHA": remote_sha,
+                        "FAKE_FETCH_SHA": fetch_sha,
+                        "FAKE_HEAD_SHA": head_sha,
+                        "FAKE_HEAD_REF": head_ref,
+                    },
+                )
+
+            success = run_probe(expected_sha, expected_sha, expected_sha)
+            self.assertEqual(success.returncode, 0, success.stderr)
+            git_operations = git_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("ls-remote https://example.invalid/gp.git refs/heads/dev refs/heads/dev^{}", git_operations)
+            self.assertIn("-C /fresh-stage fetch --no-tags https://example.invalid/gp.git refs/heads/dev", git_operations)
+            self.assertIn(f"-C /fresh-stage checkout --detach {expected_sha}", git_operations)
+            self.assertFalse(any(re.search(r"(^| )tag( |$)|update-ref .*refs/tags/", operation) for operation in git_operations))
+
+            moved = run_probe(alternate_sha, expected_sha, expected_sha)
+            self.assertEqual(moved.returncode, 126)
+            self.assertIn("canonical candidate ref does not match expected SHA", moved.stderr)
+
+            cached = run_probe(expected_sha, alternate_sha, expected_sha)
+            self.assertEqual(cached.returncode, 126)
+            self.assertIn("strict-stage fetch SHA does not match expected SHA", cached.stderr)
+
+            attached = run_probe(expected_sha, expected_sha, expected_sha, "refs/heads/dev")
+            self.assertEqual(attached.returncode, 126)
+            self.assertIn("strict-stage checkout is not detached", attached.stderr)
 
     def test_strict_commit_point_reports_terminal_evidence_and_verifies_code_rollback(self) -> None:
         stage = self.helper.split("queue_strict_update() {", 1)[1].split("validate_run_id()", 1)[0]
