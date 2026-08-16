@@ -4,6 +4,7 @@ import re
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,21 +13,43 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCRIPT = REPOSITORY / "scripts" / "release-gates" / "pi2-gate.sh"
 
+WINDOWS_GIT_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+)
+
 
 def bash_executable() -> str | None:
     """Find a real Bash on Linux and the standard Git for Windows locations."""
+    candidates = WINDOWS_GIT_BASH_CANDIDATES + (
+        "/bin/bash",
+        "/usr/bin/bash",
+        shutil.which("bash"),
+    )
     return next(
         (
             candidate
-            for candidate in (
-                shutil.which("bash"),
-                r"C:\\Program Files\\Git\\bin\\bash.exe",
-                r"C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-            )
+            for candidate in candidates
             if candidate and Path(candidate).is_file()
         ),
         None,
     )
+
+
+def git_bash_tool(bash: str | None, name: str) -> str | None:
+    if not bash:
+        return None
+    bash_path = Path(bash).resolve()
+    bash_bin_dir = bash_path.parent
+    git_root = bash_bin_dir.parent
+    if git_root.name.lower() == "usr":
+        git_root = git_root.parent
+    candidates = [git_root / "usr" / "bin" / f"{name}.exe"]
+    if os.name != "nt":
+        discovered = shutil.which(name)
+        if discovered:
+            candidates.append(Path(discovered))
+    return next((str(candidate) for candidate in candidates if candidate.is_file()), None)
 
 
 def shell_function(source: str, name: str) -> str:
@@ -41,17 +64,66 @@ def shell_function(source: str, name: str) -> str:
     return match.group("body")
 
 
+def bash_path(path: str) -> str:
+    """Return a path that Git Bash can execute without consulting PATH."""
+    resolved = Path(path).resolve()
+    drive, tail = os.path.splitdrive(str(resolved))
+    if drive:
+        return f"/{drive[0].lower()}{tail.replace(os.sep, '/')}"
+    return str(resolved)
+
+
 class Pi2GateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = SCRIPT.read_text(encoding="utf-8")
         cls.bash = bash_executable()
+        cls.python = bash_path(sys.executable)
+        cls.awk = git_bash_tool(cls.bash, "awk")
+        cls.rm = git_bash_tool(cls.bash, "rm")
+
+    def test_git_bash_tool_resolves_both_supported_bash_layouts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            git_root = Path(raw) / "Git"
+            tool_dir = git_root / "usr" / "bin"
+            tool_dir.mkdir(parents=True)
+
+            for tool_name in ("awk", "rm"):
+                (tool_dir / f"{tool_name}.exe").touch()
+
+            for bash_parts in (("bin",), ("usr", "bin")):
+                with self.subTest(bash_parts=bash_parts):
+                    bash_path = git_root.joinpath(*bash_parts, "bash.exe")
+                    bash_path.parent.mkdir(parents=True, exist_ok=True)
+                    bash_path.touch()
+
+                    for tool_name in ("awk", "rm"):
+                        self.assertEqual(
+                            Path(git_bash_tool(str(bash_path), tool_name)).resolve(),
+                            (tool_dir / f"{tool_name}.exe").resolve(),
+                        )
 
     def run_gate(self, *args: str) -> subprocess.CompletedProcess[str]:
         if not self.bash:
             self.skipTest("real Bash is unavailable")
+        harness = r'''PATH=/nonexistent
+dirname() {
+  [ "$1" = '--' ] && shift
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+cat() {
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s\n' "$line"
+  done
+}
+export -f dirname cat
+exec "$@"
+'''
         return subprocess.run(
-            [self.bash, str(SCRIPT), *args],
+            [self.bash, "-c", harness, "pi2-gate-launcher", self.bash, str(SCRIPT), *args],
             cwd=REPOSITORY,
             text=True,
             capture_output=True,
@@ -61,16 +133,26 @@ class Pi2GateTests(unittest.TestCase):
     def run_profile_reader(self, profile: Path) -> subprocess.CompletedProcess[str]:
         if not self.bash:
             self.skipTest("real Bash is unavailable")
+        if not self.awk:
+            self.fail("real awk is required for the Pi2 profile harness; expected Git Bash usr/bin/awk.exe")
         reader = shell_function(self.source, "read_trusted_profile_state_dir")
         harness = f'''set -o pipefail
+PATH=/nonexistent
 read_trusted_profile_state_dir() {{
 {reader}
 }}
+awk() {{ "$GATE_REAL_AWK" "$@"; }}
 INSTALL_PROFILE="$1"
 stat() {{ printf '0:0:600\\n'; }}
 read_trusted_profile_state_dir
 '''
-        return subprocess.run([self.bash, "-c", harness, "profile-reader", str(profile)], text=True, capture_output=True, check=False)
+        return subprocess.run(
+            [self.bash, "-c", harness, "profile-reader", bash_path(str(profile))],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "GATE_REAL_AWK": bash_path(self.awk)},
+        )
 
     def run_update_success_validator(
         self,
@@ -82,10 +164,12 @@ read_trusted_profile_state_dir
             self.skipTest("real Bash is unavailable")
         validator = shell_function(self.source, "validate_update_success_evidence")
         harness = f'''set -o pipefail
+PATH=/nonexistent
 require_trusted_root_dir() {{ :; }}
 validate_update_success_evidence() {{
 {validator}
 }}
+python() {{ "$GATE_TEST_PYTHON" "$@"; }}
 CANDIDATE_REF="$2"
 EXPECTED_SHA="$3"
 PYTHON=python
@@ -97,6 +181,7 @@ validate_update_success_evidence "$1"
             text=True,
             capture_output=True,
             check=False,
+            env={**os.environ, "GATE_TEST_PYTHON": self.python},
         )
 
     def run_cli_validator(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -115,6 +200,7 @@ validate_update_success_evidence "$1"
             )
         )
         harness = f'''set -Eeuo pipefail
+PATH=/nonexistent
 {functions}
 REF=''
 CANDIDATE=''
@@ -142,83 +228,111 @@ printf 'candidate=%s expected_sha=%s\n' "$CANDIDATE" "$EXPECTED_SHA"
         *,
         head: str,
         post_status: str = "",
+        update_status: str = "success",
+        retain_dirty_marker: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if not self.bash:
             self.skipTest("real Bash is unavailable")
-        fake_bin = temporary / "fake-bin"
+        if not self.rm:
+            self.fail("real rm is required for the Pi2 pre-tag harness; expected Git Bash usr/bin/rm.exe")
         install_dir = temporary / "install"
-        fake_bin.mkdir()
         install_dir.mkdir()
         events = temporary / "events.log"
         update_log = temporary / "update.log"
         expected_sha = "a" * 40
-        update_log.write_text("status=success\n", encoding="utf-8")
+        update_log.write_bytes(f"status={update_status}\n".encode("ascii"))
 
-        def write_executable(name: str, source: str) -> Path:
-            path = fake_bin / name
-            path.write_text(source, encoding="utf-8")
-            path.chmod(0o755)
-            return path
-
-        write_executable(
-            "git",
-            """#!/usr/bin/env bash
-set -eu
-printf 'git %s\n' "$*" >> "$GATE_EVENTS"
-case " $* " in
-  *" check-ref-format refs/heads/dev "*) exit 0 ;;
-  *" status --porcelain "*)
-    count_file="$GATE_DIR/status-count"
-    count=0
-    [ -f "$count_file" ] && count="$(cat "$count_file")"
-    count=$((count + 1))
-    printf '%s' "$count" > "$count_file"
-    [ "$count" -gt 1 ] && printf '%s' "$GATE_POST_STATUS"
-    exit 0
-    ;;
-  *" rev-parse --verify HEAD "*) printf '%s\n' "$GATE_HEAD"; exit 0 ;;
-  *) printf 'unexpected fake git call: %s\n' "$*" >&2; exit 64 ;;
-esac
-""",
-        )
-        write_executable(
-            "runuser",
-            """#!/usr/bin/env bash
-set -eu
-[ "$1" = '-u' ]
-shift 3
-exec "$@"
-""",
-        )
-        root_helper = write_executable(
-            "root-helper",
-            """#!/usr/bin/env bash
-set -eu
-printf 'root-helper %s\n' "$*" >> "$GATE_EVENTS"
-rm -f "$GATE_DIR"/.pi2-gate-dirty-marker-*
-printf 'queued=true\nstatus=queued\nphase=queued\ncandidate_ref=refs/heads/dev\nexpected_sha=%s\nunit=gp-control-plane-update-20260816T120000Z-1\nlog=/unused\n' "$GATE_EXPECTED_SHA"
-""",
-        )
         queue = f"queue_dirty_update() {{\n{shell_function(self.source, 'queue_dirty_update')}\n}}"
         resolve = f"resolve_pre_tag_candidate() {{\n{shell_function(self.source, 'resolve_pre_tag_candidate')}\n}}"
         identity = f"check_installed_ref() {{\n{shell_function(self.source, 'check_installed_ref')}\n}}"
         harness = f'''set -Eeuo pipefail
+PATH=/nonexistent
 {resolve}
 {queue}
 {identity}
 validate_queue_evidence() {{ printf 'gp-control-plane-update-20260816T120000Z-1\t%s\n' "$GATE_UPDATE_LOG"; }}
 validate_update_success_evidence() {{ printf 'update-evidence\n' >> "$GATE_EVENTS"; }}
-to_shell_path() {{
-  if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+git() {{
+  printf 'git %s\n' "$*" >> "$GATE_EVENTS"
+  case " $* " in
+    *" check-ref-format refs/heads/dev "*) return 0 ;;
+    *" status --porcelain "*)
+      count_file="$GATE_DIR/status-count"
+      count=0
+      [ -f "$count_file" ] && count="$(< "$count_file")"
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      [ "$count" -gt 1 ] && printf '%s' "$GATE_POST_STATUS"
+      return 0
+      ;;
+    *" rev-parse --verify HEAD "*) printf '%s\n' "$GATE_HEAD"; return 0 ;;
+    *) printf 'unexpected fake git call: %s\n' "$*" >&2; return 64 ;;
+  esac
 }}
-fake_bin="$(to_shell_path "$1")"
-INSTALL_DIR="$(to_shell_path "$2")"
-ROOT_HELPER="$(to_shell_path "$3")"
-GATE_DIR="$(to_shell_path "$GATE_DIR")"
-GATE_EVENTS="$(to_shell_path "$GATE_EVENTS")"
-GATE_UPDATE_LOG="$(to_shell_path "$GATE_UPDATE_LOG")"
+runuser() {{
+  [ "$1" = '-u' ] || return 64
+  shift 3
+  case "$1" in
+    mktemp)
+      marker="${{2%XXXXXX}}harness"
+      [ "$marker" != "$2" ] || return 64
+      : > "$marker"
+      printf 'marker-created %s\n' "$marker" >> "$GATE_EVENTS"
+      printf '%s\n' "$marker"
+      ;;
+    tee)
+      [ "$#" -eq 2 ] || return 64
+      while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s\n' "$line"
+      done > "$2"
+      ;;
+    rm) return 0 ;;
+    *) printf 'unexpected fake runuser command: %s\n' "$1" >&2; return 64 ;;
+  esac
+}}
+grep() {{
+  case "$1" in
+    -qx) [ "$#" -eq 3 ] || return 64; expected="$2"; mode=exact ;;
+    -q) [ "$#" -eq 3 ] || return 64; [ "$2" = '^status=' ] || return 64; expected="$2"; mode=status ;;
+    *) printf 'unexpected fake grep invocation: %s\n' "$*" >&2; return 64 ;;
+  esac
+  printf 'grep %s\n' "$*" >> "$GATE_EVENTS"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$mode" = exact ] && [ "$line" = "$expected" ]; then return 0; fi
+    if [ "$mode" = status ] && [ "${{line#status=}}" != "$line" ]; then return 0; fi
+  done < "$3"
+  return 1
+}}
+cat() {{
+  [ "$#" -eq 1 ] || return 64
+  while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$1"
+}}
+date() {{ printf 'date %s\n' "$*" >> "$GATE_EVENTS"; printf '100\n'; }}
+sleep() {{ printf 'sleep %s\n' "$*" >> "$GATE_EVENTS"; return 0; }}
+systemctl() {{
+  printf 'systemctl %s\n' "$*" >> "$GATE_EVENTS"
+  [ "$*" = 'show --property=ActiveState --value gp-control-plane-update-20260816T120000Z-1' ] || return 64
+  printf '%s\n' "$GATE_SYSTEMCTL_STATE"
+}}
+root-helper() {{
+  printf 'root-helper %s\n' "$*" >> "$GATE_EVENTS"
+  [ "$1" = queue-update ] || return 64
+  [ -n "$DIRTY_MARKER" ] && [ -f "$DIRTY_MARKER" ] || {{ printf 'dirty marker was not materialized\n' >&2; return 65; }}
+  IFS= read -r marker_line < "$DIRTY_MARKER"
+  [ "$marker_line" = "created by pi2-gate $RUN_STAMP for ref $REF" ] || {{ printf 'dirty marker content is invalid\n' >&2; return 66; }}
+  if [ "$GATE_RETAIN_DIRTY_MARKER" = 1 ]; then
+    printf 'marker-retained %s\n' "$DIRTY_MARKER" >> "$GATE_EVENTS"
+    printf 'queued=true\nstatus=queued\nphase=queued\ncandidate_ref=refs/heads/dev\nexpected_sha=%s\nunit=gp-control-plane-update-20260816T120000Z-1\nlog=/unused\n' "$GATE_EXPECTED_SHA"
+    return 0
+  fi
+  "$GATE_TEST_RM" -f -- "$DIRTY_MARKER"
+  [ ! -e "$DIRTY_MARKER" ] || {{ printf 'dirty marker survived root helper\n' >&2; return 67; }}
+  printf 'marker-removed %s\n' "$DIRTY_MARKER" >> "$GATE_EVENTS"
+  printf 'queued=true\nstatus=queued\nphase=queued\ncandidate_ref=refs/heads/dev\nexpected_sha=%s\nunit=gp-control-plane-update-20260816T120000Z-1\nlog=/unused\n' "$GATE_EXPECTED_SHA"
+}}
+INSTALL_DIR="$1"
+ROOT_HELPER=root-helper
 export GATE_DIR GATE_EVENTS GATE_UPDATE_LOG
-PATH="$fake_bin:$PATH"
 APP_USER='gate-test'
 RUN_STAMP='20260816T120000Z-1'
 REF=''
@@ -233,15 +347,18 @@ check_installed_ref
 '''
         environment = {
             **os.environ,
-            "GATE_DIR": str(install_dir),
-            "GATE_EVENTS": str(events),
-            "GATE_UPDATE_LOG": str(update_log),
+            "GATE_DIR": bash_path(str(install_dir)),
+            "GATE_EVENTS": bash_path(str(events)),
+            "GATE_UPDATE_LOG": bash_path(str(update_log)),
             "GATE_EXPECTED_SHA": expected_sha,
             "GATE_HEAD": head,
             "GATE_POST_STATUS": post_status,
+            "GATE_SYSTEMCTL_STATE": "active",
+            "GATE_TEST_RM": bash_path(self.rm),
+            "GATE_RETAIN_DIRTY_MARKER": "1" if retain_dirty_marker else "0",
         }
         result = subprocess.run(
-            [self.bash, "-c", harness, "pi2-pretag-update", str(fake_bin), str(install_dir), str(root_helper)],
+            [self.bash, "-c", harness, "pi2-pretag-update", bash_path(str(install_dir))],
             text=True,
             capture_output=True,
             check=False,
@@ -299,11 +416,33 @@ check_installed_ref
         self.assertIn("git -C", events)
         self.assertIn("check-ref-format refs/heads/dev", events)
         self.assertIn("root-helper queue-update --candidate-ref refs/heads/dev --expected-sha " + "a" * 40, events)
+        self.assertIn("marker-created ", events)
+        self.assertIn("marker-removed ", events)
+        self.assertLess(events.index("marker-created "), events.index("root-helper queue-update"))
+        self.assertLess(events.index("root-helper queue-update"), events.index("marker-removed "))
         self.assertLess(events.index("status --porcelain"), events.index("root-helper queue-update"))
         self.assertLess(events.index("root-helper queue-update"), events.index("rev-parse --verify HEAD"))
         self.assertNotIn("refs/tags/", events)
         self.assertNotIn("ls-remote", events)
         self.assertNotIn(" tag ", events)
+
+    def test_pretag_dirty_update_terminal_failure_is_hermetic_and_does_not_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = self.run_pretag_update_harness(
+                Path(temporary_directory),
+                head="a" * 40,
+                update_status="failed",
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("queue-update emitted invalid terminal status", result.stderr)
+        self.assertIn("status=failed", result.stdout)
+        events = result.events  # type: ignore[attr-defined]
+        self.assertIn("grep -qx status=success", events)
+        self.assertIn("grep -q ^status=", events)
+        self.assertNotIn("systemctl ", events)
+        self.assertIn("date +%s", events)
+        self.assertNotIn("sleep ", events)
 
     def test_pretag_dirty_update_rejects_post_update_sha_or_cleanliness_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -320,6 +459,18 @@ check_installed_ref
             )
         self.assertNotEqual(dirty.returncode, 0)
         self.assertIn("installed checkout has local changes", dirty.stderr)
+
+    def test_pretag_dirty_update_rejects_valid_evidence_when_the_root_helper_retains_the_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            retained = self.run_pretag_update_harness(
+                Path(temporary_directory),
+                head="a" * 40,
+                retain_dirty_marker=True,
+            )
+
+        self.assertNotEqual(retained.returncode, 0)
+        self.assertIn("queued update did not remove gate dirty marker", retained.stderr)
+        self.assertIn("marker-retained ", retained.events)  # type: ignore[attr-defined]
 
     def test_state_dir_uses_explicit_override_or_a_trusted_install_profile(self) -> None:
         resolve = shell_function(self.source, "resolve_state_dir")
