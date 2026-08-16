@@ -208,14 +208,38 @@ class AuthTests(unittest.TestCase):
     def test_short_new_password_is_validation_error(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
+            token = login(state_dir, {"username": "admin", "password": "admin"})
 
             with self.assertRaises(PasswordValidationError) as error:
                 change_password(
                     state_dir,
                     {"current_password": "admin", "new_password": "x" * (PASSWORD_MIN_LENGTH - 1)},
+                    f"Bearer {token['access_token']}",
                 )
 
             self.assertEqual(error.exception.status_code, 400)
+            require_bearer_token(state_dir, f"Bearer {token['access_token']}")
+            self.assertIn("access_token", login(state_dir, {"username": "admin", "password": "admin"}))
+            self.assertEqual(read_app_setting(state_dir, AUTH_SETTINGS_KEY)["token_version"], 1)
+
+    def test_invalid_current_password_is_validation_error_without_rotating_credentials_or_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            token = login(state_dir, {"username": "admin", "password": "admin"})
+
+            with self.assertRaises(PasswordValidationError) as error:
+                change_password(
+                    state_dir,
+                    {"current_password": "wrong", "new_password": "newpass8"},
+                    f"Bearer {token['access_token']}",
+                )
+
+            self.assertEqual(error.exception.status_code, 400)
+            require_bearer_token(state_dir, f"Bearer {token['access_token']}")
+            self.assertIn("access_token", login(state_dir, {"username": "admin", "password": "admin"}))
+            with self.assertRaises(AuthenticationError):
+                login(state_dir, {"username": "admin", "password": "newpass8"})
+            self.assertEqual(read_app_setting(state_dir, AUTH_SETTINGS_KEY)["token_version"], 1)
 
     def test_password_change_persists_and_invalidates_old_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

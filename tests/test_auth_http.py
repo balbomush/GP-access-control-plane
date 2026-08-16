@@ -199,6 +199,52 @@ class BearerAuthHttpTests(unittest.TestCase):
             )
             self.assertEqual(status, 200)
 
+    def test_invalid_current_password_is_400_without_revoking_bearer_until_successful_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            core = _start_managed_server(serve, config, ui_enabled=False)
+            proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
+            try:
+                status, _headers, body = _request(
+                    core.port,
+                    "/api/auth/login",
+                    method="POST",
+                    body=_json_bytes({"username": "admin", "password": "admin"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200, body)
+                old_bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
+
+                for port in (core.port, proxy.port):
+                    status, _headers, body = _request(
+                        port,
+                        "/api/auth/change-password",
+                        method="POST",
+                        body=_json_bytes({"current_password": "wrong", "new_password": "newpass8"}),
+                        headers={**old_bearer, "Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 400, body)
+                    self.assertEqual(json.loads(body)["error"]["code"], "invalid_request")
+                    self.assertEqual(
+                        _request(port, "/api/core/strategy-discovery/current-run-progress", headers=old_bearer)[0], 200
+                    )
+
+                status, _headers, body = _request(
+                    core.port,
+                    "/api/auth/change-password",
+                    method="POST",
+                    body=_json_bytes({"current_password": "admin", "new_password": "newpass8"}),
+                    headers={**old_bearer, "Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200, body)
+                for port in (core.port, proxy.port):
+                    self.assertEqual(
+                        _request(port, "/api/core/strategy-discovery/current-run-progress", headers=old_bearer)[0], 401
+                    )
+            finally:
+                proxy.close()
+                core.close()
+
     def test_spawned_core_and_proxy_share_password_rotation_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"

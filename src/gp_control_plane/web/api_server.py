@@ -437,7 +437,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self._auth_error(exc)
                     return
                 if isinstance(exc, PasswordValidationError):
-                    self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    self._json(error_payload("invalid_request", str(exc)), status=HTTPStatus.BAD_REQUEST)
                     return
                 if isinstance(exc, RuntimeBusyError):
                     self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)

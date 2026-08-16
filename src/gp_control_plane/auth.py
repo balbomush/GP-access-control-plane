@@ -28,7 +28,7 @@ class AuthenticationError(ValueError):
 
 
 class PasswordValidationError(ValueError):
-    """Invalid new-password input that API adapters must expose as HTTP 400."""
+    """Invalid password-change input that API adapters must expose as HTTP 400."""
 
     status_code = 400
 
@@ -55,7 +55,7 @@ def change_password(
         if authorization is not None:
             _validate_bearer_token(settings, authorization)
         if not _password_matches(settings, current_password):
-            raise AuthenticationError("invalid current password")
+            raise PasswordValidationError("invalid current password")
         salt = secrets.token_urlsafe(24)
         updated = {
             **settings,
