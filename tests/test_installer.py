@@ -106,13 +106,14 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn(":$expected_mode\"", function)
                 self.assertNotIn(":$managed_mode\"", function)
 
-    def test_installer_strict_update_accepts_only_tag_pins_and_preflights_before_actions(self) -> None:
+    def test_installer_strict_update_limits_refs_and_preflights_before_actions(self) -> None:
         self.assertIn('UPDATE_CANDIDATE_REF="${GP_UPDATE_CANDIDATE_REF:-}"', self.installer)
         self.assertIn('UPDATE_EXPECTED_SHA="${GP_UPDATE_EXPECTED_SHA:-}"', self.installer)
         self.assertIn('validate_pinned_update_inputs()', self.installer)
         self.assertIn('verify_pinned_update_checkout()', self.installer)
         self.assertIn('Strict trusted update requires GP_INSTALL_FORCE_CLEAN=on.', self.installer)
-        self.assertIn('Strict trusted update ref must be a full refs/tags/* ref', self.installer)
+        self.assertIn('refs/tags/*|refs/heads/dev)', self.installer)
+        self.assertIn('Strict trusted update ref must be refs/tags/* or refs/heads/dev', self.installer)
         self.assertIn('Strict trusted update SHA must be exactly 40 lowercase hexadecimal characters.', self.installer)
         self.assertIn("--strict-preflight", self.installer)
 
@@ -134,6 +135,125 @@ class InstallerTests(unittest.TestCase):
         ):
             self.assertIn(source_action, app_block)
         self.assertNotIn('GP_UPDATE_CANDIDATE_REF', app_block)
+
+    def test_installer_strict_preflight_accepts_dev_and_rejects_other_refs(self) -> None:
+        bash = shutil.which("bash")
+        git = shutil.which("git")
+        if bash is None or git is None:
+            self.skipTest("bash and git are required for strict installer preflight regression")
+
+        with tempfile.TemporaryDirectory() as raw:
+            work_dir = Path(raw)
+            staged_source = work_dir / "staged-source"
+            clone = subprocess.run(
+                [git, "clone", "--quiet", "--no-local", str(Path(__file__).resolve().parents[1]), str(staged_source)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(clone.returncode, 0, clone.stderr)
+
+            bash_work_dir = subprocess.run(
+                [bash, "-lc", "pwd"],
+                cwd=work_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            def bash_path(path: Path) -> str:
+                return f"{bash_work_dir}/{path.relative_to(work_dir).as_posix()}"
+
+            profile = work_dir / "install-profile"
+            profile.write_text("", encoding="utf-8", newline="\n")
+            profile_bash = bash_path(profile)
+            installer_path = staged_source / "scripts" / "install-linux.sh"
+            installer_source = installer_path.read_text(encoding="utf-8").replace(
+                'INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"',
+                f"INSTALL_PROFILE={shlex.quote(profile_bash)}",
+                1,
+            )
+            installer_path.write_text(installer_source, encoding="utf-8", newline="\n")
+
+            fake_bin = work_dir / "fake-bin"
+            fake_bin.mkdir()
+            helpers = {
+                "apt-get": "#!/usr/bin/env bash\nexit 0\n",
+                "getent": "#!/usr/bin/env bash\nprintf 'tester:x:1000:1000::/tmp:/bin/sh\\n'\n",
+                "id": (
+                    "#!/usr/bin/env bash\n"
+                    "case \"${1:-}\" in\n"
+                    "  -u) printf '0\\n' ;;\n"
+                    "  -un) printf 'tester\\n' ;;\n"
+                    "  -gn) printf 'tester\\n' ;;\n"
+                    "  *) exit 98 ;;\n"
+                    "esac\n"
+                ),
+                "stat": (
+                    "#!/usr/bin/env bash\n"
+                    "case \"${2:-}\" in\n"
+                    "  %u:%g:%a)\n"
+                    "    if [ \"${3:-}\" = \"$GP_TEST_PROFILE\" ]; then printf '0:0:600\\n'; else printf '0:0:755\\n'; fi\n"
+                    "    ;;\n"
+                    "  %u:%g) printf '0:0\\n' ;;\n"
+                    "  %a) printf '755\\n' ;;\n"
+                    "  *) exit 98 ;;\n"
+                    "esac\n"
+                ),
+            }
+            for name, contents in helpers.items():
+                helper = fake_bin / name
+                helper.write_text(contents, encoding="utf-8", newline="\n")
+                helper.chmod(0o755)
+
+            expected_sha = subprocess.run(
+                [git, "-C", str(staged_source), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            source_bash = bash_path(staged_source)
+            installer_bash = bash_path(installer_path)
+
+            def run_preflight(candidate_ref: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [bash, installer_bash, "--strict-preflight"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ
+                    | {
+                        "GP_INSTALL_FORCE_CLEAN": "on",
+                        "GP_TRUSTED_SOURCE_DIR": source_bash,
+                        "GP_UPDATE_CANDIDATE_REF": candidate_ref,
+                        "GP_UPDATE_EXPECTED_SHA": expected_sha,
+                        "GP_TEST_PROFILE": profile_bash,
+                        "PATH": f"{bash_path(fake_bin)}:{os.environ['PATH']}",
+                    },
+                )
+
+            for accepted in ("refs/tags/v0.4.0-rc.1", "refs/heads/dev"):
+                with self.subTest(accepted=accepted):
+                    result = run_preflight(accepted)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"Strict trusted update preflight passed for {accepted} at {expected_sha}",
+                        result.stdout,
+                    )
+
+            for rejected in (
+                "",
+                "refs/heads/main",
+                "refs/heads/feature/test",
+                "refs/remotes/origin/dev",
+                "refs/changes/1",
+                "refs/tags/",
+                "refs/heads/dev/",
+            ):
+                with self.subTest(rejected=rejected):
+                    result = run_preflight(rejected)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Strict trusted update ref", result.stderr)
 
     def test_root_helper_queue_update_has_one_exact_unambiguous_argv_contract(self) -> None:
         dispatch = self.helper.split('  queue-update)\n', 1)[1].split('  *)', 1)[0]

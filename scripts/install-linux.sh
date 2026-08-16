@@ -268,8 +268,8 @@ validate_pinned_update_inputs() {
   esac
   [ "$TRUSTED_SOURCE_DIR" != / ] || fail "Strict trusted update source must not be the filesystem root."
   case "$UPDATE_CANDIDATE_REF" in
-    refs/tags/*) ;;
-    *) fail "Strict trusted update ref must be a full refs/tags/* ref: $UPDATE_CANDIDATE_REF" ;;
+    refs/tags/*|refs/heads/dev) ;;
+    *) fail "Strict trusted update ref must be refs/tags/* or refs/heads/dev: $UPDATE_CANDIDATE_REF" ;;
   esac
   git check-ref-format "$UPDATE_CANDIDATE_REF" >/dev/null \
     || fail "Strict trusted update ref is not a valid Git ref: $UPDATE_CANDIDATE_REF"
