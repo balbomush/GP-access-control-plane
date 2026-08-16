@@ -493,6 +493,22 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
 
         self.assertNotIn("top-secret", str(raised.exception))
         self.assertEqual(1, mock_popen.call_count)
+        self.assertEqual(
+            [
+                "fake-msedge.exe",
+                "--headless=new",
+                "--remote-debugging-port=9222",
+                "--user-data-dir=fake-edge-profile",
+                "--password-store=basic",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--no-service-autorun",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+            mock_popen.call_args.args[0],
+        )
         self.assertEqual(1, len(processes))
         self.assertEqual(1, processes[0].terminate_calls)
         self.assertEqual([5], processes[0].wait_calls)
@@ -673,6 +689,10 @@ class _EdgeCdp:
                     "--headless=new",
                     f"--remote-debugging-port={self._debug_port}",
                     f"--user-data-dir={self._profile.name}",
+                    "--password-store=basic",
+                    "--disable-background-networking",
+                    "--disable-sync",
+                    "--no-service-autorun",
                     "--no-first-run",
                     "--no-default-browser-check",
                     "about:blank",
