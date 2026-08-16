@@ -598,6 +598,103 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
         self.assertEqual([5, 5], process.wait_calls)
         self.assertIsNone(edge._process)
 
+    def test_cleanup_failure_after_terminate_os_error_fails_or_notes_primary_error(self) -> None:
+        class FakePopen:
+            def __init__(self) -> None:
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+                raise OSError("terminate unavailable")
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+        def edge_with_unterminated_process() -> tuple[_EdgeCdp, FakePopen]:
+            process = FakePopen()
+            edge = _EdgeCdp(Path("fake-msedge.exe"))
+            edge._process = process  # type: ignore[assignment]
+            return edge, process
+
+        edge, process = edge_with_unterminated_process()
+        with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: process cleanup failed: terminate unavailable"):
+            edge.__exit__(None, None, None)
+
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(0, process.kill_calls)
+        self.assertIsNone(edge._process)
+
+        edge, process = edge_with_unterminated_process()
+        primary_error = AssertionError("primary test failure")
+
+        edge.__exit__(AssertionError, primary_error, None)
+
+        self.assertEqual("primary test failure", str(primary_error))
+        self.assertEqual(
+            ["Edge CDP cleanup failed: process cleanup failed: terminate unavailable"],
+            primary_error.__notes__,
+        )
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(0, process.kill_calls)
+        self.assertIsNone(edge._process)
+
+    def test_cleanup_failure_after_kill_os_error_fails_or_notes_primary_error(self) -> None:
+        class FakePopen:
+            def __init__(self) -> None:
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self.wait_calls: list[float] = []
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                raise OSError("kill unavailable")
+
+            def wait(self, timeout: float) -> int:
+                self.wait_calls.append(timeout)
+                raise subprocess.TimeoutExpired("fake-msedge.exe", timeout)
+
+        def edge_with_unreaped_process() -> tuple[_EdgeCdp, FakePopen]:
+            process = FakePopen()
+            edge = _EdgeCdp(Path("fake-msedge.exe"))
+            edge._process = process  # type: ignore[assignment]
+            return edge, process
+
+        edge, process = edge_with_unreaped_process()
+        with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: process cleanup failed: kill unavailable"):
+            edge.__exit__(None, None, None)
+
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(1, process.kill_calls)
+        self.assertEqual([5], process.wait_calls)
+        self.assertIsNone(edge._process)
+
+        edge, process = edge_with_unreaped_process()
+        primary_error = AssertionError("primary test failure")
+
+        edge.__exit__(AssertionError, primary_error, None)
+
+        self.assertEqual("primary test failure", str(primary_error))
+        self.assertEqual(
+            ["Edge CDP cleanup failed: process cleanup failed: kill unavailable"],
+            primary_error.__notes__,
+        )
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(1, process.kill_calls)
+        self.assertEqual([5], process.wait_calls)
+        self.assertIsNone(edge._process)
+
     def test_terminal_permission_error_during_profile_cleanup_fails_or_notes_primary_error(self) -> None:
         class LockedProfile:
             def __init__(self) -> None:
@@ -913,6 +1010,7 @@ class _EdgeCdp:
                 diagnostics.append(f"process exit code {exit_code}")
             except OSError as error:
                 diagnostics.append(f"process cleanup failed: {error}")
+                cleanup_failed = True
             self._process = None
         self._close_browser_log(self._stdout, "stdout", diagnostics)
         self._stdout = None
