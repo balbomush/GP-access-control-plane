@@ -681,7 +681,7 @@ start_and_stop_cycle standard
         self.assertIn('phase":["requested","verified","staged","published","root","committed","installed"]', success_validation)
         self.assertIn('cleanup_status":["completed"]', success_validation)
         self.assertIn('rollback_published_code() {', rollback)
-        self.assertIn('rollback_scope=code', rollback)
+        self.assertIn('rollback_scope=legacy-privileged-surface', rollback)
 
     def test_strict_update_success_requires_completed_cleanup(self) -> None:
         sha = "a" * 40

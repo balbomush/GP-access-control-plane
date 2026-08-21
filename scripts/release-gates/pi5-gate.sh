@@ -565,7 +565,7 @@ check_rollback_contract() {
   "$PYTHON" - "$ROOT_HELPER" <<'PY'
 import sys
 source = open(sys.argv[1], encoding="utf-8").read()
-for required in ("rollback_published_code() {", "phase=rollback", "rollback_scope=code", "rollback_after_publication_failure() {"):
+for required in ("rollback_published_code() {", "phase=rollback", "rollback_scope=legacy-privileged-surface", "rollback_after_publication_failure() {"):
     assert required in source, required
 PY
 }

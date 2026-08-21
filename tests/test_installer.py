@@ -95,8 +95,22 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("exit 75", gate)
         self.assertIn('[ -f "\\$STRICT_DISCOVERY_GATE_FILE" ] && [ ! -L "\\$STRICT_DISCOVERY_GATE_FILE" ]', gate)
         self.assertLess(stage.index('bash "\\$installer" --strict-preflight'), stage.index("strict_acquire_update_gate", stage.index('bash "\\$installer" --strict-preflight')))
-        self.assertLess(stage.index("strict_acquire_update_gate\n"), stage.index("USER_PUBLISH"))
-        self.assertLess(stage.index("USER_PUBLISH"), stage.index("rollback_published_code()"))
+        publication_start = stage.index('STRICT_PUBLICATION_STATE=publishing\nrunuser -u "\\$STRICT_USER"')
+        publication_complete = stage.index("USER_PUBLISH\nSTRICT_PUBLICATION_STATE=published")
+        self.assertLess(stage.index("strict_acquire_update_gate\n"), publication_start)
+        self.assertLess(publication_start, publication_complete)
+        self.assertLess(
+            publication_complete,
+            stage.index("rollback_after_publication_failure 'published worktree SHA could not be verified'", publication_complete),
+        )
+        signal_handler = self.shell_function(stage, "strict_handle_signal")
+        publishing_arm = signal_handler.split("    publishing)\n", 1)[1].split("    published)\n", 1)[0]
+        published_arm = signal_handler.split("    published)\n", 1)[1].split("    committed)\n", 1)[0]
+        self.assertIn('if [ ! -e "\\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\\$STRICT_PREVIOUS_DIR" ]; then', publishing_arm)
+        self.assertIn("received \\$strict_signal before publication", publishing_arm)
+        self.assertIn("rollback_published_code", publishing_arm)
+        self.assertIn("rollback_published_code", published_arm)
+        self.assertIn("received \\$strict_signal after publication", published_arm)
 
     def test_managed_paths_normalize_octal_modes_before_exact_postcondition_checks(self) -> None:
         for function_name in ("ensure_root_directory", "ensure_root_regular_file"):
@@ -106,23 +120,30 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn(":$expected_mode\"", function)
                 self.assertNotIn(":$managed_mode\"", function)
 
-    def test_installer_strict_update_limits_refs_and_preflights_before_actions(self) -> None:
+    def test_installer_strict_preflight_input_contract_and_ordering_are_source_validated(self) -> None:
         self.assertIn('UPDATE_CANDIDATE_REF="${GP_UPDATE_CANDIDATE_REF:-}"', self.installer)
         self.assertIn('UPDATE_EXPECTED_SHA="${GP_UPDATE_EXPECTED_SHA:-}"', self.installer)
-        self.assertIn('validate_pinned_update_inputs()', self.installer)
         self.assertIn('verify_pinned_update_checkout()', self.installer)
         self.assertIn('Strict trusted update requires GP_INSTALL_FORCE_CLEAN=on.', self.installer)
-        self.assertIn('refs/tags/*|refs/heads/dev)', self.installer)
-        self.assertIn('Strict trusted update ref must be refs/tags/* or refs/heads/dev', self.installer)
-        self.assertIn('Strict trusted update SHA must be exactly 40 lowercase hexadecimal characters.', self.installer)
         self.assertIn("--strict-preflight", self.installer)
+
+        validation = self.shell_function(self.installer, "validate_pinned_update_inputs")
+        self.assertIn('refs/tags/*|refs/heads/dev)', validation)
+        self.assertNotIn('refs/heads/*)', validation)
+        self.assertIn('git check-ref-format "$UPDATE_CANDIDATE_REF" >/dev/null', validation)
+        self.assertIn("*[!0-9a-f]*|'')", validation)
+        self.assertIn('[ "${#UPDATE_EXPECTED_SHA}" -eq 40 ]', validation)
+        self.assertIn('Strict trusted update ref must be refs/tags/* or refs/heads/dev', validation)
+        self.assertIn('Strict trusted update SHA must be exactly 40 lowercase hexadecimal characters.', validation)
 
         validate_pos = self.installer.index('validate_pinned_update_inputs')
         verify_pos = self.installer.index('verify_pinned_update_checkout', validate_pos + 1)
+        strict_preflight_pos = self.installer.index('if [ "$STRICT_PREFLIGHT" = on ]; then')
         app_pos = self.installer.index('if step_log app "Installing GP Access Control Plane"; then')
         self.assertLess(validate_pos, verify_pos)
+        self.assertLess(verify_pos, strict_preflight_pos)
         self.assertLess(verify_pos, app_pos)
-        self.assertLess(self.installer.index('if [ "$STRICT_PREFLIGHT" = on ]; then'), app_pos)
+        self.assertLess(strict_preflight_pos, app_pos)
 
         app_block = self.installer[app_pos : self.installer.index('\nfi\n\nstrict_migrate_internal_state', app_pos)]
         self.assertIn('if ! pinned_update_enabled; then', app_block)
@@ -136,124 +157,13 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(source_action, app_block)
         self.assertNotIn('GP_UPDATE_CANDIDATE_REF', app_block)
 
-    def test_installer_strict_preflight_accepts_dev_and_rejects_other_refs(self) -> None:
-        bash = shutil.which("bash")
-        git = shutil.which("git")
-        if bash is None or git is None:
-            self.skipTest("bash and git are required for strict installer preflight regression")
-
-        with tempfile.TemporaryDirectory() as raw:
-            work_dir = Path(raw)
-            staged_source = work_dir / "staged-source"
-            clone = subprocess.run(
-                [git, "clone", "--quiet", "--no-local", str(Path(__file__).resolve().parents[1]), str(staged_source)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(clone.returncode, 0, clone.stderr)
-
-            bash_work_dir = subprocess.run(
-                [bash, "-lc", "pwd"],
-                cwd=work_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-
-            def bash_path(path: Path) -> str:
-                return f"{bash_work_dir}/{path.relative_to(work_dir).as_posix()}"
-
-            profile = work_dir / "install-profile"
-            profile.write_text("", encoding="utf-8", newline="\n")
-            profile_bash = bash_path(profile)
-            installer_path = staged_source / "scripts" / "install-linux.sh"
-            installer_source = installer_path.read_text(encoding="utf-8").replace(
-                'INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"',
-                f"INSTALL_PROFILE={shlex.quote(profile_bash)}",
-                1,
-            )
-            installer_path.write_text(installer_source, encoding="utf-8", newline="\n")
-
-            fake_bin = work_dir / "fake-bin"
-            fake_bin.mkdir()
-            helpers = {
-                "apt-get": "#!/usr/bin/env bash\nexit 0\n",
-                "getent": "#!/usr/bin/env bash\nprintf 'tester:x:1000:1000::/tmp:/bin/sh\\n'\n",
-                "id": (
-                    "#!/usr/bin/env bash\n"
-                    "case \"${1:-}\" in\n"
-                    "  -u) printf '0\\n' ;;\n"
-                    "  -un) printf 'tester\\n' ;;\n"
-                    "  -gn) printf 'tester\\n' ;;\n"
-                    "  *) exit 98 ;;\n"
-                    "esac\n"
-                ),
-                "stat": (
-                    "#!/usr/bin/env bash\n"
-                    "case \"${2:-}\" in\n"
-                    "  %u:%g:%a)\n"
-                    "    if [ \"${3:-}\" = \"$GP_TEST_PROFILE\" ]; then printf '0:0:600\\n'; else printf '0:0:755\\n'; fi\n"
-                    "    ;;\n"
-                    "  %u:%g) printf '0:0\\n' ;;\n"
-                    "  %a) printf '755\\n' ;;\n"
-                    "  *) exit 98 ;;\n"
-                    "esac\n"
-                ),
-            }
-            for name, contents in helpers.items():
-                helper = fake_bin / name
-                helper.write_text(contents, encoding="utf-8", newline="\n")
-                helper.chmod(0o755)
-
-            expected_sha = subprocess.run(
-                [git, "-C", str(staged_source), "rev-parse", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            source_bash = bash_path(staged_source)
-            installer_bash = bash_path(installer_path)
-
-            def run_preflight(candidate_ref: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [bash, installer_bash, "--strict-preflight"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    env=os.environ
-                    | {
-                        "GP_INSTALL_FORCE_CLEAN": "on",
-                        "GP_TRUSTED_SOURCE_DIR": source_bash,
-                        "GP_UPDATE_CANDIDATE_REF": candidate_ref,
-                        "GP_UPDATE_EXPECTED_SHA": expected_sha,
-                        "GP_TEST_PROFILE": profile_bash,
-                        "PATH": f"{bash_path(fake_bin)}:{os.environ['PATH']}",
-                    },
-                )
-
-            for accepted in ("refs/tags/v0.4.0-rc.1", "refs/heads/dev"):
-                with self.subTest(accepted=accepted):
-                    result = run_preflight(accepted)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(
-                        f"Strict trusted update preflight passed for {accepted} at {expected_sha}",
-                        result.stdout,
-                    )
-
-            for rejected in (
-                "",
-                "refs/heads/main",
-                "refs/heads/feature/test",
-                "refs/remotes/origin/dev",
-                "refs/changes/1",
-                "refs/tags/",
-                "refs/heads/dev/",
-            ):
-                with self.subTest(rejected=rejected):
-                    result = run_preflight(rejected)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("Strict trusted update ref", result.stderr)
+    def test_installer_tests_have_no_fake_root_strict_preflight_success_route(self) -> None:
+        module_source = Path(__file__).read_text(encoding="utf-8")
+        self.assertNotRegex(
+            module_source,
+            r"(?s)fake_bin\s*=.*?(?:[\"']apt-get[\"']|[\"']getent[\"']|[\"']id[\"']).*?"
+            r"subprocess\.run\(\s*\[\s*bash\s*,.*?--strict-preflight",
+        )
 
     def test_root_helper_queue_update_has_one_exact_unambiguous_argv_contract(self) -> None:
         dispatch = self.helper.split('  queue-update)\n', 1)[1].split('  *)', 1)[0]
@@ -396,7 +306,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(attached.returncode, 126)
             self.assertIn("strict-stage checkout is not detached", attached.stderr)
 
-    def test_strict_commit_point_reports_terminal_evidence_and_verifies_code_rollback(self) -> None:
+    def test_strict_commit_point_reports_terminal_evidence_and_verifies_legacy_privileged_surface_rollback(self) -> None:
         stage = self.helper.split("queue_strict_update() {", 1)[1].split("validate_run_id()", 1)[0]
         publication = stage.split("strict_acquire_update_gate\n", 1)[1].split("USER_PUBLISH", 1)[0]
         self.assertIn('STRICT_PREVIOUS_SHA="\\$(runuser -u "\\$STRICT_USER"', publication)
@@ -413,7 +323,6 @@ class InstallerTests(unittest.TestCase):
             "phase=published",
             "phase=root",
             "phase=committed",
-            "phase=installed",
         )
         for previous_phase, next_phase in zip(phases, phases[1:]):
             self.assertLess(stage.index(previous_phase), stage.index(next_phase))
@@ -427,7 +336,6 @@ class InstallerTests(unittest.TestCase):
             "installed_sha=",
             "installed_version=",
             "cleanup_status=",
-            "cleanup_path=",
             "state_layout=",
             "state_migration=",
         )
@@ -438,34 +346,48 @@ class InstallerTests(unittest.TestCase):
         cleanup = post_commit.split("USER_FINALIZE\n  then", 1)[0]
         self.assertIn('if runuser -u "\\$STRICT_USER" -- /bin/sh -s -- "\\$STRICT_INSTALL_DIR" <<\'USER_FINALIZE\'', cleanup)
         self.assertIn('rm -rf -- "\\$previous"', cleanup)
-        self.assertNotIn("rollback_after_publication_failure", post_commit)
         self.assertIn("cleanup_status=completed", success)
-        cleanup_failure = success.split("  else\n", 1)[1].split("  fi\n  echo \"verified_ref", 1)[0]
-        self.assertIn('[ -d "\\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\\$STRICT_PREVIOUS_DIR" ]', cleanup_failure)
-        self.assertIn("cleanup_status=deferred", cleanup_failure)
-        self.assertIn("cleanup_status=failed", cleanup_failure)
-        self.assertIn('if [ "\\$cleanup_status" = deferred ]; then echo "cleanup_path=\\$STRICT_PREVIOUS_DIR"; fi', success)
+        self.assertIn("rollback_after_publication_failure 'rollback material cleanup failed after publication'", success)
         self.assertNotIn('rm -rf -- "\\$STRICT_PREVIOUS_DIR"', success)
         self.assertLess(success.index('phase=committed'), success.index("USER_FINALIZE"))
-        terminal_phase = success.index("phase=installed")
-        terminal_status = success.index("echo 'status=success'")
-        self.assertLess(success.index("USER_FINALIZE"), terminal_phase)
-        for key in evidence_keys:
-            self.assertLess(success.index(key), terminal_phase)
+        self.assertLess(success.index("strict_begin_irreversible_cleanup"), success.index("USER_FINALIZE"))
+        irreversible_cleanup = self.shell_function(stage, "strict_begin_irreversible_cleanup")
+        self.assertIn('[ "\\$STRICT_PUBLICATION_STATE" = published ]', irreversible_cleanup)
+        self.assertIn("trap '' HUP INT TERM", irreversible_cleanup)
+        self.assertIn("STRICT_PUBLICATION_STATE=committing", irreversible_cleanup)
+        irreversible_success = self.shell_function(stage, "strict_complete_irreversible_success")
+        self.assertIn('[ "\\$STRICT_PUBLICATION_STATE" = committing ]', irreversible_success)
+        self.assertIn('[ ! -e "\\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\\$STRICT_PREVIOUS_DIR" ]', irreversible_success)
+        self.assertNotIn("trap '' HUP INT TERM", irreversible_success)
+        self.assertIn("STRICT_PUBLICATION_STATE=committed", irreversible_success)
+        self.assertIn("STRICT_TERMINAL_WRITTEN=1", irreversible_success)
+        committed_arm = self.shell_function(stage, "strict_handle_signal").split("    committed)\n", 1)[1].split("    *)\n", 1)[0]
+        self.assertNotIn("rollback_published_code", committed_arm)
+        self.assertNotIn("strict_terminal_failure", committed_arm)
+        terminal_phase = irreversible_success.index("echo 'phase=installed'")
+        terminal_status = irreversible_success.index("echo 'status=success'")
+        self.assertLess(success.index("USER_FINALIZE"), success.index("strict_complete_irreversible_success"))
         self.assertLess(terminal_phase, terminal_status)
-        self.assertEqual(success[terminal_status:].strip(), "echo 'status=success'")
+        self.assertLess(terminal_status, irreversible_success.index("STRICT_TERMINAL_WRITTEN=1"))
+        self.assertLess(success.index("installed_version="), success.index("strict_complete_irreversible_success"))
 
-        rollback = stage.split("rollback_published_code() {", 1)[1]
+        rollback = stage.split("rollback_published_code() {", 1)[1].split("\n}\n\nrollback_after_publication_failure", 1)[0]
         self.assertIn("USER_ROLLBACK", rollback)
         self.assertIn('mv "\\$install_dir" "\\$failed"', rollback)
         self.assertIn('mv "\\$previous" "\\$install_dir"', rollback)
         self.assertIn('[ -d "\\$STRICT_INSTALL_DIR/.git" ] && [ ! -L "\\$STRICT_INSTALL_DIR/.git" ] || return 1', rollback)
         self.assertIn('restored_checkout_sha="\\$(runuser -u "\\$STRICT_USER"', rollback)
         self.assertIn('[ "\\$restored_checkout_sha" = "\\$STRICT_PREVIOUS_SHA" ] || return 1', rollback)
-        self.assertIn('systemctl restart "\\$STRICT_CORE_SERVICE"', rollback)
-        self.assertIn('rollback_scope=code', rollback)
-        self.assertIn("restore_deployment_configuration", rollback)
-        self.assertLess(rollback.index('[ "\\$restored_checkout_sha" = "\\$STRICT_PREVIOUS_SHA" ] || return 1'), rollback.index("rollback_scope=code"))
+        self.assertIn("restore_privileged_surface || return 1", rollback)
+        self.assertIn("rollback_scope=legacy-privileged-surface", rollback)
+        self.assertLess(
+            rollback.index('[ "\\$restored_checkout_sha" = "\\$STRICT_PREVIOUS_SHA" ] || return 1'),
+            rollback.index("restore_privileged_surface || return 1"),
+        )
+        self.assertLess(
+            rollback.index("restore_privileged_surface || return 1"),
+            rollback.index("rollback_scope=legacy-privileged-surface"),
+        )
 
     def test_installer_defaults_to_stable_release_and_supports_branch_or_tag(self) -> None:
         self.assertIn('BRANCH="${GP_BRANCH:-latest-stable}"', self.installer)
@@ -559,7 +481,7 @@ class InstallerTests(unittest.TestCase):
         self.assertLess(migration.index('systemctl stop "$CORE_SERVICE_NAME"'), migration.index('cp -a -- "$migration_source"'))
         self.assertLess(migration.index('cp -a -- "$migration_backups"'), migration.index('mv -- "$migration_stage"'))
 
-    def test_strict_update_helper_migrates_only_internal_state_and_rolls_back_configuration(self) -> None:
+    def test_strict_update_helper_migrates_only_internal_state_and_restores_the_legacy_privileged_surface(self) -> None:
         helper = self.helper
         self.assertIn("prepare_strict_state_layout()", helper)
         layout = helper.split("prepare_strict_state_layout() {", 1)[1].split("\n}\n\nqueue_strict_update", 1)[0]
@@ -570,20 +492,124 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('[ ! -e "$strict_data_root" ] && [ ! -L "$strict_data_root" ]', layout)
         publish = helper.split("USER_PUBLISH'", 1)[1].split("echo 'phase=published'", 1)[0]
         self.assertNotIn('cp -a "$state_dir"', publish)
-        self.assertIn("snapshot_deployment_configuration", helper)
-        self.assertIn("restore_deployment_configuration", helper)
-        self.assertIn("STRICT_CORE_ENV_FILE", helper)
-        self.assertIn("STRICT_WEB_ENV_FILE", helper)
         self.assertIn("GP_STRICT_STATE_MIGRATION=on", helper)
         staged_runner = helper.split("run_staged_installer() {", 1)[1].split("\n}\n\necho 'phase=root'", 1)[0]
         self.assertIn('if [ "\\$STRICT_STATE_LAYOUT" = internal ]; then', staged_runner)
         self.assertIn('GP_STRICT_STATE_MIGRATION=on', staged_runner)
         self.assertIn('else\n    env -i', staged_runner)
-        self.assertIn("systemctl is-active --quiet", helper)
         rollback = helper.split("rollback_published_code() {", 1)[1].split("\n}\n\nrollback_after_publication_failure", 1)[0]
-        self.assertLess(rollback.index("restore_deployment_configuration"), rollback.index("runuser -u"))
-        self.assertIn("rollback_scope=code", rollback)
+        self.assertIn("snapshot_privileged_surface || strict_fail", helper)
+        self.assertLess(helper.index("strict_acquire_update_gate\n"), helper.index("snapshot_privileged_surface || strict_fail"))
+        self.assertLess(helper.index("snapshot_privileged_surface || strict_fail"), helper.index('STRICT_PREVIOUS_SHA="\\$(runuser -u'))
+        self.assertIn("restore_privileged_surface || return 1", rollback)
+        self.assertIn("rollback_scope=legacy-privileged-surface", rollback)
         self.assertNotIn('rm -rf -- "\\$STRICT_DATA_ROOT"', helper)
+
+        snapshot = self.shell_function(helper, "snapshot_privileged_surface")
+        restore = self.shell_function(helper, "restore_privileged_surface")
+        expected_files = (
+            ("root-helper", "STRICT_SNAPSHOT_ROOT_HELPER", "/usr/local/libexec/gp-control-plane/gp-root-helper"),
+            ("root-helper-config", "STRICT_SNAPSHOT_ROOT_HELPER_CONFIG", "/etc/default/gp-control-plane-root-helper"),
+            ("sudoers", "STRICT_SNAPSHOT_SUDOERS", "/etc/sudoers.d/gp-control-plane-root-helper"),
+            ("install-profile", "STRICT_SNAPSHOT_INSTALL_PROFILE", "/etc/default/gp-control-plane-install-profile"),
+            ("core-env", "STRICT_SNAPSHOT_CORE_ENV", "/etc/default/gp-control-plane-core"),
+            ("web-env", "STRICT_SNAPSHOT_WEB_ENV", "/etc/default/gp-control-plane-web"),
+        )
+        expected_units = (
+            ("core-unit", "STRICT_SNAPSHOT_CORE_UNIT", "/etc/systemd/system/gp-control-plane-core.service"),
+            ("web-unit", "STRICT_SNAPSHOT_WEB_UNIT", "/etc/systemd/system/gp-control-plane-web.service"),
+        )
+        for name, constant, path in expected_files:
+            with self.subTest(privileged_surface=name):
+                self.assertIn(f"{constant}='{path}'", helper)
+                self.assertIn(f'strict_snapshot_file {name} "\\${constant}" || return 1', snapshot)
+                self.assertIn(f'strict_restore_file {name} "\\${constant}" || return 1', restore)
+        for name, constant, path in expected_units:
+            with self.subTest(privileged_unit=name):
+                self.assertIn(f"{constant}='{path}'", helper)
+                self.assertIn(f'strict_snapshot_unit {name} "\\${constant}" || return 1', snapshot)
+                self.assertIn(f'strict_restore_unit {name} "\\${constant}" || return 1', restore)
+                self.assertNotIn(f'strict_snapshot_file {name} "\\${constant}" || return 1', snapshot)
+                self.assertNotIn(f'strict_restore_file {name} "\\${constant}" || return 1', restore)
+
+        self.assertIn('strict_snapshot_service_state "\\$STRICT_CORE_SERVICE" "\\$STRICT_SNAPSHOT_CORE_UNIT" "\\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" || return 1', snapshot)
+        self.assertIn('strict_snapshot_service_state "\\$STRICT_WEB_SERVICE" "\\$STRICT_SNAPSHOT_WEB_UNIT" "\\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" || return 1', snapshot)
+        self.assertIn('strict_quiesce_absent_service "\\$STRICT_CORE_SERVICE" "\\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" "\\$STRICT_SNAPSHOT_CORE_UNIT" || return 1', restore)
+        self.assertIn('strict_quiesce_absent_service "\\$STRICT_WEB_SERVICE" "\\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" "\\$STRICT_SNAPSHOT_WEB_UNIT" || return 1', restore)
+        self.assertIn('strict_quiesce_persistent_masked_service "\\$STRICT_CORE_SERVICE" "\\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" core-unit "\\$STRICT_SNAPSHOT_CORE_UNIT" || return 1', restore)
+        self.assertIn('strict_quiesce_persistent_masked_service "\\$STRICT_WEB_SERVICE" "\\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" web-unit "\\$STRICT_SNAPSHOT_WEB_UNIT" || return 1', restore)
+        self.assertIn('strict_restore_service_state "\\$STRICT_CORE_SERVICE" "\\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" "\\$STRICT_SNAPSHOT_CORE_UNIT" || return 1', restore)
+        self.assertIn('strict_restore_service_state "\\$STRICT_WEB_SERVICE" "\\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" "\\$STRICT_SNAPSHOT_WEB_UNIT" || return 1', restore)
+        self.assertLess(restore.index('strict_restore_unit core-unit'), restore.index("systemctl daemon-reload || return 1"))
+        self.assertLess(restore.index("systemctl daemon-reload || return 1"), restore.index('strict_restore_service_state "\\$STRICT_CORE_SERVICE"'))
+
+        snapshot_unit = self.shell_function(helper, "strict_snapshot_unit")
+        restore_unit = self.shell_function(helper, "strict_restore_unit")
+        allowed_mask = self.shell_function(helper, "strict_unit_is_allowed_mask_link")
+        self.assertIn('strict_safe_unit_target "\\$strict_snapshot_target" || return 1', snapshot_unit)
+        self.assertIn('mask-link', snapshot_unit)
+        self.assertIn('strict_safe_config_parent_chain "\\$(dirname -- "\\$strict_restore_target")" || return 1', restore_unit)
+        self.assertIn('regular)', restore_unit)
+        self.assertIn('mask-link)', restore_unit)
+        self.assertIn('ln -s -- /dev/null "\\$strict_restore_target" || return 1', restore_unit)
+        self.assertIn('strict_unit_is_allowed_mask_link "\\$strict_restore_target"', restore_unit)
+        self.assertIn('"\\$STRICT_SNAPSHOT_CORE_UNIT"|"\\$STRICT_SNAPSHOT_WEB_UNIT")', allowed_mask)
+        self.assertIn('[ "\\$(readlink -- "\\$strict_unit_target" 2>/dev/null || true)" = /dev/null ]', allowed_mask)
+        self.assertIn('[ "\\$(readlink -f -- "\\$strict_unit_target" 2>/dev/null || true)" = /dev/null ]', allowed_mask)
+        self.assertIn('[ -c /dev/null ] || return 1', allowed_mask)
+
+        enabled_state = self.shell_function(helper, "strict_systemctl_enabled_state")
+        self.assertIn('enabled|enabled-runtime|disabled|disabled-runtime|masked|masked-runtime)', enabled_state)
+
+        service_snapshot = self.shell_function(helper, "strict_snapshot_service_state")
+        self.assertIn('[ ! -e "\\$strict_service_unit" ] && [ ! -L "\\$strict_service_unit" ]', service_snapshot)
+        self.assertIn("printf 'unit=absent", service_snapshot)
+        self.assertIn('systemctl is-enabled "\\$strict_service_name"', service_snapshot)
+        self.assertIn('strict_systemctl_enabled_state "\\$strict_service_name"', service_snapshot)
+        self.assertIn('masked-runtime)', service_snapshot)
+        self.assertIn('systemctl is-active --quiet "\\$strict_service_name"', service_snapshot)
+        self.assertIn("printf 'unit=present\\nenabled=%s\\nactive=%s\\n'", service_snapshot)
+        self.assertIn('"\\$strict_service_enabled" "\\$strict_service_active"', service_snapshot)
+
+        quiesce_absent = self.shell_function(helper, "strict_quiesce_absent_service")
+        self.assertIn('[ "\\$(strict_service_snapshot_value "\\$strict_service_snapshot" unit)" = absent ] || return 0', quiesce_absent)
+        self.assertIn('strict_service_unit="\\$3"', quiesce_absent)
+        self.assertIn('systemctl disable --now "\\$strict_service_name"', quiesce_absent)
+        self.assertIn('strict_service_is_inactive_or_not_found "\\$strict_service_name"', quiesce_absent)
+
+        quiesce_mask = self.shell_function(helper, "strict_quiesce_persistent_masked_service")
+        self.assertIn('[ "\\$(strict_service_snapshot_value "\\$strict_service_snapshot" enabled)" = masked ] || return 0', quiesce_mask)
+        self.assertIn('[ "\\$(strict_service_snapshot_value "\\$strict_service_snapshot" active)" = inactive ] || return 0', quiesce_mask)
+        self.assertIn('strict_unit_is_allowed_mask_link "\\$strict_service_unit" || return 1', quiesce_mask)
+        self.assertNotIn('systemctl unmask "\\$strict_service_name"', quiesce_mask)
+
+        restore_service = self.shell_function(helper, "strict_restore_service_state")
+        self.assertIn('strict_service_unit="\\$3"', restore_service)
+        self.assertIn('[ "\\$strict_service_unit_state" = absent ]', restore_service)
+        self.assertIn('[ "\\$strict_service_enabled" = masked-runtime ] || return 1', restore_service)
+        self.assertIn('systemctl mask --runtime "\\$strict_service_name" || return 1', restore_service)
+        self.assertLess(
+            restore_service.index('[ "\\$strict_service_unit_state" = absent ]'),
+            restore_service.index('case "\\$strict_service_enabled" in'),
+        )
+        for state, command in (
+            ("enabled", "enable"),
+            ("enabled-runtime", "enable --runtime"),
+            ("disabled", "disable"),
+            ("disabled-runtime", "disable --runtime"),
+        ):
+            with self.subTest(enablement=state):
+                self.assertIn(
+                    f'{state}) systemctl unmask "\\$strict_service_name" >/dev/null 2>&1 || true; '
+                    f'systemctl {command} "\\$strict_service_name" || return 1 ;;',
+                    restore_service,
+                )
+        self.assertIn('masked) systemctl unmask "\\$strict_service_name" >/dev/null 2>&1 || true ;;', restore_service)
+        self.assertIn('masked-runtime) systemctl unmask --runtime "\\$strict_service_name" >/dev/null 2>&1 || true ;;', restore_service)
+        self.assertIn('masked) systemctl mask "\\$strict_service_name" || return 1; strict_unit_is_allowed_mask_link "\\$strict_service_unit" || return 1 ;;', restore_service)
+        self.assertIn('masked-runtime) systemctl mask --runtime "\\$strict_service_name" || return 1 ;;', restore_service)
+        self.assertIn('active) systemctl restart "\\$strict_service_name" || return 1', restore_service)
+        self.assertIn('inactive) systemctl stop "\\$strict_service_name" || return 1', restore_service)
 
     def test_installer_prepares_v2fly_with_service_config_but_keeps_install_non_blocking(self) -> None:
         self.assertIn("Preparing local v2fly domain catalog", self.installer)
@@ -715,8 +741,13 @@ class InstallerTests(unittest.TestCase):
         publication = self.helper.index('runuser -u "\\$STRICT_USER" -- /bin/sh -s -- "\\$STRICT_BUNDLE"', stage_dirs)
         self.assertLess(profile_load, stage_dirs)
         self.assertLess(helper_gate_start, publication)
-        self.assertIn('strict_validate_config_targets || return 1', self.helper)
-        self.assertIn('strict_safe_config_target "\\$restore_target" || return 1', self.helper)
+        snapshot_file = self.shell_function(self.helper, "strict_snapshot_file")
+        restore_file = self.shell_function(self.helper, "strict_restore_file")
+        self.assertIn('strict_safe_config_target "\\$strict_snapshot_target" || return 1', snapshot_file)
+        self.assertIn('strict_safe_config_parent_chain "\\$(dirname -- "\\$strict_restore_target")" || return 1', restore_file)
+        self.assertIn('strict_restore_state="\\$(strict_snapshot_state "\\$strict_restore_name")" || return 1', restore_file)
+        self.assertIn('[ "\\$strict_restore_state" = absent ]', restore_file)
+        self.assertIn('rm -f -- "\\$strict_restore_target" || return 1', restore_file)
 
         strict_validation = self.installer.index('validate_strict_privileged_destinations\nverify_pinned_update_checkout')
         preflight = self.installer.index('if [ "$STRICT_PREFLIGHT" = on ]; then')

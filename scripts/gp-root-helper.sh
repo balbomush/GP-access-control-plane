@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+readonly PATH
 
 INITIAL_COMMAND="${1:-}"
 CONFIG_FILE="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
@@ -1052,32 +1055,147 @@ STRICT_SHA=$(shell_quote "$expected_sha")
 STRICT_DISCOVERY_GATE_FILE=$(shell_quote "$DISCOVERY_GATE_FILE")
 exec > $(shell_quote "$log_file") 2>&1
 
-strict_fail() { echo 'status=failed'; echo "error=\$1"; exit 126; }
+STRICT_TERMINAL_WRITTEN=0
+STRICT_PUBLICATION_STATE=before
+STRICT_SIGNAL_HANDLING=0
+strict_terminal_failure() {
+  [ "\$STRICT_TERMINAL_WRITTEN" = 0 ] || return 0
+  STRICT_TERMINAL_WRITTEN=1
+  echo 'status=failed'
+  echo "error=\$1"
+}
+strict_fail() {
+  strict_terminal_failure "\$1"
+  trap - HUP INT TERM
+  exit 126
+}
+strict_install_signal_traps() {
+  trap 'strict_handle_signal HUP 129' HUP
+  trap 'strict_handle_signal INT 130' INT
+  trap 'strict_handle_signal TERM 143' TERM
+}
+strict_handle_signal() {
+  strict_signal="\$1"
+  strict_signal_exit="\$2"
+  [ "\$STRICT_SIGNAL_HANDLING" = 0 ] || exit "\$strict_signal_exit"
+  STRICT_SIGNAL_HANDLING=1
+  # Do not let a second signal recurse through rollback or append evidence.
+  trap '' HUP INT TERM
+  case "\$STRICT_PUBLICATION_STATE" in
+    before)
+      strict_terminal_failure "received \$strict_signal before publication"
+      ;;
+    publishing)
+      # Publishing becomes irreversible only once the current checkout was
+      # renamed to STRICT_PREVIOUS_DIR.  A signal while the candidate is still
+      # being unpacked must retain the pre-publication terminal guarantee.
+      if [ ! -e "\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\$STRICT_PREVIOUS_DIR" ]; then
+        if strict_clean_prepublication_transients; then
+          strict_terminal_failure "received \$strict_signal before publication"
+        else
+          strict_terminal_failure "received \$strict_signal before publication; transient cleanup could not be completed"
+        fi
+      elif rollback_published_code; then
+        strict_terminal_failure "received \$strict_signal after publication; exact legacy privileged surface was restored"
+      else
+        strict_terminal_failure "received \$strict_signal after publication; legacy privileged surface rollback could not be completed"
+      fi
+      ;;
+    published)
+      if rollback_published_code; then
+        strict_terminal_failure "received \$strict_signal after publication; exact legacy privileged surface was restored"
+      else
+        strict_terminal_failure "received \$strict_signal after publication; legacy privileged surface rollback could not be completed"
+      fi
+      ;;
+    committed)
+      # The only rollback checkout was removed before this state.  A late
+      # signal must not manufacture failed evidence after the sole success
+      # terminal record or attempt an impossible rollback.
+      ;;
+    *)
+      strict_terminal_failure "received \$strict_signal in an invalid strict publication state"
+      ;;
+  esac
+  exit "\$strict_signal_exit"
+}
+strict_install_signal_traps
+strict_clean_prepublication_transients() {
+  # Before the legacy checkout moves to STRICT_PREVIOUS_DIR, only a normal
+  # checkout plus one canonical user-owned publication transient is safe to
+  # remove.  Do not touch the checkout or the root-owned rollback snapshot.
+  runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_INSTALL_DIR" <<'USER_CLEAN_PREPUBLICATION'
+set -eu
+install_dir="\$1"
+case "\$install_dir" in /*) ;; *) exit 126 ;; esac
+parent="\$(dirname "\$install_dir")"
+base="\$(basename "\$install_dir")"
+publish_dir="\$parent/.\${base}.strict-publish"
+next="\$parent/.\${base}.strict-next"
+previous="\$parent/.\${base}.strict-previous"
+[ -d "\$install_dir" ] && [ ! -L "\$install_dir" ] || exit 126
+[ -d "\$install_dir/.git" ] && [ ! -L "\$install_dir/.git" ] || exit 126
+[ ! -e "\$previous" ] && [ ! -L "\$previous" ] || exit 126
+publish_present=0
+next_present=0
+if [ -e "\$publish_dir" ] || [ -L "\$publish_dir" ]; then
+  [ -d "\$publish_dir" ] && [ ! -L "\$publish_dir" ] || exit 126
+  publish_present=1
+fi
+if [ -e "\$next" ] || [ -L "\$next" ]; then
+  [ -d "\$next" ] && [ ! -L "\$next" ] || exit 126
+  next_present=1
+fi
+# The publication sequence has at most one transient directory at a time.
+[ "\$publish_present:\$next_present" != 1:1 ] || exit 126
+[ "\$publish_present" = 0 ] || rm -rf -- "\$publish_dir"
+[ "\$next_present" = 0 ] || rm -rf -- "\$next"
+[ ! -e "\$publish_dir" ] && [ ! -L "\$publish_dir" ] || exit 126
+[ ! -e "\$next" ] && [ ! -L "\$next" ] || exit 126
+USER_CLEAN_PREPUBLICATION
+}
 strict_git() { env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git "\$@"; }
 strict_sha() { strict_sha_value="\${1:-}"; case "\$strict_sha_value" in ''|*[!0-9a-f]*) return 1 ;; esac; [ "\${#strict_sha_value}" -eq 40 ]; }
 strict_verify_remote_candidate() {
-  strict_remote_refs="\$(strict_git ls-remote "\$STRICT_UPSTREAM" "\$STRICT_REF" "\${STRICT_REF}^{}")" || strict_fail 'cannot read canonical candidate ref'
-  strict_direct_sha="\$(printf '%s\\n' "\$strict_remote_refs" | awk -v ref="\$STRICT_REF" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 1 }')" || strict_fail 'canonical candidate ref is ambiguous'
-  strict_peeled_sha="\$(printf '%s\\n' "\$strict_remote_refs" | awk -v ref="\${STRICT_REF}^{}" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 0 }')" || strict_fail 'canonical candidate peeled ref is ambiguous'
+  # Keep strict_fail in the runner shell.  Calling it from a command
+  # substitution exits only the substitution shell on some POSIX shells,
+  # which can bypass the sole terminal failure record under set -e.
+  if ! strict_remote_refs="\$(strict_git ls-remote "\$STRICT_UPSTREAM" "\$STRICT_REF" "\${STRICT_REF}^{}")"; then
+    strict_fail 'cannot read canonical candidate ref'
+  fi
+  if ! strict_direct_sha="\$(printf '%s\\n' "\$strict_remote_refs" | awk -v ref="\$STRICT_REF" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 1 }')"; then
+    strict_fail 'canonical candidate ref is ambiguous'
+  fi
+  if ! strict_peeled_sha="\$(printf '%s\\n' "\$strict_remote_refs" | awk -v ref="\${STRICT_REF}^{}" '\$2 == ref { count++; value = \$1 } END { if (count == 1) print value; else exit 0 }')"; then
+    strict_fail 'canonical candidate peeled ref is ambiguous'
+  fi
   strict_sha "\$strict_direct_sha" >/dev/null || strict_fail 'canonical candidate ref SHA is invalid'
   if [ -n "\$strict_peeled_sha" ]; then strict_sha "\$strict_peeled_sha" >/dev/null || strict_fail 'canonical candidate peeled SHA is invalid'; fi
   strict_verified_sha="\$strict_direct_sha"
   [ -n "\$strict_peeled_sha" ] && strict_verified_sha="\$strict_peeled_sha"
   [ "\$strict_verified_sha" = "\$STRICT_SHA" ] || strict_fail 'canonical candidate ref does not match expected SHA'
-  printf '%s\\n' "\$strict_verified_sha"
+  STRICT_VERIFIED_SHA="\$strict_verified_sha"
 }
 strict_fetch_pinned_candidate() {
   strict_fetch_repo="\$1"
   strict_fetch_label="\$2"
-  strict_git -C "\$strict_fetch_repo" fetch --no-tags "\$STRICT_UPSTREAM" "\$STRICT_REF" >/dev/null || strict_fail "\$strict_fetch_label fetch failed"
-  strict_fetch_sha="\$(strict_git -C "\$strict_fetch_repo" rev-parse --verify FETCH_HEAD^{commit})" || strict_fail "\$strict_fetch_label fetch did not resolve a commit"
+  if ! strict_git -C "\$strict_fetch_repo" fetch --no-tags "\$STRICT_UPSTREAM" "\$STRICT_REF" >/dev/null; then
+    strict_fail "\$strict_fetch_label fetch failed"
+  fi
+  if ! strict_fetch_sha="\$(strict_git -C "\$strict_fetch_repo" rev-parse --verify FETCH_HEAD^{commit})"; then
+    strict_fail "\$strict_fetch_label fetch did not resolve a commit"
+  fi
   [ "\$strict_fetch_sha" = "\$STRICT_SHA" ] || strict_fail "\$strict_fetch_label fetch SHA does not match expected SHA"
-  strict_git -C "\$strict_fetch_repo" checkout --detach "\$STRICT_SHA" >/dev/null || strict_fail "cannot check out \$strict_fetch_label"
+  if ! strict_git -C "\$strict_fetch_repo" checkout --detach "\$STRICT_SHA" >/dev/null; then
+    strict_fail "cannot check out \$strict_fetch_label"
+  fi
   strict_checkout_ref="\$(strict_git -C "\$strict_fetch_repo" symbolic-ref -q HEAD || true)"
   [ -z "\$strict_checkout_ref" ] || strict_fail "\$strict_fetch_label checkout is not detached"
-  strict_checkout_sha="\$(strict_git -C "\$strict_fetch_repo" rev-parse --verify HEAD^{commit})" || strict_fail "cannot resolve \$strict_fetch_label commit"
+  if ! strict_checkout_sha="\$(strict_git -C "\$strict_fetch_repo" rev-parse --verify HEAD^{commit})"; then
+    strict_fail "cannot resolve \$strict_fetch_label commit"
+  fi
   [ "\$strict_checkout_sha" = "\$STRICT_SHA" ] || strict_fail "\$strict_fetch_label checkout does not match expected SHA"
-  printf '%s\\n' "\$strict_checkout_sha"
+  STRICT_FETCH_SHA="\$strict_checkout_sha"
 }
 strict_safe_config_parent_chain() {
   strict_parent="\$1"
@@ -1102,6 +1220,28 @@ strict_safe_config_target() {
     strict_target_mode="\$(stat -c '%A' "\$strict_target" 2>/dev/null || true)"
     case "\$strict_target_mode" in ?????w*|????????w*) strict_target_writable=1 ;; *) strict_target_writable=0 ;; esac
     [ "\$strict_target_uid" = 0 ] && [ "\$strict_target_writable" = 0 ] || return 1
+  fi
+}
+strict_unit_is_allowed_mask_link() {
+  strict_unit_target="\$1"
+  case "\$strict_unit_target" in
+    "\$STRICT_SNAPSHOT_CORE_UNIT"|"\$STRICT_SNAPSHOT_WEB_UNIT") ;;
+    *) return 1 ;;
+  esac
+  [ -L "\$strict_unit_target" ] || return 1
+  [ "\$(readlink -- "\$strict_unit_target" 2>/dev/null || true)" = /dev/null ] || return 1
+  [ "\$(readlink -f -- "\$strict_unit_target" 2>/dev/null || true)" = /dev/null ] || return 1
+  [ -c /dev/null ] || return 1
+}
+strict_safe_unit_target() {
+  strict_unit_target="\$1"
+  strict_safe_config_parent_chain "\$(dirname -- "\$strict_unit_target")" || return 1
+  if [ -e "\$strict_unit_target" ] || [ -L "\$strict_unit_target" ]; then
+    if [ -L "\$strict_unit_target" ]; then
+      strict_unit_is_allowed_mask_link "\$strict_unit_target" || return 1
+    else
+      strict_safe_config_target "\$strict_unit_target" || return 1
+    fi
   fi
 }
 strict_validate_config_targets() {
@@ -1132,6 +1272,299 @@ strict_acquire_update_gate() {
   }
 }
 
+# This is deliberately a fixed allowlist.  The staged installer is allowed to
+# update these root-owned deployment files, but rollback must never follow or
+# discover an arbitrary path from the candidate.
+STRICT_SNAPSHOT_ROOT_HELPER='/usr/local/libexec/gp-control-plane/gp-root-helper'
+STRICT_SNAPSHOT_ROOT_HELPER_CONFIG='/etc/default/gp-control-plane-root-helper'
+STRICT_SNAPSHOT_SUDOERS='/etc/sudoers.d/gp-control-plane-root-helper'
+STRICT_SNAPSHOT_CORE_UNIT='/etc/systemd/system/gp-control-plane-core.service'
+STRICT_SNAPSHOT_WEB_UNIT='/etc/systemd/system/gp-control-plane-web.service'
+STRICT_SNAPSHOT_INSTALL_PROFILE='/etc/default/gp-control-plane-install-profile'
+STRICT_SNAPSHOT_CORE_ENV='/etc/default/gp-control-plane-core'
+STRICT_SNAPSHOT_WEB_ENV='/etc/default/gp-control-plane-web'
+STRICT_PRIVILEGED_SNAPSHOT="\$STRICT_STAGE_ROOT/legacy-privileged-surface"
+
+strict_snapshot_file() {
+  strict_snapshot_name="\$1"
+  strict_snapshot_target="\$2"
+  strict_safe_config_target "\$strict_snapshot_target" || return 1
+  case "\$( [ -e "\$strict_snapshot_target" ] && printf present || printf absent )" in
+    present)
+      [ -f "\$strict_snapshot_target" ] && [ ! -L "\$strict_snapshot_target" ] || return 1
+      [ "\$(stat -c '%u:%g' "\$strict_snapshot_target" 2>/dev/null || true)" = '0:0' ] || return 1
+      cp -p -- "\$strict_snapshot_target" "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name" || return 1
+      printf 'present\n' > "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state"
+      ;;
+    absent) printf 'absent\n' > "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state" ;;
+    *) return 1 ;;
+  esac
+  chown root:root "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state" || return 1
+  chmod 0600 "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state" || return 1
+}
+
+strict_snapshot_unit() {
+  strict_snapshot_name="\$1"
+  strict_snapshot_target="\$2"
+  strict_safe_unit_target "\$strict_snapshot_target" || return 1
+  if [ ! -e "\$strict_snapshot_target" ] && [ ! -L "\$strict_snapshot_target" ]; then
+    printf 'absent\n' > "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state"
+  elif [ -L "\$strict_snapshot_target" ]; then
+    strict_unit_is_allowed_mask_link "\$strict_snapshot_target" || return 1
+    printf 'mask-link\n' > "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state"
+  else
+    [ -f "\$strict_snapshot_target" ] && [ ! -L "\$strict_snapshot_target" ] || return 1
+    cp -p -- "\$strict_snapshot_target" "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name" || return 1
+    printf 'regular\n' > "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state"
+  fi
+  chown root:root "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state" || return 1
+  chmod 0600 "\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state" || return 1
+}
+
+strict_systemctl_enabled_state() {
+  strict_systemctl_service="\$1"
+  strict_systemctl_enabled="\$(systemctl is-enabled "\$strict_systemctl_service" 2>/dev/null || true)"
+  case "\$strict_systemctl_enabled" in
+    enabled|enabled-runtime|disabled|disabled-runtime|masked|masked-runtime) printf '%s\n' "\$strict_systemctl_enabled" ;;
+    *) return 1 ;;
+  esac
+}
+
+strict_snapshot_service_state() {
+  strict_service_name="\$1"
+  strict_service_unit="\$2"
+  strict_service_snapshot="\$3"
+  if [ ! -e "\$strict_service_unit" ] && [ ! -L "\$strict_service_unit" ]; then
+    strict_service_enabled="\$(systemctl is-enabled "\$strict_service_name" 2>/dev/null || true)"
+    case "\$strict_service_enabled" in
+      ''|not-found) printf 'unit=absent\n' > "\$strict_service_snapshot" ;;
+      masked-runtime)
+        systemctl is-active --quiet "\$strict_service_name" && return 1
+        printf 'unit=absent\nenabled=masked-runtime\nactive=inactive\n' > "\$strict_service_snapshot"
+        ;;
+      *) return 1 ;;
+    esac
+  else
+    strict_safe_unit_target "\$strict_service_unit" || return 1
+    strict_service_enabled="\$(strict_systemctl_enabled_state "\$strict_service_name")" || return 1
+    if systemctl is-active --quiet "\$strict_service_name"; then strict_service_active=active; else strict_service_active=inactive; fi
+    printf 'unit=present\nenabled=%s\nactive=%s\n' "\$strict_service_enabled" "\$strict_service_active" > "\$strict_service_snapshot"
+  fi
+  chown root:root "\$strict_service_snapshot" || return 1
+  chmod 0600 "\$strict_service_snapshot" || return 1
+}
+
+snapshot_privileged_surface() {
+  [ ! -e "\$STRICT_PRIVILEGED_SNAPSHOT" ] && [ ! -L "\$STRICT_PRIVILEGED_SNAPSHOT" ] || return 1
+  install -d -m 0700 -o root -g root "\$STRICT_PRIVILEGED_SNAPSHOT" || return 1
+  [ -d "\$STRICT_PRIVILEGED_SNAPSHOT" ] && [ ! -L "\$STRICT_PRIVILEGED_SNAPSHOT" ] || return 1
+  [ "\$(stat -c '%u:%g:%a' "\$STRICT_PRIVILEGED_SNAPSHOT" 2>/dev/null || true)" = '0:0:700' ] || return 1
+  strict_snapshot_file root-helper "\$STRICT_SNAPSHOT_ROOT_HELPER" || return 1
+  strict_snapshot_file root-helper-config "\$STRICT_SNAPSHOT_ROOT_HELPER_CONFIG" || return 1
+  strict_snapshot_file sudoers "\$STRICT_SNAPSHOT_SUDOERS" || return 1
+  strict_snapshot_file install-profile "\$STRICT_SNAPSHOT_INSTALL_PROFILE" || return 1
+  strict_snapshot_file core-env "\$STRICT_SNAPSHOT_CORE_ENV" || return 1
+  strict_snapshot_file web-env "\$STRICT_SNAPSHOT_WEB_ENV" || return 1
+  strict_snapshot_unit core-unit "\$STRICT_SNAPSHOT_CORE_UNIT" || return 1
+  strict_snapshot_unit web-unit "\$STRICT_SNAPSHOT_WEB_UNIT" || return 1
+  strict_snapshot_service_state "\$STRICT_CORE_SERVICE" "\$STRICT_SNAPSHOT_CORE_UNIT" "\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" || return 1
+  strict_snapshot_service_state "\$STRICT_WEB_SERVICE" "\$STRICT_SNAPSHOT_WEB_UNIT" "\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" || return 1
+  : > "\$STRICT_PRIVILEGED_SNAPSHOT/complete" || return 1
+  chown root:root "\$STRICT_PRIVILEGED_SNAPSHOT/complete" || return 1
+  chmod 0600 "\$STRICT_PRIVILEGED_SNAPSHOT/complete" || return 1
+}
+
+strict_snapshot_state() {
+  strict_snapshot_name="\$1"
+  strict_snapshot_state_file="\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_snapshot_name.state"
+  [ -f "\$strict_snapshot_state_file" ] && [ ! -L "\$strict_snapshot_state_file" ] || return 1
+  [ "\$(stat -c '%u:%g:%a' "\$strict_snapshot_state_file" 2>/dev/null || true)" = '0:0:600' ] || return 1
+  IFS= read -r strict_snapshot_state < "\$strict_snapshot_state_file" || return 1
+  case "\$strict_snapshot_state" in present|absent|regular|mask-link) ;; *) return 1 ;; esac
+  printf '%s\n' "\$strict_snapshot_state"
+}
+
+strict_restore_file() {
+  strict_restore_name="\$1"
+  strict_restore_target="\$2"
+  strict_restore_state="\$(strict_snapshot_state "\$strict_restore_name")" || return 1
+  strict_safe_config_parent_chain "\$(dirname -- "\$strict_restore_target")" || return 1
+  if [ "\$strict_restore_state" = absent ]; then
+    [ ! -e "\$strict_restore_target" ] && [ ! -L "\$strict_restore_target" ] && return 0
+    [ -f "\$strict_restore_target" ] && [ ! -L "\$strict_restore_target" ] || return 1
+    rm -f -- "\$strict_restore_target" || return 1
+    return 0
+  fi
+  strict_restore_source="\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_restore_name"
+  [ -f "\$strict_restore_source" ] && [ ! -L "\$strict_restore_source" ] || return 1
+  [ "\$(stat -c '%u:%g' "\$strict_restore_source" 2>/dev/null || true)" = '0:0' ] || return 1
+  if [ -e "\$strict_restore_target" ] || [ -L "\$strict_restore_target" ]; then
+    [ -f "\$strict_restore_target" ] && [ ! -L "\$strict_restore_target" ] || return 1
+    rm -f -- "\$strict_restore_target" || return 1
+  fi
+  install -m "\$(stat -c '%a' "\$strict_restore_source")" -o root -g root "\$strict_restore_source" "\$strict_restore_target" || return 1
+}
+
+strict_unit_snapshot_state() {
+  strict_unit_snapshot_name="\$1"
+  strict_unit_snapshot_state="\$(strict_snapshot_state "\$strict_unit_snapshot_name")" || return 1
+  case "\$strict_unit_snapshot_state" in absent|regular|mask-link) printf '%s\n' "\$strict_unit_snapshot_state" ;; *) return 1 ;; esac
+}
+
+strict_restore_unit() {
+  strict_restore_name="\$1"
+  strict_restore_target="\$2"
+  strict_restore_state="\$(strict_unit_snapshot_state "\$strict_restore_name")" || return 1
+  strict_safe_config_parent_chain "\$(dirname -- "\$strict_restore_target")" || return 1
+  if [ -e "\$strict_restore_target" ] || [ -L "\$strict_restore_target" ]; then
+    if [ -L "\$strict_restore_target" ]; then
+      strict_unit_is_allowed_mask_link "\$strict_restore_target" || return 1
+    else
+      [ -f "\$strict_restore_target" ] || return 1
+    fi
+    rm -f -- "\$strict_restore_target" || return 1
+  fi
+  case "\$strict_restore_state" in
+    absent) return 0 ;;
+    regular)
+      strict_restore_source="\$STRICT_PRIVILEGED_SNAPSHOT/\$strict_restore_name"
+      [ -f "\$strict_restore_source" ] && [ ! -L "\$strict_restore_source" ] || return 1
+      [ "\$(stat -c '%u:%g' "\$strict_restore_source" 2>/dev/null || true)" = '0:0' ] || return 1
+      install -m "\$(stat -c '%a' "\$strict_restore_source")" -o root -g root "\$strict_restore_source" "\$strict_restore_target" || return 1
+      strict_safe_config_target "\$strict_restore_target"
+      ;;
+    mask-link)
+      ln -s -- /dev/null "\$strict_restore_target" || return 1
+      strict_unit_is_allowed_mask_link "\$strict_restore_target"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+strict_service_snapshot_value() {
+  strict_service_snapshot="\$1"
+  strict_service_key="\$2"
+  [ -f "\$strict_service_snapshot" ] && [ ! -L "\$strict_service_snapshot" ] || return 1
+  [ "\$(stat -c '%u:%g:%a' "\$strict_service_snapshot" 2>/dev/null || true)" = '0:0:600' ] || return 1
+  awk -F= -v key="\$strict_service_key" '
+    \$1 == key { count++; value = \$2 }
+    END { if (count == 1) print value; else exit 1 }
+  ' "\$strict_service_snapshot"
+}
+
+strict_service_is_inactive_or_not_found() {
+  strict_service_name="\$1"
+  if systemctl is-active --quiet "\$strict_service_name"; then
+    return 1
+  else
+    strict_service_active_status="\$?"
+  fi
+  case "\$strict_service_active_status" in
+    3|4) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+strict_quiesce_absent_service() {
+  strict_service_name="\$1"
+  strict_service_snapshot="\$2"
+  strict_service_unit="\$3"
+  [ "\$(strict_service_snapshot_value "\$strict_service_snapshot" unit)" = absent ] || return 0
+  # A candidate can have created this fixed unit after publication.  Do not
+  # remove it until systemd confirms that no candidate process remains.
+  if [ -e "\$strict_service_unit" ] || [ -L "\$strict_service_unit" ]; then
+    systemctl disable --now "\$strict_service_name" || return 1
+  fi
+  strict_service_is_inactive_or_not_found "\$strict_service_name"
+}
+
+strict_quiesce_persistent_masked_service() {
+  strict_service_name="\$1"
+  strict_service_snapshot="\$2"
+  strict_service_unit_snapshot="\$3"
+  strict_service_unit="\$4"
+  [ "\$(strict_unit_snapshot_state "\$strict_service_unit_snapshot")" = mask-link ] || return 0
+  [ "\$(strict_service_snapshot_value "\$strict_service_snapshot" enabled)" = masked ] || return 0
+  [ "\$(strict_service_snapshot_value "\$strict_service_snapshot" active)" = inactive ] || return 0
+  if [ -L "\$strict_service_unit" ]; then
+    strict_unit_is_allowed_mask_link "\$strict_service_unit" || return 1
+    strict_service_is_inactive_or_not_found "\$strict_service_name"
+    return
+  fi
+  if [ -e "\$strict_service_unit" ]; then
+    [ -f "\$strict_service_unit" ] || return 1
+    systemctl stop "\$strict_service_name" || return 1
+  fi
+  strict_service_is_inactive_or_not_found "\$strict_service_name"
+}
+
+strict_restore_service_state() {
+  strict_service_name="\$1"
+  strict_service_snapshot="\$2"
+  strict_service_unit="\$3"
+  strict_service_unit_state="\$(strict_service_snapshot_value "\$strict_service_snapshot" unit)" || return 1
+  if [ "\$strict_service_unit_state" = absent ]; then
+    strict_service_enabled="\$(strict_service_snapshot_value "\$strict_service_snapshot" enabled 2>/dev/null || true)"
+    [ -z "\$strict_service_enabled" ] && return 0
+    [ "\$strict_service_enabled" = masked-runtime ] || return 1
+    systemctl mask --runtime "\$strict_service_name" || return 1
+    [ "\$(strict_systemctl_enabled_state "\$strict_service_name")" = masked-runtime ] || return 1
+    return 0
+  fi
+  strict_service_enabled="\$(strict_service_snapshot_value "\$strict_service_snapshot" enabled)" || return 1
+  strict_service_active="\$(strict_service_snapshot_value "\$strict_service_snapshot" active)" || return 1
+  if [ "\$strict_service_enabled" = masked ] && [ "\$strict_service_active" = inactive ] && [ -L "\$strict_service_unit" ]; then
+    strict_unit_is_allowed_mask_link "\$strict_service_unit" || return 1
+    systemctl mask "\$strict_service_name" || return 1
+    [ "\$(strict_systemctl_enabled_state "\$strict_service_name")" = masked ] || return 1
+    strict_service_is_inactive_or_not_found "\$strict_service_name"
+    return
+  fi
+  case "\$strict_service_enabled" in
+    enabled) systemctl unmask "\$strict_service_name" >/dev/null 2>&1 || true; systemctl enable "\$strict_service_name" || return 1 ;;
+    enabled-runtime) systemctl unmask "\$strict_service_name" >/dev/null 2>&1 || true; systemctl enable --runtime "\$strict_service_name" || return 1 ;;
+    disabled) systemctl unmask "\$strict_service_name" >/dev/null 2>&1 || true; systemctl disable "\$strict_service_name" || return 1 ;;
+    disabled-runtime) systemctl unmask "\$strict_service_name" >/dev/null 2>&1 || true; systemctl disable --runtime "\$strict_service_name" || return 1 ;;
+    masked) systemctl unmask "\$strict_service_name" >/dev/null 2>&1 || true ;;
+    masked-runtime) systemctl unmask --runtime "\$strict_service_name" >/dev/null 2>&1 || true ;;
+    *) return 1 ;;
+  esac
+  case "\$strict_service_active" in
+    active) systemctl restart "\$strict_service_name" || return 1 ;;
+    inactive) systemctl stop "\$strict_service_name" || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "\$strict_service_enabled" in
+    masked) systemctl mask "\$strict_service_name" || return 1; strict_unit_is_allowed_mask_link "\$strict_service_unit" || return 1 ;;
+    masked-runtime) systemctl mask --runtime "\$strict_service_name" || return 1 ;;
+  esac
+  [ "\$(strict_systemctl_enabled_state "\$strict_service_name")" = "\$strict_service_enabled" ] || return 1
+  if [ "\$strict_service_active" = active ]; then
+    systemctl is-active --quiet "\$strict_service_name" || return 1
+  else
+    systemctl is-active --quiet "\$strict_service_name" && return 1
+  fi
+}
+
+restore_privileged_surface() {
+  [ -f "\$STRICT_PRIVILEGED_SNAPSHOT/complete" ] && [ ! -L "\$STRICT_PRIVILEGED_SNAPSHOT/complete" ] || return 1
+  strict_quiesce_absent_service "\$STRICT_CORE_SERVICE" "\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" "\$STRICT_SNAPSHOT_CORE_UNIT" || return 1
+  strict_quiesce_absent_service "\$STRICT_WEB_SERVICE" "\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" "\$STRICT_SNAPSHOT_WEB_UNIT" || return 1
+  strict_quiesce_persistent_masked_service "\$STRICT_CORE_SERVICE" "\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" core-unit "\$STRICT_SNAPSHOT_CORE_UNIT" || return 1
+  strict_quiesce_persistent_masked_service "\$STRICT_WEB_SERVICE" "\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" web-unit "\$STRICT_SNAPSHOT_WEB_UNIT" || return 1
+  strict_restore_file root-helper "\$STRICT_SNAPSHOT_ROOT_HELPER" || return 1
+  strict_restore_file root-helper-config "\$STRICT_SNAPSHOT_ROOT_HELPER_CONFIG" || return 1
+  strict_restore_file sudoers "\$STRICT_SNAPSHOT_SUDOERS" || return 1
+  strict_restore_file install-profile "\$STRICT_SNAPSHOT_INSTALL_PROFILE" || return 1
+  strict_restore_file core-env "\$STRICT_SNAPSHOT_CORE_ENV" || return 1
+  strict_restore_file web-env "\$STRICT_SNAPSHOT_WEB_ENV" || return 1
+  strict_restore_unit core-unit "\$STRICT_SNAPSHOT_CORE_UNIT" || return 1
+  strict_restore_unit web-unit "\$STRICT_SNAPSHOT_WEB_UNIT" || return 1
+  systemctl daemon-reload || return 1
+  strict_restore_service_state "\$STRICT_CORE_SERVICE" "\$STRICT_PRIVILEGED_SNAPSHOT/core-service.state" "\$STRICT_SNAPSHOT_CORE_UNIT" || return 1
+  strict_restore_service_state "\$STRICT_WEB_SERVICE" "\$STRICT_PRIVILEGED_SNAPSHOT/web-service.state" "\$STRICT_SNAPSHOT_WEB_UNIT" || return 1
+}
+
 echo "phase=requested"
 echo "candidate_ref=\$STRICT_REF"
 echo "expected_sha=\$STRICT_SHA"
@@ -1139,12 +1572,14 @@ echo "expected_sha=\$STRICT_SHA"
 install -d -m 0700 -o root -g root "\$STRICT_STAGE_ROOT" || strict_fail 'cannot create strict stage'
 [ "\$(stat -c '%u:%a' "\$STRICT_STAGE_ROOT" 2>/dev/null || true)" = '0:700' ] || strict_fail 'strict stage ownership check failed'
 
-verified_sha="\$(strict_verify_remote_candidate)"
+strict_verify_remote_candidate
+verified_sha="\$STRICT_VERIFIED_SHA"
 
 verify_repo="\$STRICT_STAGE_ROOT/verify"
 strict_git init "\$verify_repo" >/dev/null || strict_fail 'cannot initialize verification repository'
 chown root:root "\$verify_repo" && chmod 0700 "\$verify_repo" || strict_fail 'cannot protect verification repository'
-fetch_sha="\$(strict_fetch_pinned_candidate "\$verify_repo" verification)"
+strict_fetch_pinned_candidate "\$verify_repo" verification
+fetch_sha="\$STRICT_FETCH_SHA"
 echo 'phase=verified'
 echo "verified_ref=\$STRICT_REF"
 echo "verified_sha=\$fetch_sha"
@@ -1152,7 +1587,8 @@ echo "verified_sha=\$fetch_sha"
 stage_repo="\$STRICT_STAGE_ROOT/repo"
 strict_git init "\$stage_repo" >/dev/null || strict_fail 'cannot initialize fresh strict stage repository'
 chown root:root "\$stage_repo" && chmod 0700 "\$stage_repo" || strict_fail 'cannot protect strict stage repository'
-stage_head="\$(strict_fetch_pinned_candidate "\$stage_repo" strict-stage)"
+strict_fetch_pinned_candidate "\$stage_repo" strict-stage
+stage_head="\$STRICT_FETCH_SHA"
 [ -f "\$stage_repo/scripts/install-linux.sh" ] || [ -f "\$stage_repo/scripts/install-raspberry-pi.sh" ] || strict_fail 'staged installer is missing'
 installer="\$stage_repo/scripts/install-linux.sh"
 [ -f "\$installer" ] || installer="\$stage_repo/scripts/install-raspberry-pi.sh"
@@ -1174,10 +1610,91 @@ fi
 # service restart have either completed or the runner exits.
 strict_acquire_update_gate
 
+snapshot_privileged_surface || strict_fail 'cannot safely snapshot legacy privileged surface before publication'
+
 STRICT_PREVIOUS_SHA="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || strict_fail 'current worktree SHA could not be verified before publication'
 strict_sha "\$STRICT_PREVIOUS_SHA" || strict_fail 'current worktree SHA is invalid before publication'
 STRICT_PREVIOUS_DIR="\$(dirname -- "\$STRICT_INSTALL_DIR")/.\$(basename -- "\$STRICT_INSTALL_DIR").strict-previous"
 
+rollback_published_code() {
+  echo 'phase=rollback'
+  if runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_INSTALL_DIR" <<'USER_ROLLBACK'
+set -eu
+install_dir="\$1"
+parent="\$(dirname "\$install_dir")"
+base="\$(basename "\$install_dir")"
+previous="\$parent/.\${base}.strict-previous"
+next="\$parent/.\${base}.strict-next"
+failed="\$parent/.\${base}.strict-failed"
+[ -d "\$previous" ] && [ ! -L "\$previous" ] || exit 126
+[ ! -e "\$failed" ] && [ ! -L "\$failed" ] || exit 126
+# There are two recoverable publication states.  Normally the candidate is at
+# install_dir and the legacy checkout is at previous.  A signal can instead
+# arrive in the small interval after the first rename, where install_dir is
+# absent, previous contains the legacy checkout, and next contains the
+# candidate.  Restore previous first in that state: it is the only operation
+# that re-establishes the service checkout if a second rename or cleanup fails.
+if [ -d "\$install_dir" ] && [ ! -L "\$install_dir" ]; then
+  mv "\$install_dir" "\$failed"
+  if ! mv "\$previous" "\$install_dir"; then
+    [ ! -e "\$install_dir" ] && mv "\$failed" "\$install_dir" || true
+    exit 126
+  fi
+elif [ ! -e "\$install_dir" ] && [ ! -L "\$install_dir" ]; then
+  mv "\$previous" "\$install_dir" || exit 126
+  if [ -d "\$next" ] && [ ! -L "\$next" ]; then
+    # Keep the interrupted candidate for inspection without leaving a stale
+    # strict-next directory that would block a later update transaction.
+    mv "\$next" "\$failed" || exit 126
+  elif [ -e "\$next" ] || [ -L "\$next" ]; then
+    exit 126
+  fi
+else
+  exit 126
+fi
+USER_ROLLBACK
+  then
+    [ -d "\$STRICT_INSTALL_DIR/.git" ] && [ ! -L "\$STRICT_INSTALL_DIR/.git" ] || return 1
+    restored_checkout_sha="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || return 1
+    [ "\$restored_checkout_sha" = "\$STRICT_PREVIOUS_SHA" ] || return 1
+    restore_privileged_surface || return 1
+    echo 'rollback_scope=legacy-privileged-surface'
+    return 0
+  fi
+  return 1
+}
+
+rollback_after_publication_failure() {
+  rollback_reason="\$1"
+  if rollback_published_code; then
+    strict_fail "\$rollback_reason; exact legacy privileged surface was restored"
+  fi
+  strict_fail "\$rollback_reason; legacy privileged surface rollback could not be completed"
+}
+
+strict_complete_irreversible_success() {
+  # The only rollback checkout has now been removed inside the signal-masked
+  # cleanup critical section.  Do not re-enable handlers until success is the
+  # sole terminal record and the runner is explicitly committed.
+  [ "\$STRICT_PUBLICATION_STATE" = committing ] || strict_fail 'strict commit requires committing state'
+  [ ! -e "\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\$STRICT_PREVIOUS_DIR" ] || strict_fail 'rollback material remains after strict cleanup'
+  STRICT_PUBLICATION_STATE=committed
+  echo 'phase=installed'
+  echo 'status=success'
+  STRICT_TERMINAL_WRITTEN=1
+  strict_install_signal_traps
+}
+
+strict_begin_irreversible_cleanup() {
+  # A signal before this transition still reaches the published handler and
+  # restores the complete legacy surface.  Once cleanup can remove the only
+  # checkout rollback needs, signals must not enter that impossible handler.
+  [ "\$STRICT_PUBLICATION_STATE" = published ] || strict_fail 'strict cleanup requires published state'
+  trap '' HUP INT TERM
+  STRICT_PUBLICATION_STATE=committing
+}
+
+STRICT_PUBLICATION_STATE=publishing
 runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_BUNDLE" "\$STRICT_INSTALL_DIR" <<'USER_PUBLISH' || strict_fail 'target-user publication failed; existing worktree retained or recovery directory was left'
 set -eu
 bundle="\$1"
@@ -1201,89 +1718,10 @@ if ! mv "\$next" "\$install_dir"; then
   exit 126
 fi
 USER_PUBLISH
+STRICT_PUBLICATION_STATE=published
 echo 'phase=published'
 echo "state_layout=\$STRICT_STATE_LAYOUT"
 if [ "\$STRICT_STATE_LAYOUT" = internal ]; then echo 'state_migration=pending'; else echo 'state_migration=not-required'; fi
-
-STRICT_CONFIG_SNAPSHOT="\$STRICT_STAGE_ROOT/deployment-config"
-snapshot_deployment_configuration() {
-  strict_validate_config_targets || return 1
-  [ ! -e "\$STRICT_CONFIG_SNAPSHOT" ] && [ ! -L "\$STRICT_CONFIG_SNAPSHOT" ] || return 1
-  install -d -m 0700 -o root -g root "\$STRICT_CONFIG_SNAPSHOT" || return 1
-  snapshot_one() {
-    snapshot_source="\$1"
-    snapshot_name="\$2"
-    [ -f "\$snapshot_source" ] && [ ! -L "\$snapshot_source" ] || return 1
-    [ "\$(stat -c '%u:%g' "\$snapshot_source" 2>/dev/null || true)" = '0:0' ] || return 1
-    cp -p -- "\$snapshot_source" "\$STRICT_CONFIG_SNAPSHOT/\$snapshot_name"
-  }
-  snapshot_one "\$STRICT_INSTALL_PROFILE" install-profile || return 1
-  snapshot_one "\$STRICT_CORE_ENV_FILE" core-env || return 1
-  if [ "\$STRICT_INSTALL_WEB" = on ]; then snapshot_one "\$STRICT_WEB_ENV_FILE" web-env || return 1; fi
-  : > "\$STRICT_CONFIG_SNAPSHOT/complete" && chown root:root "\$STRICT_CONFIG_SNAPSHOT/complete" && chmod 0600 "\$STRICT_CONFIG_SNAPSHOT/complete"
-}
-
-restore_deployment_configuration() {
-  restore_one() {
-    restore_source="\$1"
-    restore_target="\$2"
-    strict_safe_config_target "\$restore_target" || return 1
-    [ -f "\$restore_source" ] && [ ! -L "\$restore_source" ] || return 1
-    [ ! -e "\$restore_target" ] && [ ! -L "\$restore_target" ] || { [ -f "\$restore_target" ] && [ ! -L "\$restore_target" ]; } || return 1
-    install -m "\$(stat -c '%a' "\$restore_source")" -o root -g root "\$restore_source" "\$restore_target" || return 1
-  }
-  restore_one "\$STRICT_CONFIG_SNAPSHOT/install-profile" "\$STRICT_INSTALL_PROFILE" || return 1
-  restore_one "\$STRICT_CONFIG_SNAPSHOT/core-env" "\$STRICT_CORE_ENV_FILE" || return 1
-  if [ "\$STRICT_INSTALL_WEB" = on ]; then restore_one "\$STRICT_CONFIG_SNAPSHOT/web-env" "\$STRICT_WEB_ENV_FILE" || return 1; fi
-}
-
-rollback_published_code() {
-  echo 'phase=rollback'
-  if [ -f "\$STRICT_CONFIG_SNAPSHOT/complete" ] && [ ! -L "\$STRICT_CONFIG_SNAPSHOT/complete" ]; then
-    restore_deployment_configuration || return 1
-  fi
-  if runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_INSTALL_DIR" <<'USER_ROLLBACK'
-set -eu
-install_dir="\$1"
-parent="\$(dirname "\$install_dir")"
-base="\$(basename "\$install_dir")"
-previous="\$parent/.\${base}.strict-previous"
-failed="\$parent/.\${base}.strict-failed"
-[ -d "\$install_dir" ] && [ ! -L "\$install_dir" ] || exit 126
-[ -d "\$previous" ] && [ ! -L "\$previous" ] || exit 126
-[ ! -e "\$failed" ] && [ ! -L "\$failed" ] || exit 126
-mv "\$install_dir" "\$failed"
-if ! mv "\$previous" "\$install_dir"; then
-  [ ! -e "\$install_dir" ] && mv "\$failed" "\$install_dir" || true
-  exit 126
-fi
-USER_ROLLBACK
-  then
-    [ -d "\$STRICT_INSTALL_DIR/.git" ] && [ ! -L "\$STRICT_INSTALL_DIR/.git" ] || return 1
-    restored_checkout_sha="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || return 1
-    [ "\$restored_checkout_sha" = "\$STRICT_PREVIOUS_SHA" ] || return 1
-    if systemctl daemon-reload && systemctl restart "\$STRICT_CORE_SERVICE"; then
-      if [ "\$STRICT_INSTALL_WEB" = on ]; then
-        systemctl restart "\$STRICT_WEB_SERVICE" || return 1
-      else
-        systemctl stop "\$STRICT_WEB_SERVICE" >/dev/null 2>&1 || true
-      fi
-      echo 'rollback_scope=code'
-      return 0
-    fi
-  fi
-  return 1
-}
-
-rollback_after_publication_failure() {
-  rollback_reason="\$1"
-  if rollback_published_code; then
-    strict_fail "\$rollback_reason; previous code was restored and previous services were restarted"
-  fi
-  strict_fail "\$rollback_reason; code rollback could not be completed"
-}
-
-snapshot_deployment_configuration || rollback_after_publication_failure 'cannot safely snapshot deployment configuration before update'
 
 installed_checkout_sha="\$(runuser -u "\$STRICT_USER" -- env -i PATH="\$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c safe.directory="\$STRICT_INSTALL_DIR" -C "\$STRICT_INSTALL_DIR" rev-parse --verify HEAD^{commit})" || rollback_after_publication_failure 'published worktree SHA could not be verified'
 [ "\$installed_checkout_sha" = "\$STRICT_SHA" ] || rollback_after_publication_failure 'published worktree SHA does not match expected SHA'
@@ -1305,6 +1743,7 @@ if run_staged_installer; then
   systemctl is-active --quiet "\$STRICT_CORE_SERVICE" || rollback_after_publication_failure 'updated core service did not become active'
   if [ "\$STRICT_INSTALL_WEB" = on ]; then systemctl is-active --quiet "\$STRICT_WEB_SERVICE" || rollback_after_publication_failure 'updated web service did not become active'; fi
   echo 'phase=committed'
+  strict_begin_irreversible_cleanup
   if runuser -u "\$STRICT_USER" -- /bin/sh -s -- "\$STRICT_INSTALL_DIR" <<'USER_FINALIZE'
 set -eu
 install_dir="\$1"
@@ -1317,11 +1756,7 @@ USER_FINALIZE
   then
     cleanup_status=completed
   else
-    if [ -d "\$STRICT_PREVIOUS_DIR" ] && [ ! -L "\$STRICT_PREVIOUS_DIR" ]; then
-      cleanup_status=deferred
-    else
-      cleanup_status=failed
-    fi
+    rollback_after_publication_failure 'rollback material cleanup failed after publication'
   fi
   echo "verified_ref=\$STRICT_REF"
   echo "verified_sha=\$fetch_sha"
@@ -1335,8 +1770,7 @@ USER_FINALIZE
   installed_version="\${STRICT_REF#refs/tags/}"
   installed_version="\${installed_version#v}"
   echo "installed_version=\$installed_version"
-  echo 'phase=installed'
-  echo 'status=success'
+  strict_complete_irreversible_success
 else
   rollback_after_publication_failure 'staged installer failed after publication'
 fi
