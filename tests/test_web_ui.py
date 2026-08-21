@@ -134,6 +134,77 @@ class WebUiTests(unittest.TestCase):
             self.assertTrue(payload["storage"]["ready"])
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
 
+    def test_clean_install_vault_api_reveals_token_once_and_never_in_list_status_or_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            created = {
+                "vault_id": "a" * 32,
+                "confirmation_token": "one-time-token",
+                "archive_sha256": "b" * 64,
+                "archive_size_bytes": 12,
+                "schema_version": "7",
+                "semantic_manifest": {"history_count": 1},
+            }
+            info = {
+                "exists": True,
+                "pending": True,
+                "vault_id": "a" * 32,
+                "created_at": "2026-08-21T12:00:00Z",
+                "schema_version": "7",
+                "archive_sha256": "b" * 64,
+                "archive_size_bytes": 12,
+                "verification": "pending",
+            }
+            restored = {
+                "completed": True,
+                "vault_id": "a" * 32,
+                "verification": {"verified": True, "storage": {"ready": True, "integrity_check": "ok"}},
+                "cleanup": {"completed": True, "source_deleted": True},
+            }
+            with (
+                mock.patch.object(web_app.core_api, "create_clean_install_vault", return_value=created),
+                mock.patch.object(web_app.core_api, "clean_install_vault_info", return_value=info),
+                mock.patch.object(web_app.core_api, "restore_clean_install_vault", return_value=restored) as restore,
+            ):
+                server = _start_captured_server(serve, config)
+                with server:
+                    status, _headers, body = _http_request(
+                        server.port,
+                        "/api/core/clean-install-vaults/create",
+                        method="POST",
+                        body=b"{}",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 201, body)
+                    create_payload = json.loads(body)
+                    self.assertEqual(create_payload["confirmation_token"], "one-time-token")
+
+                    status, _headers, body = _http_request(server.port, "/api/core/clean-install-vaults/list")
+                    self.assertEqual(status, 200, body)
+                    self.assertNotIn("confirmation_token", body.decode("utf-8"))
+
+                    status, _headers, body = _http_request(
+                        server.port, "/api/core/clean-install-vaults/status?vault_id=" + ("a" * 32)
+                    )
+                    self.assertEqual(status, 200, body)
+                    self.assertNotIn("confirmation_token", body.decode("utf-8"))
+
+                    status, _headers, body = _http_request(
+                        server.port,
+                        "/api/core/clean-install-vaults/restore",
+                        method="POST",
+                        body=json.dumps({"vault_id": "a" * 32, "confirmation_token": "one-time-token"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 200, body)
+                    self.assertNotIn("confirmation_token", body.decode("utf-8"))
+                    self.assertTrue(json.loads(body)["completed"])
+                    restore.assert_called_once_with(
+                        config.output.state_dir,
+                        vault_id="a" * 32,
+                        confirmation_token="one-time-token",
+                    )
+
     def test_core_status_keeps_saving_lifecycle_until_post_run_snapshot_finishes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -492,6 +563,16 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("backup-archive-link", html)
         self.assertNotIn("backup-file-links", html)
         self.assertIn("backup-upload-file", html)
+        self.assertIn("Vault для чистой установки", html)
+        self.assertIn("clean-install-vaults/create", html)
+        self.assertIn("clean-install-vaults/list", html)
+        self.assertIn("clean-install-vaults/status", html)
+        self.assertIn("clean-install-vaults/restore", html)
+        self.assertIn("function createCleanInstallVault()", html)
+        self.assertIn("function restoreCleanInstallVault(vaultId)", html)
+        self.assertIn("window.prompt('Скопируйте и сохраните одноразовый токен", html)
+        self.assertIn("confirmationToken = '';", html)
+        self.assertNotIn("cleanInstallVaultToken", html)
         self.assertNotIn("postJson('/api/backups/create'", html)
         self.assertNotIn("postJson('/api/backups/restore'", html)
         self.assertNotIn("postJson('/api/backups/delete'", html)
@@ -2030,6 +2111,42 @@ class WebUiTests(unittest.TestCase):
                 ),
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
+                mock.patch.object(
+                    web_app.core_api,
+                    "create_clean_install_vault",
+                    return_value={
+                        "vault_id": "a" * 32,
+                        "confirmation_token": "one-time-token",
+                        "archive_sha256": "b" * 64,
+                        "archive_size_bytes": 12,
+                        "schema_version": "7",
+                        "semantic_manifest": {},
+                    },
+                ),
+                mock.patch.object(
+                    web_app.core_api,
+                    "clean_install_vault_info",
+                    return_value={
+                        "exists": True,
+                        "pending": True,
+                        "vault_id": "a" * 32,
+                        "created_at": "2026-08-21T12:00:00Z",
+                        "schema_version": "7",
+                        "archive_sha256": "b" * 64,
+                        "archive_size_bytes": 12,
+                        "verification": "pending",
+                    },
+                ),
+                mock.patch.object(
+                    web_app.core_api,
+                    "restore_clean_install_vault",
+                    return_value={
+                        "completed": True,
+                        "vault_id": "a" * 32,
+                        "verification": {"verified": True},
+                        "cleanup": {"source_deleted": True},
+                    },
+                ),
             ):
                 port = start_server(serve, config).port
 
@@ -2055,6 +2172,15 @@ class WebUiTests(unittest.TestCase):
                     ("POST", "/api/core/backups/delete", {"snapshot_id": "missing"}, {}),
                     ("GET", f"/api/core/backups/download-archive?snapshot_id={snapshot}", None, {}),
                     ("POST", "/api/core/backups/upload", b"not-a-zip", {"Content-Type": "application/zip"}),
+                    ("POST", "/api/core/clean-install-vaults/create", {}, {}),
+                    ("GET", "/api/core/clean-install-vaults/list", None, {}),
+                    ("GET", "/api/core/clean-install-vaults/status?vault_id=" + ("a" * 32), None, {}),
+                    (
+                        "POST",
+                        "/api/core/clean-install-vaults/restore",
+                        {"vault_id": "a" * 32, "confirmation_token": "one-time-token"},
+                        {},
+                    ),
                     ("GET", "/api/core/run-settings", None, {}),
                     ("POST", "/api/core/run-settings/save", {"curl_parallelism_default": 10, "curl_parallelism_max": 50}, {}),
                     ("GET", "/api/core/runs/history", None, {}),
@@ -2100,6 +2226,14 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/core/presets/v2fly/categories"): {"categories", "storage"},
                     ("POST", "/api/core/backups/create"): {"snapshot_id", "created_at", "filename", "size_bytes"},
                     ("GET", "/api/core/backups/list"): {"backups"},
+                    ("POST", "/api/core/clean-install-vaults/create"): {
+                        "vault_id", "confirmation_token", "archive_sha256", "archive_size_bytes", "schema_version", "semantic_manifest"
+                    },
+                    ("GET", "/api/core/clean-install-vaults/list"): {"vaults"},
+                    ("GET", "/api/core/clean-install-vaults/status"): {
+                        "vault_id", "created_at", "schema_version", "archive_sha256", "archive_size_bytes", "verification", "pending"
+                    },
+                    ("POST", "/api/core/clean-install-vaults/restore"): {"completed", "vault_id", "verification", "cleanup"},
                     ("GET", "/api/core/run-settings"): {
                         "curl_parallelism_default",
                         "curl_parallelism_max",
@@ -5227,6 +5361,11 @@ def _openapi_test_request(
     request_path = path
     if path == "/api/core/backups/download-archive":
         request_path = f"{path}?snapshot_id={snapshot_id}"
+    elif path == "/api/core/clean-install-vaults/create":
+        # Do not create a device-local vault from the generic OpenAPI route
+        # walker: the route contract is exercised through its documented
+        # fail-closed invalid-request response here and targeted vault tests.
+        return request_path, b'{"unexpected":true}', {"Content-Type": "application/json"}
     elif path == "/api/core/presets/v2fly/category-domains":
         request_path = f"{path}?category=missing"
     elif path == "/api/core/strategy-candidates":

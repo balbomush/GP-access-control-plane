@@ -175,6 +175,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/presets/v2fly/categories": lambda: core_api.v2fly_categories_payload(config, query),
                 "/api/core/presets/v2fly/category-domains": lambda: core_api.v2fly_category_domains_payload(config, query),
                 "/api/core/backups/list": lambda: core_api.backups_list_payload(config),
+                "/api/core/clean-install-vaults/list": lambda: core_api.clean_install_vault_list_payload(config),
+                "/api/core/clean-install-vaults/status": lambda: core_api.clean_install_vault_status_payload(config, query),
                 "/api/core/run-settings": lambda: core_api.run_settings_payload(read_run_settings(config)),
                 "/api/core/runs/history": lambda: core_api.runs_history_payload(config, query),
                 "/api/core/runs/latest-log": lambda: _latest_log_payload(config, query),
@@ -212,6 +214,12 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
                     self._storage_unavailable()
+                    return
+                if path == "/api/core/clean-install-vaults/status" and isinstance(exc, FileNotFoundError):
+                    self._json(error_payload("not_found", "Clean-install vault was not found."), status=HTTPStatus.NOT_FOUND)
+                    return
+                if path in {"/api/core/clean-install-vaults/list", "/api/core/clean-install-vaults/status"}:
+                    self._json(error_payload("invalid_request", str(exc)), status=HTTPStatus.BAD_REQUEST)
                     return
                 if path in {"/api/core/presets/v2fly/category-domains", "/api/core/strategy-candidates"}:
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -328,6 +336,13 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     raise RuntimeBusyError()
                 return {"deleted": 1}, HTTPStatus.OK
 
+            def create_clean_install_vault() -> tuple[dict[str, Any], HTTPStatus]:
+                return core_api.clean_install_vault_create_payload(config, payload), HTTPStatus.CREATED
+
+            def restore_clean_install_vault() -> tuple[dict[str, Any], HTTPStatus]:
+                restored = core_api.clean_install_vault_restore_payload(config, payload)
+                return restored, HTTPStatus.OK
+
             def set_install_channel() -> tuple[dict[str, Any], HTTPStatus]:
                 channel_payload = service_api.save_install_channel_payload(payload)
                 save_service_settings(config, {"update_channel": channel_payload["channel"]})
@@ -391,6 +406,16 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/backups/create": (create_core_backup, HTTPStatus.CONFLICT, HTTPStatus.CONFLICT),
                 "/api/core/backups/restore": (restore_core_backup, HTTPStatus.CONFLICT, HTTPStatus.CONFLICT),
                 "/api/core/backups/delete": (delete_core_backup, HTTPStatus.CONFLICT, HTTPStatus.CONFLICT),
+                "/api/core/clean-install-vaults/create": (
+                    create_clean_install_vault,
+                    HTTPStatus.CONFLICT,
+                    HTTPStatus.BAD_REQUEST,
+                ),
+                "/api/core/clean-install-vaults/restore": (
+                    restore_clean_install_vault,
+                    HTTPStatus.CONFLICT,
+                    HTTPStatus.BAD_REQUEST,
+                ),
                 "/api/core/run-settings/save": (
                     lambda: (core_api.run_settings_payload(save_run_settings(config, payload.get("settings") or payload)), HTTPStatus.OK),
                     HTTPStatus.BAD_REQUEST,

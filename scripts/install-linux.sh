@@ -7,8 +7,31 @@ INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"
 LEGACY_PROFILE_CAPTURE=off
 TRUSTED_SOURCE_DIR="${GP_TRUSTED_SOURCE_DIR:-}"
 STRICT_PREFLIGHT=off
+TRUSTED_CLEAN_INSTALL=off
+TRUSTED_CLEAN_INSTALL_MARKER="/run/gp-control-plane/trusted-clean-install.authorized"
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SCRIPT_SOURCE_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd -P)"
+
+# This mode is intentionally recognized before any install profile or caller
+# configuration is processed.  Its sole invoker is the root-owned recovery
+# runner; it is not a general-purpose privileged installer interface.
+if [ "$#" -eq 1 ] && [ "${1:-}" = "--trusted-clean-install" ]; then
+  TRUSTED_CLEAN_INSTALL=on
+fi
+TRUSTED_CLEAN_INSTALL_CALLER_CONTROLS=""
+if [ "$TRUSTED_CLEAN_INSTALL" = on ]; then
+  for trusted_clean_env_name in \
+    GP_INSTALL_FORCE_CLEAN GP_TRUSTED_SOURCE_DIR GP_UPDATE_CANDIDATE_REF GP_UPDATE_EXPECTED_SHA \
+    GP_INSTALL_CONFIG GP_INSTALL_USER GP_INSTALL_DIR GP_STATE_DIR GP_INSTALL_STEPS \
+    GP_REPO_URL GP_BRANCH GP_SERVICE_NAME GP_CORE_SERVICE_NAME GP_INSTALL_WEB \
+    GP_WEB_HOST GP_WEB_PORT GP_WEB_ENV_FILE GP_CORE_HOST GP_CORE_PORT GP_CORE_URL \
+    GP_CORE_ENV_FILE GP_ZAPRET_DIR GP_ROOT_HELPER_PATH GP_ROOT_HELPER_CONFIG \
+    GP_ROOT_HELPER_RUN_DIR GP_SUDOERS_PATH; do
+    if [ -n "${!trusted_clean_env_name+x}" ]; then
+      TRUSTED_CLEAN_INSTALL_CALLER_CONTROLS="${TRUSTED_CLEAN_INSTALL_CALLER_CONTROLS}${trusted_clean_env_name} "
+    fi
+  done
+fi
 
 release_update_enabled() {
   case "$INSTALL_FORCE_CLEAN" in
@@ -18,6 +41,7 @@ release_update_enabled() {
 }
 
 strict_update_requested() {
+  [ "$TRUSTED_CLEAN_INSTALL" = on ] && return 1
   [ -n "${GP_TRUSTED_SOURCE_DIR:-}" ] || [ -n "${GP_UPDATE_CANDIDATE_REF:-}" ] || [ -n "${GP_UPDATE_EXPECTED_SHA:-}" ]
 }
 
@@ -94,7 +118,15 @@ load_trusted_env_values() {
   done
 }
 
-if strict_update_requested; then
+if [ "$TRUSTED_CLEAN_INSTALL" = on ]; then
+  validate_install_profile_file || exit 1
+  load_trusted_env_values "$INSTALL_PROFILE" \
+    GP_INSTALL_USER GP_INSTALL_DIR GP_STATE_DIR GP_SERVICE_NAME GP_CORE_SERVICE_NAME GP_INSTALL_WEB \
+    GP_WEB_HOST GP_WEB_PORT GP_WEB_ENV_FILE GP_CORE_HOST GP_CORE_PORT GP_CORE_URL GP_CORE_ENV_FILE \
+    GP_ZAPRET_DIR GP_ROOT_HELPER_PATH GP_ROOT_HELPER_CONFIG GP_ROOT_HELPER_RUN_DIR GP_SUDOERS_PATH \
+    GP_SERVICE_MEMORY_HIGH GP_SERVICE_MEMORY_MAX \
+    || { printf '\nERROR: cannot safely parse install profile: %s\n' "$INSTALL_PROFILE" >&2; exit 1; }
+elif strict_update_requested; then
   validate_install_profile_file || exit 1
   load_trusted_env_values "$INSTALL_PROFILE" \
     GP_INSTALL_USER GP_INSTALL_DIR GP_STATE_DIR GP_SERVICE_NAME GP_CORE_SERVICE_NAME GP_INSTALL_WEB \
@@ -157,6 +189,9 @@ usage() {
   cat <<USAGE
 Usage: install-linux.sh [--step STEP] [--steps a,b,c]
 
+Root-owned recovery runner only:
+  install-linux.sh --trusted-clean-install
+
 Default is --steps all. Available steps:
   packages,zapret,app,v2fly,root-helper,service,check
 
@@ -198,6 +233,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     --strict-preflight)
       STRICT_PREFLIGHT=on
+      shift
+      ;;
+    --trusted-clean-install)
+      [ "$TRUSTED_CLEAN_INSTALL" = on ] && [ "$#" -eq 1 ] \
+        || { usage >&2; exit 2; }
       shift
       ;;
     -h|--help)
@@ -253,6 +293,7 @@ pinned_update_enabled() {
 }
 
 validate_pinned_update_inputs() {
+  [ "$TRUSTED_CLEAN_INSTALL" = on ] && return 0
   if [ -z "$TRUSTED_SOURCE_DIR" ] && [ -z "$UPDATE_CANDIDATE_REF" ] && [ -z "$UPDATE_EXPECTED_SHA" ]; then
     return 0
   fi
@@ -322,7 +363,14 @@ verify_pinned_update_checkout() {
 
 trusted_project_file() {
   project_relative_path="$1"
-  project_source_path="$TRUSTED_SOURCE_DIR/$project_relative_path"
+  if [ "$TRUSTED_CLEAN_INSTALL" = on ]; then
+    project_source_root="$SCRIPT_SOURCE_DIR"
+  else
+    project_source_root="$TRUSTED_SOURCE_DIR"
+  fi
+  project_source_path="$project_source_root/$project_relative_path"
+  [ "$(as_root readlink -f -- "$project_source_path" 2>/dev/null || true)" = "$project_source_path" ] \
+    || fail "Strict trusted update project source must be canonical: $project_source_path"
   trusted_source_file "$project_source_path"
   printf '%s\n' "$project_source_path"
 }
@@ -391,6 +439,7 @@ TARGET_HOME="$(printf '%s\n' "$TARGET_ENTRY" | cut -d: -f6)"
 TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || true)"
 [ -n "$TARGET_GROUP" ] || fail "Cannot find primary group for user: $TARGET_USER"
 INSTALL_DIR="${GP_INSTALL_DIR:-$TARGET_HOME/gp/GP-access-control-plane}"
+CLEAN_INSTALL_VAULT_DIR="$TARGET_HOME/.local/share/gp-control-plane/clean-install-vault"
 default_state_dir() {
   state_install_parent="$(dirname -- "$INSTALL_DIR")"
   state_install_base="$(basename -- "$INSTALL_DIR")"
@@ -415,6 +464,82 @@ as_root() {
   else
     sudo "$@"
   fi
+}
+
+trusted_clean_install_enabled() {
+  [ "$TRUSTED_CLEAN_INSTALL" = on ]
+}
+
+reject_trusted_clean_install_caller_controls() {
+  [ -z "$TRUSTED_CLEAN_INSTALL_CALLER_CONTROLS" ] \
+    || fail "Trusted clean install rejects caller environment control: ${TRUSTED_CLEAN_INSTALL_CALLER_CONTROLS% }"
+}
+
+validate_trusted_clean_install_invocation() {
+  trusted_clean_install_enabled || return 0
+  [ "$CURRENT_UID" -eq 0 ] || fail "Trusted clean install must run as root."
+  [ "$STRICT_PREFLIGHT" = off ] || fail "Trusted clean install does not support preflight mode."
+  [ "$REQUESTED_STEPS" = all ] || fail "Trusted clean install does not support selected install steps."
+  reject_trusted_clean_install_caller_controls
+
+  as_root test -f "$TRUSTED_CLEAN_INSTALL_MARKER" && ! as_root test -L "$TRUSTED_CLEAN_INSTALL_MARKER" \
+    || fail "Trusted clean install authorization marker is not a regular file."
+  [ "$(as_root stat -c '%u:%g:%a' "$TRUSTED_CLEAN_INSTALL_MARKER" 2>/dev/null || true)" = "0:0:600" ] \
+    || fail "Trusted clean install authorization marker must be root:root mode 0600."
+  trusted_clean_marker_contents="$(as_root cat -- "$TRUSTED_CLEAN_INSTALL_MARKER")"
+  [ "$trusted_clean_marker_contents" = "trusted-clean-install-v1 $SCRIPT_SOURCE_DIR" ] \
+    || fail "Trusted clean install authorization marker does not match the canonical staged source."
+
+  [ "$(as_root readlink -f -- "$SCRIPT_SOURCE_DIR" 2>/dev/null || true)" = "$SCRIPT_SOURCE_DIR" ] \
+    || fail "Trusted clean install source must be a canonical non-symlink path."
+  trusted_source_directory "$SCRIPT_SOURCE_DIR"
+  trusted_source_directory "$SCRIPT_SOURCE_DIR/scripts"
+  trusted_source_file "$SCRIPT_PATH"
+}
+
+validate_trusted_clean_install_preflight() {
+  [ "$TRUSTED_CLEAN_INSTALL" = on ] || return 0
+  validate_trusted_clean_install_invocation
+  validate_trusted_clean_install_target
+}
+
+assert_clean_install_vault_excluded() {
+  managed_clean_install_path="$1"
+  case "$managed_clean_install_path" in
+    "$CLEAN_INSTALL_VAULT_DIR"|"$CLEAN_INSTALL_VAULT_DIR"/*)
+      fail "Trusted clean install must not manage the device-local vault: $CLEAN_INSTALL_VAULT_DIR"
+      ;;
+  esac
+}
+
+validate_trusted_clean_install_target() {
+  trusted_clean_install_enabled || return 0
+  case "$INSTALL_DIR" in "$TARGET_HOME"/*) ;; *) fail "Trusted clean install target must stay below the fixed profile home." ;; esac
+  case "$STATE_DIR" in "$TARGET_HOME"/*) ;; *) fail "Trusted clean install state must stay below the fixed profile home." ;; esac
+  assert_clean_install_vault_excluded "$INSTALL_DIR"
+  assert_clean_install_vault_excluded "$STATE_DIR"
+}
+
+install_trusted_clean_candidate() {
+  trusted_clean_install_enabled || return 0
+  validate_trusted_clean_install_target
+  if as_root test -e "$INSTALL_DIR" || as_root test -L "$INSTALL_DIR"; then
+    fail "Trusted clean install requires the fixed profile install target to be absent."
+  fi
+  if trusted_clean_install_enabled; then
+    # The transaction runner owns the existing parent as root:root 0711 until
+    # all destructive work is complete.  Do not relax that rename lock here:
+    # the child itself is created and chowned below.
+    as_root test -d "$(dirname -- "$INSTALL_DIR")" && ! as_root test -L "$(dirname -- "$INSTALL_DIR")" \
+      || fail "Trusted clean install parent is not a safe locked directory."
+  else
+    as_root install -d -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$(dirname -- "$INSTALL_DIR")"
+  fi
+  as_root install -d -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$INSTALL_DIR"
+  as_root cp -a -- "$SCRIPT_SOURCE_DIR/." "$INSTALL_DIR"
+  as_root chown -R --no-dereference "$TARGET_USER:$TARGET_GROUP" "$INSTALL_DIR"
+  [ "$(sha256sum "$SCRIPT_PATH" | awk '{print $1}')" = "$(sha256sum "$INSTALL_DIR/scripts/install-linux.sh" | awk '{print $1}')" ] \
+    || fail "Trusted clean install candidate copy does not match the staged installer."
 }
 
 # A normal/manual installation may deliberately use alternate destinations.
@@ -791,12 +916,16 @@ if [ "$LEGACY_PROFILE_CAPTURE" = on ]; then
   capture_legacy_install_profile
 fi
 
-if [ -n "$TRUSTED_SOURCE_DIR" ] || [ -n "$UPDATE_CANDIDATE_REF" ] || [ -n "$UPDATE_EXPECTED_SHA" ]; then
+if [ "$TRUSTED_CLEAN_INSTALL" != on ] && { [ -n "$TRUSTED_SOURCE_DIR" ] || [ -n "$UPDATE_CANDIDATE_REF" ] || [ -n "$UPDATE_EXPECTED_SHA" ]; }; then
   need_command git
 fi
 validate_pinned_update_inputs
-validate_strict_privileged_destinations
-verify_pinned_update_checkout
+if [ "$TRUSTED_CLEAN_INSTALL" = on ]; then
+  validate_trusted_clean_install_preflight
+else
+  validate_strict_privileged_destinations
+  verify_pinned_update_checkout
+fi
 
 if [ "$STRICT_PREFLIGHT" = on ]; then
   log "Strict trusted update preflight passed for $UPDATE_CANDIDATE_REF at $UPDATE_EXPECTED_SHA"
@@ -883,7 +1012,10 @@ WRAPPER
 fi
 
 if step_log app "Installing GP Access Control Plane"; then
-  if ! pinned_update_enabled; then
+  if trusted_clean_install_enabled; then
+    log "Trusted clean install: copying the root-owned staged candidate into the fixed profile target"
+    install_trusted_clean_candidate
+  elif ! pinned_update_enabled; then
     resolve_install_ref
     run_as_target mkdir -p "$(dirname "$INSTALL_DIR")"
     if [ -d "$INSTALL_DIR/.git" ]; then
@@ -940,7 +1072,7 @@ if [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled root-helper; then
 elif step_log root-helper "Installing GP root helper"; then
   validate_strict_privileged_destinations
   as_root install -d -m 0755 "$(dirname "$ROOT_HELPER_PATH")"
-  if pinned_update_enabled; then
+  if pinned_update_enabled || trusted_clean_install_enabled; then
     ROOT_HELPER_SOURCE="$(trusted_project_file scripts/gp-root-helper.sh)"
   else
     ROOT_HELPER_SOURCE="$INSTALL_DIR/scripts/gp-root-helper.sh"
@@ -975,14 +1107,20 @@ elif step_log service "Creating and starting systemd service"; then
   install_service_env_file "$CORE_ENV_FILE"
   install_systemd_service "$CORE_SERVICE_NAME" "GP Strategy Finder Core API" "core" "$CORE_HOST" "$CORE_PORT" "$CORE_ENV_FILE"
   as_root systemctl daemon-reload
-  as_root systemctl enable "$CORE_SERVICE_NAME"
-  as_root systemctl restart "$CORE_SERVICE_NAME"
+  if trusted_clean_install_enabled; then
+    log "Trusted clean install: service activation is deferred to the root transaction runner"
+  else
+    as_root systemctl enable "$CORE_SERVICE_NAME"
+    as_root systemctl restart "$CORE_SERVICE_NAME"
+  fi
   if install_web_enabled; then
     install_service_env_file "$WEB_ENV_FILE"
     install_systemd_service "$SERVICE_NAME" "GP Strategy Finder Web UI" "web" "$WEB_HOST" "$WEB_PORT" "$WEB_ENV_FILE" "--core-url $CORE_URL" "$CORE_SERVICE_NAME" "$CORE_SERVICE_NAME"
     as_root systemctl daemon-reload
-    as_root systemctl enable "$SERVICE_NAME"
-    as_root systemctl restart "$SERVICE_NAME"
+    if ! trusted_clean_install_enabled; then
+      as_root systemctl enable "$SERVICE_NAME"
+      as_root systemctl restart "$SERVICE_NAME"
+    fi
   else
     as_root systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   fi

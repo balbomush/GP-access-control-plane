@@ -86,6 +86,63 @@ def _join_process(test: unittest.TestCase, process: multiprocessing.Process) -> 
 
 
 class BearerAuthHttpTests(unittest.TestCase):
+    def test_completed_clean_install_vault_is_not_exposed_as_pending_api_record(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            config = AppConfig(output=OutputConfig(state_dir=root / "state"))
+            vault = root / "install-user" / ".local" / "share" / "gp-control-plane" / "clean-install-vault"
+            vault.parents[3].mkdir()
+            with mock.patch("gp_control_plane.backups.clean_install_vault_dir", return_value=vault):
+                port = _start_server(serve, config, ui_enabled=False)
+                login_status, _headers, login_body = _request(
+                    port,
+                    "/api/auth/login",
+                    method="POST",
+                    body=_json_bytes({"username": "admin", "password": "admin"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(login_status, 200)
+                bearer = {"Authorization": f"Bearer {json.loads(login_body)['access_token']}", "Content-Type": "application/json"}
+
+                create_status, _headers, create_body = _request(
+                    port,
+                    "/api/core/clean-install-vaults/create",
+                    method="POST",
+                    body=b"{}",
+                    headers=bearer,
+                )
+                self.assertEqual(create_status, 201, create_body.decode("utf-8"))
+                created = json.loads(create_body)
+                self.assertIn("confirmation_token", created)
+
+                restore_status, _headers, restore_body = _request(
+                    port,
+                    "/api/core/clean-install-vaults/restore",
+                    method="POST",
+                    body=_json_bytes(
+                        {"vault_id": created["vault_id"], "confirmation_token": created["confirmation_token"]}
+                    ),
+                    headers=bearer,
+                )
+                self.assertEqual(restore_status, 200, restore_body.decode("utf-8"))
+                self.assertTrue(json.loads(restore_body)["completed"])
+
+                list_status, _headers, list_body = _request(
+                    port, "/api/core/clean-install-vaults/list", headers={"Authorization": bearer["Authorization"]}
+                )
+                self.assertEqual(list_status, 200)
+                listed = json.loads(list_body)
+                self.assertEqual(listed, {"vaults": []})
+                self.assertNotIn(created["confirmation_token"], list_body.decode("utf-8"))
+
+                status_status, _headers, status_body = _request(
+                    port,
+                    f"/api/core/clean-install-vaults/status?vault_id={created['vault_id']}",
+                    headers={"Authorization": bearer["Authorization"]},
+                )
+                self.assertEqual(status_status, 404)
+                self.assertIn("error", json.loads(status_body))
+
     def test_monolith_public_allowlist_and_protected_transport_routes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
@@ -113,6 +170,15 @@ class BearerAuthHttpTests(unittest.TestCase):
                 ("POST", "/api/core/strategy-discovery/stop-current-run", _json_bytes({"dry_run": True}), {"Content-Type": "application/json"}),
                 ("POST", "/api/core/backups/upload", b"not-a-zip", {"Content-Type": "application/zip"}),
                 ("GET", "/api/core/backups/download-archive?snapshot_id=missing", None, {}),
+                ("POST", "/api/core/clean-install-vaults/create", b"{}", {"Content-Type": "application/json"}),
+                ("GET", "/api/core/clean-install-vaults/list", None, {}),
+                ("GET", "/api/core/clean-install-vaults/status?vault_id=missing", None, {}),
+                (
+                    "POST",
+                    "/api/core/clean-install-vaults/restore",
+                    _json_bytes({"vault_id": "missing", "confirmation_token": "not-a-token"}),
+                    {"Content-Type": "application/json"},
+                ),
                 ("HEAD", "/api/core/strategy-candidates/export", None, {}),
                 ("GET", "/api/web/events/stream", None, {"Accept": "text/event-stream"}),
             )

@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .backups import list_snapshots
+from .backups import (
+    clean_install_vault_info,
+    create_clean_install_vault,
+    list_snapshots,
+    restore_clean_install_vault,
+)
 from .config import AppConfig
 from .domain_sources import fetch_v2fly_category_local, list_v2fly_categories_local, parse_v2fly_domains
 from .state import now_iso, read_state
@@ -231,6 +236,82 @@ def _iter_strategy_candidates_export_lines(config: AppConfig, filters: dict[str,
 
 def backups_list_payload(config: AppConfig) -> dict[str, Any]:
     return {"backups": [backup_snapshot_payload(item) for item in list_snapshots(config.output.state_dir).get("snapshots") or []]}
+
+
+def clean_install_vault_create_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    if payload:
+        raise ValueError("clean-install vault create does not accept request fields")
+    created = create_clean_install_vault(config.output.state_dir)
+    # The confirmation token is intentionally available only in this one
+    # create response.  Do not reuse this mapper for status/list responses.
+    return {
+        "vault_id": str(created.get("vault_id") or ""),
+        "confirmation_token": str(created.get("confirmation_token") or ""),
+        "archive_sha256": str(created.get("archive_sha256") or ""),
+        "archive_size_bytes": int(created.get("archive_size_bytes") or 0),
+        "schema_version": str(created.get("schema_version") or ""),
+        "semantic_manifest": created.get("semantic_manifest") or {},
+    }
+
+
+def clean_install_vault_list_payload(config: AppConfig) -> dict[str, Any]:
+    del config
+    info = clean_install_vault_info()
+    if not info.get("exists") or not info.get("pending") or not str(info.get("vault_id") or ""):
+        return {"vaults": []}
+    return {"vaults": [clean_install_vault_public_payload(info)]}
+
+
+def clean_install_vault_status_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    del config
+    vault_id = query_one(query, "vault_id")
+    if not vault_id:
+        raise ValueError("vault_id is required")
+    info = clean_install_vault_info()
+    if not info.get("exists") or not info.get("pending") or str(info.get("vault_id") or "") != vault_id:
+        raise FileNotFoundError(vault_id)
+    return clean_install_vault_public_payload(info)
+
+
+def clean_install_vault_restore_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"vault_id", "confirmation_token"}
+    unknown = sorted(str(key) for key in payload if str(key) not in allowed)
+    if unknown:
+        raise ValueError(f"unsupported clean-install vault restore fields: {', '.join(unknown)}")
+    vault_id = str(payload.get("vault_id") or "").strip()
+    confirmation_token = str(payload.get("confirmation_token") or "").strip()
+    if not vault_id:
+        raise ValueError("vault_id is required")
+    if not confirmation_token:
+        raise ValueError("confirmation_token is required")
+    restored = restore_clean_install_vault(
+        config.output.state_dir,
+        vault_id=vault_id,
+        confirmation_token=confirmation_token,
+    )
+    verification = restored.get("verification") if isinstance(restored.get("verification"), dict) else {}
+    cleanup = restored.get("cleanup") if isinstance(restored.get("cleanup"), dict) else {}
+    if not bool(verification.get("verified")) or not bool(cleanup.get("source_deleted")):
+        raise RuntimeError("clean-install vault restore did not complete verified source cleanup")
+    return {
+        "completed": bool(restored.get("completed")),
+        "vault_id": str(restored.get("vault_id") or vault_id),
+        "verification": verification,
+        "cleanup": cleanup,
+    }
+
+
+def clean_install_vault_public_payload(info: dict[str, Any]) -> dict[str, Any]:
+    """Return vault metadata without confirmation credentials."""
+    return {
+        "vault_id": str(info.get("vault_id") or ""),
+        "created_at": str(info.get("created_at") or ""),
+        "schema_version": str(info.get("schema_version") or ""),
+        "archive_sha256": str(info.get("archive_sha256") or ""),
+        "archive_size_bytes": int(info.get("archive_size_bytes") or 0),
+        "verification": str(info.get("verification") or ""),
+        "pending": bool(info.get("pending")),
+    }
 
 
 def backup_snapshot_payload(item: dict[str, Any]) -> dict[str, Any]:

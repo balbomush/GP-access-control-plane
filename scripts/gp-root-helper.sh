@@ -8,7 +8,7 @@ INITIAL_COMMAND="${1:-}"
 CONFIG_FILE="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
 # Strict updates deliberately do not consume caller-controlled environment or
 # configuration.  The fixed installation profile is loaded later as data.
-if [ "$INITIAL_COMMAND" != "queue-update" ]; then
+if [ "$INITIAL_COMMAND" != "queue-update" ] && [ "$INITIAL_COMMAND" != "clean-install" ]; then
   [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 fi
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
@@ -108,6 +108,23 @@ validate_expected_sha() {
   esac
   [ "${#expected_sha}" -eq 40 ] || fail "expected SHA must be 40 lowercase hexadecimal characters"
   printf '%s\n' "$expected_sha"
+}
+
+validate_clean_install_vault_id() {
+  clean_vault_id="${1:-}"
+  case "$clean_vault_id" in
+    ???????????????????????????????? ) ;;
+    *) fail "vault ID must be exactly 32 lowercase hexadecimal characters" ;;
+  esac
+  case "$clean_vault_id" in
+    *[!0-9a-f]*) fail "vault ID must be exactly 32 lowercase hexadecimal characters" ;;
+  esac
+  printf '%s\n' "$clean_vault_id"
+}
+
+validate_clean_install_candidate_ref() {
+  [ "${1:-}" = refs/heads/dev ] || fail "clean-install candidate ref must be exactly refs/heads/dev"
+  printf '%s\n' 'refs/heads/dev'
 }
 
 shell_quote() {
@@ -2509,6 +2526,138 @@ recover_registered_process_runs() {
   done
 }
 
+readonly CLEAN_INSTALL_TRANSACTION_ROOT='/var/lib/gp-control-plane/clean-install-transactions'
+readonly CLEAN_INSTALL_AUTHORIZATION='/run/gp-control-plane/trusted-clean-install.authorized'
+
+clean_install_safe_user_path() {
+  clean_path="$1"
+  clean_uid="$2"
+  clean_mode="$3"
+  clean_label="$4"
+  [ -e "$clean_path" ] && [ ! -L "$clean_path" ] || fail "$clean_label must be a regular non-symlink path"
+  [ "$(readlink -f -- "$clean_path" 2>/dev/null || true)" = "$clean_path" ] || fail "$clean_label must be canonical"
+  [ "$(stat -c '%u:%a' "$clean_path" 2>/dev/null || true)" = "$clean_uid:$clean_mode" ] || fail "$clean_label has unsafe owner or mode"
+}
+
+validate_clean_install_vault() {
+  clean_vault_id="$1"
+  clean_expected_sha="$2"
+  clean_vault="$strict_target_home/.local/share/gp-control-plane/clean-install-vault"
+  clean_uid="$(id -u "$strict_install_user")" || fail "cannot resolve install-user uid"
+  [ -d "$strict_target_home" ] && [ ! -L "$strict_target_home" ] || fail "install-user home is unsafe"
+  [ "$(readlink -f -- "$strict_target_home" 2>/dev/null || true)" = "$strict_target_home" ] || fail "install-user home must be canonical"
+  [ "$(stat -c '%u' "$strict_target_home" 2>/dev/null || true)" = "$clean_uid" ] || fail "install-user home owner changed"
+  for clean_dir in "$strict_target_home/.local" "$strict_target_home/.local/share" "$strict_target_home/.local/share/gp-control-plane"; do
+    [ -d "$clean_dir" ] && [ ! -L "$clean_dir" ] || fail "clean-install vault parent is unsafe: $clean_dir"
+    [ "$(readlink -f -- "$clean_dir" 2>/dev/null || true)" = "$clean_dir" ] || fail "clean-install vault parent must be canonical: $clean_dir"
+    [ "$(stat -c '%u' "$clean_dir" 2>/dev/null || true)" = "$clean_uid" ] || fail "clean-install vault parent owner changed: $clean_dir"
+  done
+  clean_install_safe_user_path "$clean_vault" "$clean_uid" 700 'clean-install vault'
+  clean_archive="$clean_vault/archive.zip"
+  clean_entry="$clean_vault/entry.json"
+  clean_install_safe_user_path "$clean_archive" "$clean_uid" 600 'clean-install vault archive'
+  clean_install_safe_user_path "$clean_entry" "$clean_uid" 600 'clean-install vault entry'
+  for clean_member in "$clean_vault"/* "$clean_vault"/.[!.]* "$clean_vault"/..?*; do
+    [ -e "$clean_member" ] || [ -L "$clean_member" ] || continue
+    case "${clean_member##*/}" in archive.zip|entry.json|cleanup.journal.json) ;; *) fail "clean-install vault contains an unexpected member" ;; esac
+  done
+  # entry.json is produced by the backend.  Parse it with the fixed system
+  # interpreter; argv data are validated as values, never evaluated as shell.
+  /usr/bin/python3 - "$clean_entry" "$clean_vault_id" "$clean_expected_sha" "$clean_archive" <<'PY' || fail "clean-install vault metadata does not bind the requested vault and candidate"
+import hashlib, json, os, sys
+entry, vault_id, expected_sha, archive = sys.argv[1:]
+with open(entry, encoding='utf-8') as handle:
+    data = json.load(handle)
+if not isinstance(data, dict):
+    raise SystemExit(1)
+if data.get('vault_id') != vault_id or data.get('verification') != 'pending':
+    raise SystemExit(1)
+if data.get('archive_size_bytes') != os.stat(archive).st_size:
+    raise SystemExit(1)
+digest_object = hashlib.sha256()
+with open(archive, 'rb') as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+        digest_object.update(chunk)
+digest = digest_object.hexdigest()
+if data.get('archive_sha256') != digest:
+    raise SystemExit(1)
+# expected_sha is deliberately consumed so accidental changes to the protocol
+# cannot turn this into an unbound generic vault preflight.
+if len(expected_sha) != 40 or any(char not in '0123456789abcdef' for char in expected_sha):
+    raise SystemExit(1)
+PY
+  CLEAN_INSTALL_VAULT="$clean_vault"
+  export CLEAN_INSTALL_VAULT
+}
+
+clean_install_git() {
+  env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git "$@"
+}
+
+clean_install_validate_staged_file() {
+  clean_file="$1"
+  [ -f "$clean_file" ] && [ ! -L "$clean_file" ] || fail "staged clean-install file is unsafe: $clean_file"
+  [ "$(readlink -f -- "$clean_file" 2>/dev/null || true)" = "$clean_file" ] || fail "staged clean-install file is non-canonical: $clean_file"
+  [ "$(stat -c '%u:%a' "$clean_file" 2>/dev/null || true)" = '0:700' ] || fail "staged clean-install file must be root-owned mode 0700: $clean_file"
+}
+
+clean_install_stage_candidate() {
+  clean_ref="$1"
+  clean_sha="$2"
+  clean_txn="$3"
+  clean_repo="$clean_txn/candidate"
+  install -d -m 0700 -o root -g root "$clean_repo" || fail "cannot create clean-install candidate stage"
+  clean_install_git init "$clean_repo" >/dev/null || fail "cannot initialize clean-install stage"
+  clean_install_git -C "$clean_repo" remote add origin "$STRICT_UPSTREAM" || fail "cannot configure clean-install upstream"
+  clean_install_git -C "$clean_repo" fetch --no-tags --depth=1 origin "$clean_ref" || fail "cannot fetch clean-install candidate"
+  clean_actual_sha="$(clean_install_git -C "$clean_repo" rev-parse --verify FETCH_HEAD^{commit})" || fail "cannot resolve clean-install candidate"
+  [ "$clean_actual_sha" = "$clean_sha" ] || fail "clean-install candidate SHA does not match expected SHA"
+  clean_install_git -C "$clean_repo" checkout --detach --force "$clean_actual_sha" >/dev/null || fail "cannot stage clean-install candidate"
+  chown -R root:root "$clean_repo" || fail "cannot own clean-install candidate"
+  chmod -R go-w "$clean_repo" || fail "cannot protect clean-install candidate"
+  [ "$(readlink -f -- "$clean_repo" 2>/dev/null || true)" = "$clean_repo" ] || fail "clean-install stage is non-canonical"
+  printf '%s\n' "$clean_repo"
+}
+
+clean_install_transaction() {
+  clean_ref="$1"
+  clean_sha="$2"
+  clean_vault_id="$3"
+  load_strict_install_profile
+  validate_clean_install_vault "$clean_vault_id" "$clean_sha"
+  ensure_strict_root_dir "$CLEAN_INSTALL_TRANSACTION_ROOT" 700
+  clean_stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  clean_txn="$CLEAN_INSTALL_TRANSACTION_ROOT/$clean_stamp"
+  [ ! -e "$clean_txn" ] && [ ! -L "$clean_txn" ] || fail "clean-install transaction already exists"
+  install -d -m 0700 -o root -g root "$clean_txn" || fail "cannot create clean-install transaction"
+  clean_repo="$(clean_install_stage_candidate "$clean_ref" "$clean_sha" "$clean_txn")"
+  clean_runner_source="$clean_repo/scripts/clean-install-root-runner.sh"
+  [ -f "$clean_runner_source" ] && [ ! -L "$clean_runner_source" ] || fail "candidate has no safe clean-install runner"
+  clean_runner="$clean_txn/runner"
+  install -m 0700 -o root -g root "$clean_runner_source" "$clean_runner" || fail "cannot stage clean-install runner"
+  clean_source_digest="$(sha256sum "$clean_runner_source" | awk '{print $1}')" || fail "cannot hash staged clean-install runner"
+  clean_runner_digest="$(sha256sum "$clean_runner" | awk '{print $1}')" || fail "cannot hash root-owned clean-install runner"
+  [ "$clean_source_digest" = "$clean_runner_digest" ] || fail "root-owned staged clean-install runner hash does not match"
+  clean_install_validate_staged_file "$clean_runner"
+  strict_safe_root_target /run/gp-control-plane directory clean-install-runtime || fail "clean-install runtime directory is unsafe"
+  [ ! -e "$CLEAN_INSTALL_AUTHORIZATION" ] && [ ! -L "$CLEAN_INSTALL_AUTHORIZATION" ] || fail "clean-install authorization already exists"
+  umask 077
+  clean_authorization_tmp="$(mktemp /run/gp-control-plane/.trusted-clean-install.XXXXXX)" || fail "cannot create clean-install authorization"
+  printf 'trusted-clean-install-v1 %s\n' "$clean_repo" > "$clean_authorization_tmp" && chown root:root "$clean_authorization_tmp" && chmod 0600 "$clean_authorization_tmp" && mv -f -- "$clean_authorization_tmp" "$CLEAN_INSTALL_AUTHORIZATION" || {
+    rm -f -- "${clean_authorization_tmp:-}"
+    fail "cannot protect clean-install authorization"
+  }
+  exec env -i PATH="$PATH" HOME=/root "$clean_runner" --transaction-dir "$clean_txn" --stage-dir "$clean_repo" --install-dir "$strict_install_dir" --state-dir "$strict_state_dir" --install-user "$strict_install_user" --vault-dir "$CLEAN_INSTALL_VAULT"
+}
+
+clean_install_dispatch() {
+  [ "$#" -eq 7 ] && [ "$1" = --vault-id ] && [ "$3" = --candidate-ref ] && [ "$5" = --expected-sha ] && [ "$7" = --apply ] || fail "clean-install requires exactly --vault-id 32-lowercase-hex --candidate-ref refs/heads/dev --expected-sha 40-lowercase-hex --apply"
+  clean_vault_id="$(validate_clean_install_vault_id "$2")"
+  clean_ref="$(validate_clean_install_candidate_ref "$4")"
+  clean_sha="$(validate_expected_sha "$6")"
+  with_recovery_gate clean_install_transaction "$clean_ref" "$clean_sha" "$clean_vault_id"
+}
+
 require_root
 
 command="${1:-}"
@@ -2594,6 +2743,9 @@ case "$command" in
   queue-update)
     [ "$#" -eq 4 ] && [ "$1" = --candidate-ref ] && [ "$3" = --expected-sha ] || fail "queue-update requires exactly --candidate-ref refs/tags/NAME-or-refs/heads/dev --expected-sha 40-lowercase-hex"
     queue_strict_update "$2" "$4"
+    ;;
+  clean-install)
+    clean_install_dispatch "$@"
     ;;
   nft-list-tables)
     exec nft list tables

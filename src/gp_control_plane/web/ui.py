@@ -2059,6 +2059,19 @@ pre {
           </div>
           <div id="backups-table" class="backup-list"></div>
         </div>
+        <div class="preset-panel settings-backups-panel" aria-labelledby="clean-install-vault-title">
+          <div class="panel-header">
+            <h2 id="clean-install-vault-title">Vault для чистой установки</h2>
+            <span class="badge" id="clean-install-vault-count">0</span>
+          </div>
+          <div class="helper-text">Создает одну защищенную локальную копию для отдельного сценария чистой установки. Vault находится вне очищаемых GP-данных. Токен подтверждения будет показан только один раз — сохраните его до очистки.</div>
+          <div class="button-row">
+            <button data-action="create-clean-install-vault" type="button">Создать vault для чистой установки</button>
+            <button class="secondary" data-action="refresh-clean-install-vaults" type="button">Обновить статус vault</button>
+          </div>
+          <div class="helper-text" id="clean-install-vault-updated-at"></div>
+          <div id="clean-install-vaults" class="backup-list"></div>
+        </div>
         <div class="preset-panel settings-danger-panel">
           <div class="panel-header">
             <h2>Опасные действия</h2>
@@ -2084,7 +2097,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, cleanInstallVaults: [], cleanInstallVaultsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2108,6 +2121,8 @@ state.candidateLoading = false;
 state.candidateUpdatedAt = '';
 state.backupsLoading = false;
 state.backupsUpdatedAt = '';
+state.cleanInstallVaultsLoading = false;
+state.cleanInstallVaultsUpdatedAt = '';
 
 const API_ENDPOINTS = Object.freeze({
   core: Object.freeze({
@@ -2120,6 +2135,10 @@ const API_ENDPOINTS = Object.freeze({
     backupsDelete: '/api/core/backups/delete',
     backupsDownloadArchive: '/api/core/backups/download-archive',
     backupsUpload: '/api/core/backups/upload',
+    cleanInstallVaultsCreate: '/api/core/clean-install-vaults/create',
+    cleanInstallVaultsList: '/api/core/clean-install-vaults/list',
+    cleanInstallVaultsStatus: '/api/core/clean-install-vaults/status',
+    cleanInstallVaultsRestore: '/api/core/clean-install-vaults/restore',
     runSettings: '/api/core/run-settings',
     saveRunSettings: '/api/core/run-settings/save',
     latestLog: '/api/core/runs/latest-log',
@@ -2463,6 +2482,7 @@ function setActiveTab(tabName){
   if (tabName === 'settings') {
     if (!mutatingBlocked() && !state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
     if (!state.backupsLoaded) refreshBackups();
+    if (!state.cleanInstallVaultsLoaded) refreshCleanInstallVaults();
   }
 }
 function latestRun(){
@@ -2764,6 +2784,7 @@ const MUTATING_ACTIONS = new Set([
   'update-from-release',
   'create-backup',
   'upload-backup',
+  'create-clean-install-vault',
   'preset-editor-save',
   'preset-editor-delete',
   'preset-new-save',
@@ -3348,6 +3369,8 @@ function renderMetrics(){
     'button[data-action="save-settings"]',
     'button[data-action="create-backup"]',
     'button[data-action="upload-backup"]',
+    'button[data-action="create-clean-install-vault"]',
+    'button[data-clean-install-vault-restore]',
     'button[data-backup-restore]',
     'button[data-backup-delete]',
     'button[data-action="preset-editor-save"]',
@@ -4554,6 +4577,60 @@ function renderBackups(){
   }
   target.innerHTML = rows.map((item) => backupCard(item)).join('');
   renderMetrics();
+}
+function renderCleanInstallVaults(){
+  const rows = Array.isArray(state.cleanInstallVaults) ? state.cleanInstallVaults : [];
+  const countNode = el('clean-install-vault-count');
+  if (countNode) countNode.textContent = String(rows.length);
+  const updatedNode = el('clean-install-vault-updated-at');
+  if (updatedNode) {
+    const updated = friendlyTime(state.cleanInstallVaultsUpdatedAt);
+    updatedNode.textContent = updated ? `Статус обновлен ${updated}` : '';
+  }
+  const target = el('clean-install-vaults');
+  if (!target) return;
+  if (state.cleanInstallVaultsLoading && !state.cleanInstallVaultsLoaded) {
+    target.innerHTML = '<div class="loading-skeleton" aria-label="Загрузка vault"></div>';
+    return;
+  }
+  if (!rows.length) {
+    target.innerHTML = `<div class="empty">${state.cleanInstallVaultsLoaded ? 'Pending vault для чистой установки нет' : 'Откройте вкладку, чтобы загрузить статус vault'}</div>`;
+    return;
+  }
+  target.innerHTML = rows.map((item) => {
+    const id = String(item.vault_id || '');
+    return `<article class="backup-card">
+      <div class="domain-header">
+        <div>
+          <h3>${esc(id)}</h3>
+          <div class="helper-text">${esc(item.created_at || '-')}</div>
+        </div>
+        ${badge(item.pending ? 'ожидает clean install' : 'не ожидает', item.pending ? 'warn' : 'bad')}
+      </div>
+      <div class="backup-meta">
+        <div>Schema: ${esc(item.schema_version || '-')}</div>
+        <div>Размер: ${esc(formatBytes(item.archive_size_bytes || 0))}</div>
+        <div>SHA-256: <code>${esc(item.archive_sha256 || '-')}</code></div>
+        <div>Проверка: ${esc(item.verification || '-')}</div>
+      </div>
+      <div class="helper-text">После успешного verified restore исходный vault будет удален автоматически. Для восстановления потребуется сохраненный ранее токен.</div>
+      <div class="backup-card-actions">
+        <button class="secondary danger" data-clean-install-vault-restore="${esc(id)}" type="button">Восстановить и удалить vault</button>
+      </div>
+    </article>`;
+  }).join('');
+}
+function cleanInstallVaultListFromPayload(data){
+  const items = Array.isArray((data || {}).vaults) ? data.vaults : [];
+  return items.map((item) => ({
+    vault_id: String((item || {}).vault_id || '').trim(),
+    created_at: String((item || {}).created_at || ''),
+    schema_version: String((item || {}).schema_version || ''),
+    archive_sha256: String((item || {}).archive_sha256 || ''),
+    archive_size_bytes: Number((item || {}).archive_size_bytes || 0),
+    verification: String((item || {}).verification || ''),
+    pending: Boolean((item || {}).pending)
+  })).filter((item) => item.vault_id);
 }
 function backupCard(item){
   const id = String(item.id || '');
@@ -6156,6 +6233,69 @@ async function refreshBackups(){
     setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
   }
 }
+async function refreshCleanInstallVaults(){
+  state.cleanInstallVaultsLoading = true;
+  renderCleanInstallVaults();
+  try {
+    const data = await getJson(apiEndpoint('core', 'cleanInstallVaultsList'));
+    state.cleanInstallVaults = cleanInstallVaultListFromPayload(data);
+    state.cleanInstallVaultsLoaded = true;
+    state.cleanInstallVaultsUpdatedAt = new Date().toISOString();
+  } catch (error) {
+    setMessage(`Ошибка загрузки vault: ${error.message}`, 'bad');
+  } finally {
+    state.cleanInstallVaultsLoading = false;
+    renderCleanInstallVaults();
+  }
+}
+async function createCleanInstallVault(){
+  try {
+    const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsCreate'), {});
+    let confirmationToken = String(data.confirmation_token || '');
+    if (!data.vault_id || !confirmationToken) throw new Error('Сервер не вернул идентификатор или одноразовый токен vault');
+    window.prompt('Скопируйте и сохраните одноразовый токен. Он больше не будет показан и потребуется для восстановления после чистой установки.', confirmationToken);
+    confirmationToken = '';
+    setMessage('Vault создан. Одноразовый токен показан только что; сохраните его до чистой установки.', 'good');
+    await refreshCleanInstallVaults();
+  } catch (error) {
+    if (isRuntimeBusyError(error)) {
+      setMessage(backupBusyMessage('create'), 'warn');
+      return;
+    }
+    setMessage(`Ошибка создания vault: ${error.message}`, 'bad');
+  }
+}
+async function restoreCleanInstallVault(vaultId){
+  const id = String(vaultId || '').trim();
+  if (!id) return;
+  const confirmed = window.confirm(`Восстановить данные из vault ${id}? Операция продолжится только после проверки данных и SQLite. При успехе исходный vault будет удален.`);
+  if (!confirmed) return;
+  let confirmationToken = String(window.prompt('Вставьте ранее сохраненный одноразовый токен для этого vault:', '') || '').trim();
+  if (!confirmationToken) {
+    setMessage('Восстановление отменено: одноразовый токен не введен.', 'warn');
+    return;
+  }
+  try {
+    const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsRestore'), {
+      vault_id: id,
+      confirmation_token: confirmationToken
+    });
+    if (!data.completed || !data.verification?.verified || !data.cleanup?.source_deleted) {
+      throw new Error('Восстановление не подтвердило verification=verified и удаление исходного vault');
+    }
+    setMessage('Данные восстановлены, проверены, а исходный vault удален.', 'good');
+    invalidateCandidateCaches();
+    await Promise.all([refresh(), refreshCleanInstallVaults()]);
+  } catch (error) {
+    if (isRuntimeBusyError(error)) {
+      setMessage(backupBusyMessage('restore'), 'warn');
+      return;
+    }
+    setMessage(`Восстановление vault не завершено: ${error.message}. Исходный vault сохранен.`, 'bad');
+  } finally {
+    confirmationToken = '';
+  }
+}
 async function createBackup(){
   try {
     const data = await postJson(apiEndpoint('core', 'backupsCreate'), {});
@@ -6359,7 +6499,7 @@ const button = event.target.closest('button');
     logout();
     return;
   }
-  const protectedMutation = MUTATING_ACTIONS.has(action) || Boolean(button.dataset.backupRestore) || Boolean(button.dataset.backupDelete);
+  const protectedMutation = MUTATING_ACTIONS.has(action) || Boolean(button.dataset.backupRestore) || Boolean(button.dataset.backupDelete) || Boolean(button.dataset.cleanInstallVaultRestore);
   if (protectedMutation && !requireNoActiveRun()) return;
   if (button.dataset.commonDomainSuggestion) {
     chooseCommonDomainSuggestion(button.dataset.commonDomainSuggestion);
@@ -6434,8 +6574,16 @@ const button = event.target.closest('button');
     refreshBackups();
     return;
   }
+  if (button.dataset.action === 'refresh-clean-install-vaults') {
+    refreshCleanInstallVaults();
+    return;
+  }
   if (button.dataset.action === 'create-backup') {
     createBackup();
+    return;
+  }
+  if (button.dataset.action === 'create-clean-install-vault') {
+    createCleanInstallVault();
     return;
   }
   if (button.dataset.action === 'save-settings') {
@@ -6495,6 +6643,10 @@ const button = event.target.closest('button');
   }
   if (button.dataset.backupRestore) {
     restoreBackup(button.dataset.backupRestore);
+    return;
+  }
+  if (button.dataset.cleanInstallVaultRestore) {
+    restoreCleanInstallVault(button.dataset.cleanInstallVaultRestore);
     return;
   }
   if (button.dataset.backupDelete) {

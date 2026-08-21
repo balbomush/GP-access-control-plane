@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
+import re
+import secrets
 import shutil
 import uuid
 import zipfile
@@ -13,12 +17,20 @@ from .resource_budget import BACKUP_STREAM_CHUNK_BYTES
 from .settings import RUN_SETTINGS_KEY, SERVICE_SETTINGS_KEY
 from .state import has_active_runtime, now_iso, read_state, update_state
 from .strategy_safety import analyze_strategy
-from .storage import connect, db_path
+from .storage import connect, db_path, storage_runtime_status, storage_status
 
 
 SNAPSHOT_KEEP = 5
-BACKUP_SCHEMA_VERSION = "6"
-SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"5", BACKUP_SCHEMA_VERSION}
+BACKUP_SCHEMA_VERSION = "7"
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"5", "6", BACKUP_SCHEMA_VERSION}
+HISTORY_BACKUP_SCHEMA_VERSION = "7"
+CLEAN_INSTALL_VAULT_RELATIVE_PATH = Path(".local/share/gp-control-plane/clean-install-vault")
+_VAULT_FILE_MODE = 0o600
+_VAULT_DIRECTORY_MODE = 0o700
+_VAULT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_VAULT_ENTRY_NAME = "entry.json"
+_VAULT_ARCHIVE_NAME = "archive.zip"
+_VAULT_JOURNAL_NAME = "cleanup.journal.json"
 POST_RUN_SNAPSHOT_ERROR_MESSAGE_MAX_LENGTH = 512
 SNAPSHOT_DOWNLOAD_FILES = {
     "manifest.json",
@@ -29,6 +41,7 @@ SNAPSHOT_DOWNLOAD_FILES = {
     "presets/domain-presets.ndjson",
     "presets/preset-domains.ndjson",
     "settings/app-settings.ndjson",
+    "history/runs.ndjson",
 }
 
 
@@ -267,6 +280,15 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     if not verify_snapshot(state_dir, snapshot_id):
         raise ValueError("backup checksum verification failed")
     restore_plan = _load_restore_plan(path)
+    return _restore_snapshot_plan(state_dir, snapshot_id, restore_plan, snapshot_info(state_dir, snapshot_id))
+
+
+def _restore_snapshot_plan(
+    state_dir: Path,
+    snapshot_id: str,
+    restore_plan: dict[str, Any],
+    source_snapshot: dict[str, Any],
+) -> dict[str, Any]:
     pre_restore = create_snapshot(state_dir, protect_ids={snapshot_id})
     strategies = restore_plan["strategies"]
     links = restore_plan["links"]
@@ -276,6 +298,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
     preset_links = restore_plan["preset_links"]
     restore_settings = bool(restore_plan["restore_settings"])
     app_settings = restore_plan["app_settings"]
+    restore_history = bool(restore_plan["restore_history"])
+    history = restore_plan["history"]
     restored_at = now_iso()
     with connect(state_dir) as conn:
         conn.execute("DELETE FROM strategy_domain_results")
@@ -287,7 +311,7 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             domain = str(item.get("domain") or item.get("name") or "").strip()
             if not domain:
                 continue
-            _restore_domain_id(conn, domain)
+            _restore_domain_id(conn, domain, str(item.get("service_group") or ""))
         for item in strategies:
             candidate_id = str(item.get("id") or "").strip()
             if not candidate_id:
@@ -348,6 +372,8 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
             _restore_domain_presets(conn, presets, preset_links)
         if restore_settings:
             _restore_app_settings(conn, app_settings)
+        if restore_history:
+            _restore_completed_history(conn, history)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("restored_snapshot", snapshot_id),
@@ -358,15 +384,657 @@ def restore_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
         )
     if restore_settings:
         _sync_legacy_state_settings_after_restore(state_dir, app_settings)
-    info = snapshot_info(state_dir, snapshot_id)
     return {
         "restored": True,
-        "snapshot": info,
+        "snapshot": source_snapshot,
         "pre_restore_snapshot": pre_restore.get("snapshot"),
         "strategy_count": len(strategies),
         "settings_count": len(app_settings) if restore_settings else 0,
+        "history_count": len(history) if restore_history else 0,
+        "full_f01_restore": bool(restore_plan["full_f01_restore"]),
+        "limited_restore": not bool(restore_plan["full_f01_restore"]),
+        "missing_f01_data": list(restore_plan["missing_f01_data"]),
         "restored_at": restored_at,
     }
+
+
+def clean_install_vault_dir(target_home: Path | None = None) -> Path:
+    """Return the single canonical, install-user-owned clean-install vault."""
+    home = Path(target_home) if target_home is not None else Path.home()
+    return home / CLEAN_INSTALL_VAULT_RELATIVE_PATH
+
+
+def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = None) -> dict[str, Any]:
+    """Create the one pending local vault and reveal its one-time token once.
+
+    The token is never put in the archive, entry, journal, or returned status
+    APIs after this call.  The caller must retain it for the explicit clean
+    install operation.
+    """
+    if has_active_runtime(state_dir):
+        raise RuntimeError("cannot create clean-install vault while a job is running")
+    vault = _prepare_empty_clean_install_vault(target_home)
+    snapshot = create_snapshot(state_dir)
+    snapshot_id = str(snapshot["snapshot"]["id"])
+    archive_source = snapshot_archive_path(state_dir, snapshot_id)
+    vault_id = secrets.token_hex(16)
+    confirmation_token = secrets.token_urlsafe(32)
+    archive = vault / _VAULT_ARCHIVE_NAME
+    entry = vault / _VAULT_ENTRY_NAME
+    try:
+        _copy_private_file(archive_source, archive)
+        archive_sha256 = _sha256_file(archive)
+        payload: dict[str, Any] = {
+            "vault_id": vault_id,
+            "created_at": now_iso(),
+            "snapshot_id": snapshot_id,
+            "schema_version": BACKUP_SCHEMA_VERSION,
+            "archive_sha256": archive_sha256,
+            "archive_size_bytes": archive.stat().st_size,
+            "confirmation_token_sha256": _sha256_text(confirmation_token),
+            "verification": "pending",
+        }
+        _write_private_json_atomic(entry, payload)
+    except BaseException:
+        # A partially written vault remains deliberately: silently replacing it
+        # could overwrite the only user-data copy after a crash.
+        raise
+    return {
+        "created": True,
+        "vault_id": vault_id,
+        "confirmation_token": confirmation_token,
+        "archive_sha256": archive_sha256,
+        "archive_size_bytes": archive.stat().st_size,
+        "schema_version": BACKUP_SCHEMA_VERSION,
+        "snapshot": snapshot["snapshot"],
+        "semantic_manifest": _semantic_manifest_from_snapshot(state_dir, snapshot_id),
+        "vault_path": str(vault),
+    }
+
+
+def clean_install_vault_info(*, target_home: Path | None = None) -> dict[str, Any]:
+    """Read non-secret vault state.  Invalid/pending state is fail-closed."""
+    vault = clean_install_vault_dir(target_home)
+    if not vault.exists() and not vault.is_symlink():
+        return {"exists": False, "pending": False, "vault_path": str(vault)}
+    journal = _validate_vault_topology(vault)
+    entry = vault / _VAULT_ENTRY_NAME
+    archive = vault / _VAULT_ARCHIVE_NAME
+    if journal and journal.get("cleanup") == "completed":
+        return {
+            "exists": True,
+            "pending": False,
+            "vault_path": str(vault),
+            "cleanup": journal.get("cleanup") if journal else "unknown",
+        }
+    if journal:
+        return {
+            "exists": True,
+            "pending": True,
+            "vault_id": journal["vault_id"],
+            "verification": journal["verification"],
+            "cleanup": journal["cleanup"],
+            "vault_path": str(vault),
+        }
+    payload = _read_vault_entry(vault)
+    return {
+        "exists": True,
+        "pending": True,
+        "vault_id": payload["vault_id"],
+        "created_at": payload["created_at"],
+        "schema_version": payload["schema_version"],
+        "archive_sha256": payload["archive_sha256"],
+        "archive_size_bytes": payload["archive_size_bytes"],
+        "verification": payload.get("verification", "pending"),
+        "vault_path": str(vault),
+    }
+
+
+def restore_clean_install_vault(
+    state_dir: Path,
+    *,
+    vault_id: str,
+    confirmation_token: str,
+    target_home: Path | None = None,
+) -> dict[str, Any]:
+    """Restore a pending vault, verify semantic data, then consume it safely."""
+    if has_active_runtime(state_dir):
+        raise RuntimeError("cannot restore clean-install vault while a job is running")
+    vault = clean_install_vault_dir(target_home)
+    clean_id = _validate_vault_id(vault_id)
+    journal = _validate_vault_topology(vault)
+    if journal:
+        if journal.get("vault_id") != clean_id or journal.get("verification") != "verified":
+            raise RuntimeError("clean-install vault has no verified recovery journal")
+        verification = _verification_from_vault_journal(journal)
+        _verify_vault_confirmation_hash(journal, confirmation_token)
+        cleanup = _consume_verified_vault(vault, clean_id, confirmation_token, verification)
+        return {
+            "restored": True,
+            "vault_id": clean_id,
+            "verification": verification,
+            "cleanup": cleanup,
+            "completed": bool(cleanup["completed"]),
+            "resumed_cleanup": True,
+        }
+    payload = _read_vault_entry(vault)
+    if clean_id != payload["vault_id"]:
+        raise ValueError("clean-install vault id does not match")
+    supplied_hash = _sha256_text(str(confirmation_token or ""))
+    if not hmac.compare_digest(supplied_hash, str(payload["confirmation_token_sha256"])):
+        raise ValueError("clean-install confirmation token does not match")
+    archive = vault / _VAULT_ARCHIVE_NAME
+    if archive.stat().st_size != int(payload["archive_size_bytes"]):
+        raise ValueError("clean-install vault archive size does not match")
+    if not hmac.compare_digest(_sha256_file(archive), str(payload["archive_sha256"])):
+        raise ValueError("clean-install vault archive checksum does not match")
+
+    staging = state_dir.parent / f".clean-install-vault-restore-{clean_id}"
+    if staging.exists() or staging.is_symlink():
+        raise RuntimeError("clean-install vault restore staging already exists")
+    staging.mkdir(mode=_VAULT_DIRECTORY_MODE, parents=True)
+    try:
+        snapshot_path, snapshot_id = _extract_clean_install_archive(archive, staging)
+        if not _verify_snapshot_path(snapshot_path):
+            raise ValueError("backup checksum verification failed")
+        restore_plan = _load_restore_plan(snapshot_path)
+        source_snapshot = _snapshot_info_from_path(snapshot_path, snapshot_id)
+        result = _restore_snapshot_plan(state_dir, snapshot_id, restore_plan, source_snapshot)
+        verification = _verify_restore_semantics(state_dir, restore_plan)
+        if not verification["verified"]:
+            raise RuntimeError("clean-install vault semantic verification failed")
+        _mark_vault_verified(vault, payload, verification)
+        cleanup = _consume_verified_vault(vault, clean_id, confirmation_token, verification)
+        result.update(
+            {
+                "vault_id": clean_id,
+                "verification": verification,
+                "cleanup": cleanup,
+                "completed": bool(cleanup["completed"]),
+            }
+        )
+        return result
+    finally:
+        if staging.exists() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _prepare_empty_clean_install_vault(target_home: Path | None) -> Path:
+    vault = clean_install_vault_dir(target_home)
+    home = vault.parents[3]
+    if (
+        not home.is_absolute()
+        or any(part in {".", ".."} for part in home.parts)
+        or not home.exists()
+        or not home.is_dir()
+        or home.is_symlink()
+    ):
+        raise ValueError("clean-install vault target home is not a canonical directory")
+    if vault.exists() or vault.is_symlink():
+        journal_payload = _validate_vault_topology(vault)
+        if journal_payload is None:
+            raise RuntimeError("a pending clean-install vault already exists")
+        if journal_payload.get("cleanup") != "completed":
+            raise RuntimeError("clean-install vault cleanup is incomplete")
+        (vault / _VAULT_JOURNAL_NAME).unlink()
+    else:
+        vault.mkdir(parents=True, mode=_VAULT_DIRECTORY_MODE)
+    _set_vault_mode(vault, _VAULT_DIRECTORY_MODE)
+    return vault
+
+
+def _validate_vault_directory(vault: Path, *, require_existing: bool) -> None:
+    if not vault.is_absolute() or any(part in {".", ".."} for part in vault.parts):
+        raise ValueError("clean-install vault path is not canonical")
+    if require_existing and (not vault.exists() or not vault.is_dir() or vault.is_symlink()):
+        raise ValueError("clean-install vault is not a canonical directory")
+    if not vault.exists():
+        return
+    if any(part.is_symlink() for part in (vault, *vault.parents) if part.exists()):
+        raise ValueError("clean-install vault path must not contain a symlink")
+    _validate_vault_mode_owner(vault, _VAULT_DIRECTORY_MODE)
+
+
+def _validate_vault_topology(vault: Path) -> dict[str, Any] | None:
+    """Validate every member before any vault read, DB mutation, or cleanup.
+
+    Only the durable cleanup journal may coexist with a verified source.  Its
+    explicit phases tolerate the two crash windows around archive/entry unlink;
+    every other file, symlink, or phase is rejected fail-closed.
+    """
+    _validate_vault_directory(vault, require_existing=True)
+    members: dict[str, Path] = {}
+    for member in vault.iterdir():
+        if member.name not in {_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME}:
+            raise ValueError("clean-install vault contains an unexpected member")
+        if member.is_symlink() or not member.is_file():
+            raise ValueError("clean-install vault file is invalid")
+        _validate_vault_file(member)
+        members[member.name] = member
+    journal_path = members.get(_VAULT_JOURNAL_NAME)
+    if journal_path is None:
+        if set(members) != {_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME}:
+            raise ValueError("clean-install vault has incomplete topology")
+        return None
+    journal = _read_optional_private_json(journal_path)
+    if not journal or not _VAULT_ID_RE.fullmatch(str(journal.get("vault_id") or "")):
+        raise ValueError("clean-install vault cleanup journal is invalid")
+    if journal.get("verification") != "verified" or not isinstance(journal.get("checks"), dict):
+        raise ValueError("clean-install vault cleanup journal is not verified")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(journal.get("confirmation_token_sha256") or "")):
+        raise ValueError("clean-install vault cleanup journal has no bound confirmation token")
+    cleanup = str(journal.get("cleanup") or "")
+    phase = str(journal.get("phase") or "")
+    if cleanup == "completed" and phase == "completed":
+        if set(members) != {_VAULT_JOURNAL_NAME}:
+            raise ValueError("completed clean-install vault has unexpected source members")
+    elif cleanup in {"pending", "in_progress"} and phase in {"verified", "archive_pending", "archive_deleted"}:
+        if _VAULT_ENTRY_NAME not in members and phase != "archive_deleted":
+            raise ValueError("clean-install vault cleanup lost its recovery entry")
+    else:
+        raise ValueError("clean-install vault cleanup journal has invalid phase")
+    return journal
+
+
+def _validate_vault_file(path: Path) -> None:
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        raise ValueError(f"clean-install vault file is invalid: {path.name}")
+    _validate_vault_mode_owner(path, _VAULT_FILE_MODE)
+
+
+def _validate_vault_mode_owner(path: Path, expected_mode: int) -> None:
+    if os.name != "posix":
+        return
+    stat = path.stat()
+    if stat.st_uid != os.geteuid():
+        raise PermissionError(f"clean-install vault owner does not match install user: {path.name}")
+    if stat.st_mode & 0o777 != expected_mode:
+        raise PermissionError(f"clean-install vault mode is unsafe: {path.name}")
+
+
+def _set_vault_mode(path: Path, mode: int) -> None:
+    if os.name == "posix":
+        os.chmod(path, mode)
+
+
+def _copy_private_file(source: Path, destination: Path) -> None:
+    temporary = destination.with_name(f".{destination.name}.tmp-{secrets.token_hex(8)}")
+    try:
+        with source.open("rb") as src, temporary.open("xb") as dst:
+            shutil.copyfileobj(src, dst, length=BACKUP_STREAM_CHUNK_BYTES)
+        _set_vault_mode(temporary, _VAULT_FILE_MODE)
+        temporary.replace(destination)
+        _set_vault_mode(destination, _VAULT_FILE_MODE)
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+
+
+def _write_private_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _set_vault_mode(temporary, _VAULT_FILE_MODE)
+        temporary.replace(path)
+        _set_vault_mode(path, _VAULT_FILE_MODE)
+        _fsync_directory(path.parent)
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a completed vault journal replace durable before destructive I/O."""
+    if os.name != "posix":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_optional_private_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    _validate_vault_file(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid clean-install vault metadata: {path.name}") from exc
+    return payload if isinstance(payload, dict) else None
+
+
+def _validate_vault_id(value: str) -> str:
+    clean = str(value or "").strip()
+    if not _VAULT_ID_RE.fullmatch(clean):
+        raise ValueError("invalid clean-install vault id")
+    return clean
+
+
+def _read_vault_entry(vault: Path) -> dict[str, Any]:
+    if _validate_vault_topology(vault) is not None:
+        raise ValueError("clean-install vault source is already in verified cleanup")
+    entry = vault / _VAULT_ENTRY_NAME
+    archive = vault / _VAULT_ARCHIVE_NAME
+    _validate_vault_file(entry)
+    _validate_vault_file(archive)
+    payload = _read_optional_private_json(entry)
+    if not payload:
+        raise ValueError("clean-install vault entry is invalid")
+    required = {
+        "vault_id",
+        "created_at",
+        "snapshot_id",
+        "schema_version",
+        "archive_sha256",
+        "archive_size_bytes",
+        "confirmation_token_sha256",
+    }
+    if not required.issubset(payload):
+        raise ValueError("clean-install vault entry is incomplete")
+    payload["vault_id"] = _validate_vault_id(str(payload["vault_id"]))
+    if str(payload["schema_version"]) not in SUPPORTED_BACKUP_SCHEMA_VERSIONS:
+        raise ValueError("clean-install vault entry has unsupported schema")
+    for key in ("archive_sha256", "confirmation_token_sha256"):
+        if not re.fullmatch(r"[a-f0-9]{64}", str(payload[key])):
+            raise ValueError(f"clean-install vault entry has invalid {key}")
+    try:
+        payload["archive_size_bytes"] = int(payload["archive_size_bytes"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("clean-install vault entry has invalid archive_size_bytes") from exc
+    if payload["archive_size_bytes"] <= 0:
+        raise ValueError("clean-install vault entry has invalid archive_size_bytes")
+    return payload
+
+
+def _extract_clean_install_archive(archive: Path, staging: Path) -> tuple[Path, str]:
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            members = [item for item in zf.infolist() if not item.is_dir()]
+            if not members:
+                raise ValueError("clean-install vault archive is empty")
+            seen: set[str] = set()
+            top_dirs: set[str] = set()
+            for member in members:
+                name = member.filename.replace("\\", "/")
+                if name in seen or name.startswith("/") or "\x00" in name:
+                    raise ValueError("clean-install vault archive has unsafe topology")
+                seen.add(name)
+                if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise ValueError("clean-install vault archive contains symlink")
+                parts = [part for part in name.split("/") if part]
+                if len(parts) < 2 or any(part in {".", ".."} for part in parts):
+                    raise ValueError("clean-install vault archive has unsafe topology")
+                top_dirs.add(parts[0])
+            if len(top_dirs) != 1:
+                raise ValueError("clean-install vault archive must contain one snapshot")
+            snapshot_id = next(iter(top_dirs))
+            if not snapshot_id or snapshot_id.startswith(".") or "/" in snapshot_id or "\\" in snapshot_id:
+                raise ValueError("clean-install vault archive has invalid snapshot id")
+            for member in members:
+                target = _safe_extract_target(staging, member.filename)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member, "r") as src, target.open("xb") as dst:
+                    shutil.copyfileobj(src, dst, length=BACKUP_STREAM_CHUNK_BYTES)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("clean-install vault archive is not a valid zip") from exc
+    path = staging / snapshot_id
+    if not path.is_dir() or path.is_symlink():
+        raise ValueError("clean-install vault archive snapshot is invalid")
+    return path, snapshot_id
+
+
+def _snapshot_info_from_path(path: Path, snapshot_id: str) -> dict[str, Any]:
+    manifest = _read_manifest(path / "manifest.json")
+    return {
+        "id": snapshot_id,
+        "schema_version": manifest.get("schema_version") or "",
+        "compatible": _is_supported_snapshot_manifest(manifest),
+        "created_at": manifest.get("created_at") or snapshot_id,
+        "completed": manifest.get("completed") == "true",
+        "size_bytes": _dir_size(path),
+        "strategy_count": int(manifest.get("strategy_count") or 0),
+        "preset_count": int(manifest.get("preset_count") or 0),
+        "checksum_ok": _verify_snapshot_path(path),
+        "files": _snapshot_files(path),
+    }
+
+
+def _semantic_manifest_from_snapshot(state_dir: Path, snapshot_id: str) -> dict[str, Any]:
+    manifest = _read_manifest(_snapshot_path(state_dir, snapshot_id) / "manifest.json")
+    return {
+        "schema_version": str(manifest.get("schema_version") or ""),
+        "semantic_scope": str(manifest.get("semantic_scope") or "limited"),
+        "domain_count": _int_value(manifest.get("domain_count")),
+        "strategy_count": _int_value(manifest.get("strategy_count")),
+        "link_count": _int_value(manifest.get("link_count")),
+        "preset_count": _int_value(manifest.get("preset_count")),
+        "preset_link_count": _int_value(manifest.get("preset_link_count")),
+        "settings_count": _int_value(manifest.get("settings_count")),
+        "history_count": _int_value(manifest.get("history_count")),
+    }
+
+
+def _verify_restore_semantics(state_dir: Path, restore_plan: dict[str, Any]) -> dict[str, Any]:
+    """Independently compare restored relational values with the parsed backup."""
+    expected_domains = {
+        (
+            str(item.get("domain") or item.get("name") or ""),
+            str(item.get("service_group") or ""),
+        )
+        for item in restore_plan["domains"]
+    }
+    expected_strategies = {str(item.get("id") or "") for item in restore_plan["strategies"]}
+    expected_links = {
+        (
+            str(item.get("strategy_id") or item.get("candidate_id") or ""),
+            str(item.get("domain") or ""),
+            "multi_domain" if str(item.get("scope") or "") == "common" else "single_domain",
+        )
+        for item in restore_plan["links"]
+    }
+    expected_history = [
+        json.dumps(item.get("payload"), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        for item in restore_plan["history"]
+    ]
+    expected_presets = {
+        (
+            str(item.get("scope") or ""),
+            str(item.get("name") or ""),
+            str(item.get("kind") or "user"),
+            str(item.get("label") or item.get("name") or ""),
+            json.dumps(
+                item.get("source") if isinstance(item.get("source"), dict) else {},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        for item in restore_plan["presets"]
+    }
+    expected_preset_links = {
+        (
+            str(item.get("scope") or ""),
+            str(item.get("name") or ""),
+            str(item.get("kind") or "user"),
+            str(item.get("domain") or ""),
+            _int_value(item.get("position")),
+            1 if _int_value(item.get("enabled")) else 0,
+        )
+        for item in restore_plan["preset_links"]
+    }
+    with connect(state_dir) as conn:
+        expected_domain_names = {domain for domain, _service_group in expected_domains}
+        actual_domains = {
+            (str(row["name"]), str(row["service_group"] or ""))
+            for row in conn.execute("SELECT name, service_group FROM domains").fetchall()
+            if str(row["name"]) in expected_domain_names
+        }
+        actual_strategies = {str(row["id"]) for row in conn.execute("SELECT id FROM strategies")}
+        actual_links = {
+            (str(row["strategy_id"]), str(row["domain"]), str(row["source_mode"]))
+            for row in conn.execute(
+                """
+                SELECT r.strategy_id, d.name AS domain, r.source_mode
+                FROM strategy_domain_results r JOIN domains d ON d.id = r.domain_id
+                """
+            )
+        }
+        actual_history = [
+            str(row["payload_json"])
+            for row in conn.execute("SELECT payload_json FROM runs ORDER BY seq ASC").fetchall()
+        ]
+        actual_settings = {
+            str(row["key"]): str(row["value_json"])
+            for row in conn.execute("SELECT key, value_json FROM app_settings").fetchall()
+        }
+        actual_presets = {
+            (
+                str(row["scope"]),
+                str(row["name"]),
+                str(row["kind"]),
+                str(row["label"]),
+                str(row["source_json"] or "{}"),
+            )
+            for row in conn.execute("SELECT scope, name, kind, label, source_json FROM domain_presets").fetchall()
+        }
+        actual_preset_links = {
+            (
+                str(row["scope"]),
+                str(row["name"]),
+                str(row["kind"]),
+                str(row["domain"]),
+                int(row["position"]),
+                int(row["enabled"]),
+            )
+            for row in conn.execute(
+                """
+                SELECT p.scope, p.name, p.kind, d.name AS domain, pd.position, pd.enabled
+                FROM domain_presets p
+                JOIN preset_domains pd ON pd.preset_id = p.id
+                JOIN domains d ON d.id = pd.domain_id
+                """
+            ).fetchall()
+        }
+    expected_settings = {
+        str(item.get("key") or ""): json.dumps(item.get("value"), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        for item in restore_plan["app_settings"]
+    }
+    checks = {
+        "domains": actual_domains == expected_domains,
+        "strategies": actual_strategies == expected_strategies,
+        "strategy_domain_links": actual_links == expected_links,
+        "presets": (not restore_plan["restore_presets"]) or actual_presets == expected_presets,
+        "preset_domains": (not restore_plan["restore_presets"]) or actual_preset_links == expected_preset_links,
+        "settings": (not restore_plan["restore_settings"]) or actual_settings == expected_settings,
+        "completed_history": (not restore_plan["restore_history"]) or actual_history == expected_history,
+    }
+    runtime = storage_runtime_status(state_dir)
+    status = storage_status(state_dir)
+    checks["storage_ready"] = bool(runtime.get("ready"))
+    checks["integrity_check"] = status.get("integrity_check") == "ok"
+    return {
+        "verified": all(checks.values()),
+        "checks": checks,
+        "full_f01_restore": bool(restore_plan["full_f01_restore"]),
+        "missing_f01_data": list(restore_plan["missing_f01_data"]),
+        "storage": {"ready": runtime.get("ready"), "integrity_check": status.get("integrity_check")},
+    }
+
+
+def _mark_vault_verified(vault: Path, payload: dict[str, Any], verification: dict[str, Any]) -> None:
+    payload = dict(payload)
+    payload["verification"] = "verified"
+    payload["verified_at"] = now_iso()
+    _write_private_json_atomic(vault / _VAULT_ENTRY_NAME, payload)
+    _write_private_json_atomic(
+        vault / _VAULT_JOURNAL_NAME,
+        {
+            "vault_id": payload["vault_id"],
+            "verification": "verified",
+            "verified_at": payload["verified_at"],
+            "checks": verification["checks"],
+            "confirmation_token_sha256": payload["confirmation_token_sha256"],
+            "cleanup": "pending",
+            "phase": "verified",
+        },
+    )
+
+
+def _verification_from_vault_journal(journal: dict[str, Any]) -> dict[str, Any]:
+    checks = journal.get("checks")
+    if not isinstance(checks, dict) or not checks or not all(value is True for value in checks.values()):
+        raise RuntimeError("clean-install vault has no successful verified checks")
+    return {"verified": True, "checks": checks}
+
+
+def _verify_vault_confirmation_hash(payload: dict[str, Any], confirmation_token: str) -> None:
+    supplied_hash = _sha256_text(str(confirmation_token or ""))
+    if not hmac.compare_digest(supplied_hash, str(payload.get("confirmation_token_sha256") or "")):
+        raise RuntimeError("clean-install vault confirmation token does not match for consumption")
+
+
+def _write_cleanup_journal(journal_path: Path, journal: dict[str, Any], *, cleanup: str, phase: str) -> dict[str, Any]:
+    updated = dict(journal)
+    updated["cleanup"] = cleanup
+    updated["phase"] = phase
+    updated["updated_at"] = now_iso()
+    _write_private_json_atomic(journal_path, updated)
+    return updated
+
+
+def _consume_verified_vault(
+    vault: Path,
+    vault_id: str,
+    confirmation_token: str,
+    verification: dict[str, Any],
+) -> dict[str, Any]:
+    """Delete source data only after independently re-checking consume guards.
+
+    This deliberately does not trust the caller to have performed the restore
+    verification.  A future call site must provide the same one-time token and
+    can only consume an entry that is durably marked verified with a pending
+    verification journal.
+    """
+    if not isinstance(verification, dict) or verification.get("verified") is not True:
+        raise RuntimeError("clean-install vault consumption requires verified restore")
+    checks = verification.get("checks")
+    if not isinstance(checks, dict) or not checks or not all(value is True for value in checks.values()):
+        raise RuntimeError("clean-install vault consumption requires successful verification checks")
+    clean_id = _validate_vault_id(vault_id)
+    journal_payload = _validate_vault_topology(vault)
+    if not journal_payload or journal_payload.get("vault_id") != clean_id:
+        raise RuntimeError("clean-install vault is not durably verified for consumption")
+    durable_verification = _verification_from_vault_journal(journal_payload)
+    if durable_verification["checks"] != checks:
+        raise RuntimeError("clean-install vault verification does not match durable journal")
+    _verify_vault_confirmation_hash(journal_payload, confirmation_token)
+    journal = vault / _VAULT_JOURNAL_NAME
+    if journal_payload.get("cleanup") == "completed":
+        return {"completed": True, "source_deleted": True, "status": "completed"}
+    if journal_payload.get("cleanup") not in {"pending", "in_progress"}:
+        raise RuntimeError("clean-install vault cleanup journal is not resumable")
+    journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="archive_pending")
+    archive = vault / _VAULT_ARCHIVE_NAME
+    entry = vault / _VAULT_ENTRY_NAME
+    try:
+        if archive.exists():
+            _validate_vault_file(archive)
+            archive.unlink()
+        journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="archive_deleted")
+        if entry.exists():
+            _validate_vault_file(entry)
+            entry.unlink()
+    except OSError as exc:
+        _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase=str(journal_payload["phase"]))
+        return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+    _write_cleanup_journal(journal, journal_payload, cleanup="completed", phase="completed")
+    return {"completed": True, "source_deleted": True, "status": "completed"}
 
 
 def list_snapshots(state_dir: Path) -> dict[str, Any]:
@@ -405,16 +1073,24 @@ def verify_snapshot(state_dir: Path, snapshot_id: str) -> bool:
 
 def _verify_snapshot_path(path: Path) -> bool:
     checksums = path / "checksums.sha256"
-    if not checksums.is_file():
+    if not checksums.is_file() or checksums.is_symlink() or path.is_symlink():
         return False
+    seen: set[str] = set()
     for line in checksums.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         expected, _, rel = line.partition("  ")
-        target = path / rel
-        if not target.is_file() or _sha256_file(target) != expected:
+        if not re.fullmatch(r"[a-f0-9]{64}", expected) or not rel or rel in seen:
             return False
-    return True
+        seen.add(rel)
+        try:
+            target = _safe_extract_target(path, rel)
+            target.relative_to(path.resolve())
+        except ValueError:
+            return False
+        if not target.is_file() or target.is_symlink() or _sha256_file(target) != expected:
+            return False
+    return bool(seen)
 
 
 def _ensure_snapshot_compatible(path: Path) -> None:
@@ -490,6 +1166,7 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
     (root / "strategies").mkdir()
     (root / "presets").mkdir()
     (root / "settings").mkdir()
+    (root / "history").mkdir()
     # All NDJSON files must describe one SQLite snapshot.  A deferred read
     # transaction starts on the first SELECT, does not acquire a write lock,
     # and therefore lets normal HTTP mutations continue in WAL mode.
@@ -502,6 +1179,7 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
             strategy_count, link_count = _export_strategies(conn, root)
             preset_count, preset_link_count = _export_domain_presets(conn, root)
             settings_count = _export_app_settings(conn, root)
+            history_count = _export_completed_history(conn, root)
         except BaseException:
             conn.rollback()
             raise
@@ -520,6 +1198,8 @@ def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None
         "preset_count": str(preset_count),
         "preset_link_count": str(preset_link_count),
         "settings_count": str(settings_count),
+        "history_count": str(history_count),
+        "semantic_scope": "f01-complete",
         "completed": "true",
     }
     _write_json(root / "manifest.json", manifest)
@@ -634,6 +1314,40 @@ def _export_app_settings(conn: Any, root: Path) -> int:
     return count
 
 
+def _export_completed_history(conn: Any, root: Path) -> int:
+    """Export only terminal history records; active runtime is never portable."""
+    count = 0
+    terminal = ("success", "failed", "stopped", "cancelled", "completed")
+    with (root / "history" / "runs.ndjson").open("w", encoding="utf-8") as handle:
+        for row in conn.execute(
+            """
+            SELECT id, kind, status, timestamp, payload_json
+            FROM runs
+            WHERE lower(status) IN (?, ?, ?, ?, ?)
+            ORDER BY seq ASC
+            """,
+            terminal,
+        ):
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except json.JSONDecodeError:
+                # A corrupt history record cannot be represented semantically;
+                # it is deliberately excluded instead of copying raw SQLite.
+                continue
+            if not isinstance(payload, dict):
+                continue
+            item = {
+                "id": str(row["id"] or ""),
+                "kind": str(row["kind"] or ""),
+                "status": str(row["status"] or ""),
+                "timestamp": str(row["timestamp"] or ""),
+                "payload": payload,
+            }
+            count += 1
+            handle.write(json.dumps(item, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+    return count
+
+
 def _write_checksums(root: Path) -> None:
     rows = []
     for item in sorted(root.rglob("*")):
@@ -688,6 +1402,11 @@ def _load_restore_plan(path: Path) -> dict[str, Any]:
     preset_links = _read_ndjson(path / "presets" / "preset-domains.ndjson") if restore_presets else []
     restore_settings = _snapshot_replaces_app_settings(path, manifest)
     app_settings = _read_ndjson(path / "settings" / "app-settings.ndjson") if restore_settings else []
+    restore_history = _snapshot_replaces_history(path, manifest)
+    history = _read_ndjson(path / "history" / "runs.ndjson") if restore_history else []
+    schema = str(manifest.get("schema_version") or "")
+    if schema == HISTORY_BACKUP_SCHEMA_VERSION and not (restore_presets and restore_settings and restore_history):
+        raise ValueError("schema 7 backup is incomplete")
     for item in presets:
         if not str(item.get("scope") or "").strip() or not str(item.get("name") or "").strip():
             raise ValueError("backup contains preset row without scope/name")
@@ -699,6 +1418,18 @@ def _load_restore_plan(path: Path) -> dict[str, Any]:
     for item in app_settings:
         if not str(item.get("key") or "").strip():
             raise ValueError("backup contains app setting row without key")
+    for item in history:
+        if not str(item.get("status") or "").strip():
+            raise ValueError("backup contains history row without status")
+        if str(item.get("status") or "").strip().lower() not in {"success", "failed", "stopped", "cancelled", "completed"}:
+            raise ValueError("backup contains non-terminal history row")
+        if not isinstance(item.get("payload"), dict):
+            raise ValueError("backup contains history row without payload")
+    missing_f01_data: list[str] = []
+    if not restore_settings:
+        missing_f01_data.append("settings")
+    if not restore_history:
+        missing_f01_data.append("completed_history")
     return {
         "manifest": manifest,
         "domains": domains,
@@ -709,6 +1440,10 @@ def _load_restore_plan(path: Path) -> dict[str, Any]:
         "preset_links": preset_links,
         "restore_settings": restore_settings,
         "app_settings": app_settings,
+        "restore_history": restore_history,
+        "history": history,
+        "missing_f01_data": missing_f01_data,
+        "full_f01_restore": schema == HISTORY_BACKUP_SCHEMA_VERSION and not missing_f01_data,
     }
 
 
@@ -746,15 +1481,18 @@ def _bool_value(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _restore_domain_id(conn: Any, domain: str) -> int:
-    conn.execute(
-        """
-        INSERT INTO domains(name, service_group)
-        VALUES(?, '')
-        ON CONFLICT(name) DO NOTHING
-        """,
-        (domain,),
-    )
+def _restore_domain_id(conn: Any, domain: str, service_group: str | None = None) -> int:
+    if service_group is None:
+        conn.execute("INSERT OR IGNORE INTO domains(name, service_group) VALUES(?, '')", (domain,))
+    else:
+        conn.execute(
+            """
+            INSERT INTO domains(name, service_group)
+            VALUES(?, ?)
+            ON CONFLICT(name) DO UPDATE SET service_group = excluded.service_group
+            """,
+            (domain, service_group),
+        )
     row = conn.execute("SELECT id FROM domains WHERE name = ?", (domain,)).fetchone()
     return int(row["id"])
 
@@ -850,6 +1588,25 @@ def _restore_app_settings(conn: Any, app_settings: list[dict[str, Any]]) -> None
         )
 
 
+def _restore_completed_history(conn: Any, history: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM runs")
+    for item in history:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        conn.execute(
+            """
+            INSERT INTO runs(id, kind, status, timestamp, payload_json)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            (
+                str(item.get("id") or ""),
+                str(item.get("kind") or ""),
+                str(item.get("status") or ""),
+                str(item.get("timestamp") or ""),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+
+
 def _sync_legacy_state_settings_after_restore(state_dir: Path, app_settings: list[dict[str, Any]]) -> None:
     restored_settings: dict[str, Any] = {}
     for item in app_settings:
@@ -884,13 +1641,26 @@ def _snapshot_replaces_presets(path: Path, manifest: dict[str, str]) -> bool:
 
 
 def _snapshot_replaces_app_settings(path: Path, manifest: dict[str, str]) -> bool:
-    if str(manifest.get("schema_version") or "") != BACKUP_SCHEMA_VERSION:
+    if str(manifest.get("schema_version") or "") not in {"6", BACKUP_SCHEMA_VERSION}:
         return False
     settings_file = path / "settings" / "app-settings.ndjson"
     if not settings_file.is_file():
         return False
     try:
         _read_ndjson(settings_file)
+    except ValueError:
+        return False
+    return True
+
+
+def _snapshot_replaces_history(path: Path, manifest: dict[str, str]) -> bool:
+    if str(manifest.get("schema_version") or "") != HISTORY_BACKUP_SCHEMA_VERSION:
+        return False
+    history_file = path / "history" / "runs.ndjson"
+    if not history_file.is_file():
+        return False
+    try:
+        _read_ndjson(history_file)
     except ValueError:
         return False
     return True

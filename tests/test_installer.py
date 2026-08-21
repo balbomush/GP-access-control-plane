@@ -52,6 +52,30 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("write_multidomain_runner", self.helper)
         self.assertIn('BRANCH="${GP_BRANCH:-latest-stable}"', self.installer)
 
+    def test_clean_install_launcher_has_one_bounded_root_helper_protocol(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "scripts" / "clean-install-vault.sh").read_text(encoding="utf-8")
+
+        self.assertIn("CHECKOUT_USER=balbomush", launcher)
+        self.assertIn("ROOT_HELPER=/usr/local/libexec/gp-control-plane/gp-root-helper", launcher)
+        self.assertIn("CANDIDATE_REF=refs/heads/dev", launcher)
+        self.assertIn('[ "$#" -eq 7 ]', launcher)
+        self.assertIn('[ "$1" = --vault-id ] && [ "$3" = --candidate-ref ] && [ "$5" = --expected-sha ] && [ "$7" = --confirm-clean-install ] || usage', launcher)
+        self.assertIn('candidate ref must be exactly $CANDIDATE_REF', launcher)
+        self.assertIn('validate_vault_id "$VAULT_ID"', launcher)
+        self.assertIn('validate_expected_sha "$EXPECTED_SHA"', launcher)
+        self.assertIn('exec /usr/bin/sudo -n "$ROOT_HELPER" clean-install \\', launcher)
+        self.assertIn('    --vault-id "$VAULT_ID" \\', launcher)
+        self.assertIn('    --candidate-ref "$CANDIDATE_REF" \\', launcher)
+        self.assertIn('    --expected-sha "$EXPECTED_SHA" \\', launcher)
+        self.assertIn('    --apply', launcher)
+        self.assertNotIn('/bin/sh -c', launcher)
+        self.assertNotIn('sudo systemctl', launcher)
+        self.assertNotIn('sudo rm', launcher)
+        self.assertNotIn('GP_INSTALL_FORCE_CLEAN', launcher)
+        self.assertNotIn('archive.zip', launcher)
+        self.assertNotIn('entry.json', launcher)
+
     def test_release_update_forces_clean_checkout_but_manual_install_keeps_dirty_guard(self) -> None:
         self.assertIn('INSTALL_FORCE_CLEAN="${GP_INSTALL_FORCE_CLEAN:-off}"', self.installer)
         self.assertIn("force_clean_enabled()", self.installer)
@@ -749,7 +773,14 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('[ "\\$strict_restore_state" = absent ]', restore_file)
         self.assertIn('rm -f -- "\\$strict_restore_target" || return 1', restore_file)
 
-        strict_validation = self.installer.index('validate_strict_privileged_destinations\nverify_pinned_update_checkout')
+        ordinary_strict_validation = (
+            'else\n'
+            '  validate_strict_privileged_destinations\n'
+            '  verify_pinned_update_checkout\n'
+            'fi\n\n'
+            'if [ "$STRICT_PREFLIGHT" = on ]; then'
+        )
+        strict_validation = self.installer.index(ordinary_strict_validation)
         preflight = self.installer.index('if [ "$STRICT_PREFLIGHT" = on ]; then')
         self.assertLess(strict_validation, preflight)
         for write_phase in (

@@ -38,6 +38,10 @@
       "description": "Backup, upload, download and restore of internal GP data."
     },
     {
+      "name": "Core Clean-Install Vault",
+      "description": "One pending device-local vault used only by the explicit clean-install recovery flow."
+    },
+    {
       "name": "Core Runs",
       "description": "Full run history, run logs and strategy candidates."
     },
@@ -833,6 +837,109 @@
           "409": {
             "$ref": "#/components/responses/RuntimeBusy"
           }
+        }
+      }
+    },
+    "/api/core/clean-install-vaults/create": {
+      "post": {
+        "tags": ["Core Clean-Install Vault"],
+        "operationId": "createCleanInstallVault",
+        "summary": "Create the one pending device-local clean-install vault",
+        "description": "Returns the confirmation token exactly once. The token is not returned by list or status and must be saved by the operator before the clean installation.",
+        "responses": {
+          "201": {
+            "description": "Pending vault created; response includes the one-time confirmation token.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CleanInstallVaultCreateResponse"},
+                "examples": {"default": {"$ref": "#/components/examples/CleanInstallVaultCreateResponse"}}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/core/clean-install-vaults/list": {
+      "get": {
+        "tags": ["Core Clean-Install Vault"],
+        "operationId": "listCleanInstallVaults",
+        "summary": "List pending clean-install vault metadata without credentials",
+        "responses": {
+          "200": {
+            "description": "Token-free pending vault metadata.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CleanInstallVaultListResponse"},
+                "examples": {"default": {"$ref": "#/components/examples/CleanInstallVaultListResponse"}}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/core/clean-install-vaults/status": {
+      "get": {
+        "tags": ["Core Clean-Install Vault"],
+        "operationId": "getCleanInstallVaultStatus",
+        "summary": "Get token-free status of one pending clean-install vault",
+        "parameters": [
+          {
+            "name": "vault_id",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1},
+            "example": "vault_20260821_120000"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token-free status metadata.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CleanInstallVaultStatus"},
+                "examples": {"default": {"$ref": "#/components/examples/CleanInstallVaultStatus"}}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/core/clean-install-vaults/restore": {
+      "post": {
+        "tags": ["Core Clean-Install Vault"],
+        "operationId": "restoreCleanInstallVault",
+        "summary": "Restore and delete a verified pending clean-install vault",
+        "description": "The operation completes only after semantic verification, SQLite integrity verification and deletion of the source vault. Failed or ambiguous paths retain the source vault.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/CleanInstallVaultRestoreRequest"},
+              "examples": {"restore": {"$ref": "#/components/examples/CleanInstallVaultRestoreRequest"}}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Restore was verified and the source vault was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CleanInstallVaultRestoreResponse"},
+                "examples": {"default": {"$ref": "#/components/examples/CleanInstallVaultRestoreResponse"}}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
+          "default": {"$ref": "#/components/responses/Error"}
         }
       }
     },
@@ -2338,6 +2445,76 @@
               "$ref": "#/components/schemas/BackupSnapshot"
             }
           }
+        },
+        "additionalProperties": false
+      },
+      "CleanInstallVaultCreateResponse": {
+        "type": "object",
+        "required": [
+          "vault_id",
+          "confirmation_token",
+          "archive_sha256",
+          "archive_size_bytes",
+          "schema_version",
+          "semantic_manifest"
+        ],
+        "properties": {
+          "vault_id": {"type": "string", "minLength": 1},
+          "confirmation_token": {"type": "string", "minLength": 1, "writeOnly": true},
+          "archive_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "archive_size_bytes": {"type": "integer", "minimum": 1},
+          "schema_version": {"type": "string", "const": "7"},
+          "semantic_manifest": {"type": "object", "additionalProperties": true}
+        },
+        "additionalProperties": false
+      },
+      "CleanInstallVaultStatus": {
+        "type": "object",
+        "required": [
+          "vault_id",
+          "created_at",
+          "schema_version",
+          "archive_sha256",
+          "archive_size_bytes",
+          "verification",
+          "pending"
+        ],
+        "properties": {
+          "vault_id": {"type": "string", "minLength": 1},
+          "created_at": {"type": "string"},
+          "schema_version": {"type": "string", "const": "7"},
+          "archive_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "archive_size_bytes": {"type": "integer", "minimum": 1},
+          "verification": {"type": "string"},
+          "pending": {"type": "boolean", "const": true}
+        },
+        "additionalProperties": false
+      },
+      "CleanInstallVaultListResponse": {
+        "type": "object",
+        "required": ["vaults"],
+        "properties": {
+          "vaults": {"type": "array", "maxItems": 1, "items": {"$ref": "#/components/schemas/CleanInstallVaultStatus"}}
+        },
+        "additionalProperties": false
+      },
+      "CleanInstallVaultRestoreRequest": {
+        "type": "object",
+        "required": ["vault_id", "confirmation_token"],
+        "properties": {
+          "vault_id": {"type": "string", "minLength": 1},
+          "confirmation_token": {"type": "string", "minLength": 1, "writeOnly": true}
+        },
+        "additionalProperties": false
+      },
+      "CleanInstallVaultRestoreResponse": {
+        "type": "object",
+        "required": ["completed", "vault_id", "verification", "cleanup"],
+        "properties": {
+          "completed": {"type": "boolean", "const": true},
+          "vault_id": {"type": "string", "minLength": 1},
+          "verification": {"type": "object", "additionalProperties": true},
+          "cleanup": {"type": "object", "additionalProperties": true}
         },
         "additionalProperties": false
       },
@@ -4837,6 +5014,61 @@
         "summary": "Выбрать бэкап для действия",
         "value": {
           "snapshot_id": "snapshot_20260722_173000"
+        }
+      },
+      "CleanInstallVaultCreateResponse": {
+        "summary": "Создан pending device-local vault; токен показывается только в этом ответе",
+        "value": {
+          "vault_id": "vault_20260821_120000",
+          "confirmation_token": "save-this-once-before-clean-install",
+          "archive_sha256": "b8e91ca19265dadfac3a4db5f2865d93d9423d6e07c510e1615cf824bd2e2db3",
+          "archive_size_bytes": 184320,
+          "schema_version": "7",
+          "semantic_manifest": {"domains": 2, "strategies": 1, "history": 1, "settings": 1}
+        }
+      },
+      "CleanInstallVaultListResponse": {
+        "summary": "Список pending vault без confirmation token",
+        "value": {
+          "vaults": [
+            {
+              "vault_id": "vault_20260821_120000",
+              "created_at": "2026-08-21T12:00:00Z",
+              "schema_version": "7",
+              "archive_sha256": "b8e91ca19265dadfac3a4db5f2865d93d9423d6e07c510e1615cf824bd2e2db3",
+              "archive_size_bytes": 184320,
+              "verification": "pending",
+              "pending": true
+            }
+          ]
+        }
+      },
+      "CleanInstallVaultStatus": {
+        "summary": "Статус pending vault без confirmation token",
+        "value": {
+          "vault_id": "vault_20260821_120000",
+          "created_at": "2026-08-21T12:00:00Z",
+          "schema_version": "7",
+          "archive_sha256": "b8e91ca19265dadfac3a4db5f2865d93d9423d6e07c510e1615cf824bd2e2db3",
+          "archive_size_bytes": 184320,
+          "verification": "pending",
+          "pending": true
+        }
+      },
+      "CleanInstallVaultRestoreRequest": {
+        "summary": "Восстановить выбранный vault с ранее сохраненным токеном",
+        "value": {
+          "vault_id": "vault_20260821_120000",
+          "confirmation_token": "saved-by-operator"
+        }
+      },
+      "CleanInstallVaultRestoreResponse": {
+        "summary": "Данные проверены и source vault удален",
+        "value": {
+          "completed": true,
+          "vault_id": "vault_20260821_120000",
+          "verification": {"verified": true, "integrity_check": "ok"},
+          "cleanup": {"completed": true, "source_deleted": true}
         }
       },
       "RunSettings": {
