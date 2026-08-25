@@ -154,6 +154,77 @@ read_trusted_profile_state_dir
             env={**os.environ, "GATE_REAL_AWK": bash_path(self.awk)},
         )
 
+    def run_installed_identity_check(
+        self, *, tag_mode: bool, head: str, attached: bool, status: str, tag_exists: bool = True,
+        tag_type: str = "tag", local_tag_object: str = "b" * 40, local_tag_commit: str = "a" * 40,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        if not self.bash:
+            self.skipTest("real Bash is unavailable")
+        resolve = shell_function(self.source, "resolve_immutable_tag")
+        check = shell_function(self.source, "check_installed_ref")
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            git_log = temporary / "git.log"
+            environment = os.environ | {
+                "GIT_LOG": bash_path(str(git_log)),
+                "FAKE_HEAD": head,
+                "FAKE_ATTACHED": "1" if attached else "0",
+                "FAKE_STATUS": status,
+                "FAKE_TAG_EXISTS": "1" if tag_exists else "0",
+                "FAKE_TAG_TYPE": tag_type,
+                "FAKE_LOCAL_TAG_OBJECT": local_tag_object,
+                "FAKE_LOCAL_TAG_COMMIT": local_tag_commit,
+            }
+            harness = f'''set -o pipefail
+PATH=/nonexistent
+INSTALL_DIR="/installed"
+resolve_immutable_tag() {{
+{resolve}
+}}
+check_installed_ref() {{
+{check}
+}}
+git() {{
+  printf '%s\\n' "$*" >> "$GIT_LOG"
+  while [ "$1" = -C ] || [ "$1" = -c ]; do shift 2; done
+  case "$1" in
+    check-ref-format) return 0 ;;
+    ls-remote) printf '%s\\trefs/tags/v1.2.3\\n%s\\trefs/tags/v1.2.3^{{}}\\n' "{'b' * 40}" "{'a' * 40}" ;;
+    rev-parse)
+      case "$3" in
+        HEAD) printf '%s\\n' "$FAKE_HEAD" ;;
+        *'^{{tag}}') [ "$FAKE_TAG_TYPE" = tag ] && printf '%s\\n' "$FAKE_LOCAL_TAG_OBJECT" || return 1 ;;
+        *'^{{commit}}') printf '%s\\n' "$FAKE_LOCAL_TAG_COMMIT" ;;
+        *) return 98 ;;
+      esac
+      ;;
+    show-ref) [ "$FAKE_TAG_EXISTS" = 1 ] ;;
+    cat-file) printf '%s\\n' "$FAKE_TAG_TYPE" ;;
+    symbolic-ref) [ "$FAKE_ATTACHED" = 1 ] && {{ printf '%s\\n' refs/heads/dev; return 0; }}; return 1 ;;
+    status) printf '%s' "$FAKE_STATUS" ;;
+    *) printf 'unexpected fake git command: %s\\n' "$*" >&2; return 99 ;;
+  esac
+}}
+if [ "$1" = tag ]; then
+  REF='v1.2.3'; CANDIDATE_REF=''; EXPECTED_SHA=''; CANONICAL_TAG_OBJECT_SHA=''
+  resolve_immutable_tag
+else
+  REF=''; CANDIDATE_REF='refs/heads/dev'; EXPECTED_SHA="{'a' * 40}"; CANONICAL_TAG_OBJECT_SHA=''
+fi
+check_installed_ref
+check_status=$?
+printf 'canonical=%s expected=%s\\n' "$CANONICAL_TAG_OBJECT_SHA" "$EXPECTED_SHA"
+exit "$check_status"
+'''
+            result = subprocess.run(
+                [self.bash, "-c", harness, "installed-identity", "tag" if tag_mode else "dev"],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            return result, git_log.read_text(encoding="utf-8").splitlines()
+
     def run_update_success_validator(
         self,
         update_log: Path,
@@ -382,7 +453,7 @@ check_installed_ref
         for args, expected_error in (
             (("--unknown",), "unknown argument: --unknown"),
             (("--ref",), "missing value for --ref"),
-            (("--ref", "v1.2.3", "--mode", "unsupported"), "--mode must be installed or dirty-update"),
+            (("--ref", "v1.2.3", "--mode", "unsupported"), "--mode must be installed"),
             (("--ref", "v1.2.3", "--poll-timeout", "9"), "--poll-timeout must be 10..900"),
         ):
             with self.subTest(args=args):
@@ -407,70 +478,10 @@ check_installed_ref
                 self.assertEqual(rejected.returncode, 2)
                 self.assertIn(error, rejected.stderr)
 
-    def test_pretag_dirty_update_queues_before_post_update_identity_check_and_never_uses_tags(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result = self.run_pretag_update_harness(Path(temporary_directory), head="a" * 40)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        events = result.events  # type: ignore[attr-defined]
-        self.assertIn("git -C", events)
-        self.assertIn("check-ref-format refs/heads/dev", events)
-        self.assertIn("root-helper queue-update --candidate-ref refs/heads/dev --expected-sha " + "a" * 40, events)
-        self.assertIn("marker-created ", events)
-        self.assertIn("marker-removed ", events)
-        self.assertLess(events.index("marker-created "), events.index("root-helper queue-update"))
-        self.assertLess(events.index("root-helper queue-update"), events.index("marker-removed "))
-        self.assertLess(events.index("status --porcelain"), events.index("root-helper queue-update"))
-        self.assertLess(events.index("root-helper queue-update"), events.index("rev-parse --verify HEAD"))
-        self.assertNotIn("refs/tags/", events)
-        self.assertNotIn("ls-remote", events)
-        self.assertNotIn(" tag ", events)
-
-    def test_pretag_dirty_update_terminal_failure_is_hermetic_and_does_not_poll(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result = self.run_pretag_update_harness(
-                Path(temporary_directory),
-                head="a" * 40,
-                update_status="failed",
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("queue-update emitted invalid terminal status", result.stderr)
-        self.assertIn("status=failed", result.stdout)
-        events = result.events  # type: ignore[attr-defined]
-        self.assertIn("grep -qx status=success", events)
-        self.assertIn("grep -q ^status=", events)
-        self.assertNotIn("systemctl ", events)
-        self.assertIn("date +%s", events)
-        self.assertNotIn("sleep ", events)
-
-    def test_pretag_dirty_update_rejects_post_update_sha_or_cleanliness_failures(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            sha_mismatch = self.run_pretag_update_harness(Path(temporary_directory), head="b" * 40)
-        self.assertNotEqual(sha_mismatch.returncode, 0)
-        self.assertIn("root-helper queue-update", sha_mismatch.events)  # type: ignore[attr-defined]
-        self.assertIn("does not match candidate refs/heads/dev", sha_mismatch.stderr)
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            dirty = self.run_pretag_update_harness(
-                Path(temporary_directory),
-                head="a" * 40,
-                post_status=" M scripts/release-gates/pi2-gate.sh",
-            )
-        self.assertNotEqual(dirty.returncode, 0)
-        self.assertIn("installed checkout has local changes", dirty.stderr)
-
-    def test_pretag_dirty_update_rejects_valid_evidence_when_the_root_helper_retains_the_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            retained = self.run_pretag_update_harness(
-                Path(temporary_directory),
-                head="a" * 40,
-                retain_dirty_marker=True,
-            )
-
-        self.assertNotEqual(retained.returncode, 0)
-        self.assertIn("queued update did not remove gate dirty marker", retained.stderr)
-        self.assertIn("marker-retained ", retained.events)  # type: ignore[attr-defined]
+    def test_gate_excludes_obsolete_update_mode(self) -> None:
+        self.assertNotIn("queue-update", self.source)
+        self.assertNotIn("dirty-update", self.source)
+        self.assertNotIn("release-updates", self.source)
 
     def test_state_dir_uses_explicit_override_or_a_trusted_install_profile(self) -> None:
         resolve = shell_function(self.source, "resolve_state_dir")
@@ -549,30 +560,21 @@ check_installed_ref
 
     def test_reports_are_root_app_group_and_gate_never_writes_state_as_root(self) -> None:
         report_file = shell_function(self.source, "new_gate_report_file")
-        queue = shell_function(self.source, "queue_dirty_update")
         finish = shell_function(self.source, "finish")
 
         self.assertIn('require_trusted_root_dir "$GATE_REPORT_PARENT" 0 "$APP_GID" 750', self.source)
         self.assertIn('chown root:"$APP_GROUP" "$path" && chmod 0640 "$path"', report_file)
-        self.assertIn('runuser -u "$APP_USER" -- mktemp "$INSTALL_DIR/.pi2-gate-dirty-marker-$RUN_STAMP.XXXXXX"', queue)
         self.assertIn('runuser -u "$APP_USER" -- rm -f -- "$DIRTY_MARKER"', finish)
-        self.assertNotIn("--state-dir", queue)
-        self.assertNotRegex(queue, r">\s*\"\$STATE_DIR")
 
-    def test_dirty_update_uses_typed_pinned_candidate_and_login_keeps_secrets_off_argv(self) -> None:
+    def test_immutable_tag_resolution_and_login_keep_secrets_off_argv(self) -> None:
         resolve = shell_function(self.source, "resolve_immutable_tag")
-        queue = shell_function(self.source, "queue_dirty_update")
         login = shell_function(self.source, "login_api")
 
         self.assertIn('CANDIDATE_REF="refs/tags/$REF"', resolve)
         self.assertIn('git -C "$INSTALL_DIR" check-ref-format "$CANDIDATE_REF"', resolve)
-        self.assertIn('EXPECTED_SHA="${peeled_sha:-$direct_sha}"', resolve)
+        self.assertIn('[ -n "$peeled_sha" ] || { printf \'release tag is not an annotated tag on canonical upstream: %s\\n\'', resolve)
+        self.assertIn('EXPECTED_SHA="$peeled_sha"', resolve)
         self.assertRegex(resolve, r'\[\[ "\$EXPECTED_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]')
-
-        typed_queue = '"$ROOT_HELPER" queue-update --candidate-ref "$CANDIDATE_REF" --expected-sha "$EXPECTED_SHA"'
-        self.assertIn(typed_queue, queue)
-        self.assertLess(queue.index('git -C "$INSTALL_DIR" status --porcelain'), queue.index(typed_queue))
-        self.assertNotIn("--state-dir", queue)
 
         curl_login = login.split('response="$(', 1)[1].split('TOKEN="$(', 1)[0]
         self.assertIn("printf '%s' \"$payload\" | curl", curl_login)
@@ -582,6 +584,35 @@ check_installed_ref
         self.assertIn('json.load(sys.stdin)', login)
         self.assertNotRegex(login, r'\$PYTHON"\s+-\s+"\$response"')
         self.assertIn("prepare_bearer_header_file\n  unset TOKEN", login)
+
+    def test_tag_identity_requires_detached_canonical_annotated_local_tag_while_dev_accepts_attached_head(self) -> None:
+        sha = "a" * 40
+        success, calls = self.run_installed_identity_check(tag_mode=True, head=sha, attached=False, status="")
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertIn(f"canonical={'b' * 40} expected={sha}", success.stdout)
+        self.assertTrue(any("symbolic-ref -q HEAD" in call for call in calls))
+        self.assertTrue(any("show-ref --verify --quiet refs/tags/v1.2.3" in call for call in calls))
+        self.assertTrue(any("cat-file -t refs/tags/v1.2.3" in call for call in calls))
+
+        attached, _ = self.run_installed_identity_check(tag_mode=True, head=sha, attached=True, status="")
+        self.assertNotEqual(attached.returncode, 0)
+        self.assertIn("tag checkout is not detached", attached.stderr)
+
+        missing, _ = self.run_installed_identity_check(tag_mode=True, head=sha, attached=False, status="", tag_exists=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("absent locally", missing.stderr)
+
+        lightweight, _ = self.run_installed_identity_check(tag_mode=True, head=sha, attached=False, status="", tag_type="commit")
+        self.assertNotEqual(lightweight.returncode, 0)
+        self.assertIn("not annotated locally", lightweight.stderr)
+
+        forged, _ = self.run_installed_identity_check(tag_mode=True, head=sha, attached=False, status="", local_tag_object="c" * 40)
+        self.assertNotEqual(forged.returncode, 0)
+        self.assertIn("does not match canonical upstream", forged.stderr)
+
+        dev_attached, dev_calls = self.run_installed_identity_check(tag_mode=False, head=sha, attached=True, status="")
+        self.assertEqual(dev_attached.returncode, 0, dev_attached.stderr)
+        self.assertNotIn("show-ref", "\n".join(dev_calls))
 
     def test_malicious_local_tag_cannot_replace_canonical_upstream_sha(self) -> None:
         resolve = shell_function(self.source, "resolve_immutable_tag")
@@ -600,99 +631,12 @@ check_installed_ref
         self.assertNotIn('remote get-url', resolve)
         self.assertNotIn('git config', resolve)
 
-    def test_dirty_update_requires_complete_queue_and_success_evidence(self) -> None:
-        queue = shell_function(self.source, "queue_dirty_update")
-        validate_queue = shell_function(self.source, "validate_queue_evidence")
-        validate_success = shell_function(self.source, "validate_update_success_evidence")
+    def test_pre_tag_candidate_must_match_canonical_dev_sha(self) -> None:
+        resolve = shell_function(self.source, "resolve_pre_tag_candidate")
 
-        self.assertIn('queue_evidence="$(validate_queue_evidence "$response")" || return 1', queue)
-        self.assertIn('validate_update_success_evidence "$log_file"', queue)
-        self.assertIn('if set(values) != set(expected) | {"unit", "log"}:', self.source)
-        self.assertIn('if key in values:', self.source)
-        self.assertIn('candidate_ref', self.source)
-        self.assertIn('verified_sha', self.source)
-        self.assertIn('staged_sha', self.source)
-        self.assertIn('installed_sha', self.source)
-        self.assertIn('"cleanup_status": ["completed"]', validate_success)
-        self.assertIn('"phase": ["requested", "verified", "staged", "published", "root", "committed", "installed"]', validate_success)
-        self.assertIn('"status": ["success"]', self.source)
-        self.assertIn('require_trusted_root_dir /var/lib/gp-control-plane/release-updates 0 0 700', self.source)
-
-    def test_update_success_validator_requires_completed_cleanup_and_terminal_success(self) -> None:
-        completed_log = """\
-phase=requested
-candidate_ref=refs/tags/v1.2.3
-expected_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-phase=verified
-verified_ref=refs/tags/v1.2.3
-verified_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-phase=staged
-staged_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-phase=published
-phase=root
-phase=committed
-phase=installed
-installed_ref=refs/tags/v1.2.3
-installed_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-cleanup_status=completed
-status=success
-"""
-        deferred_log = completed_log.replace("cleanup_status=completed", "cleanup_status=deferred")
-        early_success_log = completed_log.replace(
-            "cleanup_status=completed\nstatus=success\n",
-            "status=success\ncleanup_status=completed\n",
-        )
-        trailing_output_log = completed_log + "unstructured trailing output\n"
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            temporary = Path(temporary_directory)
-            completed_path = temporary / "completed.log"
-            deferred_path = temporary / "deferred.log"
-            early_success_path = temporary / "early-success.log"
-            trailing_output_path = temporary / "trailing-output.log"
-            completed_path.write_text(completed_log, encoding="utf-8")
-            deferred_path.write_text(deferred_log, encoding="utf-8")
-            early_success_path.write_text(early_success_log, encoding="utf-8")
-            trailing_output_path.write_text(trailing_output_log, encoding="utf-8")
-
-            self.assertEqual(self.run_update_success_validator(completed_path).returncode, 0)
-            self.assertNotEqual(self.run_update_success_validator(deferred_path).returncode, 0)
-            self.assertNotEqual(self.run_update_success_validator(early_success_path).returncode, 0)
-            self.assertNotEqual(self.run_update_success_validator(trailing_output_path).returncode, 0)
-
-    def test_pretag_update_evidence_rejects_remote_sha_mismatch(self) -> None:
-        expected_sha = "a" * 40
-        candidate_ref = "refs/heads/dev"
-        completed_log = f"""\
-phase=requested
-candidate_ref={candidate_ref}
-expected_sha={expected_sha}
-phase=verified
-verified_ref={candidate_ref}
-verified_sha={expected_sha}
-phase=staged
-staged_sha={expected_sha}
-phase=published
-phase=root
-phase=committed
-phase=installed
-installed_ref={candidate_ref}
-installed_sha={expected_sha}
-cleanup_status=completed
-status=success
-"""
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "update.log"
-            path.write_text(completed_log, encoding="utf-8")
-            self.assertEqual(
-                self.run_update_success_validator(path, candidate_ref, expected_sha).returncode,
-                0,
-            )
-            path.write_text(completed_log.replace(f"verified_sha={expected_sha}", "verified_sha=" + "b" * 40), encoding="utf-8")
-            self.assertNotEqual(
-                self.run_update_success_validator(path, candidate_ref, expected_sha).returncode,
-                0,
-            )
+        self.assertIn('ls-remote --exit-code "$CANONICAL_UPSTREAM_URL" "$CANDIDATE_REF"', resolve)
+        self.assertIn('canonical upstream dev does not match expected pre-tag SHA', resolve)
+        self.assertIn('canonical upstream returned duplicate pre-tag refs', resolve)
 
     def test_failure_recovery_records_evidence_stops_only_own_run_and_returns_original_failure(self) -> None:
         failure = shell_function(self.source, "cycle_failure")

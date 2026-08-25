@@ -471,7 +471,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("return Boolean(currentRun());", html)
         self.assertIn("const jobStatus = currentRun()?.status", html)
         self.assertIn("const runId = response?.run_id || '';", html)
-        self.assertIn("target_ref: data.update_id || channel,", html)
+        self.assertNotIn("target_ref: data.update_id || channel,", html)
         self.assertNotIn("current_job", html)
         self.assertNotIn("job_id", html)
         self.assertNotIn("response?.job", html)
@@ -598,23 +598,19 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("settings-release-stable", html)
         self.assertIn("settings-release-prerelease", html)
         self.assertIn("release-version-link", html)
-        self.assertIn("settings-release-log", html)
         self.assertIn("data-action=\"check-releases\"", html)
-        self.assertIn("data-action=\"update-from-release\"", html)
-        self.assertIn("data-action=\"toggle-update-log\"", html)
         self.assertIn("/api/service/releases/available", html)
-        self.assertIn("/api/service/releases/install-channel", html)
-        self.assertIn("/api/service/releases/set-install-channel", html)
-        self.assertIn("/api/service/releases/install-plan", html)
-        self.assertIn("/api/service/releases/install", html)
-        self.assertIn("apiUrl('service', 'installPlan', planParams)", html)
+        self.assertNotIn("/api/service/releases/install-channel", html)
+        self.assertNotIn("/api/service/releases/set-install-channel", html)
+        self.assertNotIn("/api/service/releases/install-plan", html)
+        self.assertNotIn("/api/service/releases/install", html)
         self.assertNotIn("getJson(`/api/releases?", html)
         self.assertNotIn("postJson('/api/releases/update'", html)
-        self.assertIn("releaseUpdate", html)
+        self.assertNotIn("releaseUpdate", html)
         self.assertIn("checkReleases({ silent: true })", html)
-        self.assertIn("Обновление поставлено в очередь", html)
+        self.assertIn("чистая установка по точному тегу", html)
         self.assertNotIn("Релизы еще не проверялись. Обновление из UI", html)
-        self.assertIn("Установить выбранное обновление", html)
+        self.assertNotIn("Установить выбранное обновление", html)
         self.assertIn("debug_stdout", html)
         self.assertIn("/api/core/run-settings", html)
         self.assertIn("/api/core/run-settings/save", html)
@@ -1239,8 +1235,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("function eventRows()", html)
         self.assertIn("stateBoard.last_error", html)
         self.assertIn("log.stderr_diagnostics", html)
-        self.assertIn("state.releaseUpdate", html)
-        self.assertIn("releaseStatus === 'failed'", html)
+        self.assertNotIn("state.releaseUpdate", html)
+        self.assertNotIn("releaseStatus === 'failed'", html)
         self.assertNotIn("release.status === 'failed' || release.error", html)
         self.assertNotIn("eventStore", html)
 
@@ -1344,7 +1340,7 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("const MUTATING_ACTIONS = new Set", html)
-        for action in ("save-settings", "check-releases", "update-from-release", "create-backup", "upload-backup", "preset-editor-save", "preset-editor-delete", "preset-new-save"):
+        for action in ("save-settings", "create-backup", "upload-backup", "preset-editor-save", "preset-editor-delete", "preset-new-save"):
             self.assertIn(action, html)
         self.assertIn("requireNoActiveRun()", html)
         self.assertIn("protectedMutation", html)
@@ -1574,112 +1570,6 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.status, 404)
             self.assertIn("not found", body)
 
-    def test_web_events_return_candidate_version_and_release_update(self) -> None:
-        with _captured_server_temporary_directory() as (raw, start_server):
-            tmp = Path(raw)
-            log_path = tmp / "update.log"
-            candidate_ref = "refs/tags/v0.3.1"
-            expected_sha = "a" * 40
-            log_path.write_text(
-                "\n".join(
-                    [
-                        f"installed_ref={candidate_ref}",
-                        "installed_version=0.3.1",
-                        f"candidate_ref={candidate_ref}",
-                        f"expected_sha={expected_sha}",
-                        f"verified_ref={candidate_ref}",
-                        f"verified_sha={expected_sha}",
-                        f"checked_out_sha={expected_sha}",
-                        f"installed_sha={expected_sha}",
-                        "phase=installed",
-                        "cleanup_status=deferred",
-                        "cleanup_path=/srv/gp/.GP-access-control-plane.strict-previous",
-                        "status=success",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            write_state(
-                tmp / "state",
-                {
-                    "release_update": {
-                        "status": "queued",
-                        "target_ref": "v0.3.1",
-                        "candidate_ref": candidate_ref,
-                        "expected_sha": expected_sha,
-                        "log_path": str(log_path),
-                    }
-                },
-            )
-            config = AppConfig(
-                output=OutputConfig(
-                    state_dir=tmp / "state",
-                ),
-            )
-            port = start_server(serve, config).port
-
-            response_status, _headers, response_body = _http_request(
-                port,
-                "/api/web/events",
-                headers=_authenticated_headers(port),
-            )
-            body = response_body.decode("utf-8")
-
-            self.assertEqual(response_status, 200)
-            payload = json.loads(body)
-            events = {event["type"]: event["payload"] for event in payload["events"]}
-            self.assertIn("status", events)
-            self.assertIn("candidates", events)
-            self.assertEqual(
-                {"strategy_count", "result_count", "domain_count", "strategy_signature", "result_signature"},
-                set(events["candidates"]["version"]),
-            )
-            self.assertIn("release_update", events["status"])
-            self.assertIn('"release_update"', body)
-            self.assertIn('"status":"success"', body)
-            update = events["status"]["release_update"]
-            self.assertTrue(update["verified"])
-            self.assertEqual(update["candidate_ref"], candidate_ref)
-            self.assertEqual(update["expected_sha"], expected_sha)
-            self.assertEqual(update["verified_ref"], candidate_ref)
-            self.assertEqual(update["verified_sha"], expected_sha)
-            self.assertEqual(update["checked_out_sha"], expected_sha)
-            self.assertEqual(update["installed_sha"], expected_sha)
-            self.assertEqual(update["cleanup_status"], "deferred")
-            self.assertEqual(update["cleanup_path"], "/srv/gp/.GP-access-control-plane.strict-previous")
-            persisted = read_state(config.output.state_dir)["release_update"]
-            self.assertEqual(persisted["candidate_ref"], candidate_ref)
-            self.assertEqual(persisted["expected_sha"], expected_sha)
-            self.assertEqual(persisted["installed_sha"], expected_sha)
-            self.assertEqual(persisted["cleanup_status"], "deferred")
-            self.assertEqual(persisted["cleanup_path"], "/srv/gp/.GP-access-control-plane.strict-previous")
-
-            incomplete_log_path = tmp / "incomplete-update.log"
-            incomplete_log_path.write_text("installed_version=0.3.1\nstatus=success\n", encoding="utf-8")
-            write_state(
-                config.output.state_dir,
-                {
-                    "release_update": {
-                        "status": "queued",
-                        "target_ref": "v0.3.1",
-                        "log_path": str(incomplete_log_path),
-                    }
-                },
-            )
-            invalid_status, _headers, invalid_body = _http_request(
-                port,
-                "/api/web/events",
-                headers=_authenticated_headers(port),
-            )
-            invalid_events = {
-                event["type"]: event["payload"] for event in json.loads(invalid_body.decode("utf-8"))["events"]
-            }
-
-            self.assertEqual(invalid_status, 200)
-            self.assertEqual(invalid_events["status"]["release_update"]["status"], "failed")
-            self.assertFalse(invalid_events["status"]["release_update"]["verified"])
-            self.assertIn("pinned candidate", invalid_events["status"]["release_update"]["error"])
-
     def test_core_mode_serves_api_without_web_ui(self) -> None:
         with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
@@ -1820,9 +1710,15 @@ class WebUiTests(unittest.TestCase):
                 self.assertNotIn("503", category_responses)
                 categories_responses = openapi_contract["paths"]["/api/core/presets/v2fly/categories"]["get"]["responses"]
                 self.assertNotIn("503", categories_responses)
-                install_schema = openapi_contract["components"]["schemas"]["InstallReleaseRequest"]
-                self.assertIn("dry_run", install_schema["properties"])
-                self.assertNotIn("target_ref", install_schema["properties"])
+                self.assertNotIn("InstallReleaseRequest", openapi_contract["components"]["schemas"])
+                self.assertNotIn("ReleaseInstallPlan", openapi_contract["components"]["schemas"])
+                self.assertNotIn("ReleaseUpdateInfo", openapi_contract["components"]["schemas"])
+                self.assertNotIn("ReleaseInstallAccepted", openapi_contract["components"]["schemas"])
+                self.assertNotIn("InstallChannel", openapi_contract["components"]["schemas"])
+                self.assertNotIn("InstallReleaseRequest", examples)
+                self.assertNotIn("ReleaseInstallPlanResponse", examples)
+                self.assertNotIn("ReleaseInstallAccepted", examples)
+                self.assertNotIn("InstallChannel", examples)
                 self.assertIn("CoreStatusRunning", examples)
                 self.assertIn("PagedStrategyCandidatesResponse", examples)
                 self.assertIn("PagedCandidateDomainIndexResponse", examples)
@@ -1833,7 +1729,7 @@ class WebUiTests(unittest.TestCase):
                 self.assertIn("PagedCandidateDomainIndexResponse", openapi_contract["components"]["schemas"])
                 self.assertIn("WebPresetsResponse", openapi_contract["components"]["schemas"])
                 self.assertIn("WebPresetDomainsResponse", openapi_contract["components"]["schemas"])
-                self.assertIn("ReleaseInstallPlanResponse", openapi_contract["components"]["schemas"])
+                self.assertNotIn("/api/service/releases/install", openapi_contract["paths"])
                 if target is serve_core:
                     self.assertNotIn("/api/web/candidate-domain-index-page", openapi_contract["paths"])
                     self.assertNotIn("/api/web/presets", openapi_contract["paths"])
@@ -1848,7 +1744,6 @@ class WebUiTests(unittest.TestCase):
                     self.assertIn("/api/web/presets/save", openapi_contract["paths"])
                     self.assertIn("/api/web/presets/delete-user-lists", openapi_contract["paths"])
                     self.assertIn("/api/web/events/stream", openapi_contract["paths"])
-                self.assertIn("/api/service/releases/install-plan", openapi_contract["paths"])
                 web_preset_save_schema = openapi_contract["components"]["schemas"]["WebPresetSaveRequest"]
                 self.assertNotIn("minItems", web_preset_save_schema["properties"]["domains"])
                 runtime_busy_response = openapi_contract["components"]["responses"]["RuntimeBusy"]
@@ -1951,14 +1846,9 @@ class WebUiTests(unittest.TestCase):
                     "application/json"
                 ]["schema"]["$ref"],
             )
-            self.assertEqual(
-                "#/components/schemas/ReleaseInstallAccepted",
-                contract["paths"]["/api/service/releases/install"]["post"]["responses"]["202"]["content"]["application/json"][
-                    "schema"
-                ]["$ref"],
-            )
             self.assertIn("run_id", contract["components"]["schemas"]["RunAccepted"]["properties"])
-            self.assertIn("update_id", contract["components"]["schemas"]["ReleaseInstallAccepted"]["properties"])
+            self.assertNotIn("/api/service/releases/install", contract["paths"])
+            self.assertNotIn("/api/service/releases/install-plan", contract["paths"])
             self.assertNotIn("job_id", json.dumps(contract))
 
         swagger_html = web_docs.swagger_ui_html()
@@ -1968,8 +1858,8 @@ class WebUiTests(unittest.TestCase):
     def test_route_registry_defines_runtime_boundaries(self) -> None:
         self.assertEqual("core", web_routes.route_for("GET", "/api/core/status").namespace)
         self.assertEqual("core", web_routes.route_for("GET", "/api/core/backups/download-archive").namespace)
-        self.assertEqual("service", web_routes.route_for("POST", "/api/service/releases/install").namespace)
-        self.assertEqual("service", web_routes.route_for("GET", "/api/service/releases/install-plan").namespace)
+        self.assertIsNone(web_routes.route_for("POST", "/api/service/releases/install"))
+        self.assertIsNone(web_routes.route_for("GET", "/api/service/releases/install-plan"))
         self.assertEqual("web", web_routes.route_for("GET", "/api/web/run-preferences").namespace)
         self.assertEqual("web", web_routes.route_for("GET", "/api/web/candidate-domain-index-page").namespace)
         self.assertEqual("web", web_routes.route_for("GET", "/api/web/presets").namespace)
@@ -1993,7 +1883,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/core/status", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertNotIn("/api/core/backups/download-file", web_routes.route_paths(method="GET"))
         self.assertIn("/api/service/status", web_routes.JSON_GET_ROUTE_PATHS)
-        self.assertIn("/api/service/releases/install-plan", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertNotIn("/api/service/releases/install-plan", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertIn("/api/web/run-preferences", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertIn("/api/web/candidate-domain-index-page", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertIn("/api/web/presets", web_routes.JSON_GET_ROUTE_PATHS)
@@ -2099,16 +1989,6 @@ class WebUiTests(unittest.TestCase):
             }
             with (
                 mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
-                mock.patch.object(
-                    web_app.service_api,
-                    "queue_release_update",
-                    return_value={"status": "queued", "target_ref": "v0.0.0-test", "update_id": "test-update"},
-                ),
-                mock.patch.object(
-                    web_app,
-                    "release_update_plan",
-                    return_value={"release": release, "can_update": True, "blocked_reason": "", "active_run_id": "", "steps": []},
-                ),
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
                 mock.patch.object(
@@ -2190,10 +2070,6 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/core/events", None, {}),
                     ("GET", "/api/service/status", None, {}),
                     ("GET", "/api/service/releases/available", None, {}),
-                    ("GET", "/api/service/releases/install-channel", None, {}),
-                    ("GET", "/api/service/releases/install-plan?channel=stable", None, {}),
-                    ("POST", "/api/service/releases/set-install-channel", {"channel": "prerelease"}, {}),
-                    ("POST", "/api/service/releases/install", {"channel": "stable", "dry_run": True}, {}),
                     ("GET", "/api/service/v2fly/local-storage-status", None, {}),
                     ("POST", "/api/service/v2fly/check-updates", {}, {}),
                     ("POST", "/api/service/v2fly/update-local-storage", {"dry_run": True}, {}),
@@ -2258,10 +2134,6 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/core/events"): {"events", "next_after_id"},
                     ("GET", "/api/service/status"): {"state", "mode", "services", "version", "data_state", "updated_at"},
                     ("GET", "/api/service/releases/available"): {"current", "releases", "stable_release_url", "prerelease_url"},
-                    ("GET", "/api/service/releases/install-channel"): {"channel"},
-                    ("GET", "/api/service/releases/install-plan"): {"plan"},
-                    ("POST", "/api/service/releases/set-install-channel"): {"channel"},
-                    ("POST", "/api/service/releases/install"): {"accepted", "status", "update_id"},
                     ("GET", "/api/service/v2fly/local-storage-status"): {
                         "state",
                         "source_repo",
@@ -2369,16 +2241,6 @@ class WebUiTests(unittest.TestCase):
                 mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}),
                 mock.patch.object(web_app, "run_standard_discovery", return_value={"status": "success"}),
                 mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
-                mock.patch.object(
-                    web_app.service_api,
-                    "queue_release_update",
-                    return_value={"status": "queued", "target_ref": "v0.0.0-test", "update_id": "test-update"},
-                ),
-                mock.patch.object(
-                    web_app,
-                    "release_update_plan",
-                    return_value={"release": release, "can_update": True, "blocked_reason": "", "active_run_id": "", "steps": []},
-                ),
                 mock.patch.object(web_app.service_api, "fetch_v2fly_revision", return_value="remote-test-revision"),
                 mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", return_value={"count": 0}),
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_post_run_snapshot) as post_run_snapshot,
@@ -2627,64 +2489,6 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(core_payload["state"], "ready")
             self.assertEqual(core_payload["source_commit"], "local-revision")
             self.assertEqual(core_payload["last_update_check"]["remote_revision"], "remote-revision")
-
-    def test_service_release_install_uses_config_install_dir(self) -> None:
-        with _captured_server_temporary_directory() as (raw, start_server):
-            tmp = Path(raw)
-            install_dir = tmp / "install"
-            wrong_cwd = tmp / "wrong-cwd"
-            config = AppConfig(
-                output=OutputConfig(state_dir=tmp / "state"),
-                install=InstallConfig(root_dir=install_dir),
-            )
-            calls: list[dict[str, Any]] = []
-
-            def fake_queue(config_arg: AppConfig, settings: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-                calls.append({"config": config_arg, "settings": settings, "payload": payload})
-                return {"update": {"status": "queued", "target_ref": "v0.4.0", "update_id": "test-update"}}
-
-            with mock.patch.object(web_app.service_api, "queue_release_update_payload", fake_queue), mock.patch(
-                "pathlib.Path.cwd", return_value=wrong_cwd
-            ):
-                port = start_server(serve_core, config).port
-
-                status, _headers, body = _http_request(
-                    port,
-                    "/api/service/releases/install",
-                    method="POST",
-                    body=json.dumps({"channel": "stable"}).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-
-            payload = json.loads(body.decode("utf-8"))
-            self.assertEqual(status, 202)
-            self.assertEqual(payload["status"], "queued")
-            self.assertIs(calls[0]["config"], config)
-            self.assertEqual(calls[0]["settings"]["update_channel"], "stable")
-            self.assertEqual(calls[0]["payload"], {"channel": "stable"})
-
-    def test_service_api_queues_release_update_with_config_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            config = AppConfig(
-                output=OutputConfig(state_dir=tmp / "state"),
-                install=InstallConfig(root_dir=tmp / "install"),
-            )
-            calls: list[dict[str, Any]] = []
-
-            def fake_queue_release_update(state_dir: Path, **kwargs: Any) -> dict[str, Any]:
-                calls.append({"state_dir": state_dir, "kwargs": kwargs})
-                return {"status": "queued", "target_ref": "v0.4.0"}
-
-            with mock.patch.object(web_app.service_api, "queue_release_update", fake_queue_release_update), mock.patch(
-                "pathlib.Path.cwd", side_effect=AssertionError("Path.cwd must not be used")
-            ):
-                result = web_app.service_api.queue_release_update_payload(config, {"update_channel": "stable"}, {"channel": "prerelease"})
-
-            self.assertEqual(result["update"]["status"], "queued")
-            self.assertEqual(calls[0]["state_dir"], config.output.state_dir)
-            self.assertEqual(calls[0]["kwargs"]["channel"], "prerelease")
-            self.assertEqual(calls[0]["kwargs"]["install_dir"], config.install.root_dir)
 
     def test_service_v2fly_update_conflicts_when_runtime_lock_exists(self) -> None:
         with _captured_server_temporary_directory() as (raw, start_server):
@@ -3772,30 +3576,12 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"curl_max_time_doh":4', saved)
             self.assertNotIn('"update_channel"', saved)
 
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            service_body = json.dumps({"channel": "prerelease"})
-            connection.request(
-                "POST",
-                "/api/service/releases/set-install-channel",
-                body=service_body,
-                headers=_authenticated_headers(port, {"Content-Type": "application/json"}),
-            )
-            service_response = connection.getresponse()
-            service_saved = service_response.read().decode("utf-8")
-            connection.close()
-
-            self.assertEqual(service_response.status, 200)
-            self.assertIn('"channel":"prerelease"', service_saved)
             stored = read_app_setting(config.output.state_dir, "run_settings")
-            service_stored = read_app_setting(config.output.state_dir, "service_settings")
             legacy = read_state(config.output.state_dir).get("settings")
             self.assertIsInstance(stored, dict)
-            self.assertIsInstance(service_stored, dict)
             self.assertEqual(stored["curl_parallelism_max"], 25)
             self.assertNotIn("update_channel", stored)
-            self.assertEqual(service_stored["update_channel"], "prerelease")
             self.assertEqual(legacy["curl_parallelism_max"], 25)
-            self.assertEqual(legacy["update_channel"], "prerelease")
 
     def test_read_settings_migrates_legacy_state_settings_to_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3839,25 +3625,6 @@ class WebUiTests(unittest.TestCase):
             self.assertIsNone(service_stored)
             self.assertEqual(legacy["curl_parallelism_max"], 44)
             self.assertEqual(legacy["update_channel"], "stable")
-
-    def test_service_settings_save_ignores_run_settings(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-
-            saved = web_app.save_service_settings(
-                config,
-                {"update_channel": "prerelease", "curl_parallelism_max": 44},
-            )
-
-            stored = read_app_setting(config.output.state_dir, "service_settings")
-            run_stored = read_app_setting(config.output.state_dir, "run_settings")
-            legacy = read_state(config.output.state_dir).get("settings")
-            self.assertEqual(saved["update_channel"], "prerelease")
-            self.assertNotIn("curl_parallelism_max", saved)
-            self.assertEqual(stored["update_channel"], "prerelease")
-            self.assertIsNone(run_stored)
-            self.assertEqual(legacy["update_channel"], "prerelease")
-            self.assertEqual(legacy["curl_parallelism_max"], web_app.DEFAULT_SETTINGS["curl_parallelism_max"])
 
     def test_resource_budget_constants_are_wired_to_runtime_limits(self) -> None:
         from gp_control_plane import backups as backup_module

@@ -12,7 +12,6 @@ from .domain_sources import (
     read_v2fly_group_manifest,
     write_v2fly_catalog_cache,
 )
-from .release_update import queue_release_update
 from .releases import release_channel_info
 from .state import now_iso, read_state
 from .v2fly_payloads import v2fly_storage_status_payload
@@ -67,32 +66,6 @@ def available_releases_payload(settings: dict[str, Any], *, current_version: str
         "releases": [_release_item_payload(stable), _release_item_payload(prerelease)],
         "stable_release_url": str(settings.get("stable_release_url") or ""),
         "prerelease_url": str(settings.get("prerelease_url") or ""),
-    }
-
-
-def install_channel_payload(settings: dict[str, Any]) -> dict[str, str]:
-    return {"channel": str(settings.get("update_channel") or "stable")}
-
-
-def save_install_channel_payload(payload: dict[str, Any]) -> dict[str, str]:
-    channel = str(payload.get("channel") or "").strip()
-    if channel not in {"stable", "prerelease"}:
-        raise ValueError("channel must be stable or prerelease")
-    return {"channel": channel}
-
-
-def queue_release_update_payload(
-    config: AppConfig,
-    settings: dict[str, Any],
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    channel = str(payload.get("channel") or settings.get("update_channel") or "stable")
-    return {
-        "update": queue_release_update(
-            config.output.state_dir,
-            channel=channel,
-            install_dir=config.install.root_dir,
-        )
     }
 
 

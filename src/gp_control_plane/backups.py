@@ -423,6 +423,7 @@ def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = No
     entry = vault / _VAULT_ENTRY_NAME
     try:
         _copy_private_file(archive_source, archive)
+        _validate_clean_install_vault_export(archive, state_dir, vault_id)
         archive_sha256 = _sha256_file(archive)
         payload: dict[str, Any] = {
             "vault_id": vault_id,
@@ -571,12 +572,36 @@ def _prepare_empty_clean_install_vault(target_home: Path | None) -> Path:
     ):
         raise ValueError("clean-install vault target home is not a canonical directory")
     if vault.exists() or vault.is_symlink():
-        journal_payload = _validate_vault_topology(vault)
-        if journal_payload is None:
+        _validate_vault_directory(vault, require_existing=True)
+        members = {member.name: member for member in vault.iterdir()}
+        if _VAULT_JOURNAL_NAME in members:
+            journal_payload = _validate_vault_topology(vault)
+            if journal_payload is None or journal_payload.get("cleanup") != "completed":
+                raise RuntimeError("clean-install vault cleanup is incomplete")
+            (vault / _VAULT_JOURNAL_NAME).unlink()
+            _fsync_directory(vault)
+        elif set(members) == {_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME}:
+            # This is a complete pending vault.  It is the only recoverable
+            # source copy and must never be replaced by an export retry.
+            _validate_vault_topology(vault)
             raise RuntimeError("a pending clean-install vault already exists")
-        if journal_payload.get("cleanup") != "completed":
-            raise RuntimeError("clean-install vault cleanup is incomplete")
-        (vault / _VAULT_JOURNAL_NAME).unlink()
+        elif set(members).issubset({_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME}):
+            # There is no complete entry, hence root clean-remove must reject
+            # this directory.  Both names are private canonical vault files;
+            # after validating them, discard only this incomplete export so a
+            # fresh user-level export can retry safely.
+            for member in members.values():
+                _validate_vault_file(member)
+            for name in (_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME):
+                member = members.get(name)
+                if member is not None:
+                    member.unlink()
+            _fsync_directory(vault)
+        else:
+            # Preserve fail-closed validation for all noncanonical files,
+            # including abandoned temporary files and symlinks.
+            _validate_vault_topology(vault)
+            raise AssertionError("unreachable clean-install vault topology")
     else:
         vault.mkdir(parents=True, mode=_VAULT_DIRECTORY_MODE)
     _set_vault_mode(vault, _VAULT_DIRECTORY_MODE)
@@ -662,9 +687,14 @@ def _copy_private_file(source: Path, destination: Path) -> None:
     try:
         with source.open("rb") as src, temporary.open("xb") as dst:
             shutil.copyfileobj(src, dst, length=BACKUP_STREAM_CHUNK_BYTES)
+            dst.flush()
+            os.fsync(dst.fileno())
         _set_vault_mode(temporary, _VAULT_FILE_MODE)
+        _fsync_file(temporary)
         temporary.replace(destination)
-        _set_vault_mode(destination, _VAULT_FILE_MODE)
+        # This directory sync makes the archive name durable before any caller
+        # can publish entry.json and thereby permit the root clean-remove phase.
+        _fsync_directory(destination.parent)
     finally:
         if temporary.exists() and not temporary.is_symlink():
             temporary.unlink()
@@ -679,8 +709,8 @@ def _write_private_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         _set_vault_mode(temporary, _VAULT_FILE_MODE)
+        _fsync_file(temporary)
         temporary.replace(path)
-        _set_vault_mode(path, _VAULT_FILE_MODE)
         _fsync_directory(path.parent)
     finally:
         if temporary.exists() and not temporary.is_symlink():
@@ -689,6 +719,17 @@ def _write_private_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 def _fsync_directory(path: Path) -> None:
     """Make a completed vault journal replace durable before destructive I/O."""
+    if os.name != "posix":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_file(path: Path) -> None:
+    """Persist final private-file metadata, including the required 0600 mode."""
     if os.name != "posix":
         return
     descriptor = os.open(path, os.O_RDONLY)
@@ -787,6 +828,30 @@ def _extract_clean_install_archive(archive: Path, staging: Path) -> tuple[Path, 
     if not path.is_dir() or path.is_symlink():
         raise ValueError("clean-install vault archive snapshot is invalid")
     return path, snapshot_id
+
+
+def _validate_clean_install_vault_export(archive: Path, state_dir: Path, vault_id: str) -> None:
+    """Fail closed before publishing a complete vault to the root phase.
+
+    The root helper intentionally treats the vault as user data and only
+    validates its narrow ownership/topology boundary.  The application must
+    therefore prove that the copied ZIP itself can be parsed, checksum-checked
+    and converted to a supported restore plan *before* it writes ``entry.json``.
+    Without that entry the root helper rejects the vault as incomplete, so an
+    export failure cannot advance to clean-remove.
+    """
+    staging = state_dir.parent / f".clean-install-vault-export-check-{vault_id}"
+    if staging.exists() or staging.is_symlink():
+        raise RuntimeError("clean-install vault export validation staging already exists")
+    staging.mkdir(mode=_VAULT_DIRECTORY_MODE)
+    try:
+        snapshot_path, _snapshot_id = _extract_clean_install_archive(archive, staging)
+        if not _verify_snapshot_path(snapshot_path):
+            raise ValueError("clean-install vault export checksum verification failed")
+        _load_restore_plan(snapshot_path)
+    finally:
+        if staging.exists() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _snapshot_info_from_path(path: Path, snapshot_id: str) -> dict[str, Any]:

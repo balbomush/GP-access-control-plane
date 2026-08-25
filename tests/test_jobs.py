@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.backups import create_snapshot_if_idle
-from gp_control_plane.core_api import release_update_accepted_payload, runs_history_payload
+from gp_control_plane.core_api import runs_history_payload
 from gp_control_plane.jobs import JobRunner, _CancellationToken
 from gp_control_plane.state import read_state, update_state
 from gp_control_plane.storage import append_run, connect, read_latest_run_payloads
@@ -525,15 +525,6 @@ class JobRunnerTests(unittest.TestCase):
 
             release.set()
             _wait_for_idle_state(state_dir)
-
-    def test_release_update_acknowledgement_uses_only_update_id(self) -> None:
-        payload = release_update_accepted_payload({"update_id": "update-123", "status": "queued"})
-
-        self.assertEqual(payload, {"accepted": True, "update_id": "update-123", "status": "queued"})
-        self.assertNotIn("run_id", payload)
-        self.assertNotIn("job_id", payload)
-        with self.assertRaisesRegex(ValueError, "update_id"):
-            release_update_accepted_payload({"status": "queued"})
 
     def test_state_dir_lock_blocks_parallel_runners(self) -> None:
         with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:

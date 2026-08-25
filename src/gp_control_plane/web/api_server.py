@@ -37,7 +37,6 @@ from ..domain_sources import (
     write_v2fly_catalog_cache,
 )
 from ..jobs import JobRunner
-from ..release_update import queue_release_update, release_update_plan, release_update_status
 from ..releases import release_channel_info
 from ..resource_budget import (
     BACKUP_STREAM_CHUNK_BYTES,
@@ -50,7 +49,6 @@ from ..settings import (
     read_service_settings,
     read_settings,
     save_run_settings,
-    save_service_settings,
     save_settings,
 )
 from ..state import active_job_lock_payload, has_active_runtime, now_iso, read_state, update_state
@@ -191,8 +189,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/service/releases/available": lambda: service_api.available_releases_payload(
                     read_service_settings(config), current_version=__version__
                 ),
-                "/api/service/releases/install-channel": lambda: service_api.install_channel_payload(read_service_settings(config)),
-                "/api/service/releases/install-plan": lambda: _release_update_plan_payload(config, query),
                 "/api/service/v2fly/local-storage-status": lambda: service_api.v2fly_storage_status_payload(config),
             }
 
@@ -343,11 +339,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 restored = core_api.clean_install_vault_restore_payload(config, payload)
                 return restored, HTTPStatus.OK
 
-            def set_install_channel() -> tuple[dict[str, Any], HTTPStatus]:
-                channel_payload = service_api.save_install_channel_payload(payload)
-                save_service_settings(config, {"update_channel": channel_payload["channel"]})
-                return channel_payload, HTTPStatus.OK
-
             def ensure_service_action_idle() -> None:
                 if active_job_lock_payload(config.output.state_dir, cleanup_stale=True):
                     raise RuntimeError("service action is blocked while another job is running")
@@ -360,22 +351,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 if not payload.get("dry_run"):
                     ensure_service_action_idle()
                 return service_api.v2fly_update_local_storage_payload(config, payload), HTTPStatus.OK
-
-            def install_release() -> tuple[dict[str, Any], HTTPStatus]:
-                channel = str(payload.get("channel") or read_service_settings(config).get("update_channel") or "stable")
-                if channel not in {"stable", "prerelease"}:
-                    raise ValueError("channel must be stable or prerelease")
-                if payload.get("dry_run"):
-                    return (
-                        {"accepted": True, "status": "dry_run", "update_id": ""},
-                        HTTPStatus.ACCEPTED,
-                    )
-                update = service_api.queue_release_update_payload(
-                    config,
-                    read_service_settings(config),
-                    payload,
-                ).get("update") or {}
-                return core_api.release_update_accepted_payload(update), HTTPStatus.ACCEPTED
 
             return {
                 "/api/auth/login": (
@@ -421,8 +396,6 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     HTTPStatus.BAD_REQUEST,
                     HTTPStatus.BAD_REQUEST,
                 ),
-                "/api/service/releases/set-install-channel": (set_install_channel, HTTPStatus.BAD_REQUEST, HTTPStatus.BAD_REQUEST),
-                "/api/service/releases/install": (install_release, HTTPStatus.CONFLICT, HTTPStatus.BAD_REQUEST),
                 "/api/service/v2fly/check-updates": (
                     v2fly_check_updates,
                     HTTPStatus.CONFLICT,
@@ -834,7 +807,6 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
         "state": state,
         "settings": settings,
         "run_preferences": run_preferences,
-        "release_update": release_update_status(config.output.state_dir, current_version=__version__),
         "candidate_version": candidate_storage_version(config.output.state_dir),
         "paths": {
             "state_dir": str(config.output.state_dir),
@@ -851,7 +823,7 @@ def _web_event_payloads(config: AppConfig) -> dict[str, dict[str, Any]]:
     status = status_payload(config)
     status_event = {
         key: status[key]
-        for key in ("version", "state", "settings", "run_preferences", "release_update", "paths", "zapret2")
+        for key in ("version", "state", "settings", "run_preferences", "paths", "zapret2")
         if key in status
     }
     return {
@@ -1226,18 +1198,6 @@ def _release_info_payload(config: AppConfig, query: dict[str, list[str]]) -> dic
     prerelease = release_channel_info(current_version=__version__, channel="prerelease")
     selected = prerelease if channel == "prerelease" else stable
     return {"release": selected, "releases": {"stable": stable, "prerelease": prerelease}}
-
-
-def _release_update_plan_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
-    settings = read_service_settings(config)
-    channel = _query_str(query, "channel", str(settings.get("update_channel") or "stable"))
-    return {"plan": release_update_plan(config.output.state_dir, channel=channel)}
-
-
-def _queue_release_update_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
-    settings = read_service_settings(config)
-    channel = str(payload.get("channel") or settings.get("update_channel") or "stable")
-    return {"update": queue_release_update(config.output.state_dir, channel=channel, install_dir=config.install.root_dir)}
 
 
 def _preset_domains_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:

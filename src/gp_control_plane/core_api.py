@@ -371,17 +371,6 @@ def action_accepted_payload(run: dict[str, Any]) -> dict[str, Any]:
         "status": str(run.get("status") or ""),
     }
 
-def release_update_accepted_payload(update: dict[str, Any]) -> dict[str, Any]:
-    update_id = str(update.get("update_id") or "").strip()
-    if not update_id:
-        raise ValueError("release update is missing update_id")
-    return {
-        "accepted": True,
-        "update_id": update_id,
-        "status": str(update.get("status") or ""),
-    }
-
-
 def strategy_discovery_job_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     unknown_keys = sorted(str(key) for key in payload if str(key) not in STRATEGY_DISCOVERY_START_RUN_KEYS)
     if unknown_keys:

@@ -176,6 +176,122 @@ curl_test_https_tls12 ipv4 f01-a.example.test : nfqws2 --payload=tls_client_hell
                 )
             self.assertTrue(clean_install_vault_info(target_home=home)["pending"])
 
+    def test_invalid_export_is_rejected_before_a_complete_vault_can_reach_clean_remove(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "install-user"
+            home.mkdir()
+            source_state = root / "source-state"
+            self._seed_f01(source_state)
+            invalid_archive = root / "invalid-export.zip"
+            invalid_archive.write_bytes(b"not a zip archive")
+
+            with mock.patch("gp_control_plane.backups.snapshot_archive_path", return_value=invalid_archive):
+                with self.assertRaisesRegex(ValueError, "not a valid zip"):
+                    create_clean_install_vault(source_state, target_home=home)
+
+            vault = clean_install_vault_dir(home)
+            self.assertTrue((vault / "archive.zip").is_file())
+            self.assertFalse((vault / "entry.json").exists())
+            with self.assertRaisesRegex(ValueError, "incomplete topology"):
+                clean_install_vault_info(target_home=home)
+
+    def test_archive_directory_sync_failure_prevents_entry_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "install-user"
+            home.mkdir()
+            source_state = root / "source-state"
+            self._seed_f01(source_state)
+
+            with mock.patch("gp_control_plane.backups._fsync_directory", side_effect=OSError("simulated fsync failure")):
+                with self.assertRaisesRegex(OSError, "simulated fsync failure"):
+                    create_clean_install_vault(source_state, target_home=home)
+
+            vault = clean_install_vault_dir(home)
+            self.assertTrue((vault / "archive.zip").is_file())
+            self.assertFalse((vault / "entry.json").exists())
+            with self.assertRaisesRegex(ValueError, "incomplete topology"):
+                clean_install_vault_info(target_home=home)
+
+    def test_entry_is_published_only_after_archive_directory_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "install-user"
+            home.mkdir()
+            source_state = root / "source-state"
+            self._seed_f01(source_state)
+            vault = clean_install_vault_dir(home)
+            observations: list[tuple[bool, bool]] = []
+
+            def observe_sync(path: Path) -> None:
+                self.assertEqual(path, vault)
+                observations.append(((vault / "archive.zip").exists(), (vault / "entry.json").exists()))
+
+            with mock.patch("gp_control_plane.backups._fsync_directory", side_effect=observe_sync):
+                created = create_clean_install_vault(source_state, target_home=home)
+
+            self.assertTrue(created["created"])
+            self.assertEqual(observations, [(True, False), (True, True)])
+
+    def test_retry_replaces_only_incomplete_private_export(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "install-user"
+            home.mkdir()
+            source_state = root / "source-state"
+            self._seed_f01(source_state)
+            vault = clean_install_vault_dir(home)
+            archive = vault / "archive.zip"
+            entry = vault / "entry.json"
+
+            with mock.patch("gp_control_plane.backups._fsync_directory", side_effect=OSError("simulated fsync failure")):
+                with self.assertRaisesRegex(OSError, "simulated fsync failure"):
+                    create_clean_install_vault(source_state, target_home=home)
+            self.assertTrue(archive.exists())
+            self.assertFalse(entry.exists())
+
+            original_unlink = Path.unlink
+            removed: list[Path] = []
+
+            def remember_unlink(path: Path, *args: object, **kwargs: object) -> None:
+                if path.parent == vault:
+                    removed.append(path)
+                original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", remember_unlink):
+                retried = create_clean_install_vault(source_state, target_home=home)
+
+            self.assertTrue(retried["created"])
+            self.assertEqual(removed, [archive])
+            self.assertTrue(archive.is_file())
+            self.assertTrue(entry.is_file())
+            self.assertTrue(clean_install_vault_info(target_home=home)["pending"])
+
+    def test_retry_never_removes_a_complete_pending_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "install-user"
+            home.mkdir()
+            source_state = root / "source-state"
+            self._seed_f01(source_state)
+            created = create_clean_install_vault(source_state, target_home=home)
+            vault = clean_install_vault_dir(home)
+            original_unlink = Path.unlink
+
+            def reject_vault_unlink(path: Path, *args: object, **kwargs: object) -> None:
+                if path.parent == vault:
+                    self.fail(f"retry attempted to remove pending vault member: {path.name}")
+                original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", reject_vault_unlink):
+                with self.assertRaisesRegex(RuntimeError, "pending"):
+                    create_clean_install_vault(source_state, target_home=home)
+
+            self.assertTrue((vault / "archive.zip").is_file())
+            self.assertTrue((vault / "entry.json").is_file())
+            self.assertEqual(clean_install_vault_info(target_home=home)["vault_id"], created["vault_id"])
+
     def test_refuses_second_pending_entry_and_symlink_vault_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

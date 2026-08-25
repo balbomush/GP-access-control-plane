@@ -2019,21 +2019,11 @@ pre {
               </a>
             </div>
           </div>
-          <div class="release-card">
-            <label for="settings-update-channel">Канал установки</label>
-            <select id="settings-update-channel">
-              <option value="stable">Стабильные релизы</option>
-              <option value="prerelease">Предрелизы</option>
-            </select>
-            <div class="setting-note">Stable ставит последний стабильный релиз. Предрелизы ставят последнюю alpha/prerelease-версию.</div>
-          </div>
           <div class="button-row">
             <button class="secondary" data-action="check-releases" type="button">Проверить обновления</button>
-            <button class="secondary tooltip-button" data-action="update-from-release" data-tooltip="Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап." type="button">Установить выбранное обновление</button>
-            <button class="secondary" data-action="toggle-update-log" type="button">Показать лог обновления</button>
           </div>
           <div class="source-preview" id="settings-release-result" hidden></div>
-          <pre class="source-preview release-log" id="settings-release-log" hidden></pre>
+          <div class="setting-note">Переход на новую версию выполняется только как отдельная чистая установка по точному тегу с локальным vault пользовательских данных.</div>
         </div>
         <div class="preset-panel settings-backups-panel">
           <div class="panel-header">
@@ -2097,7 +2087,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseUpdate: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, cleanInstallVaults: [], cleanInstallVaultsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, cleanInstallVaults: [], cleanInstallVaultsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2147,10 +2137,6 @@ const API_ENDPOINTS = Object.freeze({
   }),
   service: Object.freeze({
     releasesAvailable: '/api/service/releases/available',
-    installChannel: '/api/service/releases/install-channel',
-    setInstallChannel: '/api/service/releases/set-install-channel',
-    installPlan: '/api/service/releases/install-plan',
-    installRelease: '/api/service/releases/install',
     v2flyLocalStorageStatus: '/api/service/v2fly/local-storage-status'
   }),
   web: Object.freeze({
@@ -2780,8 +2766,6 @@ const RUN_LAUNCH_SUMMARY_CONTROL_IDS = new Set([
 ]);
 const MUTATING_ACTIONS = new Set([
   'save-settings',
-  'check-releases',
-  'update-from-release',
   'create-backup',
   'upload-backup',
   'create-clean-install-vault',
@@ -3356,14 +3340,6 @@ function renderMetrics(){
   jobBadge.className = `badge ${action.tone}`;
   document.querySelectorAll('button[data-action="run-selected-discovery"]').forEach((button) => {
     button.disabled = busy;
-  });
-  document.querySelectorAll('button[data-action="update-from-release"], button[data-action="check-releases"]').forEach((button) => {
-    button.disabled = busy;
-    if (button.dataset.action === 'update-from-release') {
-      button.dataset.tooltip = busy
-        ? 'Обновление можно запускать только когда подбор стратегий остановлен.'
-        : 'Устанавливает выбранный канал обновления только если подбор не запущен. Перед обновлением создается бекап.';
-    }
   });
   const mutatingSelectors = [
     'button[data-action="save-settings"]',
@@ -4822,31 +4798,6 @@ function eventRows(){
       message: String(stateBoard.last_error)
     });
   }
-  const release = state.releaseUpdate || {};
-  const releaseStatus = String(release.status || '').toLowerCase();
-  if (releaseStatus === 'failed') {
-    rows.push({
-      severity: 'error',
-      time: now,
-      title: 'Ошибка обновления',
-      source: 'release update',
-      message: release.error || release.log_tail || 'Обновление завершилось ошибкой.'
-    });
-  }
-  const cleanupStatus = String(release.cleanup_status || '').toLowerCase();
-  if (releaseStatus === 'success' && (cleanupStatus === 'deferred' || cleanupStatus === 'failed')) {
-    const cleanupPath = release.cleanup_path ? ` Путь карантина: ${release.cleanup_path}.` : '';
-    const cleanupMessage = cleanupStatus === 'deferred'
-      ? `Очистка предыдущей рабочей копии отложена. Новая версия установлена; откройте лог обновления.${cleanupPath}`
-      : `Очистка предыдущей рабочей копии завершилась ошибкой. Новая версия установлена; откройте лог обновления.${cleanupPath}`;
-    rows.push({
-      severity: 'warning',
-      time: now,
-      title: 'Очистка после обновления',
-      source: 'release update',
-      message: cleanupMessage
-    });
-  }
   const log = state.finderLog || {};
   const diagnostics = Array.isArray(log.stderr_diagnostics) ? log.stderr_diagnostics : [];
   diagnostics.slice(0, 3).forEach((item) => {
@@ -4999,11 +4950,9 @@ function renderSettings(){
   const runCurlMaxTime = el('run-curl-max-time');
   const runCurlMaxTimeQuic = el('run-curl-max-time-quic');
   const runCurlMaxTimeDoh = el('run-curl-max-time-doh');
-  const channel = el('settings-update-channel');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
-  if (channel) channel.value = settings.update_channel || 'stable';
   renderReleaseInfo();
   if (!state.settingsTouched && !state.runPreferencesApplied) {
     const curlInput = el('curl-parallelism');
@@ -5033,17 +4982,11 @@ function renderReleaseInfo(){
   const stableLink = el('settings-release-stable-link');
   const prereleaseLink = el('settings-release-prerelease-link');
   const result = el('settings-release-result');
-  const log = el('settings-release-log');
-  const selectedChannel = el('settings-update-channel')?.value || (state.settings || {}).update_channel || 'stable';
-  const selectedRelease = selectedChannel === 'prerelease' ? state.releasePrerelease : state.releaseStable;
+  const selectedRelease = state.releaseStable;
   if (stable) stable.textContent = releaseVersionLabel(state.releaseStable);
   if (prerelease) prerelease.textContent = releaseVersionLabel(state.releasePrerelease);
   if (stableLink && state.releaseStable && state.releaseStable.url) stableLink.href = state.releaseStable.url;
   if (prereleaseLink && state.releasePrerelease && state.releasePrerelease.url) prereleaseLink.href = state.releasePrerelease.url;
-  if (log) {
-    const tail = state.releaseUpdate && state.releaseUpdate.log_tail ? state.releaseUpdate.log_tail : '';
-    log.textContent = tail || 'Лог обновления пока пуст. Он появится после постановки обновления в очередь и работы helper-скрипта.';
-  }
   if (!selectedRelease) {
     if (result) {
       result.hidden = true;
@@ -5053,32 +4996,6 @@ function renderReleaseInfo(){
   }
   if (result) {
     result.hidden = false;
-    if (state.releaseUpdate) {
-      const queued = state.releaseUpdate;
-      const snapshot = queued.snapshot && queued.snapshot.id ? queued.snapshot.id : (typeof queued.snapshot === 'string' ? queued.snapshot : '');
-      const status = queued.status || 'queued';
-      const installed = queued.installed_version ? ` Установленная версия: v${String(queued.installed_version).replace(/^v/, '')}.` : '';
-      const verified = queued.verified ? ' Проверка версии: успешно.' : (status === 'success' ? ' Проверка версии: завершена.' : ' Проверка версии: ожидается после установки.');
-      const log = queued.log_path ? ` Лог: ${queued.log_path}.` : '';
-      const error = queued.error ? ` Ошибка: ${queued.error}.` : '';
-      const rollback = status === 'failed' && queued.rollback_instruction ? ` Откат: ${queued.rollback_instruction}` : '';
-      const cleanupStatus = String(queued.cleanup_status || '').toLowerCase();
-      const cleanupPath = queued.cleanup_path ? ` Путь карантина: ${queued.cleanup_path}.` : '';
-      const cleanup = {
-        completed: ' Очистка предыдущей версии: выполнена.',
-        deferred: ` Внимание: очистка предыдущей рабочей копии отложена. Откройте лог обновления.${cleanupPath}`,
-        failed: ` Внимание: очистка предыдущей рабочей копии завершилась ошибкой. Новая версия установлена; откройте лог обновления.${cleanupPath}`
-      }[cleanupStatus] || '';
-      const statusText = {
-        queued: 'Обновление поставлено в очередь',
-        running: 'Обновление выполняется',
-        success: 'Обновление завершено и версия проверена',
-        failed: 'Обновление завершилось ошибкой'
-      }[status] || `Статус обновления: ${status}`;
-      const snapshotText = snapshot ? ` Перед обновлением создан бекап: ${snapshot}.` : '';
-      result.textContent = `${statusText}.${snapshotText}${installed}${verified}${log}${error}${rollback}${cleanup}`;
-      return;
-    }
     if (selectedRelease.checked) {
       const update = selectedRelease.update_available ? 'Доступно обновление.' : 'Текущая версия не старее найденной.';
       const published = selectedRelease.published_at ? ` Опубликовано: ${friendlyDate(selectedRelease.published_at)}.` : '';
@@ -5105,7 +5022,6 @@ function currentSettingsFromForm(){
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
     curl_parallelism_default: Number(current.curl_parallelism_default || 4),
     ...timeouts,
-    update_channel: el('settings-update-channel')?.value || current.update_channel || 'stable'
   };
 }
 const RUN_SETTING_PAYLOAD_KEYS = Object.freeze([
@@ -5125,26 +5041,17 @@ function runSettingsPayloadFromSettings(payload){
   });
   return result;
 }
-function serviceChannelPayloadFromSettings(payload){
-  return { channel: (payload || {}).update_channel || 'stable' };
-}
 async function fetchSettingsPayload(){
-  const [runSettings, releaseChannel] = await Promise.all([
-    getJson(apiEndpoint('core', 'runSettings')),
-    getJson(apiEndpoint('service', 'installChannel'))
-  ]);
-  return { settings: { ...(runSettings || {}), update_channel: (releaseChannel || {}).channel || 'stable' } };
+  const runSettings = await getJson(apiEndpoint('core', 'runSettings'));
+  return { settings: runSettings || {} };
 }
 async function saveRunSettingsPayload(payload){
   const data = await postJson(apiEndpoint('core', 'saveRunSettings'), { settings: runSettingsPayloadFromSettings(payload) });
   return { settings: { ...(state.settings || {}), ...(data || {}) } };
 }
 async function saveSettingsPayload(payload){
-  const [runSettings, releaseChannel] = await Promise.all([
-    postJson(apiEndpoint('core', 'saveRunSettings'), { settings: runSettingsPayloadFromSettings(payload) }),
-    postJson(apiEndpoint('service', 'setInstallChannel'), serviceChannelPayloadFromSettings(payload))
-  ]);
-  return { settings: { ...(runSettings || {}), update_channel: (releaseChannel || {}).channel || (payload || {}).update_channel || 'stable' } };
+  const runSettings = await postJson(apiEndpoint('core', 'saveRunSettings'), { settings: runSettingsPayloadFromSettings(payload) });
+  return { settings: runSettings || {} };
 }
 async function saveLaunchTimeoutDefaultsNow(){
   const payload = currentSettingsFromForm();
@@ -5170,12 +5077,11 @@ async function saveSettings(){
 }
 async function checkReleases(options = {}){
   const silent = Boolean(options.silent);
-  const channel = el('settings-update-channel')?.value || 'stable';
   state.releaseChecking = true;
   renderReleaseInfo();
   try {
     const data = await getJson(apiEndpoint('service', 'releasesAvailable'));
-    rememberReleasePayload(data || {}, channel);
+    rememberReleasePayload(data || {}, 'stable');
     state.releaseChecked = true;
     renderReleaseInfo();
     if (!silent) setMessage('Обновления проверены', 'good');
@@ -5218,49 +5124,6 @@ function rememberReleasePayload(data, selectedChannel){
   state.releaseInfo = (data || {}).release || state.releaseInfo;
   if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
   if (state.releaseInfo && state.releaseInfo.channel === 'prerelease') state.releasePrerelease = state.releaseInfo;
-}
-function normalizeReleaseUpdatePayload(data, channel){
-  if ((data || {}).update) return data.update;
-  return {
-    status: data.status || 'queued',
-    release: state.releaseInfo || { channel },
-    target_ref: data.update_id || channel,
-    accepted: Boolean(data.accepted)
-  };
-}
-async function updateFromRelease(){
-  const channel = el('settings-update-channel')?.value || 'stable';
-  try {
-    const planParams = new URLSearchParams();
-    planParams.set('channel', channel);
-    const planData = await getJson(apiUrl('service', 'installPlan', planParams));
-    const plan = (planData || {}).plan || {};
-    state.releaseInfo = plan.release || state.releaseInfo;
-    if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
-    if (state.releaseInfo && state.releaseInfo.channel === 'prerelease') state.releasePrerelease = state.releaseInfo;
-    renderReleaseInfo();
-    if (!plan.can_update) {
-      setMessage(`Обновление не готово: ${plan.blocked_reason || 'нет доступного обновления'}`, 'warn');
-      return;
-    }
-    const steps = Array.isArray(plan.steps) ? plan.steps.join('\\n- ') : '';
-    const confirmed = window.confirm(`Запустить обновление приложения из выбранного канала?\\n\\nБудет выполнено:\\n- ${steps}`);
-    if (!confirmed) return;
-    const data = await postJson(apiEndpoint('service', 'installRelease'), { channel });
-    state.releaseUpdate = normalizeReleaseUpdatePayload(data || {}, channel);
-    state.releaseInfo = state.releaseUpdate ? (state.releaseUpdate.release || state.releaseInfo) : state.releaseInfo;
-    if (state.releaseInfo && state.releaseInfo.channel === 'stable') state.releaseStable = state.releaseInfo;
-    if (state.releaseInfo && state.releaseInfo.channel === 'prerelease') state.releasePrerelease = state.releaseInfo;
-    renderReleaseInfo();
-    setMessage('Обновление поставлено в очередь. Сервис может кратко пропасть и подняться снова.', 'good');
-  } catch (error) {
-    setMessage(`Обновление не запущено: ${error.message}`, 'bad');
-  }
-}
-function toggleUpdateLog(){
-  const log = el('settings-release-log');
-  if (!log) return;
-  log.hidden = !log.hidden;
 }
 function v2flyCategoryName(category){
   if (typeof category === 'string') return category;
@@ -6004,7 +5867,6 @@ function mergeStatusPayload(status){
   if (!status) return false;
   const previousSettings = JSON.stringify(state.settings || {});
   state.status = status;
-  state.releaseUpdate = status.release_update || state.releaseUpdate;
   if (status.candidate_version) syncCandidateVersion(status.candidate_version);
   if (status.settings) state.settings = status.settings;
   if (status.run_preferences) state.runPreferences = status.run_preferences;
@@ -6594,14 +6456,6 @@ const button = event.target.closest('button');
     checkReleases();
     return;
   }
-  if (button.dataset.action === 'update-from-release') {
-    updateFromRelease();
-    return;
-  }
-  if (button.dataset.action === 'toggle-update-log') {
-    toggleUpdateLog();
-    return;
-  }
   if (button.dataset.action === 'v2fly-load-categories') {
     loadV2flyCategories(true);
     return;
@@ -6714,9 +6568,6 @@ document.addEventListener('input', (event) => {
   }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
-  }
-  if (event.target && event.target.id === 'settings-update-channel') {
-    renderReleaseInfo();
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-category-search') {
