@@ -112,6 +112,42 @@ def index_html() -> str:
     return _index_html()
 
 
+def _clean_install_vault_public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the HTTP contract limited to non-secret vault metadata."""
+    return {
+        "vault_id": str(payload.get("vault_id") or ""),
+        "created_at": str(payload.get("created_at") or ""),
+        "schema_version": str(payload.get("schema_version") or ""),
+        "archive_sha256": str(payload.get("archive_sha256") or ""),
+        "archive_size_bytes": int(payload.get("archive_size_bytes") or 0),
+        "verification": str(payload.get("verification") or ""),
+        "pending": bool(payload.get("pending")),
+    }
+
+
+def _clean_install_vault_create_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return only public creation metadata from the protected vault handoff."""
+    return {
+        "vault_id": str(payload.get("vault_id") or ""),
+        "archive_sha256": str(payload.get("archive_sha256") or ""),
+        "archive_size_bytes": int(payload.get("archive_size_bytes") or 0),
+        "schema_version": str(payload.get("schema_version") or ""),
+        "semantic_manifest": payload.get("semantic_manifest") or {},
+    }
+
+
+def _clean_install_vault_restore_response(payload: dict[str, Any], vault_id: str) -> dict[str, Any]:
+    """Expose completion flags, never local protected-handoff details."""
+    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
+    cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), dict) else {}
+    return {
+        "completed": bool(payload.get("completed")),
+        "vault_id": str(payload.get("vault_id") or vault_id),
+        "verification": {"verified": bool(verification.get("verified"))},
+        "cleanup": {"source_deleted": bool(cleanup.get("source_deleted"))},
+    }
+
+
 def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -> None:
     recover_registered_process_runs()
     _clear_stale_current_run(config)
@@ -173,8 +209,16 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/presets/v2fly/categories": lambda: core_api.v2fly_categories_payload(config, query),
                 "/api/core/presets/v2fly/category-domains": lambda: core_api.v2fly_category_domains_payload(config, query),
                 "/api/core/backups/list": lambda: core_api.backups_list_payload(config),
-                "/api/core/clean-install-vaults/list": lambda: core_api.clean_install_vault_list_payload(config),
-                "/api/core/clean-install-vaults/status": lambda: core_api.clean_install_vault_status_payload(config, query),
+                "/api/core/clean-install-vaults/list": lambda: {
+                    "vaults": [
+                        _clean_install_vault_public_metadata(item)
+                        for item in (core_api.clean_install_vault_list_payload(config).get("vaults") or [])
+                        if isinstance(item, dict)
+                    ]
+                },
+                "/api/core/clean-install-vaults/status": lambda: _clean_install_vault_public_metadata(
+                    core_api.clean_install_vault_status_payload(config, query)
+                ),
                 "/api/core/run-settings": lambda: core_api.run_settings_payload(read_run_settings(config)),
                 "/api/core/runs/history": lambda: core_api.runs_history_payload(config, query),
                 "/api/core/runs/latest-log": lambda: _latest_log_payload(config, query),
@@ -337,11 +381,28 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return {"deleted": 1}, HTTPStatus.OK
 
             def create_clean_install_vault() -> tuple[dict[str, Any], HTTPStatus]:
-                return core_api.clean_install_vault_create_payload(config, payload), HTTPStatus.CREATED
+                if payload:
+                    raise ValueError("clean-install vault create does not accept request fields")
+                created = core_api.clean_install_vault_create_payload(config, payload)
+                return _clean_install_vault_create_response(created), HTTPStatus.CREATED
 
             def restore_clean_install_vault() -> tuple[dict[str, Any], HTTPStatus]:
+                allowed = {"vault_id"}
+                unknown = sorted(str(key) for key in payload if str(key) not in allowed)
+                if unknown:
+                    raise ValueError(f"unsupported clean-install vault restore fields: {', '.join(unknown)}")
+                # Preserve the raw JSON value for strict core validation:
+                # whitespace or a non-string vault_id must not be normalized
+                # into an otherwise acceptable identifier at this boundary.
                 restored = core_api.clean_install_vault_restore_payload(config, payload)
-                return restored, HTTPStatus.OK
+                public_response = _clean_install_vault_restore_response(restored, "")
+                if not (
+                    public_response["completed"]
+                    and public_response["verification"]["verified"]
+                    and public_response["cleanup"]["source_deleted"]
+                ):
+                    raise RuntimeError("clean-install vault restore did not complete; source retained")
+                return public_response, HTTPStatus.OK
 
             def ensure_service_action_idle() -> None:
                 if active_job_lock_payload(config.output.state_dir, cleanup_stale=True):

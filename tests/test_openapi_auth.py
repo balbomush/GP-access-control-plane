@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from gp_control_plane.backups import _validate_vault_id
 from gp_control_plane.web import docs as web_docs
 from gp_control_plane.web import routes as web_routes
 
@@ -41,6 +43,48 @@ def _documented_operations(contract: dict[str, Any]) -> set[tuple[str, str]]:
 
 
 class OpenApiAuthenticationContractTests(unittest.TestCase):
+    def test_clean_install_vault_id_schemas_and_examples_match_runtime_contract(self) -> None:
+        contract = _load_openapi_source()
+        vault_id_pattern = "^[a-f0-9]{32}$"
+        vault_id = re.compile(vault_id_pattern)
+        schemas = contract["components"]["schemas"]
+
+        for schema_name in (
+            "CleanInstallVaultCreateResponse",
+            "CleanInstallVaultStatus",
+            "CleanInstallVaultRestoreRequest",
+            "CleanInstallVaultRestoreResponse",
+        ):
+            with self.subTest(schema_name=schema_name):
+                definition = schemas[schema_name]["properties"]["vault_id"]
+                self.assertEqual(definition["type"], "string")
+                self.assertEqual(definition["pattern"], vault_id_pattern)
+
+        examples = contract["components"]["examples"]
+        matched_examples = 0
+        for example_name, example in examples.items():
+            if not example_name.startswith("CleanInstallVault"):
+                continue
+            value = example.get("value") or {}
+            if "vault_id" not in value:
+                continue
+            matched_examples += 1
+            with self.subTest(example_name=example_name):
+                self.assertIsInstance(value["vault_id"], str)
+                self.assertIsNotNone(vault_id.fullmatch(value["vault_id"]))
+                self.assertEqual(_validate_vault_id(value["vault_id"]), value["vault_id"])
+        self.assertGreater(matched_examples, 0)
+
+        list_example_vault_id = examples["CleanInstallVaultListResponse"]["value"]["vaults"][0]["vault_id"]
+        self.assertIsNotNone(vault_id.fullmatch(list_example_vault_id))
+        self.assertEqual(_validate_vault_id(list_example_vault_id), list_example_vault_id)
+
+        status_parameters = contract["paths"]["/api/core/clean-install-vaults/status"]["get"]["parameters"]
+        status_vault_id = next(parameter for parameter in status_parameters if parameter["name"] == "vault_id")
+        self.assertEqual(status_vault_id["schema"]["pattern"], vault_id_pattern)
+        self.assertIsNotNone(vault_id.fullmatch(status_vault_id["example"]))
+        self.assertEqual(_validate_vault_id(status_vault_id["example"]), status_vault_id["example"])
+
     def test_source_openapi_matches_registered_server_routes_and_auth_policy(self) -> None:
         contract = _load_openapi_source()
         expected_operations = web_routes.openapi_operations()
@@ -65,6 +109,14 @@ class OpenApiAuthenticationContractTests(unittest.TestCase):
         schemas = contract["components"]["schemas"]
         responses = contract["components"]["responses"]
         paths = contract["paths"]
+
+        serialized = json.dumps(contract, sort_keys=True)
+        self.assertNotIn("confirmation_token", serialized)
+        self.assertNotIn("handoff_secret", serialized)
+        self.assertEqual(["vault_id"], schemas["CleanInstallVaultRestoreRequest"]["required"])
+        self.assertEqual({"vault_id"}, set(schemas["CleanInstallVaultRestoreRequest"]["properties"]))
+        self.assertNotIn("confirmation_token", schemas["CleanInstallVaultCreateResponse"]["properties"])
+        self.assertNotIn("handoff_secret", schemas["CleanInstallVaultCreateResponse"]["properties"])
 
         self.assertEqual(["username", "password"], schemas["LoginRequest"]["required"])
         self.assertEqual(["current_password", "new_password"], schemas["ChangePasswordRequest"]["required"])
@@ -146,6 +198,9 @@ class OpenApiAuthenticationContractTests(unittest.TestCase):
         )
         expected_operations = web_routes.openapi_operations(core_only=True)
 
+        self.assertIn(("/api/core/clean-install-vaults/restore", "POST"), expected_operations)
+        self.assertNotIn(("/api/web/events", "GET"), expected_operations)
+
         self.assertEqual(expected_operations, _documented_operations(headless))
         self.assertEqual(source["security"], headless["security"])
         self.assertEqual(source["components"]["securitySchemes"], headless["components"]["securitySchemes"])
@@ -190,3 +245,8 @@ class OpenApiAuthenticationContractTests(unittest.TestCase):
                 operation.get("security", headless["security"]),
                 f"{method} {path}",
             )
+
+        self.assertEqual(
+            source["paths"]["/api/core/clean-install-vaults/restore"]["post"]["requestBody"],
+            headless["paths"]["/api/core/clean-install-vaults/restore"]["post"]["requestBody"],
+        )

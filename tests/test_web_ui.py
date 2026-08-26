@@ -134,12 +134,12 @@ class WebUiTests(unittest.TestCase):
             self.assertTrue(payload["storage"]["ready"])
             self.assertEqual(payload["storage"]["schema_version"], SCHEMA_VERSION)
 
-    def test_clean_install_vault_api_reveals_token_once_and_never_in_list_status_or_restore(self) -> None:
+    def test_clean_install_vault_api_never_exposes_known_local_secret_and_restores_by_id_only(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
             created = {
                 "vault_id": "a" * 32,
-                "confirmation_token": "one-time-token",
+                "handoff_secret": "SAFE-HANDOFF-001-KNOWN-SECRET",
                 "archive_sha256": "b" * 64,
                 "archive_size_bytes": 12,
                 "schema_version": "7",
@@ -177,32 +177,35 @@ class WebUiTests(unittest.TestCase):
                     )
                     self.assertEqual(status, 201, body)
                     create_payload = json.loads(body)
-                    self.assertEqual(create_payload["confirmation_token"], "one-time-token")
+                    self.assertEqual(
+                        set(create_payload),
+                        {"vault_id", "archive_sha256", "archive_size_bytes", "schema_version", "semantic_manifest"},
+                    )
+                    self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", body.decode("utf-8"))
 
                     status, _headers, body = _http_request(server.port, "/api/core/clean-install-vaults/list")
                     self.assertEqual(status, 200, body)
-                    self.assertNotIn("confirmation_token", body.decode("utf-8"))
+                    self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", body.decode("utf-8"))
 
                     status, _headers, body = _http_request(
                         server.port, "/api/core/clean-install-vaults/status?vault_id=" + ("a" * 32)
                     )
                     self.assertEqual(status, 200, body)
-                    self.assertNotIn("confirmation_token", body.decode("utf-8"))
+                    self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", body.decode("utf-8"))
 
                     status, _headers, body = _http_request(
                         server.port,
                         "/api/core/clean-install-vaults/restore",
                         method="POST",
-                        body=json.dumps({"vault_id": "a" * 32, "confirmation_token": "one-time-token"}).encode("utf-8"),
+                        body=json.dumps({"vault_id": "a" * 32}).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
                     )
                     self.assertEqual(status, 200, body)
-                    self.assertNotIn("confirmation_token", body.decode("utf-8"))
+                    self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", body.decode("utf-8"))
                     self.assertTrue(json.loads(body)["completed"])
                     restore.assert_called_once_with(
                         config.output.state_dir,
                         vault_id="a" * 32,
-                        confirmation_token="one-time-token",
                     )
 
     def test_core_status_keeps_saving_lifecycle_until_post_run_snapshot_finishes(self) -> None:
@@ -564,14 +567,33 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("backup-file-links", html)
         self.assertIn("backup-upload-file", html)
         self.assertIn("Vault для чистой установки", html)
+        self.assertIn(
+            "Создает одну защищенную локальную копию для отдельного сценария чистой установки. "
+            "Сервис автоматически сохраняет защищенный device-local handoff вне очищаемых GP-данных; "
+            "для восстановления выберите vault и явно подтвердите восстановление с удалением источника.",
+            html,
+        )
         self.assertIn("clean-install-vaults/create", html)
         self.assertIn("clean-install-vaults/list", html)
         self.assertIn("clean-install-vaults/status", html)
         self.assertIn("clean-install-vaults/restore", html)
         self.assertIn("function createCleanInstallVault()", html)
         self.assertIn("function restoreCleanInstallVault(vaultId)", html)
-        self.assertIn("window.prompt('Скопируйте и сохраните одноразовый токен", html)
-        self.assertIn("confirmationToken = '';", html)
+        self.assertIn("window.confirm(`Восстановить данные из vault ${id}", html)
+        self.assertIn(
+            "После явного подтверждения восстановление проверит данные и SQLite. "
+            "При успехе исходный vault будет удален автоматически.",
+            html,
+        )
+        self.assertIn(
+            "Vault создан. После чистой установки выберите его и явно подтвердите восстановление с удалением источника.",
+            html,
+        )
+        self.assertNotIn("window.prompt(", html)
+        self.assertNotIn("Токен подтверждения", html)
+        self.assertNotIn("одноразовый токен", html)
+        self.assertNotIn("confirmation_token", html)
+        self.assertNotIn("handoff_secret", html)
         self.assertNotIn("cleanInstallVaultToken", html)
         self.assertNotIn("postJson('/api/backups/create'", html)
         self.assertNotIn("postJson('/api/backups/restore'", html)
@@ -1996,7 +2018,7 @@ class WebUiTests(unittest.TestCase):
                     "create_clean_install_vault",
                     return_value={
                         "vault_id": "a" * 32,
-                        "confirmation_token": "one-time-token",
+                        "handoff_secret": "SAFE-HANDOFF-001-KNOWN-SECRET",
                         "archive_sha256": "b" * 64,
                         "archive_size_bytes": 12,
                         "schema_version": "7",
@@ -2058,7 +2080,7 @@ class WebUiTests(unittest.TestCase):
                     (
                         "POST",
                         "/api/core/clean-install-vaults/restore",
-                        {"vault_id": "a" * 32, "confirmation_token": "one-time-token"},
+                        {"vault_id": "a" * 32},
                         {},
                     ),
                     ("GET", "/api/core/run-settings", None, {}),
@@ -2103,7 +2125,7 @@ class WebUiTests(unittest.TestCase):
                     ("POST", "/api/core/backups/create"): {"snapshot_id", "created_at", "filename", "size_bytes"},
                     ("GET", "/api/core/backups/list"): {"backups"},
                     ("POST", "/api/core/clean-install-vaults/create"): {
-                        "vault_id", "confirmation_token", "archive_sha256", "archive_size_bytes", "schema_version", "semantic_manifest"
+                        "vault_id", "archive_sha256", "archive_size_bytes", "schema_version", "semantic_manifest"
                     },
                     ("GET", "/api/core/clean-install-vaults/list"): {"vaults"},
                     ("GET", "/api/core/clean-install-vaults/status"): {

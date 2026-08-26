@@ -12,6 +12,8 @@ PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 export PATH
 
 readonly CLEAN_REMOVE_ROOT='/usr/local/libexec/gp-control-plane/gp-clean-remove-root'
+readonly CLEAN_REMOVE_PREFLIGHT='/usr/local/libexec/gp-control-plane/gp-clean-remove-preflight'
+readonly CLEAN_REMOVE_MANIFEST='/usr/local/libexec/gp-control-plane/gp-clean-remove-root.manifest'
 
 INSTALL_USER=''
 DESTRUCTIVE_PHASE=0
@@ -29,6 +31,44 @@ usage() {
     exit 64
 }
 
+is_sha40() {
+    case "${1:-}" in ????????????????????????????????????????) ;; *) return 1 ;; esac
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+is_sha256() {
+    case "${1:-}" in ????????????????????????????????????????????????????????????????) ;; *) return 1 ;; esac
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+read_strict_manifest() {
+    manifest_candidate_sha=$(awk -F= '$1 == "candidate_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$CLEAN_REMOVE_MANIFEST" 2>/dev/null || true)
+    manifest_cleaner_sha256=$(awk -F= '$1 == "cleaner_sha256" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$CLEAN_REMOVE_MANIFEST" 2>/dev/null || true)
+    manifest_preflight_sha256=$(awk -F= '$1 == "preflight_sha256" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$CLEAN_REMOVE_MANIFEST" 2>/dev/null || true)
+    manifest_cleaner_path=$(awk -F= '$1 == "cleaner_path" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$CLEAN_REMOVE_MANIFEST" 2>/dev/null || true)
+    manifest_preflight_path=$(awk -F= '$1 == "preflight_path" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$CLEAN_REMOVE_MANIFEST" 2>/dev/null || true)
+    is_sha40 "$manifest_candidate_sha" || { die 'provisioned clean-remove manifest candidate SHA is invalid'; return 1; }
+    is_sha256 "$manifest_cleaner_sha256" || { die 'provisioned clean-remove manifest cleaner hash is invalid'; return 1; }
+    is_sha256 "$manifest_preflight_sha256" || { die 'provisioned clean-remove manifest preflight hash is invalid'; return 1; }
+    [ "$manifest_cleaner_path" = "$CLEAN_REMOVE_ROOT" ] || { die 'provisioned clean-remove manifest cleaner path is invalid'; return 1; }
+    [ "$manifest_preflight_path" = "$CLEAN_REMOVE_PREFLIGHT" ] || { die 'provisioned clean-remove manifest preflight path is invalid'; return 1; }
+    awk \
+        -v candidate_sha="$manifest_candidate_sha" \
+        -v cleaner_sha256="$manifest_cleaner_sha256" \
+        -v preflight_sha256="$manifest_preflight_sha256" \
+        -v cleaner_path="$manifest_cleaner_path" \
+        -v preflight_path="$manifest_preflight_path" \
+        'NR == 1 { valid = ($0 == "candidate_sha=" candidate_sha); next }
+         NR == 2 { valid = valid && ($0 == "cleaner_sha256=" cleaner_sha256); next }
+         NR == 3 { valid = valid && ($0 == "preflight_sha256=" preflight_sha256); next }
+         NR == 4 { valid = valid && ($0 == "cleaner_path=" cleaner_path); next }
+         NR == 5 { valid = valid && ($0 == "preflight_path=" preflight_path); next }
+         { valid = 0 }
+         END { exit (NR == 5 && valid) ? 0 : 1 }' \
+        "$CLEAN_REMOVE_MANIFEST" >/dev/null 2>&1 \
+        || { die 'provisioned clean-remove manifest format is invalid'; return 1; }
+}
+
 require_fixed_root_provision() {
     self_path=$(readlink -f -- "$0" 2>/dev/null || true)
     [ "$self_path" = "$CLEAN_REMOVE_ROOT" ] \
@@ -37,6 +77,19 @@ require_fixed_root_provision() {
         || { die 'provisioned clean-remove script is unsafe'; return 1; }
     [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_ROOT" 2>/dev/null || true)" = '0:0:700' ] \
         || { die 'provisioned clean-remove script must be root:root mode 0700'; return 1; }
+    [ -f "$CLEAN_REMOVE_MANIFEST" ] && [ ! -L "$CLEAN_REMOVE_MANIFEST" ] \
+        || { die 'provisioned clean-remove manifest is unsafe'; return 1; }
+    [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_MANIFEST" 2>/dev/null || true)" = '0:0:600' ] \
+        || { die 'provisioned clean-remove manifest must be root:root mode 0600'; return 1; }
+    [ -f "$CLEAN_REMOVE_PREFLIGHT" ] && [ ! -L "$CLEAN_REMOVE_PREFLIGHT" ] \
+        || { die 'provisioned clean-remove preflight is unsafe'; return 1; }
+    [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_PREFLIGHT" 2>/dev/null || true)" = '0:0:755' ] \
+        || { die 'provisioned clean-remove preflight must be root:root mode 0755'; return 1; }
+    read_strict_manifest || return 1
+    [ "$(sha256sum "$CLEAN_REMOVE_ROOT" | awk '{print $1}')" = "$manifest_cleaner_sha256" ] \
+        || { die 'provisioned clean-remove script hash does not match its manifest'; return 1; }
+    [ "$(sha256sum "$CLEAN_REMOVE_PREFLIGHT" | awk '{print $1}')" = "$manifest_preflight_sha256" ] \
+        || { die 'provisioned clean-remove preflight hash does not match its manifest'; return 1; }
 }
 
 safe_user_directory() {
@@ -53,6 +106,36 @@ safe_user_private_directory() {
     safe_user_directory "$1" "$2" "$3" || return 1
     [ "$(stat -c '%a' "$1" 2>/dev/null || true)" = 700 ] \
         || die "$3 must be mode 0700" || return 1
+}
+
+safe_user_private_file() {
+    path=$1; uid=$2; label=$3
+    [ -f "$path" ] && [ ! -L "$path" ] || die "$label is unsafe" || return 1
+    [ "$(stat -c '%u:%a' "$path" 2>/dev/null || true)" = "$uid:600" ] \
+        || die "$label must be install-user-owned mode 0600" || return 1
+}
+
+validate_exact_private_members() {
+    directory=$1; uid=$2; label=$3
+    shift 3
+    for member_path in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+        [ -e "$member_path" ] || [ -L "$member_path" ] || continue
+        member_name=${member_path##*/}
+        found=0
+        for expected_name in "$@"; do
+            [ "$member_name" = "$expected_name" ] && { found=1; break; }
+        done
+        [ "$found" -eq 1 ] || { die "$label has an unexpected or unsafe member: $member_name"; return 1; }
+    done
+    for expected_name in "$@"; do
+        safe_user_private_file "$directory/$expected_name" "$uid" "$label member $expected_name" || return 1
+    done
+}
+
+validate_exact_pending_topology() {
+    uid=$(id -u "$INSTALL_USER") || return 1
+    validate_exact_private_members "$VAULT_DIR" "$uid" 'clean-install vault' archive.zip entry.json || return 1
+    validate_exact_private_members "$HANDOFF_DIR" "$uid" 'clean-install handoff directory' handoff.json || return 1
 }
 
 validate_root_file() {
@@ -107,7 +190,7 @@ validate_root_helper_directory() {
     for member in "$helper_dir"/* "$helper_dir"/.[!.]* "$helper_dir"/..?*; do
         [ -e "$member" ] || [ -L "$member" ] || continue
         case "$member" in
-            "$helper_dir/gp-root-helper"|"$helper_dir/gp-clean-remove-root") ;;
+            "$helper_dir/gp-root-helper"|"$helper_dir/gp-clean-remove-root"|"$helper_dir/gp-clean-remove-preflight"|"$helper_dir/gp-clean-remove-root.manifest") ;;
             *)
                 die "legacy root-helper directory contains a foreign path: $member"
                 return 1
@@ -148,6 +231,10 @@ validate_fixed_paths() {
     CURRENT_STATE_DIR="$CURRENT_STATE_ROOT/state"
     LEGACY_STATE_DIR="$INSTALL_DIR/build/state"
     VAULT_DIR="$TARGET_HOME/.local/share/gp-control-plane/clean-install-vault"
+    VAULT_ARCHIVE="$VAULT_DIR/archive.zip"
+    VAULT_ENTRY="$VAULT_DIR/entry.json"
+    HANDOFF_DIR="$TARGET_HOME/.local/share/gp-control-plane/clean-install-handoff"
+    HANDOFF_FILE="$HANDOFF_DIR/handoff.json"
 
     safe_user_directory "$TARGET_HOME" "$uid" 'install-user home' || return 1
     safe_user_directory "$GP_ROOT" "$uid" 'managed GP parent' || return 1
@@ -172,6 +259,10 @@ validate_fixed_paths() {
         safe_user_directory "$vault_parent" "$uid" 'clean-install vault parent' || return 1
     done
     safe_user_private_directory "$VAULT_DIR" "$uid" 'clean-install vault' || return 1
+    safe_user_private_file "$VAULT_ARCHIVE" "$uid" 'clean-install vault archive' || return 1
+    safe_user_private_file "$VAULT_ENTRY" "$uid" 'clean-install vault entry' || return 1
+    safe_user_private_directory "$HANDOFF_DIR" "$uid" 'clean-install handoff directory' || return 1
+    safe_user_private_file "$HANDOFF_FILE" "$uid" 'clean-install handoff file' || return 1
 }
 
 record_and_lock_parent() {
@@ -227,6 +318,29 @@ revalidate_locked_fixed_paths() {
         safe_user_directory "$vault_parent" "$uid" 'clean-install vault parent after lock' || return 1
     done
     safe_user_private_directory "$VAULT_DIR" "$uid" 'clean-install vault after lock' || return 1
+    safe_user_private_file "$VAULT_ARCHIVE" "$uid" 'clean-install vault archive after lock' || return 1
+    safe_user_private_file "$VAULT_ENTRY" "$uid" 'clean-install vault entry after lock' || return 1
+    safe_user_private_directory "$HANDOFF_DIR" "$uid" 'clean-install handoff directory after lock' || return 1
+    safe_user_private_file "$HANDOFF_FILE" "$uid" 'clean-install handoff file after lock' || return 1
+}
+
+run_final_unprivileged_preflight() {
+    runuser -u "$INSTALL_USER" -- "$CLEAN_REMOVE_PREFLIGHT" --install-user "$INSTALL_USER" \
+        || { die 'install-user final clean-remove preflight failed'; return 1; }
+}
+
+run_preclean_flow() {
+    # The fixed preflight must retain normal install-user ownership of HOME and
+    # its vault files.  Parent locks are a later root-only TOCTOU boundary and
+    # are never acquired when this content validation fails.
+    validate_fixed_paths || return 1
+    validate_exact_pending_topology || return 1
+    validate_removal_surface || return 1
+    run_final_unprivileged_preflight || return 1
+    acquire_parent_locks || return 1
+    revalidate_locked_fixed_paths || return 1
+    validate_exact_pending_topology || return 1
+    remove_old_gp_surface
 }
 
 release_parent_locks() {
@@ -274,6 +388,8 @@ remove_old_gp_surface() {
     rm -f -- /etc/sudoers.d/gp-control-plane-root-helper || return 1
     rm -f -- /usr/local/libexec/gp-control-plane/gp-root-helper || return 1
     rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-root || return 1
+    rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-preflight || return 1
+    rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-root.manifest || return 1
     rmdir -- /usr/local/libexec/gp-control-plane 2>/dev/null || {
         [ ! -e /usr/local/libexec/gp-control-plane ] && [ ! -L /usr/local/libexec/gp-control-plane ] || return 1
     }
@@ -312,7 +428,7 @@ trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
 trap cleanup EXIT
 
-if validate_fixed_paths && validate_removal_surface && acquire_parent_locks && revalidate_locked_fixed_paths && remove_old_gp_surface; then
+if run_preclean_flow; then
     printf '%s\n' 'status=success phase=clean-remove'
     exit 0
 fi

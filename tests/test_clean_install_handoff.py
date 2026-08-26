@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -15,7 +16,7 @@ class CleanInstallHandoffBaselineContracts(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.python = Path(os.sys.executable)
 
-    def test_candidate_vault_export_accepts_each_supported_baseline_schema(self) -> None:
+    def test_candidate_vault_export_accepts_each_supported_baseline_schema_without_secret_output(self) -> None:
         for tag in ("v0.3.4", "v0.3.5-alpha.4"):
             with self.subTest(tag=tag), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
@@ -50,10 +51,11 @@ class CleanInstallHandoffBaselineContracts(unittest.TestCase):
                     [
                         str(self.python),
                         "-c",
-                        "from pathlib import Path; from gp_control_plane.backups import create_clean_install_vault, clean_install_vault_info; "
+                        "import json; from pathlib import Path; from gp_control_plane.backups import create_clean_install_vault, clean_install_vault_info; "
                         "state=Path(__import__('sys').argv[1]); home=Path(__import__('sys').argv[2]); "
                         "created=create_clean_install_vault(state, target_home=home); info=clean_install_vault_info(target_home=home); "
-                        "assert info['pending'] and info['vault_id'] == created['vault_id'] and info['archive_sha256'] == created['archive_sha256']",
+                        "assert info['pending'] and info['vault_id'] == created['vault_id'] and info['archive_sha256'] == created['archive_sha256']; "
+                        "print(json.dumps({'created': created, 'info': info}, sort_keys=True))",
                         str(state_dir),
                         str(home),
                     ],
@@ -63,3 +65,9 @@ class CleanInstallHandoffBaselineContracts(unittest.TestCase):
                     env=candidate_env,
                 )
                 self.assertEqual(result.stderr, "")
+                output = json.loads(result.stdout)
+                self.assertEqual(output["created"]["schema_version"], "7")
+                self.assertEqual(output["info"]["schema_version"], "7")
+                self.assertNotIn("confirmation_token", result.stdout)
+                self.assertNotIn("handoff_secret", result.stdout)
+                self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", result.stdout + result.stderr)

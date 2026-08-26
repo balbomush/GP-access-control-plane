@@ -12,12 +12,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "gp-clean-remove-root.sh"
+PROVISIONER = ROOT / "scripts" / "gp-clean-remove-provision-root.sh"
+PREFLIGHT = ROOT / "scripts" / "gp-clean-remove-preflight.sh"
 
 
 class LegacyCleanRemoveRootContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = SCRIPT.read_text(encoding="utf-8")
+        cls.provisioner = PROVISIONER.read_text(encoding="utf-8")
+        cls.preflight = PREFLIGHT.read_text(encoding="utf-8")
 
     def test_only_accepts_explicit_fixed_user_confirmation_grammar(self) -> None:
         self.assertIn('[ "$#" -eq 3 ] || usage', self.source)
@@ -71,18 +75,64 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
         self.assertIn("validate_release_gates_directory", removal_surface)
         self.assertNotIn("validate_root_directory /var/lib/gp-control-plane/release-gates", removal_surface)
 
-    def test_root_boundary_never_reads_or_deletes_vault_content(self) -> None:
+    def test_root_boundary_checks_vault_topology_without_reading_or_deleting_content(self) -> None:
         boundary = self.source[
             self.source.index("validate_fixed_paths() {") : self.source.index("record_and_lock_parent() {")
         ]
         removal = self.source[
             self.source.index("remove_old_gp_surface() {") : self.source.index("cleanup() {")
         ]
-        for forbidden in ("archive.zip", "entry.json", "sha256", "python3", "git ", "curl ", "checkout", "fetch"):
+        for label in (
+            "clean-install vault archive",
+            "clean-install vault entry",
+            "clean-install handoff directory",
+            "clean-install handoff file",
+        ):
+            self.assertIn(label, boundary)
+        self.assertIn('safe_user_private_file "$VAULT_ARCHIVE"', boundary)
+        self.assertIn('safe_user_private_file "$VAULT_ENTRY"', boundary)
+        self.assertIn('safe_user_private_directory "$HANDOFF_DIR"', boundary)
+        self.assertIn('safe_user_private_file "$HANDOFF_FILE"', boundary)
+        for forbidden in (
+            'cat "$VAULT_ARCHIVE"',
+            'cat "$VAULT_ENTRY"',
+            'cat "$HANDOFF_FILE"',
+            'sha256sum "$VAULT_ARCHIVE"',
+            'sha256sum "$VAULT_ENTRY"',
+            'sha256sum "$HANDOFF_FILE"',
+            "python3",
+            "git ",
+            "curl ",
+            "checkout",
+            "fetch",
+        ):
             self.assertNotIn(forbidden, boundary)
             self.assertNotIn(forbidden, removal)
         self.assertIn('safe_user_private_directory "$VAULT_DIR"', boundary)
         self.assertNotIn("VAULT_DIR", removal)
+        self.assertNotIn("HANDOFF_FILE", removal)
+
+    def test_root_preflight_rejects_missing_symlinked_or_unsafe_private_sources_before_remove(self) -> None:
+        preflight = self.source[
+            self.source.index("safe_user_private_file() {") : self.source.index("record_and_lock_parent() {")
+        ]
+        flow = self.source[
+            self.source.index("run_preclean_flow() {") : self.source.index("release_parent_locks() {")
+        ]
+        removal = self.source[
+            self.source.index("remove_old_gp_surface() {") : self.source.index("cleanup() {")
+        ]
+        self.assertIn('[ -f "$path" ] && [ ! -L "$path" ]', preflight)
+        self.assertIn('"$uid:600"', preflight)
+        self.assertIn('safe_user_private_directory "$VAULT_DIR"', preflight)
+        self.assertIn('safe_user_private_file "$VAULT_ARCHIVE"', preflight)
+        self.assertIn('safe_user_private_file "$VAULT_ENTRY"', preflight)
+        self.assertIn('safe_user_private_directory "$HANDOFF_DIR"', preflight)
+        self.assertIn('safe_user_private_file "$HANDOFF_FILE"', preflight)
+        self.assertLess(flow.index("validate_fixed_paths"), flow.index("run_final_unprivileged_preflight"))
+        self.assertLess(flow.index("run_final_unprivileged_preflight"), flow.index("acquire_parent_locks"))
+        self.assertLess(flow.index("acquire_parent_locks"), flow.index("remove_old_gp_surface"))
+        self.assertIn("DESTRUCTIVE_PHASE=1", removal)
 
     def test_removal_is_one_way_and_limited_to_gp_surface(self) -> None:
         removal = self.source[
@@ -100,6 +150,101 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
             self.assertIn(path, removal)
         for forbidden in ("rollback", "install-linux.sh", "gp-root-helper clean-install", "activate", "restore"):
             self.assertNotIn(forbidden, removal.lower())
+
+    def test_provisioner_rejects_bad_candidate_identity_hash_or_payload_before_any_root_publication(self) -> None:
+        source = self.provisioner
+        require_candidate = source[source.index("require_candidate_repository() {") : source.index("extract_verified_cleaner() {")]
+        extract = source[source.index("extract_verified_cleaner() {") : source.index("publish_cleaner() {")]
+        publish = source[source.index("publish_cleaner() {") : source.index('[ "$(id -u)" -eq 0 ] ||')]
+        dispatch = source[source.index('[ "$(id -u)" -eq 0 ] ||') :]
+
+        self.assertIn('[ "$#" -eq 8 ] || usage', dispatch)
+        self.assertIn(
+            '[ "$1" = --install-user ] && [ "$3" = --candidate-sha ] && [ "$5" = --cleaner-sha256 ] && [ "$7" = --preflight-sha256 ] || usage',
+            dispatch,
+        )
+        self.assertIn("is_sha40 \"$CANDIDATE_SHA\"", dispatch)
+        self.assertIn("is_sha256 \"$CLEANER_SHA256\"", dispatch)
+        self.assertIn("is_sha256 \"$PREFLIGHT_SHA256\"", dispatch)
+        self.assertIn('candidate-$CANDIDATE_SHA', require_candidate)
+        self.assertIn('cat-file -e "$CANDIDATE_SHA^{commit}"', require_candidate)
+        self.assertIn("pinned candidate SHA is not present as a commit object", require_candidate)
+        self.assertIn('show "$CANDIDATE_SHA:scripts/gp-clean-remove-root.sh"', extract)
+        self.assertIn("pinned candidate root cleaner hash does not match", extract)
+        self.assertIn("cannot read root cleaner from the pinned candidate commit", extract)
+        self.assertIn("sh -n \"$CLEANER_TEMP\"", extract)
+        self.assertIn('show "$CANDIDATE_SHA:scripts/gp-clean-remove-preflight.sh"', extract)
+        self.assertIn("pinned candidate clean-remove preflight hash does not match", extract)
+        self.assertIn("cannot read clean-remove preflight from the pinned candidate commit", extract)
+        self.assertIn("sh -n \"$PREFLIGHT_TEMP\"", extract)
+        self.assertLess(dispatch.index("require_candidate_repository"), dispatch.index("extract_verified_cleaner"))
+        self.assertLess(dispatch.index("extract_verified_cleaner"), dispatch.index("publish_cleaner"))
+        for forbidden in (
+            "systemctl",
+            "gp-control-plane-core.service",
+            "gp-control-plane-web.service",
+            "gp-root-helper",
+            "sudoers",
+            "INSTALL_DIR",
+            "STATE_DIR",
+        ):
+            self.assertNotIn(forbidden, require_candidate)
+            self.assertNotIn(forbidden, extract)
+        self.assertIn('mv -f -- "$CLEANER_INSTALL_TEMP" "$CLEANER_PATH"', publish)
+        self.assertIn('mv -f -- "$PREFLIGHT_INSTALL_TEMP" "$PREFLIGHT_PATH"', publish)
+        self.assertIn('"preflight_sha256=$PREFLIGHT_SHA256"', publish)
+        self.assertNotIn("remove_old_gp_surface", source)
+
+    def test_fixed_cleaner_requires_strict_manifest_and_runs_unprivileged_final_preflight_before_remove(self) -> None:
+        provision = self.source[
+            self.source.index("read_strict_manifest() {") : self.source.index("safe_user_directory() {")
+        ]
+        topology = self.source[
+            self.source.index("validate_exact_private_members() {") : self.source.index("validate_root_file() {")
+        ]
+        flow = self.source[
+            self.source.index("run_preclean_flow() {") : self.source.index("release_parent_locks() {")
+        ]
+        removal = self.source[
+            self.source.index("remove_old_gp_surface() {") : self.source.index("cleanup() {")
+        ]
+
+        for item in (
+            "candidate_sha",
+            "cleaner_sha256",
+            "preflight_sha256",
+            "cleaner_path",
+            "preflight_path",
+            "NR == 5",
+            "provisioned clean-remove manifest format is invalid",
+            "provisioned clean-remove script hash does not match its manifest",
+            "provisioned clean-remove preflight hash does not match its manifest",
+            "root:root mode 0600",
+            "root:root mode 0755",
+        ):
+            self.assertIn(item, provision)
+        self.assertIn('validate_exact_private_members "$VAULT_DIR" "$uid"', topology)
+        self.assertIn("archive.zip entry.json", topology)
+        self.assertIn('validate_exact_private_members "$HANDOFF_DIR" "$uid"', topology)
+        self.assertIn("handoff.json", topology)
+        self.assertIn('runuser -u "$INSTALL_USER" -- "$CLEAN_REMOVE_PREFLIGHT" --install-user "$INSTALL_USER"', self.source)
+        self.assertLess(flow.index("run_final_unprivileged_preflight"), flow.index("acquire_parent_locks"))
+        self.assertLess(flow.index("acquire_parent_locks"), flow.index("remove_old_gp_surface"))
+        self.assertIn("DESTRUCTIVE_PHASE=1", removal)
+
+    def test_unprivileged_final_preflight_binds_id_archive_and_handoff_without_printing_secret(self) -> None:
+        source = self.preflight
+        self.assertIn('[ "$(id -u)" -ne 0 ] || die', source)
+        self.assertIn('CURRENT_USER=$(id -un 2>/dev/null || true)', source)
+        self.assertIn('effective user does not match the declared install user', source)
+        self.assertIn('require_canonical_directory(vault, mode=0o700', source)
+        self.assertIn('require_canonical_directory(handoff_parent, mode=0o700', source)
+        self.assertIn('require_private_regular(path, label)', source)
+        self.assertIn('handoff_vault_id != vault_id', source)
+        self.assertIn('sha256_file(archive) != archive_sha256', source)
+        self.assertIn('hashlib.sha256(handoff_secret.encode("utf-8")).hexdigest() != handoff_secret_sha256', source)
+        self.assertNotIn('print(handoff_secret', source)
+        self.assertNotIn('print(handoff_payload', source)
 
     def test_both_approved_baselines_use_one_of_the_fixed_layouts(self) -> None:
         expected = {
@@ -129,6 +274,9 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
     def test_posix_harness_covers_both_layouts_and_keeps_vault(self) -> None:
         library = self.source.split('[ "$(id -u)" -eq 0 ] ||', 1)[0].replace(
             "/var/lib/gp-control-plane/release-gates", '"$TEST_RELEASE_GATES"'
+        ).replace(
+            "PATH='/usr/sbin:/usr/bin:/sbin:/bin'",
+            'PATH="$TEST_ROOT/bin:/usr/sbin:/usr/bin:/sbin:/bin"',
         )
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -157,9 +305,15 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                 printf 'rmdir %s\n' "$*" >> "$TEST_CALLS"
                 exit 0
                 SH
-                chmod 700 "$TEST_ROOT/bin/systemctl" "$TEST_ROOT/bin/rm" "$TEST_ROOT/bin/rmdir"
+                cat > "$TEST_ROOT/bin/runuser" <<'SH'
+                #!/bin/sh
+                printf 'runuser %s\n' "$*" >> "$TEST_CALLS"
+                [ "${TEST_RUNUSER_FAIL:-0}" = 1 ] && exit 1
+                exit 0
+                SH
+                chmod 700 "$TEST_ROOT/bin/systemctl" "$TEST_ROOT/bin/rm" "$TEST_ROOT/bin/rmdir" "$TEST_ROOT/bin/runuser"
                 TEST_CALLS="$TEST_ROOT/calls"
-                export TEST_CALLS PATH="$TEST_ROOT/bin:$PATH"
+                export TEST_CALLS TEST_RUNUSER_FAIL=0 PATH="$TEST_ROOT/bin:$PATH"
                 '''
             )
             harness += library
@@ -175,7 +329,7 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                 setup_variant() {
                   variant=$1
                   TEST_HOME="$TEST_ROOT/home-$variant"
-                  mkdir -p "$TEST_HOME/gp/GP-access-control-plane" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault"
+                  mkdir -p "$TEST_HOME/gp/GP-access-control-plane" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault" "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff"
                   if [ "$variant" = legacy ]; then
                     mkdir -p "$TEST_HOME/gp/GP-access-control-plane/build/state"
                   else
@@ -183,8 +337,31 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                   fi
                   chown -R "$TEST_UID:$TEST_GID" "$TEST_HOME"
                   find "$TEST_HOME" -type d -exec chmod 700 {} \;
+                  printf 'archive' > "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip"
+                  printf 'entry' > "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json"
+                  printf 'handoff' > "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
+                  chown "$TEST_UID:$TEST_GID" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json" "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
+                  chmod 600 "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json" "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
                   INSTALL_USER=gpuser
                   validate_fixed_paths
+
+                  # The final unprivileged validator must run while user
+                  # ownership is still intact, before locks or removals.
+                  validate_removal_surface() { :; }
+                  : > "$TEST_CALLS"
+                  run_preclean_flow
+                  runuser_line=$(grep -n '^runuser ' "$TEST_CALLS" | cut -d: -f1)
+                  stop_line=$(grep -n '^show ' "$TEST_CALLS" | cut -d: -f1)
+                  rm_line=$(grep -n '^rm -rf --one-file-system -- ' "$TEST_CALLS" | head -n 1 | cut -d: -f1)
+                  [ -n "$runuser_line" ] && [ -n "$stop_line" ] && [ -n "$rm_line" ]
+                  [ "$runuser_line" -lt "$stop_line" ]
+                  [ "$stop_line" -lt "$rm_line" ]
+                  [ -d "$VAULT_DIR" ] && [ "$(stat -c '%u:%a' "$VAULT_DIR")" = "$TEST_UID:700" ]
+                  release_parent_locks
+                  [ "$(stat -c '%u:%g:%a' "$TEST_HOME")" = "$TEST_UID:$TEST_GID:700" ]
+
+                  # The post-lock revalidation remains a separate TOCTOU
+                  # boundary and rejects a changed parent before removal.
                   : > "$TEST_CALLS"
                   acquire_parent_locks
                   revalidate_locked_fixed_paths
@@ -192,15 +369,65 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                   ! revalidate_locked_fixed_paths
                   chown "$TEST_UID:$TEST_GID" "$INSTALL_DIR"
                   revalidate_locked_fixed_paths
-                  remove_old_gp_surface
-                  grep -Fq "rm -rf --one-file-system -- $TEST_HOME/gp/GP-access-control-plane" "$TEST_CALLS"
-                  [ -d "$VAULT_DIR" ] && [ "$(stat -c '%u:%a' "$VAULT_DIR")" = "$TEST_UID:700" ]
                   release_parent_locks
                   [ "$(stat -c '%u:%g:%a' "$TEST_HOME")" = "$TEST_UID:$TEST_GID:700" ]
                   [ "$(stat -c '%u:%g:%a' "$TEST_HOME/gp")" = "$TEST_UID:$TEST_GID:700" ]
                 }
                 setup_variant legacy
                 setup_variant current
+
+                # A failure in the final user-owned content validation occurs
+                # after root path checks, but before parent locks or any
+                # destructive helper.  It must leave every private source and
+                # the managed path ownership untouched.
+                export TEST_RUNUSER_FAIL=1
+                DESTRUCTIVE_PHASE=0
+                before_home=$(stat -c '%u:%g:%a' "$TEST_HOME")
+                before_gp=$(stat -c '%u:%g:%a' "$TEST_HOME/gp")
+                before_install=$(stat -c '%u:%g:%a' "$TEST_HOME/gp/GP-access-control-plane")
+                : > "$TEST_CALLS"
+                ! run_preclean_flow
+                [ "$PARENT_LOCKS_HELD" = 0 ]
+                [ "$DESTRUCTIVE_PHASE" = 0 ]
+                [ "$(stat -c '%u:%g:%a' "$TEST_HOME")" = "$before_home" ]
+                [ "$(stat -c '%u:%g:%a' "$TEST_HOME/gp")" = "$before_gp" ]
+                [ "$(stat -c '%u:%g:%a' "$TEST_HOME/gp/GP-access-control-plane")" = "$before_install" ]
+                [ -d "$VAULT_DIR" ] && [ "$(stat -c '%u:%a' "$VAULT_DIR")" = "$TEST_UID:700" ]
+                grep -Fq 'runuser -u gpuser -- ' "$TEST_CALLS"
+                ! grep -Eq '^(show|is-active|stop|unmask|disable|daemon-reload|rm |rmdir )' "$TEST_CALLS"
+                export TEST_RUNUSER_FAIL=0
+
+                # The root boundary does not read private payloads, but it
+                # must reject every absent/unsafe private source before a
+                # single destructive helper command can be reached.
+                TEST_ARCHIVE="$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip"
+                TEST_ENTRY="$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json"
+                TEST_HANDOFF="$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
+                reject_preclean() {
+                  : > "$TEST_CALLS"
+                  ! validate_fixed_paths
+                  [ ! -s "$TEST_CALLS" ]
+                }
+                /bin/rm -f -- "$TEST_ARCHIVE"
+                reject_preclean
+                printf 'archive' > "$TEST_ARCHIVE"
+                chown "$TEST_UID:$TEST_GID" "$TEST_ARCHIVE"
+                chmod 600 "$TEST_ARCHIVE"
+                /bin/rm -f -- "$TEST_HANDOFF"
+                reject_preclean
+                printf 'handoff' > "$TEST_HANDOFF"
+                chown "$TEST_UID:$TEST_GID" "$TEST_HANDOFF"
+                chmod 600 "$TEST_HANDOFF"
+                /bin/rm -f -- "$TEST_ARCHIVE"
+                ln -s /tmp "$TEST_ARCHIVE"
+                reject_preclean
+                /bin/rm -f -- "$TEST_ARCHIVE"
+                printf 'archive' > "$TEST_ARCHIVE"
+                chown "$TEST_UID:$TEST_GID" "$TEST_ARCHIVE"
+                chmod 600 "$TEST_ARCHIVE"
+                chmod 644 "$TEST_ENTRY"
+                reject_preclean
+                chmod 600 "$TEST_ENTRY"
 
                 # This is the sole fixed directory that may be root:<install
                 # group>:0750. The generic root validator must still reject it.
@@ -232,6 +459,12 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                 mkdir -p "$TEST_HOME/gp/GP-access-control-plane" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault"
                 chown -R "$TEST_UID:$TEST_GID" "$TEST_HOME"
                 find "$TEST_HOME" -type d -exec chmod 700 {} \;
+                printf 'archive' > "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip"
+                printf 'entry' > "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json"
+                mkdir -p "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff"
+                printf 'handoff' > "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
+                chown "$TEST_UID:$TEST_GID" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json" "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
+                chmod 600 "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/archive.zip" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault/entry.json" "$TEST_HOME/.local/share/gp-control-plane/clean-install-handoff/handoff.json"
                 INSTALL_USER=gpuser
                 ! validate_fixed_paths
                 '''

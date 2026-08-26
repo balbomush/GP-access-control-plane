@@ -7,8 +7,12 @@ import os
 import re
 import secrets
 import shutil
+import stat
+import sys
+import threading
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +29,27 @@ BACKUP_SCHEMA_VERSION = "7"
 SUPPORTED_BACKUP_SCHEMA_VERSIONS = {"5", "6", BACKUP_SCHEMA_VERSION}
 HISTORY_BACKUP_SCHEMA_VERSION = "7"
 CLEAN_INSTALL_VAULT_RELATIVE_PATH = Path(".local/share/gp-control-plane/clean-install-vault")
+CLEAN_INSTALL_HANDOFF_RELATIVE_PATH = Path(".local/share/gp-control-plane/clean-install-handoff/handoff.json")
+CLEAN_INSTALL_CREATION_LOCK_RELATIVE_PATH = Path(".local/share/gp-control-plane/.clean-install-vault-create.lock")
 _VAULT_FILE_MODE = 0o600
 _VAULT_DIRECTORY_MODE = 0o700
+_HANDOFF_FILE_MODE = 0o600
+_HANDOFF_DIRECTORY_MODE = 0o700
 _VAULT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _VAULT_ENTRY_NAME = "entry.json"
 _VAULT_ARCHIVE_NAME = "archive.zip"
 _VAULT_JOURNAL_NAME = "cleanup.journal.json"
+# The finalization journal lives beside the vault, not in it.  Once archive
+# and entry are gone, keeping the only recovery marker inside the directory
+# would force us to delete that marker before a fallible ``rmdir``.  A sibling
+# marker makes terminal cleanup resumable across every remaining syscall.
+_VAULT_FINALIZATION_JOURNAL_NAME = ".clean-install-vault-finalization.json"
+# The guard is written and directory-synced before unlinking the finalization
+# journal.  It is not another vault source: it carries only enough verified
+# terminal state to block a new export until the journal deletion is durable.
+_VAULT_FINALIZATION_GUARD_NAME = ".clean-install-vault-finalization.guard.json"
+_CREATION_THREAD_LOCKS_GUARD = threading.Lock()
+_CREATION_THREAD_LOCKS: dict[str, threading.Lock] = {}
 POST_RUN_SNAPSHOT_ERROR_MESSAGE_MAX_LENGTH = 512
 SNAPSHOT_DOWNLOAD_FILES = {
     "manifest.json",
@@ -404,13 +423,144 @@ def clean_install_vault_dir(target_home: Path | None = None) -> Path:
     return home / CLEAN_INSTALL_VAULT_RELATIVE_PATH
 
 
-def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = None) -> dict[str, Any]:
-    """Create the one pending local vault and reveal its one-time token once.
+def clean_install_handoff_path(target_home: Path | None = None) -> Path:
+    """Return the fixed device-local secret handoff path for one vault."""
+    home = Path(target_home) if target_home is not None else Path.home()
+    return home / CLEAN_INSTALL_HANDOFF_RELATIVE_PATH
 
-    The token is never put in the archive, entry, journal, or returned status
-    APIs after this call.  The caller must retain it for the explicit clean
-    install operation.
+
+@contextmanager
+def _clean_install_vault_creation_lock(target_home: Path | None) -> Any:
+    """Fail closed when another thread or process is publishing this vault."""
+    home = _clean_install_home(target_home)
+    lock_path = home / CLEAN_INSTALL_CREATION_LOCK_RELATIVE_PATH
+    _prepare_creation_lock_parent(lock_path.parent)
+    key = str(lock_path)
+    with _CREATION_THREAD_LOCKS_GUARD:
+        thread_lock = _CREATION_THREAD_LOCKS.setdefault(key, threading.Lock())
+    if not thread_lock.acquire(blocking=False):
+        raise RuntimeError("clean-install vault creation is already in progress")
+    descriptor: int | None = None
+    locked = False
+    try:
+        if lock_path.is_symlink():
+            raise ValueError("clean-install vault creation lock is not a regular file")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(lock_path, flags, _VAULT_FILE_MODE)
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            raise ValueError("clean-install vault creation lock is not a regular file")
+        if os.name == "posix":
+            if details.st_uid != os.geteuid() or details.st_mode & 0o777 != _VAULT_FILE_MODE:
+                raise PermissionError("clean-install vault creation lock permissions are unsafe")
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("clean-install vault creation is already in progress") from exc
+        else:
+            import msvcrt
+
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError("clean-install vault creation is already in progress") from exc
+        locked = True
+        yield
+    finally:
+        primary_exception_active = sys.exc_info()[0] is not None
+        release_error: BaseException | None = None
+        try:
+            if descriptor is not None and locked:
+                try:
+                    if os.name == "posix":
+                        import fcntl
+
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    else:
+                        import msvcrt
+
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                except BaseException as exc:  # cleanup must not strand the thread lock
+                    release_error = exc
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as exc:
+                    if release_error is None:
+                        release_error = exc
+        finally:
+            thread_lock.release()
+        if release_error is not None and not primary_exception_active:
+            raise release_error
+
+
+def _clean_install_home(target_home: Path | None) -> Path:
+    vault = clean_install_vault_dir(target_home)
+    home = vault.parents[3]
+    if (
+        not home.is_absolute()
+        or any(part in {".", ".."} for part in home.parts)
+        or not home.exists()
+        or not home.is_dir()
+        or home.is_symlink()
+    ):
+        raise ValueError("clean-install vault target home is not a canonical directory")
+    return home
+
+
+def _prepare_creation_lock_parent(parent: Path) -> None:
+    if not parent.exists() and not parent.is_symlink():
+        parent.mkdir(parents=True, mode=_VAULT_DIRECTORY_MODE)
+        _set_vault_mode(parent, _VAULT_DIRECTORY_MODE)
+    if not parent.exists() or not parent.is_dir() or parent.is_symlink():
+        raise ValueError("clean-install vault creation lock parent is not a canonical directory")
+    if any(part.is_symlink() for part in (parent, *parent.parents) if part.exists()):
+        raise ValueError("clean-install vault creation lock path must not contain a symlink")
+    if os.name == "posix":
+        details = parent.stat()
+        if details.st_uid != os.geteuid() or details.st_mode & 0o022:
+            raise PermissionError("clean-install vault creation lock parent permissions are unsafe")
+
+
+def validate_clean_install_handoff(*, vault_id: str, target_home: Path | None = None) -> dict[str, str]:
+    """Validate the fixed handoff against the complete pending vault entry."""
+    clean_id = _validate_vault_id(vault_id)
+    payload = _read_vault_entry(clean_install_vault_dir(target_home))
+    if payload["vault_id"] != clean_id:
+        raise ValueError("clean-install handoff vault id does not match canonical vault")
+    handoff_secret = _read_clean_install_handoff(target_home, clean_id)
+    _verify_vault_handoff_secret(payload, handoff_secret)
+    return {"vault_id": clean_id}
+
+
+def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = None) -> dict[str, Any]:
+    """Create the one pending vault and its private, device-local handoff.
+
+    The recovery secret is never returned to a caller.  It is durably written
+    to the product-owned handoff file before ``entry.json`` publishes a vault
+    that the root clean-remove phase can accept.
     """
+    with _clean_install_vault_creation_lock(target_home):
+        return _create_clean_install_vault_locked(state_dir, target_home=target_home)
+
+
+def create_clean_install_vault_with_handoff_validation(
+    state_dir: Path,
+    *,
+    target_home: Path | None = None,
+) -> dict[str, Any]:
+    """Create and re-validate the complete private handoff under one lock."""
+    with _clean_install_vault_creation_lock(target_home):
+        created = _create_clean_install_vault_locked(state_dir, target_home=target_home)
+        validate_clean_install_handoff(vault_id=str(created["vault_id"]), target_home=target_home)
+        return created
+
+
+def _create_clean_install_vault_locked(state_dir: Path, *, target_home: Path | None) -> dict[str, Any]:
     if has_active_runtime(state_dir):
         raise RuntimeError("cannot create clean-install vault while a job is running")
     vault = _prepare_empty_clean_install_vault(target_home)
@@ -418,13 +568,14 @@ def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = No
     snapshot_id = str(snapshot["snapshot"]["id"])
     archive_source = snapshot_archive_path(state_dir, snapshot_id)
     vault_id = secrets.token_hex(16)
-    confirmation_token = secrets.token_urlsafe(32)
+    handoff_secret = secrets.token_urlsafe(32)
     archive = vault / _VAULT_ARCHIVE_NAME
     entry = vault / _VAULT_ENTRY_NAME
     try:
         _copy_private_file(archive_source, archive)
         _validate_clean_install_vault_export(archive, state_dir, vault_id)
         archive_sha256 = _sha256_file(archive)
+        _write_clean_install_handoff(target_home, vault_id, handoff_secret)
         payload: dict[str, Any] = {
             "vault_id": vault_id,
             "created_at": now_iso(),
@@ -432,7 +583,7 @@ def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = No
             "schema_version": BACKUP_SCHEMA_VERSION,
             "archive_sha256": archive_sha256,
             "archive_size_bytes": archive.stat().st_size,
-            "confirmation_token_sha256": _sha256_text(confirmation_token),
+            "handoff_secret_sha256": _sha256_text(handoff_secret),
             "verification": "pending",
         }
         _write_private_json_atomic(entry, payload)
@@ -443,7 +594,6 @@ def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = No
     return {
         "created": True,
         "vault_id": vault_id,
-        "confirmation_token": confirmation_token,
         "archive_sha256": archive_sha256,
         "archive_size_bytes": archive.stat().st_size,
         "schema_version": BACKUP_SCHEMA_VERSION,
@@ -456,6 +606,24 @@ def create_clean_install_vault(state_dir: Path, *, target_home: Path | None = No
 def clean_install_vault_info(*, target_home: Path | None = None) -> dict[str, Any]:
     """Read non-secret vault state.  Invalid/pending state is fail-closed."""
     vault = clean_install_vault_dir(target_home)
+    terminal_journal = _read_terminal_vault_cleanup_journal(vault)
+    terminal_guard = _read_terminal_vault_cleanup_guard(vault)
+    if terminal_guard is not None and terminal_guard["phase"] == "marker_unlinking":
+        _validate_terminal_vault_cleanup_topology(vault)
+        return {
+            "exists": True,
+            "pending": False,
+            "vault_path": str(vault),
+            "cleanup": "incomplete",
+        }
+    if terminal_journal is not None:
+        _validate_terminal_vault_cleanup_topology(vault)
+        return {
+            "exists": True,
+            "pending": False,
+            "vault_path": str(vault),
+            "cleanup": terminal_journal["cleanup"],
+        }
     if not vault.exists() and not vault.is_symlink():
         return {"exists": False, "pending": False, "vault_path": str(vault)}
     journal = _validate_vault_topology(vault)
@@ -469,10 +637,22 @@ def clean_install_vault_info(*, target_home: Path | None = None) -> dict[str, An
             "cleanup": journal.get("cleanup") if journal else "unknown",
         }
     if journal:
+        public_metadata = _journal_public_metadata(journal)
+        if public_metadata is None:
+            # Older/incomplete cleanup journals cannot satisfy the public
+            # OpenAPI status schema.  Do not expose a structurally invalid
+            # pending record while their private cleanup remains resumable.
+            return {
+                "exists": True,
+                "pending": False,
+                "vault_path": str(vault),
+                "cleanup": journal["cleanup"],
+            }
         return {
             "exists": True,
             "pending": True,
             "vault_id": journal["vault_id"],
+            **public_metadata,
             "verification": journal["verification"],
             "cleanup": journal["cleanup"],
             "vault_path": str(vault),
@@ -495,7 +675,6 @@ def restore_clean_install_vault(
     state_dir: Path,
     *,
     vault_id: str,
-    confirmation_token: str,
     target_home: Path | None = None,
 ) -> dict[str, Any]:
     """Restore a pending vault, verify semantic data, then consume it safely."""
@@ -503,13 +682,39 @@ def restore_clean_install_vault(
         raise RuntimeError("cannot restore clean-install vault while a job is running")
     vault = clean_install_vault_dir(target_home)
     clean_id = _validate_vault_id(vault_id)
+    terminal_journal = _read_terminal_vault_cleanup_journal(vault)
+    terminal_guard = _read_terminal_vault_cleanup_guard(vault)
+    if (
+        terminal_journal is None
+        and terminal_guard is not None
+        and terminal_guard["phase"] == "marker_deleted"
+        and (vault.exists() or vault.is_symlink())
+    ):
+        # A completed historical guard is intentionally retained as harmless
+        # bookkeeping.  Once a new vault exists, its own canonical topology
+        # must drive restore; never let old terminal metadata intercept it.
+        terminal_guard = None
+    if terminal_journal is not None or terminal_guard is not None:
+        terminal_vault_id = str((terminal_journal or terminal_guard)["vault_id"])
+        if terminal_vault_id != clean_id:
+            raise ValueError("clean-install vault id does not match")
+        terminal_verification = _verification_from_vault_journal(terminal_journal or terminal_guard)
+        cleanup = _resume_terminal_vault_cleanup(vault, terminal_journal, terminal_guard)
+        return {
+            "restored": True,
+            "vault_id": clean_id,
+            "verification": terminal_verification,
+            "cleanup": cleanup,
+            "completed": bool(cleanup["completed"]),
+            "resumed_cleanup": True,
+        }
     journal = _validate_vault_topology(vault)
     if journal:
         if journal.get("vault_id") != clean_id or journal.get("verification") != "verified":
             raise RuntimeError("clean-install vault has no verified recovery journal")
         verification = _verification_from_vault_journal(journal)
-        _verify_vault_confirmation_hash(journal, confirmation_token)
-        cleanup = _consume_verified_vault(vault, clean_id, confirmation_token, verification)
+        handoff_secret = _read_clean_install_handoff(target_home, clean_id, required=journal.get("phase") != "entry_deleted")
+        cleanup = _consume_verified_vault(vault, clean_id, handoff_secret, verification, target_home=target_home)
         return {
             "restored": True,
             "vault_id": clean_id,
@@ -521,9 +726,8 @@ def restore_clean_install_vault(
     payload = _read_vault_entry(vault)
     if clean_id != payload["vault_id"]:
         raise ValueError("clean-install vault id does not match")
-    supplied_hash = _sha256_text(str(confirmation_token or ""))
-    if not hmac.compare_digest(supplied_hash, str(payload["confirmation_token_sha256"])):
-        raise ValueError("clean-install confirmation token does not match")
+    handoff_secret = _read_clean_install_handoff(target_home, clean_id)
+    _verify_vault_handoff_secret(payload, handoff_secret)
     archive = vault / _VAULT_ARCHIVE_NAME
     if archive.stat().st_size != int(payload["archive_size_bytes"]):
         raise ValueError("clean-install vault archive size does not match")
@@ -545,7 +749,7 @@ def restore_clean_install_vault(
         if not verification["verified"]:
             raise RuntimeError("clean-install vault semantic verification failed")
         _mark_vault_verified(vault, payload, verification)
-        cleanup = _consume_verified_vault(vault, clean_id, confirmation_token, verification)
+        cleanup = _consume_verified_vault(vault, clean_id, handoff_secret, verification, target_home=target_home)
         result.update(
             {
                 "vault_id": clean_id,
@@ -562,15 +766,13 @@ def restore_clean_install_vault(
 
 def _prepare_empty_clean_install_vault(target_home: Path | None) -> Path:
     vault = clean_install_vault_dir(target_home)
-    home = vault.parents[3]
-    if (
-        not home.is_absolute()
-        or any(part in {".", ".."} for part in home.parts)
-        or not home.exists()
-        or not home.is_dir()
-        or home.is_symlink()
-    ):
-        raise ValueError("clean-install vault target home is not a canonical directory")
+    _clean_install_home(target_home)
+    terminal_journal = _read_terminal_vault_cleanup_journal(vault)
+    terminal_guard = _read_terminal_vault_cleanup_guard(vault)
+    if terminal_journal is not None or terminal_guard is not None:
+        cleanup = _resume_terminal_vault_cleanup(vault, terminal_journal, terminal_guard)
+        if not cleanup["completed"]:
+            raise RuntimeError("clean-install vault cleanup is incomplete")
     if vault.exists() or vault.is_symlink():
         _validate_vault_directory(vault, require_existing=True)
         members = {member.name: member for member in vault.iterdir()}
@@ -578,8 +780,9 @@ def _prepare_empty_clean_install_vault(target_home: Path | None) -> Path:
             journal_payload = _validate_vault_topology(vault)
             if journal_payload is None or journal_payload.get("cleanup") != "completed":
                 raise RuntimeError("clean-install vault cleanup is incomplete")
-            (vault / _VAULT_JOURNAL_NAME).unlink()
-            _fsync_directory(vault)
+            cleanup = _move_completed_vault_journal_to_finalization(vault, journal_payload)
+            if not cleanup["completed"]:
+                raise RuntimeError("clean-install vault cleanup is incomplete")
         elif set(members) == {_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME}:
             # This is a complete pending vault.  It is the only recoverable
             # source copy and must never be replaced by an export retry.
@@ -606,6 +809,154 @@ def _prepare_empty_clean_install_vault(target_home: Path | None) -> Path:
         vault.mkdir(parents=True, mode=_VAULT_DIRECTORY_MODE)
     _set_vault_mode(vault, _VAULT_DIRECTORY_MODE)
     return vault
+
+
+def _write_clean_install_handoff(target_home: Path | None, vault_id: str, handoff_secret: str) -> None:
+    """Durably bind the secret to its vault in the fixed local handoff file."""
+    handoff = clean_install_handoff_path(target_home)
+    parent = handoff.parent
+    _prepare_clean_install_handoff_parent(parent)
+    if handoff.exists() or handoff.is_symlink():
+        _validate_handoff_file(handoff)
+        handoff.unlink()
+        _fsync_directory(parent)
+    _write_private_json_atomic(
+        handoff,
+        {
+            "vault_id": _validate_vault_id(vault_id),
+            "handoff_secret": str(handoff_secret),
+        },
+    )
+
+
+def _read_clean_install_handoff(
+    target_home: Path | None,
+    vault_id: str,
+    *,
+    required: bool = True,
+) -> str:
+    """Read one fixed handoff file through one validated file descriptor."""
+    handoff = clean_install_handoff_path(target_home)
+    _validate_clean_install_handoff_parent(handoff.parent, require_existing=False)
+    if not handoff.parent.exists():
+        if required:
+            raise RuntimeError("clean-install local handoff is unavailable")
+        return ""
+    if handoff.is_symlink():
+        raise ValueError("clean-install local handoff is not a regular file")
+    if not handoff.exists() and not handoff.is_symlink():
+        if required:
+            raise RuntimeError("clean-install local handoff is unavailable")
+        return ""
+    payload = _read_handoff_json_atomic(handoff)
+    if not payload or _validate_vault_id(str(payload.get("vault_id") or "")) != _validate_vault_id(vault_id):
+        raise ValueError("clean-install local handoff does not match vault id")
+    handoff_secret = str(payload.get("handoff_secret") or "")
+    if not handoff_secret:
+        raise ValueError("clean-install local handoff has no recovery secret")
+    return handoff_secret
+
+
+def _delete_clean_install_handoff(target_home: Path | None, vault_id: str) -> None:
+    handoff = clean_install_handoff_path(target_home)
+    _validate_clean_install_handoff_parent(handoff.parent, require_existing=False)
+    if not handoff.parent.exists():
+        return
+    secret = _read_clean_install_handoff(target_home, vault_id, required=False)
+    if not secret:
+        return
+    _validate_handoff_file(handoff)
+    handoff.unlink()
+    _fsync_directory(handoff.parent)
+    try:
+        handoff.parent.rmdir()
+        _fsync_directory(handoff.parent.parent)
+    except OSError:
+        pass
+
+
+def _prepare_clean_install_handoff_parent(parent: Path) -> None:
+    home = _clean_install_home(parent.parents[3])
+    try:
+        relative_parts = parent.relative_to(home).parts
+    except ValueError as exc:
+        raise ValueError("clean-install handoff parent is not canonical") from exc
+    current = home
+    created: list[Path] = []
+    chain: list[Path] = [home]
+    for part in relative_parts:
+        child = current / part
+        if child.is_symlink():
+            raise ValueError("clean-install handoff path must not contain a symlink")
+        if not child.exists():
+            child.mkdir(mode=_HANDOFF_DIRECTORY_MODE)
+            _set_vault_mode(child, _HANDOFF_DIRECTORY_MODE)
+            # Persist each child name in its parent before descending.  The
+            # final bottom-up sync makes every created directory durable
+            # before handoff.json can make entry.json publishable.
+            _fsync_directory(current)
+            created.append(child)
+        elif not child.is_dir():
+            raise ValueError("clean-install handoff parent is not a canonical directory")
+        current = child
+        chain.append(current)
+    for directory in reversed(created):
+        _fsync_directory(directory)
+    # The creation lock may have made an ancestor before this helper runs.
+    # Sync the entire canonical chain bottom-up so that every parent directory
+    # is durable before handoff.json can permit entry.json publication.
+    for directory in reversed(chain):
+        _fsync_directory(directory)
+    _validate_clean_install_handoff_parent(parent, require_existing=True)
+
+
+def _validate_clean_install_handoff_parent(parent: Path, *, require_existing: bool) -> None:
+    if not parent.is_absolute() or any(part in {".", ".."} for part in parent.parts):
+        raise ValueError("clean-install handoff parent is not canonical")
+    if require_existing and (not parent.exists() or not parent.is_dir() or parent.is_symlink()):
+        raise ValueError("clean-install handoff parent is not a canonical directory")
+    if any(part.is_symlink() for part in (parent, *parent.parents) if part.exists()):
+        raise ValueError("clean-install handoff path must not contain a symlink")
+    if not parent.exists():
+        return
+    _validate_vault_mode_owner(parent, _HANDOFF_DIRECTORY_MODE)
+
+
+def _validate_handoff_file(path: Path) -> None:
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        raise ValueError("clean-install local handoff is not a regular file")
+    _validate_vault_mode_owner(path, _HANDOFF_FILE_MODE)
+
+
+def _read_handoff_json_atomic(path: Path) -> dict[str, Any] | None:
+    """Avoid a validate-then-open race for the local secret handoff."""
+    if path.is_symlink():
+        raise ValueError("clean-install local handoff is not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("clean-install local handoff is unavailable") from exc
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            raise ValueError("clean-install local handoff is not a regular file")
+        if os.name == "posix":
+            if details.st_uid != os.geteuid() or details.st_mode & 0o777 != _HANDOFF_FILE_MODE:
+                raise PermissionError("clean-install local handoff permissions are unsafe")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, BACKUP_STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("clean-install local handoff is invalid") from exc
+    return payload if isinstance(payload, dict) else None
 
 
 def _validate_vault_directory(vault: Path, *, require_existing: bool) -> None:
@@ -646,19 +997,185 @@ def _validate_vault_topology(vault: Path) -> dict[str, Any] | None:
         raise ValueError("clean-install vault cleanup journal is invalid")
     if journal.get("verification") != "verified" or not isinstance(journal.get("checks"), dict):
         raise ValueError("clean-install vault cleanup journal is not verified")
-    if not re.fullmatch(r"[a-f0-9]{64}", str(journal.get("confirmation_token_sha256") or "")):
-        raise ValueError("clean-install vault cleanup journal has no bound confirmation token")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(journal.get("handoff_secret_sha256") or "")):
+        raise ValueError("clean-install vault cleanup journal has no bound local handoff")
     cleanup = str(journal.get("cleanup") or "")
     phase = str(journal.get("phase") or "")
     if cleanup == "completed" and phase == "completed":
         if set(members) != {_VAULT_JOURNAL_NAME}:
             raise ValueError("completed clean-install vault has unexpected source members")
-    elif cleanup in {"pending", "in_progress"} and phase in {"verified", "archive_pending", "archive_deleted"}:
-        if _VAULT_ENTRY_NAME not in members and phase != "archive_deleted":
-            raise ValueError("clean-install vault cleanup lost its recovery entry")
+    elif cleanup in {"pending", "in_progress"} and phase in {
+        "verified",
+        "archive_pending",
+        "archive_unlinking",
+        "archive_deleted",
+        "entry_unlinking",
+        "entry_deleted",
+    }:
+        # ``*_unlinking`` is durable intent written before unlink.  A process
+        # may die after a successful unlink but before the following journal
+        # replace, so both adjacent source topologies are recoverable there.
+        expected_members = {
+            "verified": ({_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME},),
+            "archive_pending": ({_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME},),
+            "archive_unlinking": (
+                {_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME},
+                {_VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME},
+            ),
+            "archive_deleted": ({_VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME},),
+            "entry_unlinking": (
+                {_VAULT_ENTRY_NAME, _VAULT_JOURNAL_NAME},
+                {_VAULT_JOURNAL_NAME},
+            ),
+            "entry_deleted": ({_VAULT_JOURNAL_NAME},),
+        }[phase]
+        if set(members) not in expected_members:
+            raise ValueError("clean-install vault cleanup has unexpected source members")
     else:
         raise ValueError("clean-install vault cleanup journal has invalid phase")
     return journal
+
+
+def _terminal_vault_cleanup_journal_path(vault: Path) -> Path:
+    return vault.with_name(_VAULT_FINALIZATION_JOURNAL_NAME)
+
+
+def _terminal_vault_cleanup_guard_path(vault: Path) -> Path:
+    return vault.with_name(_VAULT_FINALIZATION_GUARD_NAME)
+
+
+def _read_terminal_vault_cleanup_journal(vault: Path) -> dict[str, Any] | None:
+    """Read the durable marker used after the vault itself became empty."""
+    journal_path = _terminal_vault_cleanup_journal_path(vault)
+    if not journal_path.exists() and not journal_path.is_symlink():
+        return None
+    if journal_path.is_symlink():
+        raise ValueError("clean-install vault finalization journal is invalid")
+    journal = _read_optional_private_json(journal_path)
+    if not journal or not _VAULT_ID_RE.fullmatch(str(journal.get("vault_id") or "")):
+        raise ValueError("clean-install vault finalization journal is invalid")
+    if journal.get("verification") != "verified" or not isinstance(journal.get("checks"), dict):
+        raise ValueError("clean-install vault finalization journal is not verified")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(journal.get("handoff_secret_sha256") or "")):
+        raise ValueError("clean-install vault finalization journal has no bound local handoff")
+    if journal.get("cleanup") != "completed" or journal.get("phase") != "completed":
+        raise ValueError("clean-install vault finalization journal has invalid phase")
+    return journal
+
+
+def _read_terminal_vault_cleanup_guard(vault: Path) -> dict[str, Any] | None:
+    """Read the non-source guard for the last terminal marker transition."""
+    guard_path = _terminal_vault_cleanup_guard_path(vault)
+    if not guard_path.exists() and not guard_path.is_symlink():
+        return None
+    if guard_path.is_symlink():
+        raise ValueError("clean-install vault finalization guard is invalid")
+    guard = _read_optional_private_json(guard_path)
+    if not guard or not _VAULT_ID_RE.fullmatch(str(guard.get("vault_id") or "")):
+        raise ValueError("clean-install vault finalization guard is invalid")
+    if guard.get("verification") != "verified" or not isinstance(guard.get("checks"), dict):
+        raise ValueError("clean-install vault finalization guard is not verified")
+    if str(guard.get("phase") or "") not in {"marker_unlinking", "marker_deleted"}:
+        raise ValueError("clean-install vault finalization guard has invalid phase")
+    _verification_from_vault_journal(guard)
+    return guard
+
+
+def _write_terminal_vault_cleanup_guard(guard_path: Path, journal: dict[str, Any], *, phase: str) -> dict[str, Any]:
+    """Durably publish the second guard before the marker unlink boundary."""
+    if phase not in {"marker_unlinking", "marker_deleted"}:
+        raise ValueError("clean-install vault finalization guard has invalid phase")
+    payload = {
+        "vault_id": _validate_vault_id(str(journal["vault_id"])),
+        "verification": "verified",
+        "checks": _verification_from_vault_journal(journal)["checks"],
+        "phase": phase,
+    }
+    _write_private_json_atomic(guard_path, payload)
+    return payload
+
+
+def _validate_terminal_vault_cleanup_topology(vault: Path) -> None:
+    """A finalization marker may coexist only with an empty canonical vault."""
+    if not vault.exists() and not vault.is_symlink():
+        return
+    _validate_vault_directory(vault, require_existing=True)
+    if any(vault.iterdir()):
+        raise ValueError("clean-install vault finalization has unexpected source members")
+
+
+def _resume_terminal_vault_cleanup(
+    vault: Path,
+    journal: dict[str, Any] | None,
+    guard: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Finish the terminal marker transition without recreating its journal."""
+    _validate_terminal_vault_cleanup_topology(vault)
+    journal_path = _terminal_vault_cleanup_journal_path(vault)
+    guard_path = _terminal_vault_cleanup_guard_path(vault)
+    if journal is None and guard is None:
+        raise ValueError("clean-install vault terminal cleanup has no durable state")
+    if journal is not None and guard is not None and journal["vault_id"] != guard["vault_id"]:
+        raise ValueError("clean-install vault terminal cleanup state does not match")
+    if guard is not None and guard["phase"] == "marker_deleted":
+        if journal is not None:
+            raise ValueError("clean-install vault finalization guard conflicts with its journal")
+        return {"completed": True, "source_deleted": True, "status": "completed"}
+    if guard is None:
+        if journal is None:
+            raise AssertionError("unreachable terminal cleanup state")
+        try:
+            guard = _write_terminal_vault_cleanup_guard(guard_path, journal, phase="marker_unlinking")
+        except OSError:
+            return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+    try:
+        if vault.exists() or vault.is_symlink():
+            vault.rmdir()
+        # The directory removal is not durable until its parent is synced.
+        _fsync_directory(vault.parent)
+    except OSError:
+        return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+    try:
+        if journal_path.exists() or journal_path.is_symlink():
+            _validate_vault_file(journal_path)
+            journal_path.unlink()
+        # The durable guard exists before this unlink.  A parent fsync is the
+        # confirmation that the marker deletion itself survived the boundary.
+        _fsync_directory(journal_path.parent)
+    except OSError:
+        return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+    try:
+        _write_terminal_vault_cleanup_guard(guard_path, guard, phase="marker_deleted")
+    except OSError:
+        return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+    return {"completed": True, "source_deleted": True, "status": "completed"}
+
+
+def _move_completed_vault_journal_to_finalization(vault: Path, journal: dict[str, Any]) -> dict[str, Any]:
+    """Publish terminal intent outside the directory before its last removal."""
+    journal_path = vault / _VAULT_JOURNAL_NAME
+    finalization_path = _terminal_vault_cleanup_journal_path(vault)
+    existing = _read_terminal_vault_cleanup_journal(vault)
+    existing_guard = _read_terminal_vault_cleanup_guard(vault)
+    if existing is None:
+        if existing_guard is not None and existing_guard["phase"] != "marker_deleted":
+            raise ValueError("clean-install vault finalization guard blocks a new terminal cleanup")
+        if journal.get("cleanup") != "completed" or journal.get("phase") != "completed":
+            journal = _write_cleanup_journal(journal_path, journal, cleanup="completed", phase="completed")
+        try:
+            journal_path.replace(finalization_path)
+            # The moved marker must be durable before ``vault.rmdir()`` can run.
+            _fsync_directory(vault.parent)
+        except OSError:
+            return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+        existing = journal
+    elif existing.get("vault_id") != journal.get("vault_id"):
+        raise ValueError("clean-install vault finalization journal does not match vault")
+    if existing_guard is not None and existing_guard["phase"] == "marker_deleted":
+        # A completed guard from a previous vault is harmless.  The current
+        # marker will atomically replace it with a new pre-unlink guard.
+        existing_guard = None
+    return _resume_terminal_vault_cleanup(vault, existing, existing_guard)
 
 
 def _validate_vault_file(path: Path) -> None:
@@ -757,6 +1274,13 @@ def _validate_vault_id(value: str) -> str:
     return clean
 
 
+def validate_clean_install_vault_id(value: object) -> str:
+    """Validate the raw public API identifier without normalization."""
+    if not isinstance(value, str) or not _VAULT_ID_RE.fullmatch(value):
+        raise ValueError("invalid clean-install vault id")
+    return value
+
+
 def _read_vault_entry(vault: Path) -> dict[str, Any]:
     if _validate_vault_topology(vault) is not None:
         raise ValueError("clean-install vault source is already in verified cleanup")
@@ -774,14 +1298,14 @@ def _read_vault_entry(vault: Path) -> dict[str, Any]:
         "schema_version",
         "archive_sha256",
         "archive_size_bytes",
-        "confirmation_token_sha256",
+        "handoff_secret_sha256",
     }
     if not required.issubset(payload):
         raise ValueError("clean-install vault entry is incomplete")
     payload["vault_id"] = _validate_vault_id(str(payload["vault_id"]))
     if str(payload["schema_version"]) not in SUPPORTED_BACKUP_SCHEMA_VERSIONS:
         raise ValueError("clean-install vault entry has unsupported schema")
-    for key in ("archive_sha256", "confirmation_token_sha256"):
+    for key in ("archive_sha256", "handoff_secret_sha256"):
         if not re.fullmatch(r"[a-f0-9]{64}", str(payload[key])):
             raise ValueError(f"clean-install vault entry has invalid {key}")
     try:
@@ -1021,14 +1545,42 @@ def _mark_vault_verified(vault: Path, payload: dict[str, Any], verification: dic
         vault / _VAULT_JOURNAL_NAME,
         {
             "vault_id": payload["vault_id"],
+            "created_at": payload["created_at"],
+            "schema_version": payload["schema_version"],
+            "archive_sha256": payload["archive_sha256"],
+            "archive_size_bytes": payload["archive_size_bytes"],
             "verification": "verified",
             "verified_at": payload["verified_at"],
             "checks": verification["checks"],
-            "confirmation_token_sha256": payload["confirmation_token_sha256"],
+            "handoff_secret_sha256": payload["handoff_secret_sha256"],
             "cleanup": "pending",
             "phase": "verified",
         },
     )
+
+
+def _journal_public_metadata(journal: dict[str, Any]) -> dict[str, Any] | None:
+    """Return only complete metadata accepted by CleanInstallVaultStatus."""
+    try:
+        created_at = str(journal["created_at"])
+        schema_version = str(journal["schema_version"])
+        archive_sha256 = str(journal["archive_sha256"])
+        archive_size_bytes = int(journal["archive_size_bytes"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        not created_at
+        or schema_version != BACKUP_SCHEMA_VERSION
+        or not re.fullmatch(r"[a-f0-9]{64}", archive_sha256)
+        or archive_size_bytes <= 0
+    ):
+        return None
+    return {
+        "created_at": created_at,
+        "schema_version": schema_version,
+        "archive_sha256": archive_sha256,
+        "archive_size_bytes": archive_size_bytes,
+    }
 
 
 def _verification_from_vault_journal(journal: dict[str, Any]) -> dict[str, Any]:
@@ -1038,10 +1590,10 @@ def _verification_from_vault_journal(journal: dict[str, Any]) -> dict[str, Any]:
     return {"verified": True, "checks": checks}
 
 
-def _verify_vault_confirmation_hash(payload: dict[str, Any], confirmation_token: str) -> None:
-    supplied_hash = _sha256_text(str(confirmation_token or ""))
-    if not hmac.compare_digest(supplied_hash, str(payload.get("confirmation_token_sha256") or "")):
-        raise RuntimeError("clean-install vault confirmation token does not match for consumption")
+def _verify_vault_handoff_secret(payload: dict[str, Any], handoff_secret: str) -> None:
+    supplied_hash = _sha256_text(str(handoff_secret or ""))
+    if not hmac.compare_digest(supplied_hash, str(payload.get("handoff_secret_sha256") or "")):
+        raise RuntimeError("clean-install local handoff does not match vault")
 
 
 def _write_cleanup_journal(journal_path: Path, journal: dict[str, Any], *, cleanup: str, phase: str) -> dict[str, Any]:
@@ -1056,15 +1608,16 @@ def _write_cleanup_journal(journal_path: Path, journal: dict[str, Any], *, clean
 def _consume_verified_vault(
     vault: Path,
     vault_id: str,
-    confirmation_token: str,
+    handoff_secret: str,
     verification: dict[str, Any],
+    *,
+    target_home: Path | None = None,
 ) -> dict[str, Any]:
     """Delete source data only after independently re-checking consume guards.
 
     This deliberately does not trust the caller to have performed the restore
-    verification.  A future call site must provide the same one-time token and
-    can only consume an entry that is durably marked verified with a pending
-    verification journal.
+    verification.  It can only consume a source that is durably marked
+    verified with a pending verification journal and the bound local handoff.
     """
     if not isinstance(verification, dict) or verification.get("verified") is not True:
         raise RuntimeError("clean-install vault consumption requires verified restore")
@@ -1078,28 +1631,49 @@ def _consume_verified_vault(
     durable_verification = _verification_from_vault_journal(journal_payload)
     if durable_verification["checks"] != checks:
         raise RuntimeError("clean-install vault verification does not match durable journal")
-    _verify_vault_confirmation_hash(journal_payload, confirmation_token)
     journal = vault / _VAULT_JOURNAL_NAME
     if journal_payload.get("cleanup") == "completed":
-        return {"completed": True, "source_deleted": True, "status": "completed"}
+        if journal_payload.get("phase") != "completed":
+            raise RuntimeError("clean-install vault cleanup journal has invalid phase")
+        return _move_completed_vault_journal_to_finalization(vault, journal_payload)
     if journal_payload.get("cleanup") not in {"pending", "in_progress"}:
         raise RuntimeError("clean-install vault cleanup journal is not resumable")
-    journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="archive_pending")
-    archive = vault / _VAULT_ARCHIVE_NAME
-    entry = vault / _VAULT_ENTRY_NAME
-    try:
-        if archive.exists():
-            _validate_vault_file(archive)
-            archive.unlink()
+    phase = str(journal_payload.get("phase") or "")
+    if phase != "entry_deleted":
+        _verify_vault_handoff_secret(journal_payload, handoff_secret)
+    if phase in {"verified", "archive_pending"}:
+        journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="archive_unlinking")
+        phase = "archive_unlinking"
+    if phase == "archive_unlinking":
+        archive = vault / _VAULT_ARCHIVE_NAME
+        try:
+            if archive.exists() or archive.is_symlink():
+                _validate_vault_file(archive)
+                archive.unlink()
+        except OSError:
+            return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
         journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="archive_deleted")
-        if entry.exists():
-            _validate_vault_file(entry)
-            entry.unlink()
-    except OSError as exc:
-        _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase=str(journal_payload["phase"]))
-        return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
-    _write_cleanup_journal(journal, journal_payload, cleanup="completed", phase="completed")
-    return {"completed": True, "source_deleted": True, "status": "completed"}
+        phase = "archive_deleted"
+    if phase == "archive_deleted":
+        journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="entry_unlinking")
+        phase = "entry_unlinking"
+    if phase == "entry_unlinking":
+        entry = vault / _VAULT_ENTRY_NAME
+        try:
+            if entry.exists() or entry.is_symlink():
+                _validate_vault_file(entry)
+                entry.unlink()
+        except OSError:
+            return {"completed": False, "source_deleted": False, "status": "cleanup_incomplete"}
+        journal_payload = _write_cleanup_journal(journal, journal_payload, cleanup="in_progress", phase="entry_deleted")
+        phase = "entry_deleted"
+    if phase != "entry_deleted":
+        raise RuntimeError("clean-install vault cleanup journal has invalid phase")
+    # At this point archive and entry are gone.  Removing the private handoff
+    # cannot make an unverified source unrecoverable; the remaining work is
+    # only idempotent source-directory cleanup after a crash.
+    _delete_clean_install_handoff(target_home, clean_id)
+    return _move_completed_vault_journal_to_finalization(vault, journal_payload)
 
 
 def list_snapshots(state_dir: Path) -> dict[str, Any]:

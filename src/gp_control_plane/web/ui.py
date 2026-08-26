@@ -2054,7 +2054,7 @@ pre {
             <h2 id="clean-install-vault-title">Vault для чистой установки</h2>
             <span class="badge" id="clean-install-vault-count">0</span>
           </div>
-          <div class="helper-text">Создает одну защищенную локальную копию для отдельного сценария чистой установки. Vault находится вне очищаемых GP-данных. Токен подтверждения будет показан только один раз — сохраните его до очистки.</div>
+          <div class="helper-text">Создает одну защищенную локальную копию для отдельного сценария чистой установки. Сервис автоматически сохраняет защищенный device-local handoff вне очищаемых GP-данных; для восстановления выберите vault и явно подтвердите восстановление с удалением источника.</div>
           <div class="button-row">
             <button data-action="create-clean-install-vault" type="button">Создать vault для чистой установки</button>
             <button class="secondary" data-action="refresh-clean-install-vaults" type="button">Обновить статус vault</button>
@@ -4589,7 +4589,7 @@ function renderCleanInstallVaults(){
         <div>SHA-256: <code>${esc(item.archive_sha256 || '-')}</code></div>
         <div>Проверка: ${esc(item.verification || '-')}</div>
       </div>
-      <div class="helper-text">После успешного verified restore исходный vault будет удален автоматически. Для восстановления потребуется сохраненный ранее токен.</div>
+      <div class="helper-text">После явного подтверждения восстановление проверит данные и SQLite. При успехе исходный vault будет удален автоматически.</div>
       <div class="backup-card-actions">
         <button class="secondary danger" data-clean-install-vault-restore="${esc(id)}" type="button">Восстановить и удалить vault</button>
       </div>
@@ -6113,11 +6113,8 @@ async function refreshCleanInstallVaults(){
 async function createCleanInstallVault(){
   try {
     const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsCreate'), {});
-    let confirmationToken = String(data.confirmation_token || '');
-    if (!data.vault_id || !confirmationToken) throw new Error('Сервер не вернул идентификатор или одноразовый токен vault');
-    window.prompt('Скопируйте и сохраните одноразовый токен. Он больше не будет показан и потребуется для восстановления после чистой установки.', confirmationToken);
-    confirmationToken = '';
-    setMessage('Vault создан. Одноразовый токен показан только что; сохраните его до чистой установки.', 'good');
+    if (!data.vault_id) throw new Error('Сервер не вернул идентификатор vault');
+    setMessage('Vault создан. После чистой установки выберите его и явно подтвердите восстановление с удалением источника.', 'good');
     await refreshCleanInstallVaults();
   } catch (error) {
     if (isRuntimeBusyError(error)) {
@@ -6130,17 +6127,11 @@ async function createCleanInstallVault(){
 async function restoreCleanInstallVault(vaultId){
   const id = String(vaultId || '').trim();
   if (!id) return;
-  const confirmed = window.confirm(`Восстановить данные из vault ${id}? Операция продолжится только после проверки данных и SQLite. При успехе исходный vault будет удален.`);
+  const confirmed = window.confirm(`Восстановить данные из vault ${id} и удалить источник после проверки? Операция продолжится только после проверки данных и SQLite.`);
   if (!confirmed) return;
-  let confirmationToken = String(window.prompt('Вставьте ранее сохраненный одноразовый токен для этого vault:', '') || '').trim();
-  if (!confirmationToken) {
-    setMessage('Восстановление отменено: одноразовый токен не введен.', 'warn');
-    return;
-  }
   try {
     const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsRestore'), {
-      vault_id: id,
-      confirmation_token: confirmationToken
+      vault_id: id
     });
     if (!data.completed || !data.verification?.verified || !data.cleanup?.source_deleted) {
       throw new Error('Восстановление не подтвердило verification=verified и удаление исходного vault');
@@ -6154,8 +6145,6 @@ async function restoreCleanInstallVault(vaultId){
       return;
     }
     setMessage(`Восстановление vault не завершено: ${error.message}. Исходный vault сохранен.`, 'bad');
-  } finally {
-    confirmationToken = '';
   }
 }
 async function createBackup(){

@@ -32,6 +32,10 @@ ROOT_HELPER_PATH="${GP_ROOT_HELPER_PATH:-/usr/local/libexec/gp-control-plane/gp-
 ROOT_HELPER_CONFIG="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
 ROOT_HELPER_RUN_DIR="${GP_ROOT_HELPER_RUN_DIR:-/run/gp-control-plane/runs}"
 SUDOERS_PATH="${GP_SUDOERS_PATH:-/etc/sudoers.d/gp-control-plane-root-helper}"
+CLEAN_REMOVE_DIRECTORY="/usr/local/libexec/gp-control-plane"
+CLEAN_REMOVE_ROOT_PATH="$CLEAN_REMOVE_DIRECTORY/gp-clean-remove-root"
+CLEAN_REMOVE_PREFLIGHT_PATH="$CLEAN_REMOVE_DIRECTORY/gp-clean-remove-preflight"
+CLEAN_REMOVE_MANIFEST_PATH="$CLEAN_REMOVE_DIRECTORY/gp-clean-remove-root.manifest"
 SERVICE_MEMORY_HIGH="${GP_SERVICE_MEMORY_HIGH:-512M}"
 SERVICE_MEMORY_MAX="${GP_SERVICE_MEMORY_MAX:-1G}"
 REQUESTED_STEPS="${GP_INSTALL_STEPS:-all}"
@@ -350,6 +354,94 @@ checkout_selected_release() {
   esac
   repo_git checkout --detach --force "$SELECTED_COMMIT_SHA"
   verify_selected_release
+}
+
+selected_commit_script_sha256() {
+  selected_script_path="$1"
+  selected_script_sha256="$(repo_git show "$SELECTED_COMMIT_SHA:$selected_script_path" | sha256sum | awk 'NR == 1 { print $1 }')" \
+    || fail "Cannot hash selected release script: $selected_script_path"
+  case "$selected_script_sha256" in
+    ????????????????????????????????????????????????????????????????) ;;
+    *) fail "Selected release script hash is invalid: $selected_script_path" ;;
+  esac
+  case "$selected_script_sha256" in
+    *[!0-9a-f]*) fail "Selected release script hash is invalid: $selected_script_path" ;;
+  esac
+  printf '%s\n' "$selected_script_sha256"
+}
+
+verify_clean_remove_publish_destination() {
+  destination_path="$1"
+  destination_mode="$2"
+  if as_root test -e "$destination_path" || as_root test -L "$destination_path"; then
+    as_root test -f "$destination_path" && ! as_root test -L "$destination_path" \
+      || fail "Clean-remove publish destination is unsafe: $destination_path"
+    [ "$(as_root stat -c '%u:%g:%a' "$destination_path" 2>/dev/null || true)" = "0:0:$destination_mode" ] \
+      || fail "Clean-remove publish destination has unexpected ownership or mode: $destination_path"
+  fi
+}
+
+verify_published_clean_remove_file() {
+  published_path="$1"
+  published_mode="$2"
+  expected_sha256="$3"
+  as_root test -f "$published_path" && ! as_root test -L "$published_path" \
+    || fail "Published clean-remove file is unsafe: $published_path"
+  [ "$(as_root stat -c '%u:%g:%a' "$published_path" 2>/dev/null || true)" = "0:0:$published_mode" ] \
+    || fail "Published clean-remove file has unexpected ownership or mode: $published_path"
+  [ "$(as_root sha256sum "$published_path" | awk 'NR == 1 { print $1 }')" = "$expected_sha256" ] \
+    || fail "Published clean-remove file hash does not match selected release: $published_path"
+}
+
+install_clean_remove_bundle() {
+  cleaner_source="$INSTALL_DIR/scripts/gp-clean-remove-root.sh"
+  preflight_source="$INSTALL_DIR/scripts/gp-clean-remove-preflight.sh"
+  [ -f "$cleaner_source" ] && [ ! -L "$cleaner_source" ] \
+    || fail "Selected release clean-remove source is unsafe: $cleaner_source"
+  [ -f "$preflight_source" ] && [ ! -L "$preflight_source" ] \
+    || fail "Selected release clean-remove preflight source is unsafe: $preflight_source"
+
+  cleaner_expected_sha256="$(selected_commit_script_sha256 scripts/gp-clean-remove-root.sh)"
+  preflight_expected_sha256="$(selected_commit_script_sha256 scripts/gp-clean-remove-preflight.sh)"
+  manifest_payload="$(printf '%s\n' \
+    "candidate_sha=$SELECTED_COMMIT_SHA" \
+    "cleaner_sha256=$cleaner_expected_sha256" \
+    "preflight_sha256=$preflight_expected_sha256" \
+    "cleaner_path=$CLEAN_REMOVE_ROOT_PATH" \
+    "preflight_path=$CLEAN_REMOVE_PREFLIGHT_PATH")"
+
+  ensure_root_directory "$CLEAN_REMOVE_DIRECTORY" 0755 root root
+  verify_clean_remove_publish_destination "$CLEAN_REMOVE_ROOT_PATH" 700
+  verify_clean_remove_publish_destination "$CLEAN_REMOVE_PREFLIGHT_PATH" 755
+  verify_clean_remove_publish_destination "$CLEAN_REMOVE_MANIFEST_PATH" 600
+  clean_remove_stage_dir="$(as_root mktemp -d /run/gp-clean-remove-install.XXXXXX)" \
+    || fail "Cannot create root-private clean-remove publication stage"
+  cleaner_stage="$clean_remove_stage_dir/cleaner"
+  preflight_stage="$clean_remove_stage_dir/preflight"
+  manifest_stage="$clean_remove_stage_dir/manifest"
+
+  as_root install -m 0700 -o root -g root "$cleaner_source" "$cleaner_stage"
+  as_root install -m 0755 -o root -g root "$preflight_source" "$preflight_stage"
+  as_root sh -n "$cleaner_stage"
+  as_root sh -n "$preflight_stage"
+  verify_published_clean_remove_file "$cleaner_stage" 700 "$cleaner_expected_sha256"
+  verify_published_clean_remove_file "$preflight_stage" 755 "$preflight_expected_sha256"
+  printf '%s\n' "$manifest_payload" | as_root tee "$manifest_stage" >/dev/null
+  as_root chown root:root "$manifest_stage"
+  as_root chmod 0600 "$manifest_stage"
+  [ "$(as_root stat -c '%u:%g:%a' "$manifest_stage" 2>/dev/null || true)" = "0:0:600" ] \
+    || fail "Staged clean-remove manifest has unexpected ownership or mode"
+
+  as_root mv -f -- "$cleaner_stage" "$CLEAN_REMOVE_ROOT_PATH"
+  as_root mv -f -- "$preflight_stage" "$CLEAN_REMOVE_PREFLIGHT_PATH"
+  as_root mv -f -- "$manifest_stage" "$CLEAN_REMOVE_MANIFEST_PATH"
+  as_root rmdir -- "$clean_remove_stage_dir"
+  verify_published_clean_remove_file "$CLEAN_REMOVE_ROOT_PATH" 700 "$cleaner_expected_sha256"
+  verify_published_clean_remove_file "$CLEAN_REMOVE_PREFLIGHT_PATH" 755 "$preflight_expected_sha256"
+  [ "$(as_root cat "$CLEAN_REMOVE_MANIFEST_PATH")" = "$manifest_payload" ] \
+    || fail "Published clean-remove manifest does not match the selected release"
+  [ "$(as_root stat -c '%u:%g:%a' "$CLEAN_REMOVE_MANIFEST_PATH" 2>/dev/null || true)" = "0:0:600" ] \
+    || fail "Published clean-remove manifest has unexpected ownership or mode"
 }
 
 apt_package_available() {
@@ -732,9 +824,7 @@ elif step_log root-helper "Installing GP root helper"; then
   as_root install -d -m 0755 "$(dirname "$ROOT_HELPER_PATH")"
   ROOT_HELPER_SOURCE="$INSTALL_DIR/scripts/gp-root-helper.sh"
   as_root install -m 0755 -o root -g root "$ROOT_HELPER_SOURCE" "$ROOT_HELPER_PATH"
-  CLEAN_REMOVE_SOURCE="$INSTALL_DIR/scripts/gp-clean-remove-root.sh"
-  as_root install -m 0700 -o root -g root "$CLEAN_REMOVE_SOURCE" \
-    /usr/local/libexec/gp-control-plane/gp-clean-remove-root
+  install_clean_remove_bundle
 
   ensure_root_directory /run/gp-control-plane/gates 0700 root root
   ensure_root_regular_file /run/gp-control-plane/gates/discovery-update.lock 0600 root root

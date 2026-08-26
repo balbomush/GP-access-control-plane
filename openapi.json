@@ -845,10 +845,10 @@
         "tags": ["Core Clean-Install Vault"],
         "operationId": "createCleanInstallVault",
         "summary": "Create the one pending device-local clean-install vault",
-        "description": "Returns the confirmation token exactly once. The token is not returned by list or status and must be saved by the operator before the clean installation.",
+        "description": "Creates one pending device-local vault. The protected handoff remains local to the device; the response contains public metadata only.",
         "responses": {
           "201": {
-            "description": "Pending vault created; response includes the one-time confirmation token.",
+            "description": "Pending vault created; response contains public metadata only.",
             "content": {
               "application/json": {
                 "schema": {"$ref": "#/components/schemas/CleanInstallVaultCreateResponse"},
@@ -866,10 +866,10 @@
       "get": {
         "tags": ["Core Clean-Install Vault"],
         "operationId": "listCleanInstallVaults",
-        "summary": "List pending clean-install vault metadata without credentials",
+        "summary": "List pending clean-install vault metadata",
         "responses": {
           "200": {
-            "description": "Token-free pending vault metadata.",
+            "description": "Public pending vault metadata.",
             "content": {
               "application/json": {
                 "schema": {"$ref": "#/components/schemas/CleanInstallVaultListResponse"},
@@ -886,19 +886,19 @@
       "get": {
         "tags": ["Core Clean-Install Vault"],
         "operationId": "getCleanInstallVaultStatus",
-        "summary": "Get token-free status of one pending clean-install vault",
+        "summary": "Get public status of one pending clean-install vault",
         "parameters": [
           {
             "name": "vault_id",
             "in": "query",
             "required": true,
-            "schema": {"type": "string", "minLength": 1},
-            "example": "vault_20260821_120000"
+            "schema": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+            "example": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e"
           }
         ],
         "responses": {
           "200": {
-            "description": "Token-free status metadata.",
+            "description": "Public status metadata.",
             "content": {
               "application/json": {
                 "schema": {"$ref": "#/components/schemas/CleanInstallVaultStatus"},
@@ -2264,15 +2264,13 @@
         "type": "object",
         "required": [
           "vault_id",
-          "confirmation_token",
           "archive_sha256",
           "archive_size_bytes",
           "schema_version",
           "semantic_manifest"
         ],
         "properties": {
-          "vault_id": {"type": "string", "minLength": 1},
-          "confirmation_token": {"type": "string", "minLength": 1, "writeOnly": true},
+          "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
           "archive_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
           "archive_size_bytes": {"type": "integer", "minimum": 1},
           "schema_version": {"type": "string", "const": "7"},
@@ -2292,7 +2290,7 @@
           "pending"
         ],
         "properties": {
-          "vault_id": {"type": "string", "minLength": 1},
+          "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
           "created_at": {"type": "string"},
           "schema_version": {"type": "string", "const": "7"},
           "archive_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
@@ -2312,10 +2310,9 @@
       },
       "CleanInstallVaultRestoreRequest": {
         "type": "object",
-        "required": ["vault_id", "confirmation_token"],
+        "required": ["vault_id"],
         "properties": {
-          "vault_id": {"type": "string", "minLength": 1},
-          "confirmation_token": {"type": "string", "minLength": 1, "writeOnly": true}
+          "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"}
         },
         "additionalProperties": false
       },
@@ -2324,7 +2321,7 @@
         "required": ["completed", "vault_id", "verification", "cleanup"],
         "properties": {
           "completed": {"type": "boolean", "const": true},
-          "vault_id": {"type": "string", "minLength": 1},
+          "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
           "verification": {"type": "object", "additionalProperties": true},
           "cleanup": {"type": "object", "additionalProperties": true}
         },
@@ -4642,10 +4639,9 @@
         }
       },
       "CleanInstallVaultCreateResponse": {
-        "summary": "Создан pending device-local vault; токен показывается только в этом ответе",
+        "summary": "Создан pending device-local vault с публичными метаданными",
         "value": {
-          "vault_id": "vault_20260821_120000",
-          "confirmation_token": "save-this-once-before-clean-install",
+          "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e",
           "archive_sha256": "b8e91ca19265dadfac3a4db5f2865d93d9423d6e07c510e1615cf824bd2e2db3",
           "archive_size_bytes": 184320,
           "schema_version": "7",
@@ -4653,11 +4649,11 @@
         }
       },
       "CleanInstallVaultListResponse": {
-        "summary": "Список pending vault без confirmation token",
+        "summary": "Список pending vault с публичными метаданными",
         "value": {
           "vaults": [
             {
-              "vault_id": "vault_20260821_120000",
+              "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e",
               "created_at": "2026-08-21T12:00:00Z",
               "schema_version": "7",
               "archive_sha256": "b8e91ca19265dadfac3a4db5f2865d93d9423d6e07c510e1615cf824bd2e2db3",
@@ -4669,9 +4665,9 @@
         }
       },
       "CleanInstallVaultStatus": {
-        "summary": "Статус pending vault без confirmation token",
+        "summary": "Публичный статус pending vault",
         "value": {
-          "vault_id": "vault_20260821_120000",
+          "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e",
           "created_at": "2026-08-21T12:00:00Z",
           "schema_version": "7",
           "archive_sha256": "b8e91ca19265dadfac3a4db5f2865d93d9423d6e07c510e1615cf824bd2e2db3",
@@ -4681,17 +4677,16 @@
         }
       },
       "CleanInstallVaultRestoreRequest": {
-        "summary": "Восстановить выбранный vault с ранее сохраненным токеном",
+        "summary": "Восстановить выбранный vault после явного подтверждения",
         "value": {
-          "vault_id": "vault_20260821_120000",
-          "confirmation_token": "saved-by-operator"
+          "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e"
         }
       },
       "CleanInstallVaultRestoreResponse": {
         "summary": "Данные проверены и source vault удален",
         "value": {
           "completed": true,
-          "vault_id": "vault_20260821_120000",
+          "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e",
           "verification": {"verified": true, "integrity_check": "ok"},
           "cleanup": {"completed": true, "source_deleted": true}
         }

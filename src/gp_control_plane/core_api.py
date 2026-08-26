@@ -8,6 +8,7 @@ from .backups import (
     create_clean_install_vault,
     list_snapshots,
     restore_clean_install_vault,
+    validate_clean_install_vault_id,
 )
 from .config import AppConfig
 from .domain_sources import fetch_v2fly_category_local, list_v2fly_categories_local, parse_v2fly_domains
@@ -242,11 +243,8 @@ def clean_install_vault_create_payload(config: AppConfig, payload: dict[str, Any
     if payload:
         raise ValueError("clean-install vault create does not accept request fields")
     created = create_clean_install_vault(config.output.state_dir)
-    # The confirmation token is intentionally available only in this one
-    # create response.  Do not reuse this mapper for status/list responses.
     return {
         "vault_id": str(created.get("vault_id") or ""),
-        "confirmation_token": str(created.get("confirmation_token") or ""),
         "archive_sha256": str(created.get("archive_sha256") or ""),
         "archive_size_bytes": int(created.get("archive_size_bytes") or 0),
         "schema_version": str(created.get("schema_version") or ""),
@@ -264,9 +262,12 @@ def clean_install_vault_list_payload(config: AppConfig) -> dict[str, Any]:
 
 def clean_install_vault_status_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     del config
-    vault_id = query_one(query, "vault_id")
-    if not vault_id:
+    values = query.get("vault_id") or []
+    if not values or values[0] == "":
         raise ValueError("vault_id is required")
+    if len(values) != 1:
+        raise ValueError("invalid clean-install vault id")
+    vault_id = validate_clean_install_vault_id(values[0])
     info = clean_install_vault_info()
     if not info.get("exists") or not info.get("pending") or str(info.get("vault_id") or "") != vault_id:
         raise FileNotFoundError(vault_id)
@@ -274,20 +275,17 @@ def clean_install_vault_status_payload(config: AppConfig, query: dict[str, list[
 
 
 def clean_install_vault_restore_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"vault_id", "confirmation_token"}
+    allowed = {"vault_id"}
     unknown = sorted(str(key) for key in payload if str(key) not in allowed)
     if unknown:
         raise ValueError(f"unsupported clean-install vault restore fields: {', '.join(unknown)}")
-    vault_id = str(payload.get("vault_id") or "").strip()
-    confirmation_token = str(payload.get("confirmation_token") or "").strip()
-    if not vault_id:
+    raw_vault_id = payload.get("vault_id")
+    if raw_vault_id is None or raw_vault_id == "":
         raise ValueError("vault_id is required")
-    if not confirmation_token:
-        raise ValueError("confirmation_token is required")
+    vault_id = validate_clean_install_vault_id(raw_vault_id)
     restored = restore_clean_install_vault(
         config.output.state_dir,
         vault_id=vault_id,
-        confirmation_token=confirmation_token,
     )
     verification = restored.get("verification") if isinstance(restored.get("verification"), dict) else {}
     cleanup = restored.get("cleanup") if isinstance(restored.get("cleanup"), dict) else {}
