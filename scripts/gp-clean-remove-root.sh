@@ -77,6 +77,16 @@ validate_root_directory() {
     case "$mode" in ??[2367]|?[2367]?|[2367]???) die "legacy GP directory is group/world-writable: $path"; return 1 ;; esac
 }
 
+validate_release_gates_directory() {
+    release_gates_dir=/var/lib/gp-control-plane/release-gates
+    [ ! -e "$release_gates_dir" ] && [ ! -L "$release_gates_dir" ] && return 0
+    [ -d "$release_gates_dir" ] && [ ! -L "$release_gates_dir" ] || { die "legacy release-gates directory is unsafe: $release_gates_dir"; return 1; }
+    [ "$(readlink -f -- "$release_gates_dir" 2>/dev/null || true)" = "$release_gates_dir" ] \
+        || { die "legacy release-gates directory is non-canonical: $release_gates_dir"; return 1; }
+    [ "$(stat -c '%u:%g:%a' "$release_gates_dir" 2>/dev/null || true)" = "0:$INSTALL_GID:750" ] \
+        || { die "legacy release-gates directory must be root:$INSTALL_GID mode 0750: $release_gates_dir"; return 1; }
+}
+
 validate_unit_path() {
     path=$1
     [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
@@ -120,12 +130,14 @@ validate_removal_surface() {
     validate_root_helper_directory || return 1
     validate_root_directory /run/gp-control-plane/runs || return 1
     validate_root_directory /run/gp-control-plane/gates || return 1
-    validate_root_directory /var/lib/gp-control-plane/release-gates || return 1
+    validate_release_gates_directory || return 1
 }
 
 validate_fixed_paths() {
     uid=$(id -u "$INSTALL_USER") || return 1
+    INSTALL_GID=$(id -g "$INSTALL_USER") || return 1
     [ "$INSTALL_USER" != root ] || { die 'root is not a supported install user'; return 1; }
+    case "$INSTALL_GID" in ''|0|0*|*[!0-9]*) die 'install-user group must be a nonzero numeric GID'; return 1 ;; esac
     TARGET_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6) || return 1
     [ -n "$TARGET_HOME" ] || { die 'cannot resolve install-user home'; return 1; }
     [ "$TARGET_HOME" = "$(readlink -f -- "$TARGET_HOME" 2>/dev/null || true)" ] \

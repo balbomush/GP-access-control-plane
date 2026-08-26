@@ -49,6 +49,28 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
         self.assertIn('neither supported legacy nor current GP state layout exists', fixed)
         self.assertNotIn("GP_STATE_DIR", fixed)
 
+    def test_release_gates_directory_has_the_only_install_group_exception(self) -> None:
+        generic = self.source[
+            self.source.index("validate_root_directory() {") : self.source.index("validate_release_gates_directory() {")
+        ]
+        special = self.source[
+            self.source.index("validate_release_gates_directory() {") : self.source.index("validate_unit_path() {")
+        ]
+        fixed = self.source[
+            self.source.index("validate_fixed_paths() {") : self.source.index("record_and_lock_parent() {")
+        ]
+        removal_surface = self.source[
+            self.source.index("validate_removal_surface() {") : self.source.index("validate_fixed_paths() {")
+        ]
+        self.assertIn("= '0:0'", generic)
+        self.assertNotIn("INSTALL_GID", generic)
+        self.assertIn('release_gates_dir=/var/lib/gp-control-plane/release-gates', special)
+        self.assertIn('"0:$INSTALL_GID:750"', special)
+        self.assertIn('INSTALL_GID=$(id -g "$INSTALL_USER")', fixed)
+        self.assertIn("install-user group must be a nonzero numeric GID", fixed)
+        self.assertIn("validate_release_gates_directory", removal_surface)
+        self.assertNotIn("validate_root_directory /var/lib/gp-control-plane/release-gates", removal_surface)
+
     def test_root_boundary_never_reads_or_deletes_vault_content(self) -> None:
         boundary = self.source[
             self.source.index("validate_fixed_paths() {") : self.source.index("record_and_lock_parent() {")
@@ -105,7 +127,9 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix" and os.geteuid() == 0, "requires isolated POSIX root harness")
     def test_posix_harness_covers_both_layouts_and_keeps_vault(self) -> None:
-        library = self.source.split('[ "$(id -u)" -eq 0 ] ||', 1)[0]
+        library = self.source.split('[ "$(id -u)" -eq 0 ] ||', 1)[0].replace(
+            "/var/lib/gp-control-plane/release-gates", '"$TEST_RELEASE_GATES"'
+        )
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             harness = textwrap.dedent(
@@ -143,6 +167,7 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                 r'''
                 TEST_UID="$(command id -u nobody)"
                 TEST_GID="$(command id -g nobody)"
+                TEST_RELEASE_GATES="$TEST_ROOT/release-gates"
                 id() {
                   if [ "$1" = -u ] && [ "${2:-}" = gpuser ]; then printf '%s\n' "$TEST_UID"; else command id "$@"; fi
                 }
@@ -176,6 +201,33 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
                 }
                 setup_variant legacy
                 setup_variant current
+
+                # This is the sole fixed directory that may be root:<install
+                # group>:0750. The generic root validator must still reject it.
+                INSTALL_GID="$TEST_GID"
+                validate_release_gates_directory
+                mkdir "$TEST_RELEASE_GATES"
+                chown root:"$TEST_GID" "$TEST_RELEASE_GATES"
+                chmod 0750 "$TEST_RELEASE_GATES"
+                validate_release_gates_directory
+                ! validate_root_directory "$TEST_RELEASE_GATES"
+                chmod 0755 "$TEST_RELEASE_GATES"
+                ! validate_release_gates_directory
+                chmod 0770 "$TEST_RELEASE_GATES"
+                ! validate_release_gates_directory
+                chown "$TEST_UID:$TEST_GID" "$TEST_RELEASE_GATES"
+                chmod 0750 "$TEST_RELEASE_GATES"
+                ! validate_release_gates_directory
+                /bin/rm -rf -- "$TEST_RELEASE_GATES"
+                : > "$TEST_RELEASE_GATES"
+                chown root:"$TEST_GID" "$TEST_RELEASE_GATES"
+                chmod 0750 "$TEST_RELEASE_GATES"
+                ! validate_release_gates_directory
+                /bin/rm -f -- "$TEST_RELEASE_GATES"
+                ln -s /tmp "$TEST_RELEASE_GATES"
+                ! validate_release_gates_directory
+                /bin/rm -f -- "$TEST_RELEASE_GATES"
+
                 TEST_HOME="$TEST_ROOT/no-state"
                 mkdir -p "$TEST_HOME/gp/GP-access-control-plane" "$TEST_HOME/.local/share/gp-control-plane/clean-install-vault"
                 chown -R "$TEST_UID:$TEST_GID" "$TEST_HOME"
