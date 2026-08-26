@@ -298,6 +298,11 @@ def _cleanup_nft_blockcheck_tables() -> None:
             _run_root_helper(["nft-delete-blockcheck-table", family, table])
 
 
+def cleanup_nft_blockcheck_tables() -> None:
+    """Best-effort cleanup of temporary blockcheck nft tables only."""
+    _cleanup_nft_blockcheck_tables()
+
+
 def _blockcheck_nft_tables(output: str) -> list[tuple[str, str]]:
     tables: list[tuple[str, str]] = []
     for line in output.splitlines():

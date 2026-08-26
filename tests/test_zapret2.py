@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from gp_control_plane.zapret2 import (
     BLOCKCHECK_ENV_KEYS,
     _blockcheck_nft_tables,
+    _cleanup_nft_blockcheck_tables,
     _signal_process_group,
+    cleanup_nft_blockcheck_tables,
     signal_registered_process_run,
     _stop_process_group,
     check_install,
@@ -39,6 +41,37 @@ def _root_helper_test_source(helper: Path) -> str:
 
 
 class Zapret2Tests(unittest.TestCase):
+    def test_public_cleanup_nft_blockcheck_tables_delegates_to_private_cleanup(self) -> None:
+        with mock.patch("gp_control_plane.zapret2._cleanup_nft_blockcheck_tables") as private_cleanup:
+            cleanup_nft_blockcheck_tables()
+
+        private_cleanup.assert_called_once_with()
+
+    def test_cleanup_nft_blockcheck_tables_uses_root_helper_after_direct_delete_is_denied(self) -> None:
+        table = "blockcheck2427371"
+        with (
+            mock.patch("gp_control_plane.zapret2.shutil.which", return_value="/usr/sbin/nft"),
+            mock.patch(
+                "gp_control_plane.zapret2.subprocess.run",
+                side_effect=[
+                    subprocess.CompletedProcess(["nft", "list", "tables"], 0, f"table inet {table}\n", ""),
+                    subprocess.CompletedProcess(["nft", "delete", "table", "inet", table], 1, "", "Operation not permitted"),
+                ],
+            ) as direct_nft,
+            mock.patch("gp_control_plane.zapret2._run_root_helper") as root_helper,
+        ):
+            _cleanup_nft_blockcheck_tables()
+
+        direct_nft.assert_has_calls(
+            [
+                mock.call(["/usr/sbin/nft", "list", "tables"], text=True, capture_output=True, check=False),
+                mock.call(
+                    ["/usr/sbin/nft", "delete", "table", "inet", table], text=True, capture_output=True, check=False
+                ),
+            ]
+        )
+        root_helper.assert_called_once_with(["nft-delete-blockcheck-table", "inet", table])
+
     def test_root_helper_env_whitelist_matches_backend_keys(self) -> None:
         helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
         text = helper.read_text(encoding="utf-8")

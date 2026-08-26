@@ -3760,92 +3760,113 @@ class WebUiTests(unittest.TestCase):
                     self.assertEqual(runner_threads.tracked_count, 1)
                     self.assertTrue(snapshot_finished.is_set())
 
-    def test_strategy_discovery_start_leaves_root_signal_cancellation_to_worker(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            captured_start_kwargs: list[dict[str, object]] = []
-            original_runner = web_app.JobRunner
-            worker_started = threading.Event()
-            worker_cancelled = threading.Event()
-            release_worker = threading.Event()
-            worker_finished = threading.Event()
-            snapshot_completed = threading.Event()
+    def test_strategy_discovery_start_installs_one_time_runtime_cleanup_hook(self) -> None:
+        def run_cancel_hook_regression(mode: str) -> None:
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                captured_start_kwargs: list[dict[str, object]] = []
+                original_runner = web_app.JobRunner
+                worker_started = threading.Event()
+                worker_cancelled = threading.Event()
+                release_worker = threading.Event()
+                worker_finished = threading.Event()
+                snapshot_completed = threading.Event()
+                cleanup_started = threading.Event()
 
-            class CapturingJobRunner(original_runner):
-                def start(self, *args: object, **kwargs: object) -> object:
-                    captured_start_kwargs.append(dict(kwargs))
-                    return super().start(*args, **kwargs)
+                class CapturingJobRunner(original_runner):
+                    def start(self, *args: object, **kwargs: object) -> object:
+                        captured_start_kwargs.append(dict(kwargs))
+                        return super().start(*args, **kwargs)
 
-            def worker_run(*args: object, **kwargs: object) -> dict[str, str]:
-                stop_event = kwargs["stop_event"]
-                run_id = kwargs["run_id"]
-                self.assertIsInstance(stop_event, threading.Event)
-                self.assertIsInstance(run_id, str)
-                worker_started.set()
-                try:
-                    self.assertTrue(stop_event.wait(timeout=2))
-                    strategy_finder.signal_registered_process_run(run_id, "TERM")
-                    worker_cancelled.set()
-                    self.assertTrue(release_worker.wait(timeout=2))
-                    return {"status": "stopped"}
-                finally:
-                    worker_finished.set()
+                def worker_run(*args: object, **kwargs: object) -> dict[str, str]:
+                    stop_event = kwargs["stop_event"]
+                    run_id = kwargs["run_id"]
+                    self.assertIsInstance(stop_event, threading.Event)
+                    self.assertIsInstance(run_id, str)
+                    worker_started.set()
+                    try:
+                        self.assertTrue(stop_event.wait(timeout=2))
+                        strategy_finder.signal_registered_process_run(run_id, "TERM")
+                        worker_cancelled.set()
+                        self.assertTrue(release_worker.wait(timeout=2))
+                        return {"status": "stopped"}
+                    finally:
+                        worker_finished.set()
 
-            def create_snapshot_when_idle(*_args: object, **_kwargs: object) -> dict[str, object]:
-                try:
-                    return {
-                        "kind": "snapshot",
-                        "status": "success",
-                        "completed_at": "2026-08-12T00:00:00Z",
-                        "snapshot_id": "post-run-snapshot",
-                    }
-                finally:
-                    snapshot_completed.set()
+                def create_snapshot_when_idle(*_args: object, **_kwargs: object) -> dict[str, object]:
+                    try:
+                        return {
+                            "kind": "snapshot",
+                            "status": "success",
+                            "completed_at": "2026-08-12T00:00:00Z",
+                            "snapshot_id": "post-run-snapshot",
+                        }
+                    finally:
+                        snapshot_completed.set()
 
-            with (
-                mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
-                mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
-                mock.patch.object(strategy_finder, "signal_registered_process_run") as root_signal,
-                mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_when_idle),
-            ):
-                server = _start_captured_server(serve, config)
-                with server, _JobRunnerThreadTracker() as runner_threads:
-                    runner_threads.release_barrier(release_worker)
-                    runner_threads.add_release_action(
-                        "cancel active JobRunner before releasing worker",
-                        lambda: _stop_current_run_if_started(server.port, worker_started, worker_finished),
-                    )
-                    status, _headers, body = _http_request(
-                        server.port,
-                        "/api/core/strategy-discovery/start-run",
-                        method="POST",
-                        body=json.dumps({"mode": "standard", "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
-                            "utf-8"
-                        ),
-                        headers={"Content-Type": "application/json"},
-                    )
-                    self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
-                    accepted = json.loads(body.decode("utf-8"))
-                    self.assertTrue(worker_started.wait(timeout=2))
-                    self.assertEqual(len(captured_start_kwargs), 1)
-                    self.assertNotIn("cancel_hook", captured_start_kwargs[0])
-
-                    for _ in range(2):
-                        stop_status, _stop_headers, stop_body = _http_request(
+                with (
+                    mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
+                    mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
+                    mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=worker_run),
+                    mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_when_idle),
+                    mock.patch.object(strategy_finder, "signal_registered_process_run") as root_signal,
+                    mock.patch.object(
+                        web_app,
+                        "cleanup_nft_blockcheck_tables",
+                        side_effect=cleanup_started.set,
+                    ) as cleanup,
+                ):
+                    server = _start_captured_server(serve, config)
+                    with server, _JobRunnerThreadTracker() as runner_threads:
+                        runner_threads.release_barrier(release_worker)
+                        runner_threads.add_release_action(
+                            "cancel active JobRunner before releasing worker",
+                            lambda: _stop_current_run_if_started(server.port, worker_started, worker_finished),
+                        )
+                        status, _headers, body = _http_request(
                             server.port,
-                            "/api/core/strategy-discovery/stop-current-run",
+                            "/api/core/strategy-discovery/start-run",
                             method="POST",
-                            body=b"{}",
+                            body=json.dumps({"mode": mode, "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                                "utf-8"
+                            ),
                             headers={"Content-Type": "application/json"},
                         )
-                        self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
-                    self.assertTrue(worker_cancelled.wait(timeout=2))
-                    root_signal.assert_called_once_with(accepted["run_id"], "TERM")
-                    self.assertEqual(runner_threads.tracked_count, 1)
+                        self.assertEqual(status, 202, body.decode("utf-8", errors="replace"))
+                        accepted = json.loads(body.decode("utf-8"))
+                        self.assertTrue(accepted["run_id"])
+                        self.assertTrue(worker_started.wait(timeout=2))
+                        self.assertEqual(len(captured_start_kwargs), 1)
+                        self.assertTrue(callable(captured_start_kwargs[0].get("cancel_hook")))
 
-                self.assertTrue(worker_finished.is_set())
-                self.assertTrue(snapshot_completed.is_set())
+                        for _ in range(2):
+                            stop_status, _stop_headers, stop_body = _http_request(
+                                server.port,
+                                "/api/core/strategy-discovery/stop-current-run",
+                                method="POST",
+                                body=b"{}",
+                                headers={"Content-Type": "application/json"},
+                            )
+                            self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
+                        self.assertTrue(worker_cancelled.wait(timeout=2))
+                        self.assertTrue(cleanup_started.wait(timeout=2))
+                        cleanup.assert_called_once_with()
+                        root_signal.assert_called_once_with(accepted["run_id"], "TERM")
+
+                        release_worker.set()
+                        self.assertTrue(worker_finished.wait(timeout=2))
+                        runner_threads.join_tracked()
+                        state = read_state(config.output.state_dir)
+                        self.assertIsNone(state["current_run_id"])
+                        self.assertEqual("stopped", state["last_run_status"])
+                        self.assertEqual(runner_threads.tracked_count, 1)
+
+                        self.assertTrue(snapshot_completed.is_set())
+
+        for mode in ("standard", "multi_domain"):
+            with self.subTest(mode=mode):
+                run_cancel_hook_regression(mode)
 
     def test_strategy_discovery_immediate_stop_finishes_without_privileged_child(self) -> None:
         def run_immediate_stop(mode: str) -> None:
@@ -3856,6 +3877,7 @@ class WebUiTests(unittest.TestCase):
                 worker_at_barrier = threading.Event()
                 release_worker = threading.Event()
                 worker_finished = threading.Event()
+                cleanup_completed = threading.Event()
 
                 class BarrierJobRunner(original_runner):
                     def _run(self, *args: object, **kwargs: object) -> None:
@@ -3893,6 +3915,11 @@ class WebUiTests(unittest.TestCase):
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run after immediate stop"),
                     ) as root_signal,
+                    mock.patch.object(
+                        web_app,
+                        "cleanup_nft_blockcheck_tables",
+                        side_effect=cleanup_completed.set,
+                    ) as cleanup,
                 ):
                     server = _start_captured_server(serve, config)
                     with server, _JobRunnerThreadTracker() as runner_threads:
@@ -3919,6 +3946,8 @@ class WebUiTests(unittest.TestCase):
                         )
                         self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
                         self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+                        self.assertTrue(cleanup_completed.wait(timeout=2))
+                        cleanup.assert_called_once_with()
 
                         release_worker.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
@@ -3956,6 +3985,7 @@ class WebUiTests(unittest.TestCase):
                 root_command_entered = threading.Event()
                 release_root_command = threading.Event()
                 worker_finished = threading.Event()
+                cleanup_completed = threading.Event()
 
                 class ObservingJobRunner(original_runner):
                     def _run(self, *args: object, **kwargs: object) -> None:
@@ -3998,6 +4028,11 @@ class WebUiTests(unittest.TestCase):
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run after stop during root_command"),
                     ) as root_signal,
+                    mock.patch.object(
+                        web_app,
+                        "cleanup_nft_blockcheck_tables",
+                        side_effect=cleanup_completed.set,
+                    ) as cleanup,
                 ):
                     server = _start_captured_server(serve, config)
                     with server, _JobRunnerThreadTracker() as runner_threads:
@@ -4024,6 +4059,8 @@ class WebUiTests(unittest.TestCase):
                         )
                         self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
                         self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+                        self.assertTrue(cleanup_completed.wait(timeout=2))
+                        cleanup.assert_called_once_with()
 
                         release_root_command.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
@@ -4056,6 +4093,7 @@ class WebUiTests(unittest.TestCase):
                 stdout_log_opened = threading.Event()
                 release_stdout_log = threading.Event()
                 worker_finished = threading.Event()
+                cleanup_completed = threading.Event()
 
                 class ObservingJobRunner(original_runner):
                     def _run(self, *args: object, **kwargs: object) -> None:
@@ -4101,6 +4139,11 @@ class WebUiTests(unittest.TestCase):
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run before a child is launched"),
                     ) as root_signal,
+                    mock.patch.object(
+                        web_app,
+                        "cleanup_nft_blockcheck_tables",
+                        side_effect=cleanup_completed.set,
+                    ) as cleanup,
                 ):
                     server = _start_captured_server(serve, config)
                     with server, _JobRunnerThreadTracker() as runner_threads:
@@ -4127,6 +4170,8 @@ class WebUiTests(unittest.TestCase):
                         )
                         self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
                         self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+                        self.assertTrue(cleanup_completed.wait(timeout=2))
+                        cleanup.assert_called_once_with()
 
                         release_stdout_log.set()
                         self.assertTrue(worker_finished.wait(timeout=2))

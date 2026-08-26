@@ -77,7 +77,7 @@ from ..strategy_finder import (
     run_multi_domain_discovery,
     run_standard_discovery,
 )
-from ..zapret2 import check_install_cached, recover_registered_process_runs
+from ..zapret2 import check_install_cached, cleanup_nft_blockcheck_tables, recover_registered_process_runs
 from .errors import error_payload, normalize_error_payload
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
@@ -309,7 +309,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     if name == "zapret-multi-domain-discovery"
                     else (lambda stop, run_id: _job_zapret_standard_discovery(config, core_payload, stop, run_id))
                 )
-                job = runner.start(name, func)
+                job = runner.start(
+                    name,
+                    func,
+                    cancel_hook=cleanup_nft_blockcheck_tables,
+                )
                 return core_api.run_accepted_payload(job), HTTPStatus.ACCEPTED
 
             def create_core_backup() -> tuple[dict[str, Any], HTTPStatus]:

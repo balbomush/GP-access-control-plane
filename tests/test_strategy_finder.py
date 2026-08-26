@@ -60,6 +60,19 @@ from gp_control_plane.strategy_finder import (
 
 
 class StrategyFinderTests(unittest.TestCase):
+    def test_stop_active_blockcheck_runtime_without_active_run_only_cleans_nft_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            with (
+                patch.object(strategy_finder_module, "active_runtime_payload", return_value={}),
+                patch.object(strategy_finder_module, "signal_registered_process_run") as signal_run,
+                patch.object(strategy_finder_module, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
+            ):
+                strategy_finder_module.stop_active_blockcheck_runtime(state_dir)
+
+        signal_run.assert_not_called()
+        cleanup_tables.assert_called_once_with()
+
     def test_standard_discovery_forwards_the_assigned_public_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with patch.object(strategy_finder_module, "_run_blockcheck_live", return_value={"id": "run-public"}) as live:
