@@ -146,11 +146,22 @@ def clear_install_check_cache() -> None:
 def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = None) -> None:
     if process.poll() is not None:
         return
-    _signal_process_group("TERM", process, run_id)
+    try:
+        _signal_process_group("TERM", process, run_id)
+    except RuntimeError as exc:
+        # _signal_process_group has already sent local TERM in its finally
+        # block.  A stale root record therefore only means the remote side is
+        # already gone; other root-helper failures must still be visible.
+        if str(exc).strip() != "gp-root-helper: registered process is stale or invalid":
+            raise
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        _signal_process_group("KILL", process, run_id)
+        # The managed root helper receives TERM once above.  A local KILL is
+        # only a fallback for this Popen instance: issuing a second managed
+        # signal would race a root-owned process record that TERM may already
+        # have removed.
+        _signal_local_process_group("KILL", process)
         process.wait(timeout=5)
 
 
