@@ -15,7 +15,11 @@ def main() -> int:
     args = parser.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from gp_control_plane.backups import clean_install_vault_info, create_clean_install_vault
-    info = clean_install_vault_info(target_home=args.home) if args.verify else create_clean_install_vault(args.state_dir, target_home=args.home)
+    if args.verify:
+        info = clean_install_vault_info(target_home=args.home)
+    else:
+        create_clean_install_vault(args.state_dir, target_home=args.home)
+        info = clean_install_vault_info(target_home=args.home)
     if not info.get("pending") or not info.get("vault_id"):
         raise RuntimeError("clean-install vault is not ready")
     print(f"status=ready vault_id={info['vault_id']}")

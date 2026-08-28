@@ -136,6 +136,22 @@ class CleanInstallVaultTests(unittest.TestCase):
             self.assertTrue(clean_install_vault_info(target_home=home)["pending"])
             self.assertEqual(clean_install_vault_info(target_home=home)["vault_id"], created["vault_id"])
 
+    def test_cli_create_reports_ready_and_publishes_a_pending_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"; self.seed(source)
+            tool = Path(__file__).resolve().parents[1] / "scripts" / "clean-install-vault.py"
+            created = subprocess.run(
+                [sys.executable, str(tool), "--state-dir", str(source), "--home", str(home)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertRegex(created.stdout, r"^status=ready vault_id=[0-9a-f-]+\n$")
+            info = clean_install_vault_info(target_home=home)
+            self.assertTrue(info["pending"])
+            self.assertRegex(str(info["vault_id"]), r"^[0-9a-f-]+$")
+
     def test_module_has_one_active_public_vault_contract(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "src" / "gp_control_plane" / "backups.py").read_text(encoding="utf-8")
         for name in ("create_clean_install_vault", "clean_install_vault_info", "restore_clean_install_vault"):
