@@ -6,23 +6,22 @@ from pathlib import Path
 
 
 class ReadmeInstallationTests(unittest.TestCase):
-    def test_installation_commands_use_latest_release_assets_and_a_branch_variable(self) -> None:
+    def test_installation_commands_require_an_exact_release_tag(self) -> None:
         root = Path(__file__).resolve().parents[1]
         readme = (root / "README.md").read_text(encoding="utf-8")
         bootstrap = (root / "scripts" / "bootstrap-linux.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("/raw/", readme)
-        self.assertNotRegex(readme, r"/releases/download/v[0-9][^/\s]*/")
-        self.assertIn(
-            "/releases/latest/download/bootstrap-linux.sh",
-            readme,
-        )
-        self.assertIn(
-            "/releases/latest/download/install-zapret2.sh",
-            readme,
-        )
-        self.assertIn('GP_BRANCH="${GP_BRANCH:-latest-stable}"', readme)
-        self.assertIn('INSTALL_REF="${GP_BRANCH:-latest-stable}"', bootstrap)
+        self.assertNotIn('GP_BRANCH="${GP_BRANCH:-latest-stable}"', readme)
+        self.assertIn('GP_BRANCH=v0.4.0', readme)
+        self.assertNotIn('GP_INSTALL_CONFIG', readme)
+        self.assertNotIn('GP_STATE_DIR', readme)
+        self.assertNotIn('v2fly/domain-list-community', readme)
+        self.assertIn('только стандартный путь `$HOME/gp/GP-access-control-plane/build/state`', readme)
+        self.assertIn('не входит в scope этой миграции', readme)
+        self.assertNotIn('latest-stable', readme)
+        self.assertIn('TAG="${GP_BRANCH:-}"', bootstrap)
+        self.assertIn('exact release tag vX.Y.Z', bootstrap)
 
 
 if __name__ == "__main__":

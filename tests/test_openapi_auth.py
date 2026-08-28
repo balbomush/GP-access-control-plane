@@ -113,8 +113,8 @@ class OpenApiAuthenticationContractTests(unittest.TestCase):
         serialized = json.dumps(contract, sort_keys=True)
         self.assertNotIn("confirmation_token", serialized)
         self.assertNotIn("handoff_secret", serialized)
-        self.assertEqual(["vault_id"], schemas["CleanInstallVaultRestoreRequest"]["required"])
-        self.assertEqual({"vault_id"}, set(schemas["CleanInstallVaultRestoreRequest"]["properties"]))
+        self.assertEqual(["vault_id", "confirm_restore"], schemas["CleanInstallVaultRestoreRequest"]["required"])
+        self.assertEqual({"vault_id", "confirm_restore"}, set(schemas["CleanInstallVaultRestoreRequest"]["properties"]))
         self.assertNotIn("confirmation_token", schemas["CleanInstallVaultCreateResponse"]["properties"])
         self.assertNotIn("handoff_secret", schemas["CleanInstallVaultCreateResponse"]["properties"])
 

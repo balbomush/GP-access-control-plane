@@ -845,7 +845,7 @@
         "tags": ["Core Clean-Install Vault"],
         "operationId": "createCleanInstallVault",
         "summary": "Create the one pending device-local clean-install vault",
-        "description": "Creates one pending device-local vault. The protected handoff remains local to the device; the response contains public metadata only.",
+        "description": "Creates one pending device-local vault. Its local handoff remains on this device; the response contains public metadata only.",
         "responses": {
           "201": {
             "description": "Pending vault created; response contains public metadata only.",
@@ -917,7 +917,7 @@
         "tags": ["Core Clean-Install Vault"],
         "operationId": "restoreCleanInstallVault",
         "summary": "Restore and delete a verified pending clean-install vault",
-        "description": "The operation completes only after semantic verification, SQLite integrity verification and deletion of the source vault. Failed or ambiguous paths retain the source vault.",
+        "description": "Requires explicit confirmation. The operation completes only after semantic verification, SQLite readiness/integrity verification and deletion of the source vault. Failed paths retain vault and handoff.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2310,19 +2310,21 @@
       },
       "CleanInstallVaultRestoreRequest": {
         "type": "object",
-        "required": ["vault_id"],
+        "required": ["vault_id", "confirm_restore"],
         "properties": {
-          "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"}
+          "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+          "confirm_restore": {"type": "boolean", "const": true}
         },
         "additionalProperties": false
       },
       "CleanInstallVaultRestoreResponse": {
         "type": "object",
-        "required": ["completed", "vault_id", "verification", "cleanup"],
+        "required": ["completed", "vault_id", "verification", "storage_status", "cleanup"],
         "properties": {
           "completed": {"type": "boolean", "const": true},
           "vault_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
           "verification": {"type": "object", "additionalProperties": true},
+          "storage_status": {"type": "object", "additionalProperties": true},
           "cleanup": {"type": "object", "additionalProperties": true}
         },
         "additionalProperties": false
@@ -4679,7 +4681,8 @@
       "CleanInstallVaultRestoreRequest": {
         "summary": "Восстановить выбранный vault после явного подтверждения",
         "value": {
-          "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e"
+          "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e",
+          "confirm_restore": true
         }
       },
       "CleanInstallVaultRestoreResponse": {
@@ -4688,6 +4691,7 @@
           "completed": true,
           "vault_id": "4f2a9c8e1b3d6a7f0c5e2d9b8a1f4c6e",
           "verification": {"verified": true, "integrity_check": "ok"},
+          "storage_status": {"ready": true, "integrity_check": "ok"},
           "cleanup": {"completed": true, "source_deleted": true}
         }
       },

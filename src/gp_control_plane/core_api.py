@@ -275,7 +275,7 @@ def clean_install_vault_status_payload(config: AppConfig, query: dict[str, list[
 
 
 def clean_install_vault_restore_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"vault_id"}
+    allowed = {"vault_id", "confirm_restore"}
     unknown = sorted(str(key) for key in payload if str(key) not in allowed)
     if unknown:
         raise ValueError(f"unsupported clean-install vault restore fields: {', '.join(unknown)}")
@@ -283,18 +283,22 @@ def clean_install_vault_restore_payload(config: AppConfig, payload: dict[str, An
     if raw_vault_id is None or raw_vault_id == "":
         raise ValueError("vault_id is required")
     vault_id = validate_clean_install_vault_id(raw_vault_id)
+    if payload.get("confirm_restore") is not True:
+        raise ValueError("confirm_restore=true is required")
     restored = restore_clean_install_vault(
         config.output.state_dir,
         vault_id=vault_id,
     )
     verification = restored.get("verification") if isinstance(restored.get("verification"), dict) else {}
     cleanup = restored.get("cleanup") if isinstance(restored.get("cleanup"), dict) else {}
-    if not bool(verification.get("verified")) or not bool(cleanup.get("source_deleted")):
+    readiness = restored.get("storage_status") if isinstance(restored.get("storage_status"), dict) else {}
+    if not bool(verification.get("verified")) or not bool(readiness.get("ready")) or not bool(cleanup.get("source_deleted")):
         raise RuntimeError("clean-install vault restore did not complete verified source cleanup")
     return {
         "completed": bool(restored.get("completed")),
         "vault_id": str(restored.get("vault_id") or vault_id),
         "verification": verification,
+        "storage_status": readiness,
         "cleanup": cleanup,
     }
 

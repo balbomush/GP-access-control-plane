@@ -23,18 +23,18 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" GP_INSTALL_WEB=off bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 GP_INSTALL_WEB=off bash
 ```
 
-Bootstrap-скрипт загружается как asset последнего стабильного release, ставит минимальные зависимости для загрузки (`ca-certificates`, `curl`, `git`), затем по `GP_BRANCH` (по умолчанию `latest-stable`) находит последний стабильный git tag и запускает установщик из этого tag. Укажите `GP_BRANCH=<tag>` только когда нужен конкретный релиз. Если `sudo` нужен, скрипт запросит его сам.
+Укажите exact annotated release tag в `GP_BRANCH`. До единственного запроса `sudo` bootstrap сначала проверяет уже существующий device-local vault; при его отсутствии экспортирует legacy-state. На чистом хосте без legacy-state он выполняет non-destructive initial install без vault. Затем один штатный installer-process останавливает сервисы, удаляет только прежнюю GP-поверхность и ставит fresh версию из того же tag. При ошибке vault до удаления ничего не меняется; после удаления разрешён только повтор fresh-install. Откат не поддерживается.
 
 Установка проверяется на Debian/Ubuntu-like системах с `apt-get` и `systemd`.
 
@@ -76,26 +76,25 @@ curl -X POST "$BASE_URL/api/auth/change-password" \
 
 Swagger UI и raw OpenAPI можно открыть без токена. Чтобы выполнить защищенный метод через **Try it out**, сначала укажите Bearer-токен через кнопку **Authorize** в Swagger UI.
 
-### Конфиг Установки
+### Параметры Установки
 
-Для нестандартных параметров создайте env-файл и передайте его через `GP_INSTALL_CONFIG`:
+Поддерживаются только topology-параметры, переданные в окружении bootstrap:
 
 ```bash
 cat > gp-install.env <<'EOF'
 GP_INSTALL_WEB=on
-GP_INSTALL_DIR="$HOME/gp/GP-access-control-plane"
-GP_SERVICE_MEMORY_HIGH=768M
-GP_SERVICE_MEMORY_MAX=1500M
 EOF
 
-export GP_INSTALL_CONFIG="$PWD/gp-install.env"
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
+set -a; . ./gp-install.env; set +a
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 bash
 ```
 
-Без конфига проект ставится в `~/gp/GP-access-control-plane`. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
+Проект ставится в `~/gp/GP-access-control-plane`; clean-install не принимает внешний путь состояния. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
 
-После успешной установки или явной перенастройки установщик сохраняет разрешенный профиль в root-owned `/etc/default/gp-control-plane-install-profile`. Обычное обновление релиза повторно использует этот профиль и не меняет `GP_INSTALL_WEB`, host/port, `GP_CORE_URL` или топологию сервисов. Для изменения этих параметров снова явно запустите bootstrap/installer с нужным `GP_INSTALL_CONFIG`; не меняйте профиль вручную.
+Миграция legacy-state в v0.4.0 поддерживает только стандартный путь `$HOME/gp/GP-access-control-plane/build/state`. Настроенный или внешний путь состояния не входит в scope этой миграции.
+
+Топология выбирается только перед запуском: `GP_INSTALL_WEB=on` ставит Core и Web, `off` — только Core. После fresh-install восстановите vault в UI/API, подтвердив `confirm_restore=true`; источник удаляется только после semantic-проверки и готовности/integrity SQLite.
 
 Что делает установщик:
 
@@ -103,7 +102,6 @@ curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
 - устанавливает `zapret2` в `/opt/zapret2`;
 - скачивает GP и создает Python-окружение;
 - устанавливает команду `gp-control-plane`;
-- готовит локальный каталог `v2fly/domain-list-community`;
 - ставит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
 - создает и запускает systemd-сервисы.
 
@@ -208,11 +206,11 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 Повторно запустите bootstrap:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 bash
 ```
 
-Он установит последний стабильный git tag, обновит Python-окружение и перезапустит сервисы. Для явной установки ветки или tag задайте `GP_BRANCH`.
+Это односторонний clean-install маршрут только из exact annotated tag. Ветки, `dev`, cache/candidate routes и rollback не являются пользовательскими способами установки.
 
 ## Данные И Бекапы
 
@@ -228,6 +226,6 @@ curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH="${GP_BRANCH:-latest-stable}" bash
 ~/gp/.GP-access-control-plane.data/backups/
 ```
 
-При строгом обновлении релиза прежние данные, находившиеся внутри каталога проекта, автоматически переносятся в этот постоянный каталог. Если вы заранее указали внешний `GP_STATE_DIR`, его путь не меняется.
+При строгом обновлении релиза прежние данные, находившиеся внутри каталога проекта, экспортируются в device-local vault и восстанавливаются только после явного подтверждения.
 
 Откат кода не откатывает пользовательские данные и не отменяет этот перенос. Для возврата данных используйте созданный ранее бекап. Данные остаются на хосте и никуда не публикуются.

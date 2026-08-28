@@ -137,13 +137,15 @@ def _clean_install_vault_create_response(payload: dict[str, Any]) -> dict[str, A
 
 
 def _clean_install_vault_restore_response(payload: dict[str, Any], vault_id: str) -> dict[str, Any]:
-    """Expose completion flags, never local protected-handoff details."""
+    """Expose only completion flags from the local restore."""
     verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
     cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), dict) else {}
+    readiness = payload.get("storage_status") if isinstance(payload.get("storage_status"), dict) else {}
     return {
         "completed": bool(payload.get("completed")),
         "vault_id": str(payload.get("vault_id") or vault_id),
         "verification": {"verified": bool(verification.get("verified"))},
+        "storage_status": {"ready": bool(readiness.get("ready"))},
         "cleanup": {"source_deleted": bool(cleanup.get("source_deleted"))},
     }
 
@@ -387,7 +389,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return _clean_install_vault_create_response(created), HTTPStatus.CREATED
 
             def restore_clean_install_vault() -> tuple[dict[str, Any], HTTPStatus]:
-                allowed = {"vault_id"}
+                allowed = {"vault_id", "confirm_restore"}
                 unknown = sorted(str(key) for key in payload if str(key) not in allowed)
                 if unknown:
                     raise ValueError(f"unsupported clean-install vault restore fields: {', '.join(unknown)}")
@@ -399,6 +401,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 if not (
                     public_response["completed"]
                     and public_response["verification"]["verified"]
+                    and public_response["storage_status"]["ready"]
                     and public_response["cleanup"]["source_deleted"]
                 ):
                     raise RuntimeError("clean-install vault restore did not complete; source retained")

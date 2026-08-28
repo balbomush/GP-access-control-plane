@@ -36,7 +36,7 @@ def default_install_dir() -> Path:
     current = Path(__file__).resolve()
     for parent in current.parents:
         scripts_dir = parent / "scripts"
-        has_installer = (scripts_dir / "install-linux.sh").is_file() or (scripts_dir / "install-raspberry-pi.sh").is_file()
+        has_installer = (scripts_dir / "install-linux.sh").is_file()
         if (parent / "pyproject.toml").is_file() and has_installer:
             return parent
     return current.parents[2]

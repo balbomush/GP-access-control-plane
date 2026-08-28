@@ -14,36 +14,7 @@ Feature-ветки не проверяются на Raspberry Pi 2. Фактич
 
 ## Ручные проверки на платах
 
-Gates запускаются оператором на реальной плате после установки целевого тега. Они не выполняют установку, reimage или сброс данных. Пароль передавайте через переменную окружения, а не как часть команды из истории shell:
-
-```bash
-read -rsp 'Пароль API: ' GP_GATE_PASSWORD; echo
-```
-
-### Raspberry Pi 2
-
-Pi2 gate измеряет RSS Core, Web и их сумму. Чистая установка/reimage остаётся ручной предпосылкой:
-
-```bash
-sudo GP_GATE_PASSWORD="$GP_GATE_PASSWORD" bash scripts/release-gates/pi2-gate.sh --ref vX.Y.Z
-unset GP_GATE_PASSWORD
-```
-
-Обязателен `--ref` с существующим тегом релиза; `--mode installed` используется по умолчанию. `--mode dirty-update` проверяет поддерживаемое строгое обновление с собственным временным dirty marker. Дополнительные безопасные настройки: `--password-env NAME`, `--base-url URL`, `--core-url URL`, `--state-dir PATH` и `--poll-timeout SECONDS`. Без `--state-dir` gate читает `GP_STATE_DIR` из root-owned `0600` `/etc/default/gp-control-plane-install-profile`; для `v0.4.0` и новее отсутствие или небезопасный профиль останавливает gate.
-
-### Raspberry Pi 5
-
-Pi5 gate функционально проверяет установленную топологию, циклы `standard`/`multi_domain` и отсутствие оставшихся процессов. Укажите фактическую топологию:
-
-```bash
-sudo --preserve-env=GP_GATE_PASSWORD bash scripts/release-gates/pi5-gate.sh \
-  --ref vX.Y.Z --topology web --mode installed
-unset GP_GATE_PASSWORD
-```
-
-`--topology web|headless` и `--ref` обязательны. Помимо `installed`, режим `dirty-update` проверяет строгое обновление. Режим `clean-install` только проверяет результат ручной чистой установки: запускайте его лишь с `--mode clean-install --ack-clean-install`; сам gate не устанавливает и не переустанавливает систему.
-
-Оба gate сохраняют JSONL-отчёты и логи в `/var/lib/gp-control-plane/release-gates`. Пароль и bearer token не записываются в отчёты и не передаются в аргументах `curl`.
+Аппаратная проверка выполняется вручную по active release matrix после установки exact annotated tag. В репозитории нет отдельных Pi gate scripts: Windows/local tests не заменяют Pi proof. В evidence не записываются пароль, bearer token, board addresses или raw vault data.
 
 ## Backup And Streaming
 

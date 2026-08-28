@@ -1,888 +1,121 @@
 #!/usr/bin/env bash
+# This script is the sole elevated process of a clean installation.
 set -Eeuo pipefail
-
-# Fixed, root-owned profile used by the one-way clean-remove helper.
-INSTALL_PROFILE="/etc/default/gp-control-plane-install-profile"
-LEGACY_PROFILE_CAPTURE=off
-if [ -n "${GP_INSTALL_CONFIG:-}" ]; then
-  [ -r "$GP_INSTALL_CONFIG" ] || { printf '\nERROR: install config is not readable: %s\n' "$GP_INSTALL_CONFIG" >&2; exit 1; }
-  # shellcheck disable=SC1090
-  set -a
-  . "$GP_INSTALL_CONFIG"
-  set +a
-fi
-
-REPO_URL="${GP_REPO_URL:-https://github.com/balbomush/GP-access-control-plane.git}"
-BRANCH="${GP_BRANCH:-latest-stable}"
-EXPECTED_SHA="${GP_EXPECTED_SHA:-}"
-SERVICE_NAME="${GP_SERVICE_NAME:-gp-control-plane-web.service}"
-CORE_SERVICE_NAME="${GP_CORE_SERVICE_NAME:-gp-control-plane-core.service}"
-INSTALL_WEB="${GP_INSTALL_WEB:-on}"
-WEB_HOST="${GP_WEB_HOST:-0.0.0.0}"
-WEB_PORT="${GP_WEB_PORT:-8080}"
-WEB_ENV_FILE="${GP_WEB_ENV_FILE:-/etc/default/gp-control-plane-web}"
-CORE_HOST="${GP_CORE_HOST:-127.0.0.1}"
-CORE_PORT="${GP_CORE_PORT:-8081}"
-CORE_URL="${GP_CORE_URL:-http://$CORE_HOST:$CORE_PORT}"
-CORE_ENV_FILE="${GP_CORE_ENV_FILE:-/etc/default/gp-control-plane-core}"
-ZAPRET_REPO_URL="${ZAPRET_REPO_URL:-https://github.com/bol-van/zapret2.git}"
-ZAPRET_BRANCH="${ZAPRET_BRANCH:-master}"
-ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
-ROOT_HELPER_PATH="${GP_ROOT_HELPER_PATH:-/usr/local/libexec/gp-control-plane/gp-root-helper}"
-ROOT_HELPER_CONFIG="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
-ROOT_HELPER_RUN_DIR="${GP_ROOT_HELPER_RUN_DIR:-/run/gp-control-plane/runs}"
-SUDOERS_PATH="${GP_SUDOERS_PATH:-/etc/sudoers.d/gp-control-plane-root-helper}"
-CLEAN_REMOVE_DIRECTORY="/usr/local/libexec/gp-control-plane"
-CLEAN_REMOVE_ROOT_PATH="$CLEAN_REMOVE_DIRECTORY/gp-clean-remove-root"
-CLEAN_REMOVE_PREFLIGHT_PATH="$CLEAN_REMOVE_DIRECTORY/gp-clean-remove-preflight"
-CLEAN_REMOVE_MANIFEST_PATH="$CLEAN_REMOVE_DIRECTORY/gp-clean-remove-root.manifest"
-SERVICE_MEMORY_HIGH="${GP_SERVICE_MEMORY_HIGH:-512M}"
-SERVICE_MEMORY_MAX="${GP_SERVICE_MEMORY_MAX:-1G}"
-REQUESTED_STEPS="${GP_INSTALL_STEPS:-all}"
-
-usage() {
-  cat <<USAGE
-Usage: install-linux.sh [--step STEP] [--steps a,b,c]
-
-Default is --steps all. Available steps:
-  packages,zapret,app,v2fly,root-helper,service,check
-
-Runtime:
-  GP_INSTALL_WEB=on   installs Core service and штатный Web UI proxy service.
-  GP_INSTALL_WEB=off  installs only API-only Core service on GP_CORE_HOST:GP_CORE_PORT.
-  GP_BRANCH=latest-stable installs the latest stable Git tag; this is the default.
-  GP_BRANCH=vX.Y.Z        installs one exact annotated release tag.
-  GP_BRANCH=dev           pre-tag hardware validation only; GP_EXPECTED_SHA is required.
-USAGE
-}
-
-append_requested_step() {
-  if [ "$REQUESTED_STEPS" = "all" ]; then
-    REQUESTED_STEPS="$1"
-  else
-    REQUESTED_STEPS="$REQUESTED_STEPS,$1"
-  fi
-}
-
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER --tag vX.Y.Z --web on|off --initial-install on|off' >&2; exit 64; }
+[ "$(id -u)" -eq 0 ] || fail 'must be run by the bootstrap sudo process'
+SOURCE_DIR= INSTALL_USER= TAG= INSTALL_WEB= INITIAL_INSTALL=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --step)
-      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-      append_requested_step "$2"
-      shift 2
-      ;;
-    --step=*)
-      append_requested_step "${1#--step=}"
-      shift
-      ;;
-    --steps)
-      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-      REQUESTED_STEPS="$2"
-      shift 2
-      ;;
-    --steps=*)
-      REQUESTED_STEPS="${1#--steps=}"
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      usage >&2
-      exit 2
-      ;;
+    --source-dir|--install-user|--tag|--web|--initial-install)
+      [ "$#" -ge 2 ] || usage; value="$2"; case "$1" in --source-dir) SOURCE_DIR="$value";; --install-user) INSTALL_USER="$value";; --tag) TAG="$value";; --web) INSTALL_WEB="$value";; --initial-install) INITIAL_INSTALL="$value";; esac; shift 2 ;;
+    *) usage ;;
   esac
 done
-
-log() {
-  printf '\n==> %s\n' "$1"
-}
-
-fail() {
-  printf '\nERROR: %s\n' "$1" >&2
-  exit 1
-}
-
-need_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "Command not found: $1"
-}
-
-step_enabled() {
-  [ "$REQUESTED_STEPS" = "all" ] && return 0
-  case ",$REQUESTED_STEPS," in
-    *",$1,"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-step_log() {
-  if step_enabled "$1"; then
-    log "[$1] $2"
-    return 0
-  fi
-  log "[$1] skipped"
-  return 1
-}
-
-ensure_root_directory() {
-  managed_directory="$1"
-  managed_mode="$2"
-  managed_owner="$3"
-  managed_group="$4"
-  expected_mode="$(printf '%o' "$((8#$managed_mode))")"
-
-  if as_root test -e "$managed_directory" || as_root test -L "$managed_directory"; then
-    as_root test -d "$managed_directory" && ! as_root test -L "$managed_directory" \
-      || fail "Managed directory must be a non-symlink directory: $managed_directory"
-  fi
-  as_root install -d -m "$managed_mode" -o "$managed_owner" -g "$managed_group" "$managed_directory"
-  as_root test -d "$managed_directory" && ! as_root test -L "$managed_directory" \
-    || fail "Managed directory was not created safely: $managed_directory"
-  [ "$(as_root stat -c '%u:%g:%a' "$managed_directory" 2>/dev/null || true)" = "0:$(getent group "$managed_group" | cut -d: -f3):$expected_mode" ] \
-    || fail "Managed directory has unexpected ownership or mode: $managed_directory"
-}
-
-ensure_root_regular_file() {
-  managed_file="$1"
-  managed_mode="$2"
-  managed_owner="$3"
-  managed_group="$4"
-  expected_mode="$(printf '%o' "$((8#$managed_mode))")"
-
-  if as_root test -e "$managed_file" || as_root test -L "$managed_file"; then
-    as_root test -f "$managed_file" && ! as_root test -L "$managed_file" \
-      || fail "Managed file must be a regular non-symlink file: $managed_file"
-  else
-    as_root touch "$managed_file"
-  fi
-  as_root chown "$managed_owner:$managed_group" "$managed_file"
-  as_root chmod "$managed_mode" "$managed_file"
-  as_root test -f "$managed_file" && ! as_root test -L "$managed_file" \
-    && [ "$(as_root stat -c '%u:%g:%a' "$managed_file" 2>/dev/null || true)" = "0:$(getent group "$managed_group" | cut -d: -f3):$expected_mode" ] \
-    || fail "Managed file has unexpected ownership or mode: $managed_file"
-}
-
-install_web_enabled() {
-  case "$INSTALL_WEB" in
-    1|true|TRUE|yes|YES|on|ON|web|WEB|ui|UI) return 0 ;;
-    0|false|FALSE|no|NO|off|OFF|headless|HEADLESS|core|CORE) return 1 ;;
-    *) fail "Unsupported GP_INSTALL_WEB value: $INSTALL_WEB" ;;
-  esac
-}
-
-CURRENT_UID="$(id -u)"
-CURRENT_USER="$(id -un)"
-
-if [ -n "${GP_INSTALL_USER:-}" ]; then
-  TARGET_USER="$GP_INSTALL_USER"
-elif [ "$CURRENT_UID" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-  TARGET_USER="$SUDO_USER"
-else
-  TARGET_USER="$CURRENT_USER"
+case "$INSTALL_USER" in ''|root|*[!A-Za-z0-9_-]*) fail 'install user is invalid';; esac
+printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'tag must be an exact release tag'
+case "$INSTALL_WEB" in on|off) ;; *) fail 'web mode must be on or off';; esac
+case "$INITIAL_INSTALL" in on|off) ;; *) fail 'initial-install must be on or off';; esac
+[ -d "$SOURCE_DIR/.git" ] && [ ! -L "$SOURCE_DIR" ] || fail 'source directory is unsafe'
+[ "$(git -C "$SOURCE_DIR" cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ] || fail 'source tag must be annotated'
+[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+[ -z "$(git -C "$SOURCE_DIR" status --porcelain)" ] || fail 'exact-tag source tree is not clean'
+target_home="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
+[ -n "$target_home" ] && [ -d "$target_home" ] || fail 'install-user home is unavailable'
+gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; legacy_state="$install_dir/build/state"; state_dir="$gp_root/.GP-access-control-plane.data/state"
+[ "$target_home" = "$(readlink -f -- "$target_home")" ] && [ ! -L "$target_home" ] || fail 'install-user home is not canonical'
+if [ -e "$gp_root" ] || [ -L "$gp_root" ]; then
+  [ -d "$gp_root" ] && [ ! -L "$gp_root" ] && [ "$gp_root" = "$(readlink -f -- "$gp_root")" ] || fail 'managed GP root is not canonical'
+elif [ "$INITIAL_INSTALL" != on ]; then
+  fail 'managed GP root is unavailable for a vault restore'
 fi
-
-TARGET_ENTRY="$(getent passwd "$TARGET_USER" || true)"
-[ -n "$TARGET_ENTRY" ] || fail "Cannot find user: $TARGET_USER"
-TARGET_HOME="$(printf '%s\n' "$TARGET_ENTRY" | cut -d: -f6)"
-[ -n "$TARGET_HOME" ] || fail "Cannot find home directory for user: $TARGET_USER"
-TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || true)"
-[ -n "$TARGET_GROUP" ] || fail "Cannot find primary group for user: $TARGET_USER"
-INSTALL_DIR="${GP_INSTALL_DIR:-$TARGET_HOME/gp/GP-access-control-plane}"
-default_state_dir() {
-  state_install_parent="$(dirname -- "$INSTALL_DIR")"
-  state_install_base="$(basename -- "$INSTALL_DIR")"
-  printf '%s/.%s.data/state\n' "$state_install_parent" "$state_install_base"
-}
-
-# A manual reinstall of a legacy worktree must not silently strand its state.
-if [ -n "${GP_STATE_DIR:-}" ]; then
-  STATE_DIR="$GP_STATE_DIR"
-elif [ -d "$INSTALL_DIR/build/state" ] && [ ! -L "$INSTALL_DIR/build/state" ]; then
-  STATE_DIR="$INSTALL_DIR/build/state"
-else
-  STATE_DIR="$(default_state_dir)"
+if [ -e "$install_dir" ] || [ -L "$install_dir" ]; then
+  [ -d "$install_dir" ] && [ ! -L "$install_dir" ] && [ "$install_dir" = "$(readlink -f -- "$install_dir")" ] || fail 'managed GP install directory is not canonical'
 fi
-TARGET_BIN_DIR="$TARGET_HOME/.local/bin"
-SERVICE_PATH="$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-as_root() {
-  if [ "$CURRENT_UID" -eq 0 ]; then
-    "$@"
-  else
-    sudo "$@"
-  fi
-}
-
-run_zapret_install_bin() {
-  if [ "$CURRENT_UID" -eq 0 ]; then
-    (cd "$ZAPRET_DIR" && ./install_bin.sh)
-  else
-    sudo sh -c 'cd "$1" && ./install_bin.sh' sh "$ZAPRET_DIR"
-  fi
-}
-
-run_as_target() {
-  if [ "$CURRENT_USER" = "$TARGET_USER" ]; then
-    HOME="$TARGET_HOME" PATH="$SERVICE_PATH" "$@"
-  else
-    sudo -H -u "$TARGET_USER" env HOME="$TARGET_HOME" PATH="$SERVICE_PATH" "$@"
-  fi
-}
-
-repo_git() {
-  run_as_target git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
-}
-
-resolve_install_ref() {
-  case "$BRANCH" in
-    latest|stable|latest-stable)
-      log "Resolving latest stable GP release tag"
-      resolved_ref="$(git ls-remote --tags --refs "$REPO_URL" "v*" \
-        | awk '{print $2}' \
-        | sed 's#refs/tags/##' \
-        | grep -E '^v[0-9]+([.][0-9]+)*$' \
-        | sort -V \
-        | tail -n 1 || true)"
-      [ -n "$resolved_ref" ] || fail "Cannot resolve latest stable release tag from $REPO_URL. Set GP_BRANCH=<tag> explicitly."
-      BRANCH="$resolved_ref"
-      log "Latest stable GP release: $BRANCH"
-      ;;
-  esac
-}
-
-validate_release_selector() {
-  case "$BRANCH" in
-    v*)
-      printf '%s\n' "$BRANCH" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-        || fail "GP_BRANCH must be an immutable release tag vX.Y.Z"
-      [ -z "$EXPECTED_SHA" ] || fail "GP_EXPECTED_SHA is reserved for the pre-tag dev candidate"
-      ;;
-    dev)
-      case "$EXPECTED_SHA" in *[!0-9a-f]*|'') fail "GP_BRANCH=dev requires GP_EXPECTED_SHA as 40 lowercase hexadecimal characters" ;; esac
-      [ "${#EXPECTED_SHA}" -eq 40 ] \
-        || fail "GP_BRANCH=dev requires GP_EXPECTED_SHA as 40 lowercase hexadecimal characters"
-      ;;
-    *) fail "GP_BRANCH must be an immutable release tag vX.Y.Z; pre-tag validation may use dev with GP_EXPECTED_SHA" ;;
-  esac
-}
-
-remote_ref_sha() {
-  remote_ref="$1"
-  remote_output="$2"
-  remote_sha="$(printf '%s\n' "$remote_output" | awk -v ref="$remote_ref" '
-    $2 == ref { count++; sha = $1 }
-    END { if (count == 1) print sha; else exit 1 }
-  ')" || return 1
-  case "$remote_sha" in
-    *[!0-9a-f]*|'') return 1 ;;
-  esac
-  [ "${#remote_sha}" -eq 40 ] || return 1
-  printf '%s\n' "$remote_sha"
-}
-
-resolve_selected_release_identity() {
-  case "$BRANCH" in
-    v*)
-      remote_tag="refs/tags/$BRANCH"
-      remote_refs="$(git ls-remote --tags "$REPO_URL" "$remote_tag" "${remote_tag}^{}")" \
-        || fail "Cannot resolve release tag identity from $REPO_URL: $BRANCH"
-      SELECTED_TAG_OBJECT_SHA="$(remote_ref_sha "$remote_tag" "$remote_refs")" \
-        || fail "GP_BRANCH must resolve to exactly one annotated immutable release tag: $BRANCH"
-      SELECTED_COMMIT_SHA="$(remote_ref_sha "${remote_tag}^{}" "$remote_refs")" \
-        || fail "GP_BRANCH must resolve to an annotated immutable release tag: $BRANCH"
-      ;;
-    dev)
-      remote_refs="$(git ls-remote "$REPO_URL" refs/heads/dev)" \
-        || fail "Cannot resolve canonical dev candidate from $REPO_URL"
-      SELECTED_COMMIT_SHA="$(remote_ref_sha refs/heads/dev "$remote_refs")" \
-        || fail "Canonical dev candidate is missing or ambiguous"
-      [ "$SELECTED_COMMIT_SHA" = "$EXPECTED_SHA" ] \
-        || fail "Canonical dev candidate SHA does not match GP_EXPECTED_SHA"
-      SELECTED_TAG_OBJECT_SHA=""
-      ;;
-  esac
-}
-
-preflight_fresh_install() {
-  resolve_install_ref
-  validate_release_selector
-  [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] \
-    || fail "Clean installation requires an absent target: $INSTALL_DIR. Create a vault, run the fixed clean-remove, then install the release tag."
-  resolve_selected_release_identity
-}
-
-verify_selected_release() {
-  installed_sha="$(repo_git rev-parse --verify HEAD^{commit})" \
-    || fail "Cannot resolve installed GP commit"
-  case "$BRANCH" in
-    v*)
-      [ "$(repo_git cat-file -t "refs/tags/$BRANCH" 2>/dev/null || true)" = tag ] \
-        || fail "GP_BRANCH must resolve to an annotated immutable release tag: $BRANCH"
-      installed_tag_object="$(repo_git rev-parse --verify "refs/tags/$BRANCH")" \
-        || fail "Cannot resolve checked-out annotated release tag object: $BRANCH"
-      [ "$installed_tag_object" = "$SELECTED_TAG_OBJECT_SHA" ] \
-        || fail "Checked-out annotated release tag object does not match canonical release identity"
-      selected_tag_commit="$(repo_git rev-parse --verify "refs/tags/$BRANCH^{commit}")" \
-        || fail "Cannot resolve checked-out annotated release tag commit: $BRANCH"
-      [ "$selected_tag_commit" = "$SELECTED_COMMIT_SHA" ] \
-        || fail "Checked-out annotated release tag commit does not match canonical release identity"
-      [ "$installed_sha" = "$SELECTED_COMMIT_SHA" ] \
-        || fail "Installed release SHA does not match the annotated release tag commit"
-      ! repo_git symbolic-ref -q HEAD >/dev/null 2>&1 \
-        || fail "Installed release checkout must be detached at the annotated tag commit"
-      ;;
-    dev)
-      [ "$installed_sha" = "$SELECTED_COMMIT_SHA" ] && [ "$installed_sha" = "$EXPECTED_SHA" ] \
-        || fail "Installed dev candidate SHA does not match GP_EXPECTED_SHA"
-      ! repo_git symbolic-ref -q HEAD >/dev/null 2>&1 \
-        || fail "Installed dev candidate checkout must be detached at GP_EXPECTED_SHA"
-      ;;
-  esac
-}
-
-checkout_selected_release() {
-  run_as_target git init "$INSTALL_DIR"
-  repo_git remote add origin "$REPO_URL"
-  case "$BRANCH" in
-    v*)
-      repo_git fetch --no-tags --depth=1 origin "+refs/tags/$BRANCH:refs/tags/$BRANCH"
-      ;;
-    dev)
-      repo_git fetch --no-tags --depth=1 origin "+refs/heads/dev:refs/remotes/origin/dev"
-      ;;
-  esac
-  repo_git checkout --detach --force "$SELECTED_COMMIT_SHA"
-  verify_selected_release
-}
-
-selected_commit_script_sha256() {
-  selected_script_path="$1"
-  selected_script_sha256="$(repo_git show "$SELECTED_COMMIT_SHA:$selected_script_path" | sha256sum | awk 'NR == 1 { print $1 }')" \
-    || fail "Cannot hash selected release script: $selected_script_path"
-  case "$selected_script_sha256" in
-    ????????????????????????????????????????????????????????????????) ;;
-    *) fail "Selected release script hash is invalid: $selected_script_path" ;;
-  esac
-  case "$selected_script_sha256" in
-    *[!0-9a-f]*) fail "Selected release script hash is invalid: $selected_script_path" ;;
-  esac
-  printf '%s\n' "$selected_script_sha256"
-}
-
-verify_clean_remove_publish_destination() {
-  destination_path="$1"
-  destination_mode="$2"
-  if as_root test -e "$destination_path" || as_root test -L "$destination_path"; then
-    as_root test -f "$destination_path" && ! as_root test -L "$destination_path" \
-      || fail "Clean-remove publish destination is unsafe: $destination_path"
-    [ "$(as_root stat -c '%u:%g:%a' "$destination_path" 2>/dev/null || true)" = "0:0:$destination_mode" ] \
-      || fail "Clean-remove publish destination has unexpected ownership or mode: $destination_path"
-  fi
-}
-
-verify_published_clean_remove_file() {
-  published_path="$1"
-  published_mode="$2"
-  expected_sha256="$3"
-  as_root test -f "$published_path" && ! as_root test -L "$published_path" \
-    || fail "Published clean-remove file is unsafe: $published_path"
-  [ "$(as_root stat -c '%u:%g:%a' "$published_path" 2>/dev/null || true)" = "0:0:$published_mode" ] \
-    || fail "Published clean-remove file has unexpected ownership or mode: $published_path"
-  [ "$(as_root sha256sum "$published_path" | awk 'NR == 1 { print $1 }')" = "$expected_sha256" ] \
-    || fail "Published clean-remove file hash does not match selected release: $published_path"
-}
-
-install_clean_remove_bundle() {
-  cleaner_source="$INSTALL_DIR/scripts/gp-clean-remove-root.sh"
-  preflight_source="$INSTALL_DIR/scripts/gp-clean-remove-preflight.sh"
-  [ -f "$cleaner_source" ] && [ ! -L "$cleaner_source" ] \
-    || fail "Selected release clean-remove source is unsafe: $cleaner_source"
-  [ -f "$preflight_source" ] && [ ! -L "$preflight_source" ] \
-    || fail "Selected release clean-remove preflight source is unsafe: $preflight_source"
-
-  cleaner_expected_sha256="$(selected_commit_script_sha256 scripts/gp-clean-remove-root.sh)"
-  preflight_expected_sha256="$(selected_commit_script_sha256 scripts/gp-clean-remove-preflight.sh)"
-  manifest_payload="$(printf '%s\n' \
-    "candidate_sha=$SELECTED_COMMIT_SHA" \
-    "cleaner_sha256=$cleaner_expected_sha256" \
-    "preflight_sha256=$preflight_expected_sha256" \
-    "cleaner_path=$CLEAN_REMOVE_ROOT_PATH" \
-    "preflight_path=$CLEAN_REMOVE_PREFLIGHT_PATH")"
-
-  ensure_root_directory "$CLEAN_REMOVE_DIRECTORY" 0755 root root
-  verify_clean_remove_publish_destination "$CLEAN_REMOVE_ROOT_PATH" 700
-  verify_clean_remove_publish_destination "$CLEAN_REMOVE_PREFLIGHT_PATH" 755
-  verify_clean_remove_publish_destination "$CLEAN_REMOVE_MANIFEST_PATH" 600
-  clean_remove_stage_dir="$(as_root mktemp -d /run/gp-clean-remove-install.XXXXXX)" \
-    || fail "Cannot create root-private clean-remove publication stage"
-  cleaner_stage="$clean_remove_stage_dir/cleaner"
-  preflight_stage="$clean_remove_stage_dir/preflight"
-  manifest_stage="$clean_remove_stage_dir/manifest"
-
-  as_root install -m 0700 -o root -g root "$cleaner_source" "$cleaner_stage"
-  as_root install -m 0755 -o root -g root "$preflight_source" "$preflight_stage"
-  as_root sh -n "$cleaner_stage"
-  as_root sh -n "$preflight_stage"
-  verify_published_clean_remove_file "$cleaner_stage" 700 "$cleaner_expected_sha256"
-  verify_published_clean_remove_file "$preflight_stage" 755 "$preflight_expected_sha256"
-  printf '%s\n' "$manifest_payload" | as_root tee "$manifest_stage" >/dev/null
-  as_root chown root:root "$manifest_stage"
-  as_root chmod 0600 "$manifest_stage"
-  [ "$(as_root stat -c '%u:%g:%a' "$manifest_stage" 2>/dev/null || true)" = "0:0:600" ] \
-    || fail "Staged clean-remove manifest has unexpected ownership or mode"
-
-  as_root mv -f -- "$cleaner_stage" "$CLEAN_REMOVE_ROOT_PATH"
-  as_root mv -f -- "$preflight_stage" "$CLEAN_REMOVE_PREFLIGHT_PATH"
-  as_root mv -f -- "$manifest_stage" "$CLEAN_REMOVE_MANIFEST_PATH"
-  as_root rmdir -- "$clean_remove_stage_dir"
-  verify_published_clean_remove_file "$CLEAN_REMOVE_ROOT_PATH" 700 "$cleaner_expected_sha256"
-  verify_published_clean_remove_file "$CLEAN_REMOVE_PREFLIGHT_PATH" 755 "$preflight_expected_sha256"
-  [ "$(as_root cat "$CLEAN_REMOVE_MANIFEST_PATH")" = "$manifest_payload" ] \
-    || fail "Published clean-remove manifest does not match the selected release"
-  [ "$(as_root stat -c '%u:%g:%a' "$CLEAN_REMOVE_MANIFEST_PATH" 2>/dev/null || true)" = "0:0:600" ] \
-    || fail "Published clean-remove manifest has unexpected ownership or mode"
-}
-
-apt_package_available() {
-  apt-cache show "$1" >/dev/null 2>&1
-}
-
-install_luajit_dev_package() {
-  for package in libluajit2-5.1-dev libluajit-5.1-dev; do
-    if apt_package_available "$package"; then
-      log "Installing LuaJIT build dependency: $package"
-      as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
-      return 0
-    fi
-  done
-  log "LuaJIT development package was not found; continuing because zapret2 can build without LuaJIT on some platforms"
-}
-
-install_service_env_file() {
-  env_file="$1"
-  if install_web_enabled; then
-    install_web_value="on"
-  else
-    install_web_value="off"
-  fi
-  TMP_WEB_ENV="$(mktemp)"
-  {
-    install_dir_escaped="$(printf '%s' "$INSTALL_DIR" | sed "s/'/'\\\\''/g")"
-    state_dir_escaped="$(printf '%s' "$STATE_DIR" | sed "s/'/'\\\\''/g")"
-    printf "GP_INSTALL_DIR='%s'\n" "$install_dir_escaped"
-    printf "GP_STATE_DIR='%s'\n" "$state_dir_escaped"
-    printf "GP_INSTALL_WEB='%s'\n" "$install_web_value"
-  } > "$TMP_WEB_ENV"
-  as_root install -m 0640 -o root -g root "$TMP_WEB_ENV" "$env_file"
-  rm -f "$TMP_WEB_ENV"
-}
-
-install_web_env_file() {
-  install_service_env_file "$WEB_ENV_FILE"
-}
-
-install_systemd_service() {
-  service_name="$1"
-  description="$2"
-  command_name="$3"
-  host="$4"
-  port="$5"
-  env_file="$6"
-  extra_args="${7:-}"
-  after_extra="${8:-}"
-  wants_extra="${9:-}"
-  after_line="network-online.target"
-  wants_line="network-online.target"
-  [ -z "$after_extra" ] || after_line="$after_line $after_extra"
-  [ -z "$wants_extra" ] || wants_line="$wants_line $wants_extra"
-  exec_start="$INSTALL_DIR/.venv/bin/gp-control-plane $command_name --host $host --port $port"
-  [ -z "$extra_args" ] || exec_start="$exec_start $extra_args"
-  privileged_env=""
-  if [ "$command_name" = "core" ]; then
-    privileged_env="Environment=GP_ROOT_HELPER=$ROOT_HELPER_PATH
-Environment=GP_ZAPRET_DIR=$ZAPRET_DIR"
-  fi
-  TMP_SERVICE="$(mktemp)"
-  cat > "$TMP_SERVICE" <<SERVICE
+vault_tool="$SOURCE_DIR/scripts/clean-install-vault.py"
+[ -f "$vault_tool" ] && [ ! -L "$vault_tool" ] || fail 'exact tag lacks the vault tool'
+# This executes as the install user; root neither reads nor deletes the vault/handoff.
+if [ "$INITIAL_INSTALL" = off ]; then
+  runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify --state-dir "$legacy_state" --home "$target_home" >/dev/null || fail 'vault is absent or corrupt; nothing was removed'
+fi
+stop_unit() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
+stop_unit gp-control-plane-web.service; stop_unit gp-control-plane-core.service
+rm -f -- /etc/systemd/system/gp-control-plane-core.service /etc/systemd/system/gp-control-plane-web.service
+rm -f -- /etc/default/gp-control-plane-install-profile /etc/default/gp-control-plane-core /etc/default/gp-control-plane-web /etc/default/gp-control-plane-root-helper /etc/sudoers.d/gp-control-plane-root-helper
+rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane /run/gp-control-plane "$install_dir" "$gp_root/.GP-access-control-plane.data"
+systemctl daemon-reload
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl dnsutils git iproute2 ipset iptables nftables python3 python3-pip python3-venv sudo
+group="$(id -gn "$INSTALL_USER")"
+install -d -o "$INSTALL_USER" -g "$group" "$gp_root" "$install_dir"
+tar -C "$SOURCE_DIR" --exclude=.git -cf - . | tar -C "$install_dir" -xf -
+chown -R "$INSTALL_USER:$group" "$install_dir"
+ZAPRET_DIR=/opt/zapret2 bash "$install_dir/scripts/install-zapret2.sh"
+[ -x /opt/zapret2/blockcheck2.sh ] && [ -x /opt/zapret2/nfq2/nfqws2 ] || fail 'zapret2 runtime is not ready'
+install -d -m 0755 /usr/local/libexec/gp-control-plane
+cat > /usr/local/libexec/gp-control-plane/nfqws2 <<'EOF'
+#!/bin/sh
+exec /opt/zapret2/nfq2/nfqws2 "$@"
+EOF
+cat > /usr/local/libexec/gp-control-plane/blockcheck2.sh <<'EOF'
+#!/bin/sh
+exec /opt/zapret2/blockcheck2.sh "$@"
+EOF
+chmod 0755 /usr/local/libexec/gp-control-plane/nfqws2 /usr/local/libexec/gp-control-plane/blockcheck2.sh
+install -d -o "$INSTALL_USER" -g "$group" "$state_dir"
+runuser -u "$INSTALL_USER" -- python3 -m venv "$install_dir/.venv"
+runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
+runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"
+install -d -m 0755 /usr/local/libexec/gp-control-plane
+install -m 0755 "$install_dir/scripts/gp-root-helper.sh" /usr/local/libexec/gp-control-plane/gp-root-helper
+cat > /etc/sudoers.d/gp-control-plane-root-helper <<EOF
+# Managed by GP clean installer; runtime discovery only.
+$INSTALL_USER ALL=(root) NOPASSWD: /usr/local/libexec/gp-control-plane/gp-root-helper *
+EOF
+visudo -cf /etc/sudoers.d/gp-control-plane-root-helper >/dev/null || fail 'runtime sudoers rule is invalid'
+chmod 0440 /etc/sudoers.d/gp-control-plane-root-helper
+cat > /etc/default/gp-control-plane-core <<EOF
+GP_INSTALL_DIR='$install_dir'
+GP_STATE_DIR='$state_dir'
+EOF
+cat > /etc/systemd/system/gp-control-plane-core.service <<EOF
 [Unit]
-Description=$description
-After=$after_line
-Wants=$wants_line
-
+Description=GP Strategy Finder Core API
+After=network-online.target
 [Service]
-Type=simple
-User=$TARGET_USER
-WorkingDirectory=$INSTALL_DIR
-Environment=HOME=$TARGET_HOME
-Environment=PATH=$SERVICE_PATH
-$privileged_env
-EnvironmentFile=-$env_file
-ExecStart=$exec_start
-KillMode=control-group
-MemoryAccounting=true
-MemoryHigh=$SERVICE_MEMORY_HIGH
-MemoryMax=$SERVICE_MEMORY_MAX
+User=$INSTALL_USER
+WorkingDirectory=$install_dir
+Environment=HOME=$target_home
+Environment=PATH=/usr/local/libexec/gp-control-plane:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/default/gp-control-plane-core
+Environment=GP_ROOT_HELPER=/usr/local/libexec/gp-control-plane/gp-root-helper
+ExecStart=$install_dir/.venv/bin/gp-control-plane core --host 127.0.0.1 --port 8081
 Restart=always
-RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
-SERVICE
-  as_root install -m 0644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/$service_name"
-  rm -f "$TMP_SERVICE"
-}
-
-prepare_v2fly_local_catalog() {
-  run_as_target sh -c 'cd "$1" && GP_INSTALL_DIR="$1" GP_STATE_DIR="$2" "$1/.venv/bin/gp-control-plane" domain-sources prepare-v2fly' sh "$INSTALL_DIR" "$STATE_DIR"
-}
-
-if [ "$CURRENT_UID" -ne 0 ]; then
-  need_command sudo
+EOF
+if [ "$INSTALL_WEB" = on ]; then
+cat > /etc/default/gp-control-plane-web <<EOF
+GP_INSTALL_DIR='$install_dir'
+GP_STATE_DIR='$state_dir'
+EOF
+cat > /etc/systemd/system/gp-control-plane-web.service <<EOF
+[Unit]
+Description=GP Strategy Finder Web UI
+After=network-online.target gp-control-plane-core.service
+[Service]
+User=$INSTALL_USER
+WorkingDirectory=$install_dir
+Environment=HOME=$target_home
+Environment=PATH=/usr/local/libexec/gp-control-plane:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/default/gp-control-plane-web
+ExecStart=$install_dir/.venv/bin/gp-control-plane web --host 0.0.0.0 --port 8080 --core-url http://127.0.0.1:8081
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
 fi
-need_command bash
-
-if ! command -v apt-get >/dev/null 2>&1; then
-  fail "This installer supports Debian/Ubuntu-like systems with apt-get."
-fi
-need_command git
-
-log "Checking administrator access"
-as_root true
-
-# Reject an invalid release identity or an existing target before packages,
-# zapret, services, sudoers, or any other root-managed surface can change.
-if [ "$LEGACY_PROFILE_CAPTURE" != on ]; then
-  preflight_fresh_install
-fi
-
-trusted_root_file() {
-  profile_path="$1"
-  [ -f "$profile_path" ] && [ ! -L "$profile_path" ] || return 1
-  profile_uid="$(as_root stat -c '%u' "$profile_path" 2>/dev/null || true)"
-  profile_mode="$(as_root stat -c '%a' "$profile_path" 2>/dev/null || true)"
-  [ "$profile_uid" = "0" ] && [ -n "$profile_mode" ] && [ $((8#$profile_mode & 022)) -eq 0 ]
-}
-
-read_root_env_value() {
-  root_env_file="$1"
-  root_env_key="$2"
-  if [ "$CURRENT_UID" -eq 0 ]; then
-    root_env_reader=(awk)
-  else
-    root_env_reader=(sudo awk)
-  fi
-  "${root_env_reader[@]}" -v key="$root_env_key" '
-    function decode_single_quoted(value,    length_value, position, character, decoded) {
-      length_value = length(value)
-      if (length_value < 2 || substr(value, 1, 1) != "\047") return ""
-      for (position = 2; position <= length_value; position++) {
-        character = substr(value, position, 1)
-        if (character == "\047") {
-          if (position == length_value) { decoded_value = decoded; return "ok" }
-          if (substr(value, position + 1, 3) != "\\\047\047") return ""
-          decoded = decoded "\047"
-          position += 3
-        } else {
-          decoded = decoded character
-        }
-      }
-      return ""
-    }
-    {
-      sub(/\r$/, "")
-      if (index($0, key "=") != 1) next
-      matches++
-      if (decode_single_quoted(substr($0, length(key) + 2)) != "ok") invalid = 1
-    }
-    END {
-      if (invalid || matches > 1) exit 2
-      if (matches == 0) exit 3
-      print decoded_value
-    }
-  ' "$root_env_file"
-}
-
-load_root_env_values() {
-  root_env_file="$1"
-  shift
-  for root_env_key in "$@"; do
-    case "$root_env_key" in
-      GP_INSTALL_DIR|GP_STATE_DIR|GP_INSTALL_WEB) ;;
-      *) return 2 ;;
-    esac
-    if root_env_value="$(read_root_env_value "$root_env_file" "$root_env_key")"; then
-      printf -v "$root_env_key" '%s' "$root_env_value"
-      export "$root_env_key"
-    else
-      root_env_status=$?
-      [ "$root_env_status" -eq 3 ] || return "$root_env_status"
-    fi
-  done
-}
-
-unit_value() {
-  unit_file="/etc/systemd/system/$1"
-  property="$2"
-  trusted_root_file "$unit_file" || fail "Cannot safely read systemd unit: $unit_file"
-  sed -n "s/^$property=//p" "$unit_file" | head -n 1
-}
-
-unit_option() {
-  unit_file="/etc/systemd/system/$1"
-  option="$2"
-  trusted_root_file "$unit_file" || fail "Cannot safely read systemd unit: $unit_file"
-  awk -v option="$option" '/^ExecStart=/ { for (i = 1; i < NF; i++) if ($i == option) { print $(i + 1); exit } }' "$unit_file"
-}
-
-load_trusted_service_env() {
-  service_env_file="$1"
-  trusted_root_file "$service_env_file" || fail "Cannot safely read service environment: $service_env_file"
-
-  # The legacy EnvironmentFile is root-owned and can be 0640, so read only the
-  # values this installer needs through sudo.  Do not source it: EnvironmentFile
-  # contents are data, not installer shell code.
-  load_root_env_values "$service_env_file" GP_INSTALL_DIR GP_STATE_DIR GP_INSTALL_WEB \
-    || fail "Cannot safely parse service environment: $service_env_file"
-}
-
-capture_legacy_install_profile() {
-  [ -f "/etc/systemd/system/$CORE_SERVICE_NAME" ] || fail "Cannot capture legacy install profile: Core service is missing"
-  CORE_ENV_FILE="$(unit_value "$CORE_SERVICE_NAME" EnvironmentFile | sed 's/^-//')"
-  [ -n "$CORE_ENV_FILE" ] || fail "Cannot capture legacy install profile: Core EnvironmentFile is missing"
-  load_trusted_service_env "$CORE_ENV_FILE"
-  INSTALL_DIR="${GP_INSTALL_DIR:-$INSTALL_DIR}"
-  STATE_DIR="${GP_STATE_DIR:-$STATE_DIR}"
-  SERVICE_PATH="$INSTALL_DIR/.venv/bin:$TARGET_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  CORE_HOST="$(unit_option "$CORE_SERVICE_NAME" --host)"
-  CORE_PORT="$(unit_option "$CORE_SERVICE_NAME" --port)"
-  [ -n "$CORE_HOST" ] && [ -n "$CORE_PORT" ] || fail "Cannot capture legacy install profile: Core host/port are missing"
-  CORE_URL="http://$CORE_HOST:$CORE_PORT"
-  if [ -f "/etc/systemd/system/$SERVICE_NAME" ]; then
-    INSTALL_WEB=on
-    WEB_ENV_FILE="$(unit_value "$SERVICE_NAME" EnvironmentFile | sed 's/^-//')"
-    [ -n "$WEB_ENV_FILE" ] || fail "Cannot capture legacy install profile: Web EnvironmentFile is missing"
-    load_trusted_service_env "$WEB_ENV_FILE"
-    WEB_HOST="$(unit_option "$SERVICE_NAME" --host)"
-    WEB_PORT="$(unit_option "$SERVICE_NAME" --port)"
-    CORE_URL="$(unit_option "$SERVICE_NAME" --core-url)"
-    [ -n "$WEB_HOST" ] && [ -n "$WEB_PORT" ] && [ -n "$CORE_URL" ] || fail "Cannot capture legacy install profile: Web topology is incomplete"
-  else
-    INSTALL_WEB=off
-  fi
-}
-
-write_install_profile_value() {
-  profile_key="$1"
-  profile_value="$2"
-  profile_escaped="$(printf '%s' "$profile_value" | sed "s/'/'\\\\''/g")"
-  printf "%s='%s'\n" "$profile_key" "$profile_escaped"
-}
-
-write_install_profile() {
-  tmp_profile="$(mktemp)"
-  if install_web_enabled; then profile_install_web=on; else profile_install_web=off; fi
-  {
-    printf '# Managed by GP Access Control Plane installer. Reconfigure only through the explicit installer.\n'
-    write_install_profile_value GP_INSTALL_USER "$TARGET_USER"
-    write_install_profile_value GP_INSTALL_DIR "$INSTALL_DIR"
-    write_install_profile_value GP_STATE_DIR "$STATE_DIR"
-    write_install_profile_value GP_SERVICE_NAME "$SERVICE_NAME"
-    write_install_profile_value GP_CORE_SERVICE_NAME "$CORE_SERVICE_NAME"
-    write_install_profile_value GP_INSTALL_WEB "$profile_install_web"
-    write_install_profile_value GP_WEB_HOST "$WEB_HOST"
-    write_install_profile_value GP_WEB_PORT "$WEB_PORT"
-    write_install_profile_value GP_WEB_ENV_FILE "$WEB_ENV_FILE"
-    write_install_profile_value GP_CORE_HOST "$CORE_HOST"
-    write_install_profile_value GP_CORE_PORT "$CORE_PORT"
-    write_install_profile_value GP_CORE_URL "$CORE_URL"
-    write_install_profile_value GP_CORE_ENV_FILE "$CORE_ENV_FILE"
-    write_install_profile_value GP_ZAPRET_DIR "$ZAPRET_DIR"
-    write_install_profile_value GP_ROOT_HELPER_PATH "$ROOT_HELPER_PATH"
-    write_install_profile_value GP_ROOT_HELPER_CONFIG "$ROOT_HELPER_CONFIG"
-    write_install_profile_value GP_ROOT_HELPER_RUN_DIR "$ROOT_HELPER_RUN_DIR"
-    write_install_profile_value GP_SUDOERS_PATH "$SUDOERS_PATH"
-    write_install_profile_value GP_SERVICE_MEMORY_HIGH "$SERVICE_MEMORY_HIGH"
-    write_install_profile_value GP_SERVICE_MEMORY_MAX "$SERVICE_MEMORY_MAX"
-  } > "$tmp_profile"
-  install_profile_dir="$(dirname -- "$INSTALL_PROFILE")"
-  as_root install -d -m 0755 -o root -g root "$install_profile_dir"
-  if as_root test -e "$INSTALL_PROFILE" || as_root test -L "$INSTALL_PROFILE"; then
-    as_root test -f "$INSTALL_PROFILE" && ! as_root test -L "$INSTALL_PROFILE" \
-      || fail "Cannot replace non-regular install profile: $INSTALL_PROFILE"
-  fi
-  as_root install -m 0600 -o root -g root "$tmp_profile" "$INSTALL_PROFILE"
-  as_root test -f "$INSTALL_PROFILE" && ! as_root test -L "$INSTALL_PROFILE" \
-    && [ "$(as_root stat -c '%u:%g:%a' "$INSTALL_PROFILE" 2>/dev/null || true)" = "0:0:600" ] \
-    || fail "Install profile was not created as root:root mode 0600: $INSTALL_PROFILE"
-  rm -f "$tmp_profile"
-}
-
-if [ "$LEGACY_PROFILE_CAPTURE" = on ]; then
-  capture_legacy_install_profile
-fi
-
-log "Installing for user: $TARGET_USER"
-log "Install directory: $INSTALL_DIR"
-log "State directory: $STATE_DIR"
-
-if step_log packages "Updating package index and installing required packages"; then
-  as_root apt-get update
-  as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    bsdextrautils \
-    ca-certificates \
-    curl \
-    dnsutils \
-    git \
-    iproute2 \
-    ipset \
-    iptables \
-    nftables \
-    python3 \
-    python3-pip \
-    python3-venv \
-    sudo
-fi
-
-if step_log zapret "Installing zapret2"; then
-  if [ -d "$ZAPRET_DIR/.git" ]; then
-    if [ -n "$(as_root git -C "$ZAPRET_DIR" status --short)" ]; then
-      log "zapret2 already exists and has local changes; keeping existing files"
-    else
-      as_root git -C "$ZAPRET_DIR" fetch origin "$ZAPRET_BRANCH"
-      as_root git -C "$ZAPRET_DIR" checkout "$ZAPRET_BRANCH"
-      as_root git -C "$ZAPRET_DIR" pull --ff-only origin "$ZAPRET_BRANCH"
-    fi
-  elif [ -e "$ZAPRET_DIR" ]; then
-    fail "zapret2 install path exists but is not a git repository: $ZAPRET_DIR"
-  else
-    as_root mkdir -p "$(dirname "$ZAPRET_DIR")"
-    as_root git clone --branch "$ZAPRET_BRANCH" "$ZAPRET_REPO_URL" "$ZAPRET_DIR"
-  fi
-
-  as_root chmod +x "$ZAPRET_DIR/blockcheck2.sh" "$ZAPRET_DIR/install_bin.sh" 2>/dev/null || true
-  if ! run_zapret_install_bin; then
-    log "zapret2 ready binaries were not found; installing build dependencies and compiling"
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      build-essential \
-      gcc \
-      libcap-dev \
-      libmnl-dev \
-      libnetfilter-queue-dev \
-      libsystemd-dev \
-      make \
-      zlib1g-dev
-    install_luajit_dev_package
-    as_root make -C "$ZAPRET_DIR" systemd || as_root make -C "$ZAPRET_DIR"
-    run_zapret_install_bin
-  fi
-
-  [ -x "$ZAPRET_DIR/blockcheck2.sh" ] || fail "zapret2 blockcheck2.sh was not installed"
-  [ -x "$ZAPRET_DIR/nfq2/nfqws2" ] || fail "zapret2 nfqws2 was not installed"
-
-  log "Preparing zapret2 command wrappers"
-  as_root install -d -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_BIN_DIR"
-  TMP_BLOCKCHECK="$(mktemp)"
-  TMP_NFQWS="$(mktemp)"
-  cat > "$TMP_BLOCKCHECK" <<WRAPPER
-#!/bin/sh
-exec "$ZAPRET_DIR/blockcheck2.sh" "\$@"
-WRAPPER
-  cat > "$TMP_NFQWS" <<WRAPPER
-#!/bin/sh
-exec "$ZAPRET_DIR/nfq2/nfqws2" "\$@"
-WRAPPER
-  as_root install -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TMP_BLOCKCHECK" "$TARGET_BIN_DIR/blockcheck2.sh"
-  as_root install -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TMP_NFQWS" "$TARGET_BIN_DIR/nfqws2"
-  rm -f "$TMP_BLOCKCHECK" "$TMP_NFQWS"
-
-  run_as_target sh -c 'if ! grep -qs '\''export PATH="$HOME/.local/bin:$PATH"'\'' "$HOME/.profile"; then printf '\''\nexport PATH="$HOME/.local/bin:$PATH"\n'\'' >> "$HOME/.profile"; fi'
-  export PATH="$TARGET_BIN_DIR:$PATH"
-fi
-
-if step_log app "Installing GP Access Control Plane"; then
-  [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] \
-    || fail "Clean installation requires an absent target: $INSTALL_DIR. Create a vault, run the fixed clean-remove, then install the release tag."
-  run_as_target mkdir -p "$(dirname "$INSTALL_DIR")"
-  checkout_selected_release
-
-  log "Creating Python virtual environment"
-  run_as_target python3 -m venv "$INSTALL_DIR/.venv"
-  run_as_target "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
-  run_as_target "$INSTALL_DIR/.venv/bin/python" -m pip install -e "$INSTALL_DIR"
-fi
-
-if step_log v2fly "Preparing local v2fly domain catalog"; then
-  if ! prepare_v2fly_local_catalog; then
-    log "v2fly local catalog was not prepared; v2fly import will become available after the next successful install"
-  fi
-fi
-
-if [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled root-helper; then
-  log "[root-helper] skipped while capturing the existing install profile"
-elif step_log root-helper "Installing GP root helper"; then
-  as_root install -d -m 0755 "$(dirname "$ROOT_HELPER_PATH")"
-  ROOT_HELPER_SOURCE="$INSTALL_DIR/scripts/gp-root-helper.sh"
-  as_root install -m 0755 -o root -g root "$ROOT_HELPER_SOURCE" "$ROOT_HELPER_PATH"
-  install_clean_remove_bundle
-
-  ensure_root_directory /run/gp-control-plane/gates 0700 root root
-  ensure_root_regular_file /run/gp-control-plane/gates/discovery-update.lock 0600 root root
-
-  TMP_ROOT_HELPER_CONFIG="$(mktemp)"
-  ZAPRET_DIR_ESCAPED="$(printf '%s' "$ZAPRET_DIR" | sed "s/'/'\\\\''/g")"
-  ROOT_HELPER_RUN_DIR_ESCAPED="$(printf '%s' "$ROOT_HELPER_RUN_DIR" | sed "s/'/'\\\\''/g")"
-  {
-    printf "ZAPRET_DIR='%s'\n" "$ZAPRET_DIR_ESCAPED"
-    printf "GP_ROOT_HELPER_RUN_DIR='%s'\n" "$ROOT_HELPER_RUN_DIR_ESCAPED"
-  } > "$TMP_ROOT_HELPER_CONFIG"
-  as_root install -m 0644 -o root -g root "$TMP_ROOT_HELPER_CONFIG" "$ROOT_HELPER_CONFIG"
-  rm -f "$TMP_ROOT_HELPER_CONFIG"
-
-  TMP_SUDOERS="$(mktemp)"
-  printf '# Managed by GP Access Control Plane installer\n%s ALL=(root) NOPASSWD: %s *\n' "$TARGET_USER" "$ROOT_HELPER_PATH" > "$TMP_SUDOERS"
-  as_root visudo -cf "$TMP_SUDOERS"
-  as_root install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_PATH"
-  rm -f "$TMP_SUDOERS"
-fi
-
-if [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled service; then
-  log "[service] skipped while capturing the existing install profile"
-elif step_log service "Creating and starting systemd service"; then
-  install_service_env_file "$CORE_ENV_FILE"
-  install_systemd_service "$CORE_SERVICE_NAME" "GP Strategy Finder Core API" "core" "$CORE_HOST" "$CORE_PORT" "$CORE_ENV_FILE"
-  as_root systemctl daemon-reload
-  as_root systemctl enable "$CORE_SERVICE_NAME"
-  as_root systemctl restart "$CORE_SERVICE_NAME"
-  if install_web_enabled; then
-    install_service_env_file "$WEB_ENV_FILE"
-    install_systemd_service "$SERVICE_NAME" "GP Strategy Finder Web UI" "web" "$WEB_HOST" "$WEB_PORT" "$WEB_ENV_FILE" "--core-url $CORE_URL" "$CORE_SERVICE_NAME" "$CORE_SERVICE_NAME"
-    as_root systemctl daemon-reload
-    as_root systemctl enable "$SERVICE_NAME"
-    as_root systemctl restart "$SERVICE_NAME"
-  else
-    as_root systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
-  fi
-fi
-
-if step_log check "Checking installation"; then
-  run_as_target env GP_INSTALL_DIR="$INSTALL_DIR" GP_STATE_DIR="$STATE_DIR" "$INSTALL_DIR/.venv/bin/gp-control-plane" zapret2 check-install || true
-  as_root systemctl --no-pager --full status "$CORE_SERVICE_NAME" || true
-  if install_web_enabled; then
-    as_root systemctl --no-pager --full status "$SERVICE_NAME" || true
-  fi
-fi
-
-if { [ "$LEGACY_PROFILE_CAPTURE" = on ] && step_enabled app; } || step_enabled service; then
-  log "Writing root-owned resolved install profile"
-  write_install_profile
-fi
-
-IP_ADDRESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
-if install_web_enabled && [ -n "${IP_ADDRESS:-}" ]; then
-  printf '\nDone. Open: http://%s:%s/\n' "$IP_ADDRESS" "$WEB_PORT"
-elif install_web_enabled; then
-  printf '\nDone. Open host address on port %s.\n' "$WEB_PORT"
-else
-  printf '\nDone. Core API: http://%s:%s/\n' "$CORE_HOST" "$CORE_PORT"
-fi
+systemctl daemon-reload; systemctl enable --now gp-control-plane-core.service
+if [ "$INSTALL_WEB" = on ]; then systemctl enable --now gp-control-plane-web.service; fi
+printf '%s\n' 'status=success phase=fresh-install'

@@ -1954,7 +1954,7 @@ run_owned_multidomain_target "$2" "$3"
             self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
 
         helper_text = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
-        owned_wrapper = helper_text.split("run_owned_multidomain_target() (", 1)[1].split("\n)\n\nCLEAN_REMOVE_PROFILE", 1)[0]
+        owned_wrapper = helper_text.split("run_owned_multidomain_target() (", 1)[1].split("\n)\n\nrequire_root", 1)[0]
         self.assertIn('( run_owned_process "$run_id" "$runner" "$@" )', owned_wrapper)
         self.assertNotIn("--cleanup-dir", owned_wrapper)
         self.assertIn("trap cleanup_runner EXIT", owned_wrapper)

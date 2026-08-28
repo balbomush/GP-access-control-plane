@@ -5,11 +5,7 @@ export PATH
 readonly PATH
 
 CONFIG_FILE="${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}"
-# The one-way clean-remove command does not consume caller-controlled helper
-# configuration.  It reads only the fixed root-owned installation profile.
-if [ "${1:-}" != "clean-remove" ]; then
-  [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
-fi
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 ZAPRET_DIR="${ZAPRET_DIR:-/opt/zapret2}"
 RUN_REGISTRY_DIR="${GP_ROOT_HELPER_RUN_DIR:-/run/gp-control-plane/runs}"
 DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'
@@ -765,26 +761,6 @@ run_owned_multidomain_target() (
   exit "$code"
 )
 
-CLEAN_REMOVE_PROFILE='/etc/default/gp-control-plane-install-profile'
-
-load_clean_remove_install_user() {
-  [ -f "$CLEAN_REMOVE_PROFILE" ] && [ ! -L "$CLEAN_REMOVE_PROFILE" ] \
-    || fail "clean-remove requires a regular installation profile: $CLEAN_REMOVE_PROFILE"
-  [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_PROFILE" 2>/dev/null || true)" = '0:0:600' ] \
-    || fail "clean-remove installation profile must be root:root mode 0600: $CLEAN_REMOVE_PROFILE"
-  clean_remove_install_user="$(awk '
-    /^GP_INSTALL_USER=\047[A-Za-z0-9_-]+\047$/ {
-      count++
-      value = substr($0, 18, length($0) - 18)
-    }
-    /^GP_INSTALL_USER=/ && $0 !~ /^GP_INSTALL_USER=\047[A-Za-z0-9_-]+\047$/ { invalid = 1 }
-    END { if (invalid || count != 1) exit 1; print value }
-  ' "$CLEAN_REMOVE_PROFILE")" || fail "cannot read GP_INSTALL_USER from installation profile"
-  case "$clean_remove_install_user" in ''|root|*[!A-Za-z0-9_-]*) fail "GP_INSTALL_USER in installation profile is unsafe" ;; esac
-  getent passwd "$clean_remove_install_user" >/dev/null 2>&1 \
-    || fail "installation profile user does not exist: $clean_remove_install_user"
-}
-
 validate_run_id() {
   case "${1:-}" in
     ""|*[!A-Za-z0-9._-]*|.*|*..*) fail "invalid run id" ;;
@@ -1515,19 +1491,6 @@ recover_registered_process_runs() {
   done
 }
 
-readonly CLEAN_REMOVE_ROOT='/usr/local/libexec/gp-control-plane/gp-clean-remove-root'
-
-clean_remove_dispatch() {
-  [ "$#" -eq 1 ] && [ "$1" = --confirm-clean-remove ] \
-    || fail 'clean-remove requires exactly --confirm-clean-remove'
-  load_clean_remove_install_user
-  [ -f "$CLEAN_REMOVE_ROOT" ] && [ ! -L "$CLEAN_REMOVE_ROOT" ] \
-    || fail "installed clean-remove root script is unavailable: $CLEAN_REMOVE_ROOT"
-  [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_ROOT" 2>/dev/null || true)" = '0:0:700' ] \
-    || fail "installed clean-remove root script is unsafe: $CLEAN_REMOVE_ROOT"
-  exec "$CLEAN_REMOVE_ROOT" --install-user "$clean_remove_install_user" --confirm-clean-remove
-}
-
 require_root
 
 command="${1:-}"
@@ -1609,9 +1572,6 @@ case "$command" in
       shift
     done
     with_discovery_gate run_owned_multidomain_target "$run_id" "$@"
-    ;;
-  clean-remove)
-    clean_remove_dispatch "$@"
     ;;
   nft-list-tables)
     exec nft list tables

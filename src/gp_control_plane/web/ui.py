@@ -6131,10 +6131,11 @@ async function restoreCleanInstallVault(vaultId){
   if (!confirmed) return;
   try {
     const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsRestore'), {
-      vault_id: id
+      vault_id: id,
+      confirm_restore: true
     });
-    if (!data.completed || !data.verification?.verified || !data.cleanup?.source_deleted) {
-      throw new Error('Восстановление не подтвердило verification=verified и удаление исходного vault');
+    if (!data.completed || !data.verification?.verified || !data.storage_status?.ready || !data.cleanup?.source_deleted) {
+      throw new Error('Восстановление не подтвердило данные, SQLite и удаление исходного vault');
     }
     setMessage('Данные восстановлены, проверены, а исходный vault удален.', 'good');
     invalidateCandidateCaches();

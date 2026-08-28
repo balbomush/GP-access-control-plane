@@ -159,6 +159,7 @@ class WebUiTests(unittest.TestCase):
                 "completed": True,
                 "vault_id": "a" * 32,
                 "verification": {"verified": True, "storage": {"ready": True, "integrity_check": "ok"}},
+                "storage_status": {"ready": True, "integrity_check": "ok"},
                 "cleanup": {"completed": True, "source_deleted": True},
             }
             with (
@@ -197,16 +198,13 @@ class WebUiTests(unittest.TestCase):
                         server.port,
                         "/api/core/clean-install-vaults/restore",
                         method="POST",
-                        body=json.dumps({"vault_id": "a" * 32}).encode("utf-8"),
+                        body=json.dumps({"vault_id": "a" * 32, "confirm_restore": True}).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
                     )
                     self.assertEqual(status, 200, body)
                     self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", body.decode("utf-8"))
                     self.assertTrue(json.loads(body)["completed"])
-                    restore.assert_called_once_with(
-                        config.output.state_dir,
-                        vault_id="a" * 32,
-                    )
+                    restore.assert_called_once_with(config.output.state_dir, vault_id="a" * 32)
 
     def test_core_status_keeps_saving_lifecycle_until_post_run_snapshot_finishes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

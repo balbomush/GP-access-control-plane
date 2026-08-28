@@ -99,7 +99,7 @@ class BearerAuthHttpTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=root / "state"))
             vault = root / "install-user" / ".local" / "share" / "gp-control-plane" / "clean-install-vault"
             vault.parents[3].mkdir()
-            handoff = root / "install-user" / ".local" / "share" / "gp-control-plane" / "clean-install-handoff" / "handoff.json"
+            handoff = vault / "handoff.json"
             valid_vault_id = "a" * 32
             with (
                 mock.patch("gp_control_plane.backups.clean_install_vault_dir", return_value=vault),
@@ -170,61 +170,12 @@ class BearerAuthHttpTests(unittest.TestCase):
                     raise OSError("simulated interrupted entry cleanup")
                 original_unlink(path, *args, **kwargs)
 
-            with mock.patch.object(Path, "unlink", interrupt_entry_unlink):
-                restored = restore_clean_install_vault(target_state, target_home=home, vault_id=created["vault_id"])
-            self.assertFalse(restored["completed"])
-            self.assertTrue((vault / "cleanup.journal.json").is_file())
-
-            config = AppConfig(output=OutputConfig(state_dir=root / "api-state"))
-            handoff = clean_install_handoff_path(home)
-            with (
-                mock.patch("gp_control_plane.backups.clean_install_vault_dir", return_value=vault),
-                mock.patch("gp_control_plane.backups.clean_install_handoff_path", return_value=handoff),
-            ):
-                port = _start_server(serve, config, ui_enabled=False)
-                login_status, _headers, login_body = _request(
-                    port,
-                    "/api/auth/login",
-                    method="POST",
-                    body=_json_bytes({"username": "admin", "password": "admin"}),
-                    headers={"Content-Type": "application/json"},
-                )
-                self.assertEqual(login_status, 200)
-                bearer = {"Authorization": f"Bearer {json.loads(login_body)['access_token']}"}
-
-                list_status, _headers, list_body = _request(port, "/api/core/clean-install-vaults/list", headers=bearer)
-                status_status, _headers, status_body = _request(
-                    port,
-                    f"/api/core/clean-install-vaults/status?vault_id={created['vault_id']}",
-                    headers=bearer,
-                )
-                self.assertEqual(list_status, 200, list_body.decode("utf-8"))
-                self.assertEqual(status_status, 200, status_body.decode("utf-8"))
-                public_status = json.loads(status_body)
-                self.assertEqual(json.loads(list_body), {"vaults": [public_status]})
-
-                contract = json.loads((Path(__file__).resolve().parents[1] / "openapi.json").read_text(encoding="utf-8"))
-                status_schema = contract["components"]["schemas"]["CleanInstallVaultStatus"]
-                self.assertEqual(set(public_status), set(status_schema["required"]))
-                self.assertTrue(re.fullmatch(status_schema["properties"]["vault_id"]["pattern"], public_status["vault_id"]))
-                self.assertTrue(re.fullmatch(status_schema["properties"]["archive_sha256"]["pattern"], public_status["archive_sha256"]))
-                self.assertEqual(public_status["schema_version"], status_schema["properties"]["schema_version"]["const"])
-                self.assertGreaterEqual(public_status["archive_size_bytes"], status_schema["properties"]["archive_size_bytes"]["minimum"])
-                self.assertIs(public_status["pending"], status_schema["properties"]["pending"]["const"])
-
-                journal_path = vault / "cleanup.journal.json"
-                old_journal = json.loads(journal_path.read_text(encoding="utf-8"))
-                old_journal.pop("created_at")
-                journal_path.write_text(json.dumps(old_journal), encoding="utf-8")
-                list_status, _headers, list_body = _request(port, "/api/core/clean-install-vaults/list", headers=bearer)
-                status_status, _headers, status_body = _request(
-                    port,
-                    f"/api/core/clean-install-vaults/status?vault_id={created['vault_id']}",
-                    headers=bearer,
-                )
-                self.assertEqual(list_status, 200, list_body.decode("utf-8"))
-                self.assertEqual(json.loads(list_body), {"vaults": []})
-                self.assertEqual(status_status, 404, status_body.decode("utf-8"))
+            with self.assertRaisesRegex(OSError, "interrupted entry cleanup"):
+                with mock.patch.object(Path, "unlink", interrupt_entry_unlink):
+                    restore_clean_install_vault(target_state, target_home=home, vault_id=created["vault_id"])
+            self.assertTrue((vault / "archive.zip").is_file())
+            self.assertTrue(entry.is_file())
+            self.assertTrue(clean_install_handoff_path(home).is_file())
 
     def test_completed_clean_install_vault_is_not_exposed_as_pending_api_record(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -232,7 +183,7 @@ class BearerAuthHttpTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=root / "state"))
             vault = root / "install-user" / ".local" / "share" / "gp-control-plane" / "clean-install-vault"
             vault.parents[3].mkdir()
-            handoff = root / "install-user" / ".local" / "share" / "gp-control-plane" / "clean-install-handoff" / "handoff.json"
+            handoff = vault / "handoff.json"
             with (
                 mock.patch("gp_control_plane.backups.clean_install_vault_dir", return_value=vault),
                 mock.patch("gp_control_plane.backups.clean_install_handoff_path", return_value=handoff),
@@ -265,7 +216,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                     port,
                     "/api/core/clean-install-vaults/restore",
                     method="POST",
-                    body=_json_bytes({"vault_id": created["vault_id"]}),
+                    body=_json_bytes({"vault_id": created["vault_id"], "confirm_restore": True}),
                     headers=bearer,
                 )
                 self.assertEqual(restore_status, 200, restore_body.decode("utf-8"))
