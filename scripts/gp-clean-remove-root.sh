@@ -14,6 +14,8 @@ export PATH
 readonly CLEAN_REMOVE_ROOT='/usr/local/libexec/gp-control-plane/gp-clean-remove-root'
 readonly CLEAN_REMOVE_PREFLIGHT='/usr/local/libexec/gp-control-plane/gp-clean-remove-preflight'
 readonly CLEAN_REMOVE_MANIFEST='/usr/local/libexec/gp-control-plane/gp-clean-remove-root.manifest'
+readonly CLEAN_REMOVE_ADAPTER='/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter'
+readonly CLEAN_REMOVE_ADAPTER_MANIFEST='/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter.manifest'
 
 INSTALL_USER=''
 DESTRUCTIVE_PHASE=0
@@ -190,7 +192,7 @@ validate_root_helper_directory() {
     for member in "$helper_dir"/* "$helper_dir"/.[!.]* "$helper_dir"/..?*; do
         [ -e "$member" ] || [ -L "$member" ] || continue
         case "$member" in
-            "$helper_dir/gp-root-helper"|"$helper_dir/gp-clean-remove-root"|"$helper_dir/gp-clean-remove-preflight"|"$helper_dir/gp-clean-remove-root.manifest") ;;
+            "$helper_dir/gp-root-helper"|"$helper_dir/gp-clean-remove-root"|"$helper_dir/gp-clean-remove-preflight"|"$helper_dir/gp-clean-remove-root.manifest"|"$CLEAN_REMOVE_ADAPTER"|"$CLEAN_REMOVE_ADAPTER_MANIFEST") ;;
             *)
                 die "legacy root-helper directory contains a foreign path: $member"
                 return 1
@@ -198,6 +200,22 @@ validate_root_helper_directory() {
         esac
         validate_root_file "$member" || return 1
     done
+}
+
+validate_trust_anchor_members() {
+    adapter_present=0
+    manifest_present=0
+    [ ! -e "$CLEAN_REMOVE_ADAPTER" ] && [ ! -L "$CLEAN_REMOVE_ADAPTER" ] || adapter_present=1
+    [ ! -e "$CLEAN_REMOVE_ADAPTER_MANIFEST" ] && [ ! -L "$CLEAN_REMOVE_ADAPTER_MANIFEST" ] || manifest_present=1
+    [ "$adapter_present" = "$manifest_present" ] \
+        || { die 'legacy clean-remove trust anchor is incomplete'; return 1; }
+    [ "$adapter_present" = 0 ] && return 0
+    [ -f "$CLEAN_REMOVE_ADAPTER" ] && [ ! -L "$CLEAN_REMOVE_ADAPTER" ] \
+        && [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_ADAPTER" 2>/dev/null || true)" = '0:0:700' ] \
+        || { die 'legacy clean-remove adapter is unsafe'; return 1; }
+    [ -f "$CLEAN_REMOVE_ADAPTER_MANIFEST" ] && [ ! -L "$CLEAN_REMOVE_ADAPTER_MANIFEST" ] \
+        && [ "$(stat -c '%u:%g:%a' "$CLEAN_REMOVE_ADAPTER_MANIFEST" 2>/dev/null || true)" = '0:0:600' ] \
+        || { die 'legacy clean-remove adapter manifest is unsafe'; return 1; }
 }
 
 validate_removal_surface() {
@@ -211,6 +229,7 @@ validate_removal_surface() {
     validate_root_file /etc/default/gp-control-plane-root-helper || return 1
     validate_root_file /etc/sudoers.d/gp-control-plane-root-helper || return 1
     validate_root_helper_directory || return 1
+    validate_trust_anchor_members || return 1
     validate_root_directory /run/gp-control-plane/runs || return 1
     validate_root_directory /run/gp-control-plane/gates || return 1
     validate_release_gates_directory || return 1
@@ -387,6 +406,8 @@ remove_old_gp_surface() {
     rm -f -- /etc/default/gp-control-plane-root-helper || return 1
     rm -f -- /etc/sudoers.d/gp-control-plane-root-helper || return 1
     rm -f -- /usr/local/libexec/gp-control-plane/gp-root-helper || return 1
+    rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-adapter || return 1
+    rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-adapter.manifest || return 1
     rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-root || return 1
     rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-preflight || return 1
     rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-root.manifest || return 1

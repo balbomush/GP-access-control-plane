@@ -56,6 +56,16 @@ require_unprivileged_user() {
   export HOME
 }
 
+require_exact_legacy_state_dir() {
+  # The bridge is intentionally not a generic exporter.  The only supported
+  # legacy source is the installation owned by this same install user.  Check
+  # the supplied spelling before resolving it, so a symlink or an alternate
+  # path that happens to resolve here cannot become an accepted input.
+  expected="$HOME/gp/GP-access-control-plane/build/state"
+  [ "$STATE_DIR" = "$expected" ] || die "state dir must be exactly $expected"
+  canonical_directory "$expected" >/dev/null || die 'canonical legacy state directory is unavailable or unsafe'
+}
+
 prepare_candidate_checkout() {
   handoff_root="$HOME/.cache/gp-control-plane/clean-handoff"
   install -d -m 0700 "$handoff_root"
@@ -117,10 +127,6 @@ materialize_candidate_runtime() {
   tar -xf "$runtime_archive" -C "$RUNTIME_STAGE" || die 'cannot extract pinned candidate runtime source'
   rm -f -- "$runtime_archive"
   [ -f "$RUNTIME_STAGE/src/gp_control_plane/backups.py" ] || die 'candidate has no clean-install vault implementation'
-  [ -f "$RUNTIME_STAGE/scripts/gp-clean-remove-root.sh" ] && [ ! -L "$RUNTIME_STAGE/scripts/gp-clean-remove-root.sh" ] \
-    || die 'candidate root clean-remove provision source is unsafe'
-  [ -f "$RUNTIME_STAGE/scripts/gp-clean-remove-preflight.sh" ] && [ ! -L "$RUNTIME_STAGE/scripts/gp-clean-remove-preflight.sh" ] \
-    || die 'candidate clean-remove preflight provision source is unsafe'
 }
 
 [ "$#" -eq 6 ] || usage
@@ -132,7 +138,7 @@ CANDIDATE_SHA="$6"
 is_sha "$CANDIDATE_SHA" || die 'candidate SHA must be exactly 40 lowercase hexadecimal characters'
 valid_candidate_ref "$CANDIDATE_REF" || die 'candidate ref must be refs/heads/dev or an immutable refs/tags/vX.Y.Z tag'
 require_unprivileged_user
-STATE_DIR="$(canonical_directory "$STATE_DIR")" || die 'state dir must be an existing canonical directory'
+require_exact_legacy_state_dir
 for command_name in git install mktemp python3 readlink rm mv tar; do
   command -v "$command_name" >/dev/null 2>&1 || die "required command is unavailable: $command_name"
 done
@@ -140,7 +146,7 @@ done
 trap cleanup_stage EXIT HUP INT TERM
 prepare_candidate_checkout
 materialize_candidate_runtime
-PYTHONPATH="$RUNTIME_STAGE/src" python3 - "$STATE_DIR" "$HOME" "$CANDIDATE_REF" "$CANDIDATE_SHA" "$RUNTIME_STAGE" <<'PY'
+PYTHONPATH="$RUNTIME_STAGE/src" python3 - "$STATE_DIR" "$HOME" "$CANDIDATE_REF" "$CANDIDATE_SHA" <<'PY'
 import hashlib
 import json
 import os
@@ -154,7 +160,6 @@ state_dir = Path(sys.argv[1])
 home = Path(sys.argv[2])
 candidate_ref = sys.argv[3]
 candidate_sha = sys.argv[4]
-candidate_stage = Path(sys.argv[5])
 created = create_clean_install_vault_with_handoff_validation(state_dir, target_home=home)
 info = clean_install_vault_info(target_home=home)
 if not info.get("exists") or not info.get("pending"):
@@ -201,14 +206,6 @@ if not handoff_secret:
 if hashlib.sha256(handoff_secret.encode("utf-8")).hexdigest() != str(entry_payload.get("handoff_secret_sha256") or ""):
     raise SystemExit("device-local handoff secret does not match the vault entry")
 
-candidate_cleaner = candidate_stage / "scripts" / "gp-clean-remove-root.sh"
-if candidate_cleaner.is_symlink() or not candidate_cleaner.is_file():
-    raise SystemExit("candidate root clean-remove provision source is unsafe")
-cleaner_sha256 = hashlib.sha256(candidate_cleaner.read_bytes()).hexdigest()
-candidate_preflight = candidate_stage / "scripts" / "gp-clean-remove-preflight.sh"
-if candidate_preflight.is_symlink() or not candidate_preflight.is_file():
-    raise SystemExit("candidate clean-remove preflight provision source is unsafe")
-preflight_sha256 = hashlib.sha256(candidate_preflight.read_bytes()).hexdigest()
 print(json.dumps({
     "handoff": "ready",
     "candidate_ref": candidate_ref,
@@ -217,7 +214,5 @@ print(json.dumps({
     "archive_sha256": created["archive_sha256"],
     "archive_size_bytes": created["archive_size_bytes"],
     "schema_version": created["schema_version"],
-    "cleaner_sha256": cleaner_sha256,
-    "preflight_sha256": preflight_sha256,
 }, separators=(",", ":")))
 PY

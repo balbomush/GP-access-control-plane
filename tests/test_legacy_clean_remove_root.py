@@ -144,6 +144,8 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
             "/etc/default/gp-control-plane-install-profile",
             "/etc/sudoers.d/gp-control-plane-root-helper",
             "/usr/local/libexec/gp-control-plane/gp-root-helper",
+            "/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter",
+            "/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter.manifest",
             'rm -rf --one-file-system -- "$INSTALL_DIR"',
             'rm -rf --one-file-system -- "$CURRENT_STATE_ROOT"',
         ):
@@ -151,48 +153,122 @@ class LegacyCleanRemoveRootContracts(unittest.TestCase):
         for forbidden in ("rollback", "install-linux.sh", "gp-root-helper clean-install", "activate", "restore"):
             self.assertNotIn(forbidden, removal.lower())
 
-    def test_provisioner_rejects_bad_candidate_identity_hash_or_payload_before_any_root_publication(self) -> None:
+    def test_cleaner_accepts_only_complete_safe_trust_anchor_and_removes_it_before_rmdir(self) -> None:
+        directory = self.source[
+            self.source.index("validate_root_helper_directory() {") : self.source.index("validate_removal_surface() {")
+        ]
+        surface = self.source[
+            self.source.index("validate_removal_surface() {") : self.source.index("validate_fixed_paths() {")
+        ]
+        flow = self.source[
+            self.source.index("run_preclean_flow() {") : self.source.index("release_parent_locks() {")
+        ]
+        removal = self.source[
+            self.source.index("remove_old_gp_surface() {") : self.source.index("cleanup() {")
+        ]
+
+        self.assertIn("readonly CLEAN_REMOVE_ADAPTER='/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter'", self.source)
+        self.assertIn(
+            "readonly CLEAN_REMOVE_ADAPTER_MANIFEST='/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter.manifest'",
+            self.source,
+        )
+        self.assertIn('"$CLEAN_REMOVE_ADAPTER"|"$CLEAN_REMOVE_ADAPTER_MANIFEST"', directory)
+        self.assertIn('die "legacy root-helper directory contains a foreign path: $member"', directory)
+        self.assertIn("validate_trust_anchor_members || return 1", surface)
+        self.assertLess(flow.index("validate_removal_surface"), flow.index("remove_old_gp_surface"))
+
+        trust = directory[directory.index("validate_trust_anchor_members() {") :]
+        self.assertIn('[ "$adapter_present" = "$manifest_present" ]', trust)
+        self.assertIn("legacy clean-remove trust anchor is incomplete", trust)
+        self.assertIn('[ -f "$CLEAN_REMOVE_ADAPTER" ] && [ ! -L "$CLEAN_REMOVE_ADAPTER" ]', trust)
+        self.assertIn("= '0:0:700'", trust)
+        self.assertIn("legacy clean-remove adapter is unsafe", trust)
+        self.assertIn('[ -f "$CLEAN_REMOVE_ADAPTER_MANIFEST" ] && [ ! -L "$CLEAN_REMOVE_ADAPTER_MANIFEST" ]', trust)
+        self.assertIn("= '0:0:600'", trust)
+        self.assertIn("legacy clean-remove adapter manifest is unsafe", trust)
+        self.assertLess(trust.index("legacy clean-remove trust anchor is incomplete"), trust.index("legacy clean-remove adapter is unsafe"))
+        self.assertLess(trust.index("legacy clean-remove adapter is unsafe"), trust.index("legacy clean-remove adapter manifest is unsafe"))
+
+        adapter_remove = 'rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-adapter'
+        manifest_remove = 'rm -f -- /usr/local/libexec/gp-control-plane/gp-clean-remove-adapter.manifest'
+        rmdir = 'rmdir -- /usr/local/libexec/gp-control-plane'
+        self.assertIn(adapter_remove, removal)
+        self.assertIn(manifest_remove, removal)
+        self.assertLess(removal.index(adapter_remove), removal.index(manifest_remove))
+        self.assertLess(removal.index(manifest_remove), removal.index(rmdir))
+        self.assertNotIn("rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane", removal)
+
+    def test_trust_anchor_adapter_has_no_user_cache_or_caller_selected_provision_interface(self) -> None:
         source = self.provisioner
-        require_candidate = source[source.index("require_candidate_repository() {") : source.index("extract_verified_cleaner() {")]
-        extract = source[source.index("extract_verified_cleaner() {") : source.index("publish_cleaner() {")]
-        publish = source[source.index("publish_cleaner() {") : source.index('[ "$(id -u)" -eq 0 ] ||')]
+        fixed = source[source.index("require_fixed_trust_anchor() {") : source.index('[ "$(id -u)" -eq 0 ] ||')]
         dispatch = source[source.index('[ "$(id -u)" -eq 0 ] ||') :]
 
-        self.assertIn('[ "$#" -eq 8 ] || usage', dispatch)
-        self.assertIn(
-            '[ "$1" = --install-user ] && [ "$3" = --candidate-sha ] && [ "$5" = --cleaner-sha256 ] && [ "$7" = --preflight-sha256 ] || usage',
-            dispatch,
-        )
-        self.assertIn("is_sha40 \"$CANDIDATE_SHA\"", dispatch)
-        self.assertIn("is_sha256 \"$CLEANER_SHA256\"", dispatch)
-        self.assertIn("is_sha256 \"$PREFLIGHT_SHA256\"", dispatch)
-        self.assertIn('candidate-$CANDIDATE_SHA', require_candidate)
-        self.assertIn('cat-file -e "$CANDIDATE_SHA^{commit}"', require_candidate)
-        self.assertIn("pinned candidate SHA is not present as a commit object", require_candidate)
-        self.assertIn('show "$CANDIDATE_SHA:scripts/gp-clean-remove-root.sh"', extract)
-        self.assertIn("pinned candidate root cleaner hash does not match", extract)
-        self.assertIn("cannot read root cleaner from the pinned candidate commit", extract)
-        self.assertIn("sh -n \"$CLEANER_TEMP\"", extract)
-        self.assertIn('show "$CANDIDATE_SHA:scripts/gp-clean-remove-preflight.sh"', extract)
-        self.assertIn("pinned candidate clean-remove preflight hash does not match", extract)
-        self.assertIn("cannot read clean-remove preflight from the pinned candidate commit", extract)
-        self.assertIn("sh -n \"$PREFLIGHT_TEMP\"", extract)
-        self.assertLess(dispatch.index("require_candidate_repository"), dispatch.index("extract_verified_cleaner"))
-        self.assertLess(dispatch.index("extract_verified_cleaner"), dispatch.index("publish_cleaner"))
-        for forbidden in (
-            "systemctl",
-            "gp-control-plane-core.service",
-            "gp-control-plane-web.service",
-            "gp-root-helper",
-            "sudoers",
-            "INSTALL_DIR",
-            "STATE_DIR",
+        self.assertIn("readonly ROOT_ADAPTER='/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter'", source)
+        self.assertIn("readonly ROOT_ADAPTER_MANIFEST='/usr/local/libexec/gp-control-plane/gp-clean-remove-adapter.manifest'", source)
+        self.assertIn("readonly ROOT_CLEANER='/usr/local/libexec/gp-control-plane/gp-clean-remove-root'", source)
+        self.assertIn("readonly ROOT_PREFLIGHT='/usr/local/libexec/gp-control-plane/gp-clean-remove-preflight'", source)
+        self.assertIn('[ "$#" -eq 2 ] && [ "$1" = clean-remove ] && [ "$2" = --confirm-clean-remove ]', dispatch)
+        self.assertIn("usage: gp-clean-remove-adapter clean-remove --confirm-clean-remove", dispatch)
+        self.assertIn("require_fixed_trust_anchor", dispatch)
+        self.assertIn('exec "$ROOT_CLEANER" --install-user "$manifest_install_user" --confirm-clean-remove', dispatch)
+        self.assertLess(dispatch.index("require_fixed_trust_anchor"), dispatch.index('exec "$ROOT_CLEANER"'))
+
+        for required in (
+            '[ "$self_path" = "$ROOT_ADAPTER" ]',
+            "'0:0:700'",
+            "'0:0:600'",
+            "adapter must be a root:root mode 0700 regular file",
+            "adapter manifest must be a root:root mode 0600 regular file",
+            "cleaner must be a root:root mode 0700 regular file",
+            "preflight must be a root:root mode 0755 regular file",
+            "install_user",
+            "candidate_sha",
+            "adapter_sha256",
+            "cleaner_sha256",
+            "preflight_sha256",
+            "NR == 5",
+            "adapter manifest format is invalid",
+            "adapter hash does not match its manifest",
+            "cleaner hash does not match adapter manifest",
+            "preflight hash does not match adapter manifest",
         ):
-            self.assertNotIn(forbidden, require_candidate)
-            self.assertNotIn(forbidden, extract)
-        self.assertIn('mv -f -- "$CLEANER_INSTALL_TEMP" "$CLEANER_PATH"', publish)
-        self.assertIn('mv -f -- "$PREFLIGHT_INSTALL_TEMP" "$PREFLIGHT_PATH"', publish)
-        self.assertIn('"preflight_sha256=$PREFLIGHT_SHA256"', publish)
+            self.assertIn(required, fixed)
+
+        cleaner_exec = source.index('exec "$ROOT_CLEANER"')
+        for failure in (
+            "must be installed and invoked from $ROOT_ADAPTER",
+            "adapter must be a root:root mode 0700 regular file",
+            "adapter manifest must be a root:root mode 0600 regular file",
+            "cleaner must be a root:root mode 0700 regular file",
+            "preflight must be a root:root mode 0755 regular file",
+            "adapter manifest format is invalid",
+            "adapter hash does not match its manifest",
+            "cleaner hash does not match adapter manifest",
+            "preflight hash does not match adapter manifest",
+        ):
+            self.assertLess(source.index(failure), cleaner_exec)
+
+        for forbidden in (
+            "candidate_repository",
+            "CANDIDATE_SHA",
+            "CLEANER_SHA256",
+            "PREFLIGHT_SHA256",
+            "--candidate-sha",
+            "--cleaner-sha256",
+            "--preflight-sha256",
+            "git -C",
+            "git fetch",
+            "git clone",
+            "curl ",
+            "mktemp",
+            "mv -f",
+            "systemctl",
+            "queue-update",
+            "rollback",
+            "snapshot",
+            "sudo ",
+        ):
+            self.assertNotIn(forbidden, source)
         self.assertNotIn("remove_old_gp_surface", source)
 
     def test_fixed_cleaner_requires_strict_manifest_and_runs_unprivileged_final_preflight_before_remove(self) -> None:

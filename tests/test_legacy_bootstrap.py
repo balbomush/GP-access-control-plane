@@ -42,6 +42,10 @@ class LegacyCleanHandoffContracts(unittest.TestCase):
         self.assertIn('cat-file -t FETCH_HEAD', self.payload)
         self.assertIn('candidate release ref must resolve to an annotated immutable tag', self.payload)
         self.assertIn("create_clean_install_vault", self.payload)
+        self.assertIn('require_exact_legacy_state_dir', self.payload)
+        self.assertIn('expected="$HOME/gp/GP-access-control-plane/build/state"', self.payload)
+        self.assertIn('[ "$STATE_DIR" = "$expected" ]', self.payload)
+        self.assertIn('canonical legacy state directory is unavailable or unsafe', self.payload)
         self.assertIn("clean_install_vault_info", self.payload)
         self.assertLess(self.payload.index("created = create_clean_install_vault"), self.payload.index("info = clean_install_vault_info"))
         self.assertIn('if not info.get("exists") or not info.get("pending"):', self.payload)
@@ -53,13 +57,12 @@ class LegacyCleanHandoffContracts(unittest.TestCase):
         self.assertIn("persisted candidate repository has local changes", self.payload)
         self.assertIn('git -C "$CANDIDATE_REPOSITORY" archive --format=tar "$CANDIDATE_SHA"', self.payload)
         self.assertIn('tar -xf "$runtime_archive" -C "$RUNTIME_STAGE"', self.payload)
-        self.assertIn('candidate_preflight = candidate_stage / "scripts" / "gp-clean-remove-preflight.sh"', self.payload)
-        self.assertIn('preflight_sha256 = hashlib.sha256(candidate_preflight.read_bytes()).hexdigest()', self.payload)
         self.assertIn('"handoff": "ready"', self.payload)
         self.assertNotIn("confirmation_token", self.payload)
         public_result = self.payload[self.payload.index('print(json.dumps({'):]
         self.assertIn('"handoff_secret_sha256"', self.payload)
-        self.assertIn('"preflight_sha256": preflight_sha256', public_result)
+        self.assertNotIn('"cleaner_sha256":', public_result)
+        self.assertNotIn('"preflight_sha256":', public_result)
         self.assertNotIn("handoff_secret", public_result)
         self.assertNotIn("SAFE-HANDOFF-001-KNOWN-SECRET", self.payload)
         self.assertNotIn("/usr/bin/sudo", self.payload)
@@ -125,9 +128,9 @@ exec /usr/bin/id \"$@\"
 
             for baseline_tag in ("v0.3.4", "v0.3.5-alpha.4"):
                 with self.subTest(baseline_tag=baseline_tag):
-                    state = root / f"state-{baseline_tag}"
                     home = root / f"home-{baseline_tag}"
                     home.mkdir()
+                    state = home / "gp" / "GP-access-control-plane" / "build" / "state"
                     self._seed_state_from_baseline(real_git, baseline_tag, state, root)
                     environment = os.environ | {
                         "HOME": str(home),
@@ -152,10 +155,6 @@ exec /usr/bin/id \"$@\"
                     self.assertEqual(ready["handoff"], "ready")
                     self.assertEqual(ready["candidate_ref"], "refs/heads/dev")
                     self.assertEqual(ready["candidate_sha"], candidate_sha)
-                    self.assertEqual(
-                        ready["preflight_sha256"],
-                        hashlib.sha256((candidate / "scripts" / "gp-clean-remove-preflight.sh").read_bytes()).hexdigest(),
-                    )
                     git_log = Path(environment["FAKE_GIT_LOG"]).read_text(encoding="utf-8")
                     self.assertIn("fetch --no-tags --depth=1 origin refs/heads/dev", git_log)
                     self.assertIn(f"archive --format=tar {candidate_sha}", git_log)
@@ -184,9 +183,9 @@ exec /usr/bin/id \"$@\"
                         ("untracked", "persisted candidate repository has local changes"),
                     ):
                         with self.subTest(baseline_tag=baseline_tag, dirty_kind=dirty_kind):
-                            dirty_state = root / f"state-{baseline_tag}-dirty-{dirty_kind}"
                             dirty_home = root / f"home-{baseline_tag}-dirty-{dirty_kind}"
                             dirty_home.mkdir()
+                            dirty_state = dirty_home / "gp" / "GP-access-control-plane" / "build" / "state"
                             self._seed_state_from_baseline(real_git, baseline_tag, dirty_state, root)
                             dirty_cache = (
                                 dirty_home
@@ -245,9 +244,9 @@ exec /usr/bin/id \"$@\"
                                 Path(environment["FAKE_GIT_LOG"]).read_text(encoding="utf-8"),
                             )
 
-                    rejected_state = root / f"state-{baseline_tag}-wrong-sha"
                     rejected_home = root / f"home-{baseline_tag}-wrong-sha"
                     rejected_home.mkdir()
+                    rejected_state = rejected_home / "gp" / "GP-access-control-plane" / "build" / "state"
                     self._seed_state_from_baseline(real_git, baseline_tag, rejected_state, root)
                     wrong_sha = subprocess.run(
                         [
@@ -298,9 +297,9 @@ exec /usr/bin/id \"$@\"
 
                     for fault in ("missing", "mutated", "vault_id", "archive"):
                         with self.subTest(baseline_tag=baseline_tag, fault=fault):
-                            fault_state = root / f"state-{baseline_tag}-{fault}"
                             fault_home = root / f"home-{baseline_tag}-{fault}"
                             fault_home.mkdir()
+                            fault_state = fault_home / "gp" / "GP-access-control-plane" / "build" / "state"
                             self._seed_state_from_baseline(real_git, baseline_tag, fault_state, root)
                             fault_result = subprocess.run(
                                 [
@@ -325,6 +324,40 @@ exec /usr/bin/id \"$@\"
                             self.assertNotIn('"handoff":"ready"', fault_result.stdout)
                             self.assertNotIn("confirmation_token", fault_result.stdout + fault_result.stderr)
                             self.assertNotIn("handoff_secret", fault_result.stdout + fault_result.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "legacy source-path rejection needs a POSIX user boundary")
+    def test_noncanonical_or_nonexact_state_dir_stops_before_cache_or_vault(self) -> None:
+        shell = shutil.which("sh")
+        self.assertIsNotNone(shell)
+        assert shell is not None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            home.mkdir()
+            expected = home / "gp" / "GP-access-control-plane" / "build" / "state"
+            other = root / "other-state"
+            other.mkdir()
+            link = root / "state-link"
+            link.symlink_to(other, target_is_directory=True)
+            payload = root / "legacy-bootstrap.sh"
+            payload.write_text(self.payload, encoding="utf-8")
+            payload.chmod(0o700)
+            for supplied in (other, link, expected):
+                with self.subTest(supplied=supplied):
+                    result = subprocess.run(
+                        [shell, str(payload), "--state-dir", str(supplied), "--candidate-ref", "refs/heads/dev", "--candidate-sha", "a" * 40],
+                        cwd=root,
+                        env=os.environ | {"HOME": str(home)},
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 64)
+                    self.assertIn("state dir", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertFalse((home / ".cache" / "gp-control-plane" / "clean-handoff").exists())
+                    self.assertFalse((home / ".local" / "share" / "gp-control-plane" / "clean-install-vault").exists())
+                    self.assertFalse((home / ".local" / "share" / "gp-control-plane" / "clean-install-handoff").exists())
 
     def _git(self, git: str, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([git, *args], cwd=cwd, check=True, capture_output=True, text=True)

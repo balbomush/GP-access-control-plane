@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import http.client
 import json
 import os
@@ -443,6 +444,13 @@ class TestServerLifecycleTests(unittest.TestCase):
 
 
 class EdgeCdpLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._platform_patch = patch.object(sys, "platform", "linux")
+        self._platform_patch.start()
+
+    def tearDown(self) -> None:
+        self._platform_patch.stop()
+
     def test_startup_failure_cleans_its_process_profile_and_reports_redacted_diagnostics(self) -> None:
         class FakeProfile:
             name = "fake-edge-profile"
@@ -513,6 +521,88 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
         self.assertEqual(1, processes[0].terminate_calls)
         self.assertEqual([5], processes[0].wait_calls)
         self.assertTrue(profile.cleaned)
+
+    def test_windows_job_closes_before_profile_cleanup_when_parent_already_exited(self) -> None:
+        events: list[str] = []
+
+        class FakePopen:
+            def __init__(self) -> None:
+                self.returncode = 0
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+        class Profile:
+            def __init__(self) -> None:
+                self.cleanup_calls = 0
+
+            def cleanup(self) -> None:
+                events.append("profile cleanup")
+                self.cleanup_calls += 1
+
+        class FakeWindowsJob:
+            def __init__(self) -> None:
+                events.append("job created")
+
+            def close(self) -> None:
+                events.append("job close")
+
+        process = FakePopen()
+        profile = Profile()
+        edge = _EdgeCdp(Path("fake-msedge.exe"))
+        edge._process = process  # type: ignore[assignment]
+        edge._job = FakeWindowsJob()  # type: ignore[assignment]
+        edge._profile = profile
+
+        with patch.object(sys, "platform", "win32"):
+            edge.__exit__(None, None, None)
+
+        self.assertEqual(1, profile.cleanup_calls)
+        self.assertEqual(["job created", "job close", "profile cleanup"], events)
+        self.assertIsNone(edge._process)
+        self.assertIsNone(edge._job)
+        self.assertIsNone(edge._profile)
+
+    def test_windows_startup_assigns_edge_to_kill_on_close_job(self) -> None:
+        events: list[str] = []
+
+        class FakeProfile:
+            name = "fake-edge-profile"
+
+            def cleanup(self) -> None:
+                events.append("profile cleanup")
+
+        class FakePopen:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                self.returncode = 0
+
+            def poll(self) -> int:
+                return self.returncode
+
+        class FakeWindowsJob:
+            def __init__(self) -> None:
+                events.append("job created")
+
+            def assign(self, process: FakePopen) -> None:
+                self.process = process
+                events.append("job assigned")
+
+            def close(self) -> None:
+                events.append("job close")
+
+        profile = FakeProfile()
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(tempfile, "TemporaryDirectory", return_value=profile),
+            patch.object(subprocess, "Popen", return_value=FakePopen()),
+            patch(__name__ + "._WindowsJob", FakeWindowsJob),
+            patch(__name__ + "._free_port", return_value=9222),
+            patch(__name__ + "._wait_for_http", side_effect=AssertionError("connection refused")),
+        ):
+            with self.assertRaisesRegex(AssertionError, r"Edge CDP startup failed: connection refused; process exit code 0"):
+                _EdgeCdp(Path("fake-msedge.exe")).__enter__()
+
+        self.assertEqual(["job created", "job assigned", "job close", "profile cleanup"], events)
 
     def test_cleanup_succeeds_when_process_reaps_after_terminate(self) -> None:
         class FakePopen:
@@ -695,14 +785,14 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
         self.assertEqual([5], process.wait_calls)
         self.assertIsNone(edge._process)
 
-    def test_terminal_permission_error_during_profile_cleanup_fails_or_notes_primary_error(self) -> None:
+    def test_profile_cleanup_fails_when_lock_persists_until_deadline(self) -> None:
         class LockedProfile:
             def __init__(self) -> None:
                 self.cleanup_calls = 0
 
             def cleanup(self) -> None:
                 self.cleanup_calls += 1
-                raise PermissionError("profile is locked")
+                raise PermissionError("profile token=top-secret is locked")
 
         def edge_with_locked_profile() -> tuple[_EdgeCdp, LockedProfile]:
             profile = LockedProfile()
@@ -710,28 +800,85 @@ class EdgeCdpLifecycleTests(unittest.TestCase):
             edge._profile = profile
             return edge, profile
 
+        class FakeClock:
+            value = 0.0
+
+            def monotonic(self) -> float:
+                return self.value
+
+            def sleep(self, delay: float) -> None:
+                self.value += delay
+
         edge, profile = edge_with_locked_profile()
-        with patch(__name__ + ".time.sleep") as sleep:
-            with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: profile cleanup failed: profile is locked"):
+        clock = FakeClock()
+        with patch(__name__ + ".time.monotonic", side_effect=clock.monotonic), patch(
+            __name__ + ".time.sleep", side_effect=clock.sleep
+        ) as sleep:
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"Edge CDP cleanup failed: profile cleanup failed: profile token=\[REDACTED\] is locked",
+            ) as raised:
                 edge.__exit__(None, None, None)
 
-        self.assertEqual(20, profile.cleanup_calls)
-        self.assertEqual(19, sleep.call_count)
+        self.assertNotIn("top-secret", str(raised.exception))
+        self.assertEqual(21, profile.cleanup_calls)
+        self.assertEqual(20, sleep.call_count)
+        self.assertAlmostEqual(2.0, clock.value)
         self.assertIsNone(edge._profile)
 
         edge, profile = edge_with_locked_profile()
         primary_error = AssertionError("primary test failure")
+        clock = FakeClock()
 
-        with patch(__name__ + ".time.sleep") as sleep:
+        with patch(__name__ + ".time.monotonic", side_effect=clock.monotonic), patch(
+            __name__ + ".time.sleep", side_effect=clock.sleep
+        ) as sleep:
             edge.__exit__(AssertionError, primary_error, None)
 
         self.assertEqual("primary test failure", str(primary_error))
         self.assertEqual(
-            ["Edge CDP cleanup failed: profile cleanup failed: profile is locked"],
+            ["Edge CDP cleanup failed: profile cleanup failed: profile token=[REDACTED] is locked"],
             primary_error.__notes__,
         )
-        self.assertEqual(20, profile.cleanup_calls)
-        self.assertEqual(19, sleep.call_count)
+        self.assertEqual(21, profile.cleanup_calls)
+        self.assertEqual(20, sleep.call_count)
+        self.assertAlmostEqual(2.0, clock.value)
+        self.assertIsNone(edge._profile)
+
+    def test_profile_cleanup_succeeds_when_lock_releases_before_deadline(self) -> None:
+        class DelayedProfile:
+            def __init__(self) -> None:
+                self.cleanup_calls = 0
+
+            def cleanup(self) -> None:
+                self.cleanup_calls += 1
+                if self.cleanup_calls < 3:
+                    raise PermissionError("profile token=top-secret is locked")
+
+        class FakeClock:
+            value = 0.0
+
+            def monotonic(self) -> float:
+                return self.value
+
+            def sleep(self, delay: float) -> None:
+                self.value += delay
+
+        edge = _EdgeCdp(Path("fake-msedge.exe"))
+        profile = DelayedProfile()
+        clock = FakeClock()
+        edge._profile = profile
+
+        with patch(__name__ + ".time.monotonic", side_effect=clock.monotonic), patch(
+            __name__ + ".time.sleep", side_effect=clock.sleep
+        ) as sleep:
+            diagnostics, cleanup_failed = edge._cleanup()
+
+        self.assertFalse(cleanup_failed)
+        self.assertEqual("no process was created", diagnostics)
+        self.assertEqual(3, profile.cleanup_calls)
+        self.assertEqual(2, sleep.call_count)
+        self.assertAlmostEqual(0.2, clock.value)
         self.assertIsNone(edge._profile)
 
     def test_os_error_during_profile_cleanup_fails_or_notes_primary_error(self) -> None:
@@ -926,6 +1073,10 @@ def _wait_for_http(url: str, timeout: float = 5) -> dict[str, Any]:
 
 
 class _EdgeCdp:
+    _PROCESS_EXIT_TIMEOUT = 5
+    _PROFILE_CLEANUP_TIMEOUT = 2
+    _PROFILE_CLEANUP_POLL_INTERVAL = 0.1
+
     def __init__(self, executable: Path) -> None:
         self._executable = executable
         self._process: subprocess.Popen[bytes] | None = None
@@ -934,6 +1085,7 @@ class _EdgeCdp:
         self._profile: Any | None = None
         self._stdout: Any | None = None
         self._stderr: Any | None = None
+        self._job: _WindowsJob | None = None
 
     def __enter__(self) -> "_EdgeCdp":
         self._debug_port = _free_port()
@@ -941,6 +1093,8 @@ class _EdgeCdp:
         self._stdout = tempfile.TemporaryFile()
         self._stderr = tempfile.TemporaryFile()
         try:
+            if sys.platform == "win32":
+                self._job = _WindowsJob()
             self._process = subprocess.Popen(
                 [
                     str(self._executable),
@@ -958,6 +1112,8 @@ class _EdgeCdp:
                 stdout=self._stdout,
                 stderr=self._stderr,
             )
+            if self._job is not None:
+                self._job.assign(self._process)
             version = _wait_for_http(f"http://127.0.0.1:{self._debug_port}/json/version")
             self._client = _CdpClient(str(version["webSocketDebuggerUrl"]))
             target_id = str(self._client.command("Target.createTarget", {"url": "about:blank"})["targetId"])
@@ -991,25 +1147,44 @@ class _EdgeCdp:
             except OSError as error:
                 diagnostics.append(f"CDP close failed: {error}")
             self._client = None
+        if self._job is not None:
+            try:
+                self._job.close()
+            except OSError as error:
+                diagnostics.append(f"Windows Edge job cleanup failed: {self._redact_browser_output(str(error))}")
+                cleanup_failed = True
+            self._job = None
         if self._process is not None:
             process = self._process
             try:
                 exit_code = process.poll()
                 if exit_code is None:
-                    process.terminate()
-                    try:
-                        exit_code = process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                    if sys.platform == "win32":
                         try:
-                            exit_code = process.wait(timeout=5)
+                            exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
                         except subprocess.TimeoutExpired:
-                            diagnostics.append("process did not exit after kill")
-                            cleanup_failed = True
-                            exit_code = process.poll()
+                            process.kill()
+                            try:
+                                exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
+                            except subprocess.TimeoutExpired:
+                                diagnostics.append("process did not exit after Windows job close")
+                                cleanup_failed = True
+                                exit_code = process.poll()
+                    else:
+                        process.terminate()
+                        try:
+                            exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            try:
+                                exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
+                            except subprocess.TimeoutExpired:
+                                diagnostics.append("process did not exit after kill")
+                                cleanup_failed = True
+                                exit_code = process.poll()
                 diagnostics.append(f"process exit code {exit_code}")
             except OSError as error:
-                diagnostics.append(f"process cleanup failed: {error}")
+                diagnostics.append(f"process cleanup failed: {self._redact_browser_output(str(error))}")
                 cleanup_failed = True
             self._process = None
         self._close_browser_log(self._stdout, "stdout", diagnostics)
@@ -1017,22 +1192,25 @@ class _EdgeCdp:
         self._close_browser_log(self._stderr, "stderr", diagnostics)
         self._stderr = None
         if self._profile is not None:
-            for attempt in range(20):
-                try:
-                    self._profile.cleanup()
-                    break
-                except PermissionError as error:
-                    if attempt == 19:
-                        diagnostics.append(f"profile cleanup failed: {error}")
-                        cleanup_failed = True
-                    else:
-                        time.sleep(0.1)
-                except OSError as error:
-                    diagnostics.append(f"profile cleanup failed: {error}")
-                    cleanup_failed = True
-                    break
+            cleanup_failed = self._cleanup_profile(self._profile, diagnostics) or cleanup_failed
             self._profile = None
         return "; ".join(diagnostics) or "no process was created", cleanup_failed
+
+    def _cleanup_profile(self, profile: Any, diagnostics: list[str]) -> bool:
+        deadline = time.monotonic() + self._PROFILE_CLEANUP_TIMEOUT
+        while True:
+            try:
+                profile.cleanup()
+                return False
+            except PermissionError as error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    diagnostics.append(f"profile cleanup failed: {self._redact_browser_output(str(error))}")
+                    return True
+                time.sleep(min(self._PROFILE_CLEANUP_POLL_INTERVAL, remaining))
+            except OSError as error:
+                diagnostics.append(f"profile cleanup failed: {self._redact_browser_output(str(error))}")
+                return True
 
     @staticmethod
     def _close_browser_log(stream: Any | None, name: str, diagnostics: list[str]) -> None:
@@ -1086,6 +1264,91 @@ class _EdgeCdp:
         assert self._client is not None
         assert self._session_id is not None
         return self._client.command(method, params, session_id=self._session_id)
+
+
+class _WindowsJobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_longlong),
+        ("per_job_user_time_limit", ctypes.c_longlong),
+        ("limit_flags", ctypes.c_uint32),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_uint32),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_uint32),
+        ("scheduling_class", ctypes.c_uint32),
+    ]
+
+
+class _WindowsJobIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
+
+
+class _WindowsJobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _WindowsJobBasicLimitInformation),
+        ("io_info", _WindowsJobIoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _WindowsJob:
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+    def __init__(self) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.SetInformationJobObject.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
+        self._kernel32 = kernel32
+        self._handle = kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            self._raise_last_error("CreateJobObjectW")
+        limits = _WindowsJobExtendedLimitInformation()
+        limits.basic_limit_information.limit_flags = self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            self._handle,
+            self._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            try:
+                self.close()
+            finally:
+                self._raise_last_error("SetInformationJobObject")
+
+    def assign(self, process: subprocess.Popen[bytes]) -> None:
+        if self._handle is None:
+            raise OSError("Windows Edge job is already closed")
+        if not self._kernel32.AssignProcessToJobObject(self._handle, ctypes.c_void_p(process._handle)):  # type: ignore[attr-defined]
+            self._raise_last_error("AssignProcessToJobObject")
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        handle, self._handle = self._handle, None
+        if not self._kernel32.CloseHandle(handle):
+            self._raise_last_error("CloseHandle")
+
+    @staticmethod
+    def _raise_last_error(operation: str) -> None:
+        raise OSError(ctypes.get_last_error(), f"{operation} failed")
 
 
 class _CdpClient:
