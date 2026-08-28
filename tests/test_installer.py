@@ -55,6 +55,15 @@ class CleanInstallerTests(unittest.TestCase):
         for forbidden in ("adapter", "provision", "preflight", "manifest", "candidate", "rollback", "snapshot"):
             self.assertNotIn(forbidden, self.installer)
 
+    def test_state_hierarchy_is_private_and_owned_by_the_install_user(self) -> None:
+        self.assertIn('state_parent="$gp_root/.GP-access-control-plane.data"', self.installer)
+        self.assertIn('state_dir="$state_parent/state"', self.installer)
+        self.assertIn('"$install_dir" "$state_parent"', self.installer)
+        self.assertIn(
+            'install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$state_parent" "$state_dir"',
+            self.installer,
+        )
+
     def test_retired_transition_entrypoints_are_absent(self) -> None:
         root = Path(__file__).resolve().parents[1] / "scripts"
         for name in ("clean-install-vault.sh", "gp-clean-remove-root.sh", "gp-clean-remove-preflight.sh", "gp-clean-remove-provision-root.sh", "legacy-bootstrap.sh", "legacy-bootstrap-launcher.sh"):

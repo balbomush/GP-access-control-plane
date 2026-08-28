@@ -23,7 +23,7 @@ case "$INITIAL_INSTALL" in on|off) ;; *) fail 'initial-install must be on or off
 [ -z "$(git -C "$SOURCE_DIR" status --porcelain)" ] || fail 'exact-tag source tree is not clean'
 target_home="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
 [ -n "$target_home" ] && [ -d "$target_home" ] || fail 'install-user home is unavailable'
-gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; legacy_state="$install_dir/build/state"; state_dir="$gp_root/.GP-access-control-plane.data/state"
+gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; legacy_state="$install_dir/build/state"; state_parent="$gp_root/.GP-access-control-plane.data"; state_dir="$state_parent/state"
 [ "$target_home" = "$(readlink -f -- "$target_home")" ] && [ ! -L "$target_home" ] || fail 'install-user home is not canonical'
 if [ -e "$gp_root" ] || [ -L "$gp_root" ]; then
   [ -d "$gp_root" ] && [ ! -L "$gp_root" ] && [ "$gp_root" = "$(readlink -f -- "$gp_root")" ] || fail 'managed GP root is not canonical'
@@ -43,7 +43,7 @@ stop_unit() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
 stop_unit gp-control-plane-web.service; stop_unit gp-control-plane-core.service
 rm -f -- /etc/systemd/system/gp-control-plane-core.service /etc/systemd/system/gp-control-plane-web.service
 rm -f -- /etc/default/gp-control-plane-install-profile /etc/default/gp-control-plane-core /etc/default/gp-control-plane-web /etc/default/gp-control-plane-root-helper /etc/sudoers.d/gp-control-plane-root-helper
-rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane /run/gp-control-plane "$install_dir" "$gp_root/.GP-access-control-plane.data"
+rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane /run/gp-control-plane "$install_dir" "$state_parent"
 systemctl daemon-reload
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl dnsutils git iproute2 ipset iptables nftables python3 python3-pip python3-venv sudo
@@ -63,7 +63,7 @@ cat > /usr/local/libexec/gp-control-plane/blockcheck2.sh <<'EOF'
 exec /opt/zapret2/blockcheck2.sh "$@"
 EOF
 chmod 0755 /usr/local/libexec/gp-control-plane/nfqws2 /usr/local/libexec/gp-control-plane/blockcheck2.sh
-install -d -o "$INSTALL_USER" -g "$group" "$state_dir"
+install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$state_parent" "$state_dir"
 runuser -u "$INSTALL_USER" -- python3 -m venv "$install_dir/.venv"
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"
