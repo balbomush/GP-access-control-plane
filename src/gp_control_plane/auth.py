@@ -5,12 +5,13 @@ import hashlib
 import hmac
 import json
 import secrets
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
 from .state import now_iso
-from .storage import auth_transaction
+from .storage import auth_read_snapshot, auth_transaction
 
 
 AUTH_SETTINGS_KEY = "auth"
@@ -36,11 +37,15 @@ class PasswordValidationError(ValueError):
 def login(state_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
     username = str(payload.get("username") or "").strip()
     password = _password_value(payload.get("password"))
-    with auth_transaction(state_dir) as conn:
-        settings = _settings(conn)
-        if username != DEFAULT_USERNAME or not _password_matches(settings, password):
-            raise AuthenticationError("invalid credentials")
-        return _token_payload(settings)
+    settings = _existing_settings_snapshot(state_dir)
+    if settings is None:
+        # First use creates credentials under the dedicated writer lock.  This
+        # preserves one-time bootstrap semantics across Core/Web processes.
+        with auth_transaction(state_dir) as conn:
+            settings = _settings(conn)
+    if username != DEFAULT_USERNAME or not _password_matches(settings, password):
+        raise AuthenticationError("invalid credentials")
+    return _token_payload(settings)
 
 
 def change_password(
@@ -69,8 +74,12 @@ def change_password(
 
 
 def require_bearer_token(state_dir: Path, authorization: str | None) -> None:
-    with auth_transaction(state_dir) as conn:
-        _validate_bearer_token(_settings(conn), authorization)
+    settings = _existing_settings_snapshot(state_dir)
+    if settings is None:
+        # Preserve fail-closed bootstrap for an uninitialized state directory.
+        with auth_transaction(state_dir) as conn:
+            settings = _settings(conn)
+    _validate_bearer_token(settings, authorization)
 
 
 def _validate_bearer_token(settings: dict[str, Any], authorization: str | None) -> None:
@@ -117,10 +126,38 @@ def _settings(conn: Any) -> dict[str, Any]:
             (AUTH_SETTINGS_KEY, json.dumps(raw, ensure_ascii=False, separators=(",", ":")), now_iso()),
         )
     else:
+        raw = _settings_value(row)
+    return _validated_settings(raw)
+
+
+def _existing_settings_snapshot(state_dir: Path) -> dict[str, Any] | None:
+    """Return an initialized auth record from one SQLite reader snapshot."""
+    with auth_read_snapshot(state_dir) as conn:
+        if conn is None:
+            return None
         try:
-            raw = json.loads(str(row["value_json"] or "null"))
-        except json.JSONDecodeError:
-            raw = None
+            row = conn.execute(
+                "SELECT value_json FROM app_settings WHERE key = ?", (AUTH_SETTINGS_KEY,)
+            ).fetchone()
+        except sqlite3.OperationalError as error:
+            # A pre-auth database may need schema migration, which is a writer
+            # operation.  Do not treat any other storage failure as bootstrap.
+            if "no such table: app_settings" in str(error).lower():
+                return None
+            raise
+    if row is None:
+        return None
+    return _validated_settings(_settings_value(row))
+
+
+def _settings_value(row: Any) -> Any:
+    try:
+        return json.loads(str(row["value_json"] or "null"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _validated_settings(raw: Any) -> dict[str, Any]:
     if not _valid_settings(raw):
         raise AuthenticationError("auth settings are invalid")
     return dict(raw)

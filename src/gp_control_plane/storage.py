@@ -287,6 +287,52 @@ def auth_transaction(
         conn.close()
 
 
+@contextmanager
+def auth_read_snapshot(
+    state_dir: Path, *, busy_timeout_ms: int = AUTH_BUSY_TIMEOUT_MS
+) -> Iterator[sqlite3.Connection | None]:
+    """Read an existing auth record without migrations or a writer transaction.
+
+    ``None`` means that the database does not exist yet.  Callers must then use
+    :func:`auth_transaction` to perform the initial schema/auth bootstrap.
+    """
+    try:
+        timeout_ms = max(0, int(busy_timeout_ms))
+    except (TypeError, ValueError):
+        timeout_ms = AUTH_BUSY_TIMEOUT_MS
+
+    path = state_dir / "strategy-finder" / "state.sqlite3"
+    if not path.is_file():
+        yield None
+        return
+
+    conn: sqlite3.Connection | None = None
+    try:
+        # ``mode=ro`` and ``query_only`` guarantee this path cannot create,
+        # migrate, or modify the database.  BEGIN is deferred: the SELECT made
+        # by the caller obtains a WAL reader snapshot without competing for the
+        # live writer's RESERVED lock.
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            timeout=timeout_ms / 1000,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        yield conn
+    except sqlite3.OperationalError as error:
+        _raise_storage_unavailable(error)
+    finally:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.OperationalError as error:
+                _raise_storage_unavailable(error)
+            finally:
+                conn.close()
+
+
 def storage_runtime_status(state_dir: Path) -> dict[str, Any]:
     path = db_path(state_dir)
     with connect(state_dir) as conn:

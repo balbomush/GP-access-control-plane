@@ -25,7 +25,7 @@ from gp_control_plane.backups import (  # noqa: E402
     restore_clean_install_vault,
 )
 from gp_control_plane.config import AppConfig, OutputConfig
-from gp_control_plane.storage import StorageUnavailableError, db_path
+from gp_control_plane.storage import StorageUnavailableError, append_run, db_path
 from gp_control_plane.web.api_server import serve
 from gp_control_plane.web.proxy import serve_web_proxy
 
@@ -469,69 +469,124 @@ class BearerAuthHttpTests(unittest.TestCase):
                 core_stop.set()
                 _join_process(self, core_process)
 
-    def test_busy_auth_transaction_is_503_then_old_token_is_401_after_rotation(self) -> None:
+    def test_active_discovery_can_be_authorized_and_stopped_during_writer_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            core = _start_managed_server(serve, config, ui_enabled=False)
-            proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
-            context = multiprocessing.get_context("spawn")
-            entered = context.Event()
-            release = context.Event()
-            holder_errors = context.Queue()
-            holder: multiprocessing.Process | None = None
-            try:
-                status, _headers, body = _request(
-                    core.port,
-                    "/api/auth/login",
-                    method="POST",
-                    body=_json_bytes({"username": "admin", "password": "admin"}),
-                    headers={"Content-Type": "application/json"},
-                )
-                self.assertEqual(status, 200, body)
-                old_bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
-                holder = context.Process(
-                    target=_hold_sqlite_immediate_transaction_in_process,
-                    args=(str(config.output.state_dir), entered, release, holder_errors),
-                    name="sqlite-auth-write-lock-holder",
-                )
-                holder.start()
-                self.assertTrue(entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
-                for port in (core.port, proxy.port):
-                    status, _headers, body = _request(
-                        port, "/api/core/strategy-discovery/current-run-progress", headers=old_bearer
-                    )
-                    self.assertEqual(status, 503, body)
-                    self.assertEqual(json.loads(body)["error"]["code"], "storage_unavailable")
-            finally:
-                release.set()
-                if holder is not None:
-                    _join_process(self, holder)
-                    try:
-                        holder_error = holder_errors.get_nowait()
-                    except queue.Empty:
-                        holder_error = None
-                    self.assertIsNone(holder_error, holder_error)
+            job_started = threading.Event()
+            cancellation_observed = threading.Event()
+            cancel_hook_called = threading.Event()
+            allow_terminal_persistence = threading.Event()
 
-            try:
-                status, _headers, body = _request(
-                    core.port,
-                    "/api/auth/change-password",
-                    method="POST",
-                    body=_json_bytes({"current_password": "admin", "new_password": "newpass8"}),
-                    headers={**old_bearer, "Content-Type": "application/json"},
+            def controlled_discovery(_config: AppConfig, _payload: dict[str, Any], stop: Any, _run_id: str) -> dict[str, str]:
+                job_started.set()
+                if not stop.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+                    raise TimeoutError("test stop endpoint did not cancel the active job")
+                cancellation_observed.set()
+                if not allow_terminal_persistence.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+                    raise TimeoutError("test did not release the writer lock for terminal persistence")
+                append_run(
+                    _config.output.state_dir,
+                    {
+                        "id": _run_id,
+                        "kind": "multi-domain-discovery",
+                        "status": "stopped",
+                        "timestamp": "test-stopped",
+                        "started_at": "test-started",
+                        "completed_at": "test-stopped",
+                        "domains": list(_payload.get("domains") or []),
+                    },
                 )
-                self.assertEqual(status, 200, body)
-                fresh_bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
-                for port in (core.port, proxy.port):
-                    self.assertEqual(
-                        _request(port, "/api/core/strategy-discovery/current-run-progress", headers=old_bearer)[0], 401
-                    )
-                    self.assertEqual(
-                        _request(port, "/api/core/strategy-discovery/current-run-progress", headers=fresh_bearer)[0], 200
-                    )
-            finally:
-                proxy.close()
-                core.close()
+                return {"status": "stopped"}
+
+            with mock.patch(
+                "gp_control_plane.web.api_server._job_zapret_multi_domain_discovery",
+                side_effect=controlled_discovery,
+            ), mock.patch(
+                "gp_control_plane.web.api_server.cleanup_nft_blockcheck_tables",
+                side_effect=cancel_hook_called.set,
+            ):
+                core = _start_managed_server(serve, config, ui_enabled=False)
+                proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
+                try:
+                    for port in (core.port, proxy.port):
+                        job_started.clear()
+                        cancellation_observed.clear()
+                        cancel_hook_called.clear()
+                        allow_terminal_persistence.clear()
+                        status, _headers, body = _request(
+                            port,
+                            "/api/auth/login",
+                            method="POST",
+                            body=_json_bytes({"username": "admin", "password": "admin"}),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(status, 200, body)
+                        start_bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
+                        status, _headers, body = _request(
+                            port,
+                            "/api/core/strategy-discovery/start-run",
+                            method="POST",
+                            body=_json_bytes({"mode": "multi_domain", "domains": ["example.test"], "protocols": ["tcp"]}),
+                            headers={**start_bearer, "Content-Type": "application/json"},
+                        )
+                        self.assertEqual(status, 202, body)
+                        run_id = str(json.loads(body)["run_id"])
+                        self.assertTrue(run_id)
+                        self.assertTrue(job_started.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+
+                        context = multiprocessing.get_context("spawn")
+                        entered = context.Event()
+                        release = context.Event()
+                        holder_errors = context.Queue()
+                        holder = context.Process(
+                            target=_hold_sqlite_immediate_transaction_in_process,
+                            args=(str(config.output.state_dir), entered, release, holder_errors),
+                            name="sqlite-auth-write-lock-holder",
+                        )
+                        holder.start()
+                        try:
+                            self.assertTrue(entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                            for headers in ({}, {"Authorization": "Bearer malformed-token"}):
+                                status, _headers, body = _request(
+                                    port,
+                                    "/api/core/strategy-discovery/current-run-progress",
+                                    headers=headers,
+                                )
+                                self.assertEqual(status, 401, body)
+
+                            status, _headers, body = _request(
+                                port,
+                                "/api/auth/login",
+                                method="POST",
+                                body=_json_bytes({"username": "admin", "password": "admin"}),
+                                headers={"Content-Type": "application/json"},
+                            )
+                            self.assertEqual(status, 200, body)
+                            locked_bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
+                            status, _headers, body = _request(
+                                port,
+                                "/api/core/strategy-discovery/stop-current-run",
+                                method="POST",
+                                body=_json_bytes({}),
+                                headers={**locked_bearer, "Content-Type": "application/json"},
+                            )
+                            self.assertEqual(status, 202, body)
+                            self.assertEqual(json.loads(body), {"accepted": True, "run_id": run_id, "status": "stopping"})
+                            self.assertTrue(cancel_hook_called.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                        finally:
+                            release.set()
+                            _join_process(self, holder)
+                            allow_terminal_persistence.set()
+                        try:
+                            holder_error = holder_errors.get_nowait()
+                        except queue.Empty:
+                            holder_error = None
+                        self.assertIsNone(holder_error, holder_error)
+                        self.assertTrue(cancellation_observed.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                        _wait_for_stopped_run(self, core.port, locked_bearer, run_id)
+                finally:
+                    proxy.close()
+                    core.close()
 
     def test_password_rotation_revokes_open_sse_streams(self) -> None:
         for topology in ("core", "proxy"):
@@ -840,7 +895,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                     proxy.close()
                     core.close()
 
-    def test_proxy_does_not_accept_pre_rotation_bearer_from_stale_local_cache_during_outage(self) -> None:
+    def test_proxy_rejects_pre_rotation_bearer_during_writer_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
             core = _start_managed_server(serve, config, ui_enabled=False)
@@ -879,8 +934,8 @@ class BearerAuthHttpTests(unittest.TestCase):
                 try:
                     self.assertTrue(entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
                     status, _headers, body = _request(proxy.port, "/api/core/runs/history", headers=old_bearer)
-                    self.assertEqual(status, 503, body)
-                    self.assertEqual(json.loads(body)["error"]["code"], "storage_unavailable")
+                    self.assertEqual(status, 401, body)
+                    self.assertEqual(json.loads(body)["error"]["code"], "authentication_required")
                 finally:
                     release.set()
                     _join_process(self, holder)
@@ -1042,6 +1097,26 @@ def _wait_for_server(port: int) -> None:
             return
         time.sleep(0.02)
     raise AssertionError(f"server on port {port} did not become ready")
+
+
+def _wait_for_stopped_run(
+    test: unittest.TestCase, port: int, headers: dict[str, str], run_id: str
+) -> None:
+    """Wait for the real JobRunner cancellation path to reach idle/stopped."""
+    deadline = time.monotonic() + _PROCESS_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        status, _response_headers, body = _request(port, "/api/core/runs/history", headers=headers)
+        if status == 200:
+            history = json.loads(body).get("runs", [])
+            stopped = next(
+                (item for item in history if item.get("run_id") == run_id and item.get("status") == "stopped"),
+                None,
+            )
+            status_code, _status_headers, status_body = _request(port, "/api/core/status", headers=headers)
+            if stopped is not None and status_code == 200 and json.loads(status_body).get("state") == "idle":
+                return
+        time.sleep(0.02)
+    test.fail(f"run {run_id} did not reach stopped/idle through the API")
 
 
 def _free_port() -> int:

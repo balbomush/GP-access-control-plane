@@ -28,22 +28,22 @@ from gp_control_plane.storage import AUTH_BUSY_TIMEOUT_MS, StorageUnavailableErr
 _PROCESS_TIMEOUT_SECONDS = 15
 
 
-def _hold_validated_token_in_auth_transaction(
+def _require_token_after_barrier(
     state_dir_raw: str,
     token: str,
-    entered: multiprocessing.synchronize.Event,
-    release: multiprocessing.synchronize.Event,
+    ready: multiprocessing.synchronize.Event,
+    start: multiprocessing.synchronize.Event,
     results: multiprocessing.queues.Queue[tuple[str, str]],
 ) -> None:
-    """Validate a bearer token and keep its real SQLite auth transaction open."""
-    state_dir = Path(state_dir_raw)
+    """Exercise the production bearer validator concurrently with rotation."""
     try:
-        with auth.auth_transaction(state_dir) as conn:
-            auth._validate_bearer_token(auth._settings(conn), f"Bearer {token}")
-            entered.set()
-            if not release.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
-                raise TimeoutError("parent did not release the auth transaction")
-        results.put(("validated", ""))
+        ready.set()
+        if not start.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+            raise TimeoutError("parent did not start bearer validation")
+        require_bearer_token(Path(state_dir_raw), f"Bearer {token}")
+        results.put((token, "accepted"))
+    except AuthenticationError:
+        results.put((token, "rejected"))
     except BaseException as error:  # noqa: BLE001 - report child failures to the parent test
         results.put(("error", repr(error)))
 
@@ -53,8 +53,11 @@ def _change_password_in_process(
     attempted: multiprocessing.synchronize.Event,
     finished: multiprocessing.synchronize.Event,
     results: multiprocessing.queues.Queue[tuple[str, object]],
+    start: multiprocessing.synchronize.Event | None = None,
 ) -> None:
     try:
+        if start is not None and not start.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+            raise TimeoutError("parent did not start password rotation")
         attempted.set()
         token = change_password(
             Path(state_dir_raw),
@@ -146,6 +149,42 @@ class AuthTests(unittest.TestCase):
             self.assertIn("token_secret", settings)
             self.assertEqual(settings["token_version"], 1)
 
+    def test_login_migrates_existing_database_without_app_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            database = state_dir / "strategy-finder" / "state.sqlite3"
+            database.parent.mkdir()
+            with sqlite3.connect(database) as connection:
+                connection.execute("CREATE TABLE legacy_marker (value TEXT NOT NULL)")
+                connection.execute("INSERT INTO legacy_marker(value) VALUES ('pre-auth-state')")
+            connection.close()
+
+            with sqlite3.connect(database) as connection:
+                tables_before_login = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+            connection.close()
+            self.assertNotIn("app_settings", tables_before_login)
+
+            token = login(state_dir, {"username": "admin", "password": "admin"})
+
+            settings = read_app_setting(state_dir, AUTH_SETTINGS_KEY)
+            self.assertIsNotNone(settings)
+            self.assertEqual(settings["username"], "admin")
+            require_bearer_token(state_dir, f"Bearer {token['access_token']}")
+            with sqlite3.connect(database) as connection:
+                tables_after_login = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+            connection.close()
+            self.assertIn("app_settings", tables_after_login)
+
     def test_wrong_credentials_are_authentication_errors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -204,6 +243,40 @@ class AuthTests(unittest.TestCase):
 
             self.assertEqual(initial_calls, 0)
             self.assertEqual(pbkdf2_calls, 0)
+
+    def test_initialized_auth_reads_work_during_external_writer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            token = login(state_dir, {"username": "admin", "password": "admin"})["access_token"]
+            context = multiprocessing.get_context("spawn")
+            entered = context.Event()
+            release = context.Event()
+            holder_results = context.Queue()
+            holder = context.Process(
+                target=_hold_sqlite_immediate_transaction,
+                args=(str(state_dir), entered, release, holder_results),
+                name="sqlite-auth-read-lock-holder",
+            )
+            holder.start()
+            try:
+                self.assertTrue(entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                self.assertIn("access_token", login(state_dir, {"username": "admin", "password": "admin"}))
+                require_bearer_token(state_dir, f"Bearer {token}")
+                with self.assertRaises(AuthenticationError):
+                    require_bearer_token(state_dir, "Bearer malformed-token")
+                started = time.monotonic()
+                with self.assertRaises(StorageUnavailableError):
+                    change_password(state_dir, {"current_password": "admin", "new_password": "newpass8"})
+                self.assertLessEqual(time.monotonic() - started, (AUTH_BUSY_TIMEOUT_MS / 1000) + 1)
+            finally:
+                release.set()
+                _join_process(self, holder)
+
+            self.assertEqual(holder_results.get(timeout=_PROCESS_TIMEOUT_SECONDS), ("released", ""))
+            fresh = change_password(state_dir, {"current_password": "admin", "new_password": "newpass8"})
+            with self.assertRaises(AuthenticationError):
+                require_bearer_token(state_dir, f"Bearer {token}")
+            require_bearer_token(state_dir, f"Bearer {fresh['access_token']}")
 
     def test_short_new_password_is_validation_error(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -308,39 +381,43 @@ class AuthTests(unittest.TestCase):
             state_dir = Path(raw)
             old_token = login(state_dir, {"username": "admin", "password": "admin"})["access_token"]
             context = multiprocessing.get_context("spawn")
-            validation_entered = context.Event()
-            release_validation = context.Event()
+            validation_ready = context.Event()
+            start_race = context.Event()
             rotation_attempted = context.Event()
             rotation_finished = context.Event()
             validation_results = context.Queue()
             rotation_results = context.Queue()
             validation = context.Process(
-                target=_hold_validated_token_in_auth_transaction,
-                args=(str(state_dir), old_token, validation_entered, release_validation, validation_results),
-                name="old-token-validation",
+                target=_require_token_after_barrier,
+                args=(str(state_dir), old_token, validation_ready, start_race, validation_results),
+                name="old-token-production-validation",
             )
             rotation = context.Process(
                 target=_change_password_in_process,
-                args=(str(state_dir), rotation_attempted, rotation_finished, rotation_results),
+                args=(str(state_dir), rotation_attempted, rotation_finished, rotation_results, start_race),
                 name="password-rotation",
             )
             validation.start()
             try:
-                self.assertTrue(validation_entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                self.assertTrue(validation_ready.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
                 rotation.start()
+                start_race.set()
                 self.assertTrue(rotation_attempted.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
-                self.assertFalse(rotation_finished.is_set(), "password rotation committed before token validation released")
-                release_validation.set()
                 _join_process(self, validation)
                 _join_process(self, rotation)
             finally:
-                release_validation.set()
+                start_race.set()
                 if validation.is_alive():
                     _join_process(self, validation)
                 if rotation.pid is not None and rotation.is_alive():
                     _join_process(self, rotation)
 
-            self.assertEqual(validation_results.get(timeout=_PROCESS_TIMEOUT_SECONDS), ("validated", ""))
+            # The reader may linearize before the committed rotation (accepted)
+            # or after it (rejected); it must never need a writer lock.
+            self.assertIn(
+                validation_results.get(timeout=_PROCESS_TIMEOUT_SECONDS),
+                {(old_token, "accepted"), (old_token, "rejected")},
+            )
             result_kind, fresh_token = rotation_results.get(timeout=_PROCESS_TIMEOUT_SECONDS)
             self.assertEqual(result_kind, "token")
             self.assertIsInstance(fresh_token, dict)
