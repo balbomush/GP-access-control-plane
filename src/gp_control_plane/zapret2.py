@@ -35,8 +35,13 @@ BLOCKCHECK_ENV_KEYS = (
     "ZAPRET_RW",
 )
 INSTALL_CHECK_CACHE_SECONDS = 30.0
-ROOT_HELPER_RECORD_WAIT_SECONDS = 5.0
-ROOT_HELPER_RECORD_RETRY_SECONDS = 0.05
+# The root helper waits up to ten seconds for its owned supervisor to become
+# ready before publishing the run record.  An immediate stop must keep
+# retrying until that bounded handshake can complete; otherwise it can kill
+# only the unprivileged sudo parent and leave the root-owned runner behind.
+ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS = 10.0
+ROOT_HELPER_RECORD_WAIT_SECONDS = ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS + 2.0
+ROOT_HELPER_RECORD_RETRY_SECONDS = 0.25
 _INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 _INSTALL_CHECK_LOCK = threading.Lock()
 
