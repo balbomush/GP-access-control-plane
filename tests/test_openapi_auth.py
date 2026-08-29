@@ -120,7 +120,10 @@ class OpenApiAuthenticationContractTests(unittest.TestCase):
 
         self.assertEqual(["username", "password"], schemas["LoginRequest"]["required"])
         self.assertEqual(["current_password", "new_password"], schemas["ChangePasswordRequest"]["required"])
-        self.assertEqual(8, schemas["ChangePasswordRequest"]["properties"]["new_password"]["minLength"])
+        self.assertEqual(
+            [{"const": "admin"}, {"minLength": 8}],
+            schemas["ChangePasswordRequest"]["properties"]["new_password"]["anyOf"],
+        )
         self.assertEqual(["access_token", "token_type", "expires_in"], schemas["BearerToken"]["required"])
         self.assertEqual("Bearer", schemas["BearerToken"]["properties"]["token_type"]["const"])
         self.assertEqual(86400, schemas["BearerToken"]["properties"]["expires_in"]["const"])

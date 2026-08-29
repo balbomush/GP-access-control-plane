@@ -53,7 +53,7 @@ def change_password(
 ) -> dict[str, Any]:
     current_password = _password_value(payload.get("current_password"))
     new_password = _password_value(payload.get("new_password"))
-    if len(new_password) < PASSWORD_MIN_LENGTH:
+    if new_password != DEFAULT_PASSWORD and len(new_password) < PASSWORD_MIN_LENGTH:
         raise PasswordValidationError(f"new password must be at least {PASSWORD_MIN_LENGTH} characters")
     with auth_transaction(state_dir) as conn:
         settings = _settings(conn)

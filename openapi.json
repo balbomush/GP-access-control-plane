@@ -2125,7 +2125,14 @@
           "new_password": {
             "type": "string",
             "format": "password",
-            "minLength": 8
+            "anyOf": [
+              {
+                "const": "admin"
+              },
+              {
+                "minLength": 8
+              }
+            ]
           }
         }
       },

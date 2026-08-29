@@ -51,7 +51,7 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
             'Смена пароля',
             'Текущий пароль',
             'Новый пароль',
-            'Используйте не менее 8 символов.',
+            'Используйте не менее 8 символов или admin для возврата стандартного доступа.',
             'Изменить пароль',
         ):
             self.assertIn(text, self.html)
@@ -106,10 +106,13 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         )
         self.assertRegex(
             self.html,
-            r'<input id="settings-new-password"[^>]*minlength="8"[^>]*'
+            r'<input id="settings-new-password"(?![^>]*minlength=)[^>]*'
             r'aria-describedby="settings-new-password-hint"[^>]*>',
         )
-        self.assertIn('id="settings-new-password-hint">Используйте не менее 8 символов.</div>', self.html)
+        self.assertIn(
+            'id="settings-new-password-hint">Используйте не менее 8 символов или admin для возврата стандартного доступа.</div>',
+            self.html,
+        )
         self.assertIn(
             'id="change-password-status" role="status" aria-live="polite" aria-atomic="true"', self.html
         )
@@ -234,9 +237,9 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
                         "statusRole": "status",
                         "statusLive": "polite",
                         "statusAtomic": "true",
-                        "minLength": 8,
+                        "minLength": -1,
                         "describedBy": "settings-new-password-hint",
-                        "hint": "Используйте не менее 8 символов.",
+                        "hint": "Используйте не менее 8 символов или admin для возврата стандартного доступа.",
                     },
                 )
                 page.evaluate(

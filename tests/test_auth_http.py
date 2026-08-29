@@ -359,6 +359,27 @@ class BearerAuthHttpTests(unittest.TestCase):
                 headers={"Authorization": f"Bearer {new_token}"},
             )
             self.assertEqual(status, 200)
+            status, _headers, body = _request(
+                proxy_port,
+                "/api/auth/change-password",
+                method="POST",
+                body=_json_bytes({"current_password": "newpass8", "new_password": "admin"}),
+                headers={"Authorization": f"Bearer {new_token}", "Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200, body)
+            reset_token = json.loads(body)["access_token"]
+            self.assertEqual(
+                _request(proxy_port, "/api/core/strategy-discovery/current-run-progress", headers={"Authorization": f"Bearer {new_token}"})[0],
+                401,
+            )
+            self.assertEqual(
+                _request(proxy_port, "/api/auth/login", method="POST", body=_json_bytes({"username": "admin", "password": "admin"}), headers={"Content-Type": "application/json"})[0],
+                200,
+            )
+            self.assertEqual(
+                _request(proxy_port, "/api/core/strategy-discovery/current-run-progress", headers={"Authorization": f"Bearer {reset_token}"})[0],
+                200,
+            )
 
     def test_invalid_current_password_is_400_without_revoking_bearer_until_successful_rotation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -295,6 +295,28 @@ class AuthTests(unittest.TestCase):
             self.assertIn("access_token", login(state_dir, {"username": "admin", "password": "admin"}))
             self.assertEqual(read_app_setting(state_dir, AUTH_SETTINGS_KEY)["token_version"], 1)
 
+    def test_default_password_is_allowed_only_as_authenticated_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            initial = login(state_dir, {"username": "admin", "password": "admin"})
+            rotated = change_password(
+                state_dir,
+                {"current_password": "admin", "new_password": "newpass8"},
+                f"Bearer {initial['access_token']}",
+            )
+            reset = change_password(
+                state_dir,
+                {"current_password": "newpass8", "new_password": "admin"},
+                f"Bearer {rotated['access_token']}",
+            )
+
+            with self.assertRaises(AuthenticationError):
+                login(state_dir, {"username": "admin", "password": "newpass8"})
+            with self.assertRaises(AuthenticationError):
+                require_bearer_token(state_dir, f"Bearer {rotated['access_token']}")
+            self.assertIn("access_token", login(state_dir, {"username": "admin", "password": "admin"}))
+            require_bearer_token(state_dir, f"Bearer {reset['access_token']}")
+
     def test_invalid_current_password_is_validation_error_without_rotating_credentials_or_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

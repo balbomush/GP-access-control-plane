@@ -1988,8 +1988,8 @@ pre {
             </div>
             <div class="field">
               <label for="settings-new-password">Новый пароль</label>
-              <input id="settings-new-password" name="new_password" type="password" autocomplete="new-password" minlength="8" aria-describedby="settings-new-password-hint" required>
-              <div class="setting-note" id="settings-new-password-hint">Используйте не менее 8 символов.</div>
+              <input id="settings-new-password" name="new_password" type="password" autocomplete="new-password" aria-describedby="settings-new-password-hint" required>
+              <div class="setting-note" id="settings-new-password-hint">Используйте не менее 8 символов или admin для возврата стандартного доступа.</div>
             </div>
           </div>
           <div class="button-row">
