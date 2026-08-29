@@ -3,23 +3,30 @@
 set -Eeuo pipefail
 PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER --tag vX.Y.Z --web on|off --initial-install on|off' >&2; exit 64; }
+usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER (--tag vX.Y.Z | --candidate-sha SHA) --web on|off --initial-install on|off' >&2; exit 64; }
 [ "$(id -u)" -eq 0 ] || fail 'must be run by the bootstrap sudo process'
-SOURCE_DIR= INSTALL_USER= TAG= INSTALL_WEB= INITIAL_INSTALL=
+SOURCE_DIR= INSTALL_USER= TAG= CANDIDATE_SHA= INSTALL_WEB= INITIAL_INSTALL=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --source-dir|--install-user|--tag|--web|--initial-install)
-      [ "$#" -ge 2 ] || usage; value="$2"; case "$1" in --source-dir) SOURCE_DIR="$value";; --install-user) INSTALL_USER="$value";; --tag) TAG="$value";; --web) INSTALL_WEB="$value";; --initial-install) INITIAL_INSTALL="$value";; esac; shift 2 ;;
+    --source-dir|--install-user|--tag|--candidate-sha|--web|--initial-install)
+      [ "$#" -ge 2 ] || usage; value="$2"; case "$1" in --source-dir) SOURCE_DIR="$value";; --install-user) INSTALL_USER="$value";; --tag) TAG="$value";; --candidate-sha) CANDIDATE_SHA="$value";; --web) INSTALL_WEB="$value";; --initial-install) INITIAL_INSTALL="$value";; esac; shift 2 ;;
     *) usage ;;
   esac
 done
 case "$INSTALL_USER" in ''|root|*[!A-Za-z0-9_-]*) fail 'install user is invalid';; esac
-printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'tag must be an exact release tag'
 case "$INSTALL_WEB" in on|off) ;; *) fail 'web mode must be on or off';; esac
 case "$INITIAL_INSTALL" in on|off) ;; *) fail 'initial-install must be on or off';; esac
 [ -d "$SOURCE_DIR/.git" ] && [ ! -L "$SOURCE_DIR" ] || fail 'source directory is unsafe'
-[ "$(git -C "$SOURCE_DIR" cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ] || fail 'source tag must be annotated'
-[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+[ -z "$TAG" ] || [ -z "$CANDIDATE_SHA" ] || usage
+[ -n "$TAG" ] || [ -n "$CANDIDATE_SHA" ] || usage
+if [ -n "$TAG" ]; then
+  printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'tag must be an exact release tag'
+  [ "$(git -C "$SOURCE_DIR" cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ] || fail 'source tag must be annotated'
+  [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+else
+  printf '%s\n' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$' || fail 'candidate SHA must be a full lowercase commit SHA'
+  [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA" ] || fail 'source checkout does not match the exact candidate SHA'
+fi
 [ -z "$(git -C "$SOURCE_DIR" status --porcelain)" ] || fail 'exact-tag source tree is not clean'
 target_home="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
 [ -n "$target_home" ] && [ -d "$target_home" ] || fail 'install-user home is unavailable'
