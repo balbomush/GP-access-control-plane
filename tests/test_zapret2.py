@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.zapret2 import (
     BLOCKCHECK_ENV_KEYS,
+    ROOT_HELPER_RECORD_RETRY_SECONDS,
+    ROOT_HELPER_RECORD_WAIT_SECONDS,
+    ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS,
     _blockcheck_nft_tables,
     _cleanup_nft_blockcheck_tables,
     _signal_process_group,
@@ -500,6 +503,35 @@ table inet blockcheck42
 
         self.assertEqual(calls, [["signal-run", run_id, "TERM"], ["signal-run", run_id, "TERM"]])
         sleep.assert_called_once()
+
+    def test_immediate_stop_waits_through_the_root_helper_supervisor_handshake(self) -> None:
+        run_id = "late-root-record"
+        clock = {"now": 0.0}
+        calls: list[list[str]] = []
+
+        def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if clock["now"] < ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS:
+                return subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def fake_sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2._run_root_helper", side_effect=fake_helper),
+            mock.patch("gp_control_plane.zapret2.time.monotonic", side_effect=lambda: clock["now"]),
+            mock.patch("gp_control_plane.zapret2.time.sleep", side_effect=fake_sleep),
+        ):
+            signal_registered_process_run(run_id, "TERM")
+
+        self.assertEqual(ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS, 10.0)
+        self.assertEqual(ROOT_HELPER_RECORD_WAIT_SECONDS, 12.0)
+        self.assertEqual(ROOT_HELPER_RECORD_RETRY_SECONDS, 0.25)
+        self.assertEqual(clock["now"], ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS)
+        self.assertEqual(calls[-1], ["signal-run", run_id, "TERM"])
+        self.assertGreater(len(calls), 2)
 
     def test_signal_registered_process_stops_retrying_at_the_record_wait_deadline(self) -> None:
         failure = subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n")
