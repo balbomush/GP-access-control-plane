@@ -149,6 +149,113 @@ class StrategyFinderTests(unittest.TestCase):
                         )
             finally:
                 stopper.join(timeout=2)
+
+    def test_observed_managed_launcher_exit_after_cancel_hook_acknowledges_terminal_before_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stop_event = threading.Event()
+            process = Mock()
+            process.stdout = None
+            process.returncode = None
+            events: list[str] = []
+
+            def observed_launcher_exit(*, timeout: float) -> int:
+                self.assertEqual(timeout, 1.0)
+                events.append("launcher-reaped")
+                stop_event.set()
+                return 143
+
+            def acknowledge_terminal(run_id: str) -> None:
+                self.assertEqual(run_id, "hook-delivered-run")
+                events.append("terminal-acknowledged")
+
+            process.wait.side_effect = observed_launcher_exit
+            run = {
+                "id": "hook-delivered-run",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(state_dir / "progress.json"),
+                "metrics_log": str(state_dir / "metrics.ndjson"),
+                "attempt_plan": {"total": 1, "scripts": {}, "script_order": [], "source": "test"},
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            with (
+                patch.object(strategy_finder_module.subprocess, "Popen", return_value=process),
+                patch.object(
+                    strategy_finder_module,
+                    "acknowledge_registered_process_run_terminal",
+                    side_effect=acknowledge_terminal,
+                ),
+                patch.object(strategy_finder_module, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
+            ):
+                result = _run_process_with_live_stdout(
+                    command=["gp-root-helper", "run-owned", run["id"]],
+                    env=os.environ.copy(),
+                    stdout_log=state_dir / "stdout.log",
+                    stderr_log=state_dir / "stderr.log",
+                    debug_stdout_log=None,
+                    timeout_seconds=10,
+                    stop_event=stop_event,
+                    recorder=recorder,
+                    run_id=run["id"],
+                )
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertTrue(result["stopped"])
+        self.assertEqual(events, ["launcher-reaped", "terminal-acknowledged"])
+        cleanup_tables.assert_called_once_with()
+
+    def test_observed_managed_launcher_exit_quarantines_terminal_ack_integrity_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stop_event = threading.Event()
+            process = Mock()
+            process.stdout = None
+            process.returncode = None
+
+            def observed_launcher_exit(*, timeout: float) -> int:
+                self.assertEqual(timeout, 1.0)
+                stop_event.set()
+                return 143
+
+            process.wait.side_effect = observed_launcher_exit
+            run = {
+                "id": "hook-delivered-terminal-integrity-failure",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(state_dir / "progress.json"),
+                "metrics_log": str(state_dir / "metrics.ndjson"),
+                "attempt_plan": {"total": 1, "scripts": {}, "script_order": [], "source": "test"},
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            with (
+                patch.object(strategy_finder_module.subprocess, "Popen", return_value=process),
+                patch.object(
+                    strategy_finder_module,
+                    "acknowledge_registered_process_run_terminal",
+                    side_effect=RuntimeError("gp-root-helper: run terminal is unsafe"),
+                ),
+                patch.object(strategy_finder_module, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
+            ):
+                with self.assertRaisesRegex(ManagedRuntimeQuarantinedError, "run terminal is unsafe"):
+                    _run_process_with_live_stdout(
+                        command=["gp-root-helper", "run-owned", run["id"]],
+                        env=os.environ.copy(),
+                        stdout_log=state_dir / "stdout.log",
+                        stderr_log=state_dir / "stderr.log",
+                        debug_stdout_log=None,
+                        timeout_seconds=10,
+                        stop_event=stop_event,
+                        recorder=recorder,
+                        run_id=run["id"],
+                    )
+
+        cleanup_tables.assert_not_called()
+
     def test_stop_active_blockcheck_runtime_without_active_run_only_cleans_nft_tables(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

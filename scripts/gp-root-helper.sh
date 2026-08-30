@@ -125,6 +125,25 @@ with_recovery_gate() {
   "$@"
 }
 
+# A managed launcher and signal-run may both need to inspect the same
+# lifecycle directory while the launcher is exiting.  Serialize that narrow
+# transition on a root-owned file inside the directory: the discovery gate is
+# deliberately shared by running discovery commands and cannot provide this
+# exclusion.
+with_run_lifecycle_gate() {
+  lifecycle_gate="$1"
+  shift
+  [ -f "$lifecycle_gate" ] && [ ! -L "$lifecycle_gate" ] || return 2
+  [ "$(stat -c '%u:%g:%a' "$lifecycle_gate" 2>/dev/null || true)" = '0:0:600' ] || return 2
+  command -v flock >/dev/null 2>&1 || return 2
+  exec 8<>"$lifecycle_gate"
+  flock -x 8 || return 2
+  "$@"
+  lifecycle_status="$?"
+  flock -u 8 || return 2
+  return "$lifecycle_status"
+}
+
 write_owned_run_record() {
   run_id="$(validate_run_id "$1")"
   pid="$(validate_pid "$2")"
@@ -207,6 +226,25 @@ write_owned_run_go() {
     ! chmod 0600 "$tmp_go" ||
     ! mv -f "$tmp_go" "$go_file"; then
     rm -f "$tmp_go"
+    return 1
+  fi
+}
+
+write_owned_run_signal_delivery() {
+  signal_file="$1"
+  delivered_signal="$(validate_signal "$2")"
+  delivered_pid="$(validate_pid "$3")"
+  delivered_pgid="$(validate_pid "$4")"
+  delivered_marker="$5"
+  [ "$delivered_pid" = "$delivered_pgid" ] || return 1
+  is_valid_process_start_marker "$delivered_marker" || return 1
+  umask 077
+  tmp_signal="$(mktemp "${signal_file}.XXXXXX")" || return 1
+  if ! printf 'helper-signal-v1 %s %s %s %s\n' "$delivered_signal" "$delivered_pid" "$delivered_pgid" "$delivered_marker" > "$tmp_signal" ||
+    ! chown root:root "$tmp_signal" ||
+    ! chmod 0600 "$tmp_signal" ||
+    ! mv -f "$tmp_signal" "$signal_file"; then
+    rm -f "$tmp_signal"
     return 1
   fi
 }
@@ -307,6 +345,8 @@ run_owned_process() {
   ready_file="$lock_dir/supervisor-ready"
   go_file="$lock_dir/supervisor-go"
   status_file="$lock_dir/target-status"
+  lifecycle_gate="$lock_dir/signal-gate"
+  signal_file="$lock_dir/signal-delivery"
   lock_created=0
   supervisor_started=0
   supervisor_attested=0
@@ -318,7 +358,7 @@ run_owned_process() {
   remove_unattested_run_lock() {
     [ "$lock_created" = 1 ] || return 0
     [ "$supervisor_started" = 0 ] || return 1
-    rm -f -- "$ready_file" "$go_file"
+    rm -f -- "$ready_file" "$go_file" "$lifecycle_gate" "$signal_file"
     rmdir -- "$lock_dir" 2>/dev/null || return 1
     lock_created=0
   }
@@ -342,9 +382,17 @@ run_owned_process() {
     else
       return "$?"
     fi
-    rm -f -- "$record" "$ready_file" "$go_file" "$status_file"
-    rmdir -- "$lock_dir" 2>/dev/null || return 1
+    if [ -e "$signal_file" ] || [ -L "$signal_file" ]; then
+      terminal_dir="$(recovery_terminal_path "$run_id")"
+      [ ! -e "$terminal_dir" ] && [ ! -L "$terminal_dir" ] || return 1
+      mv -- "$lock_dir" "$terminal_dir" || return 1
+      rm -f -- "$record" || return 1
+    else
+      rm -f -- "$record" "$ready_file" "$go_file" "$status_file" "$lifecycle_gate"
+      rmdir -- "$lock_dir" 2>/dev/null || return 1
+    fi
     supervisor_attested=0
+    lock_created=0
   }
   stop_unattested_supervisor() {
     [ "$supervisor_started" = 1 ] || return 0
@@ -359,7 +407,7 @@ run_owned_process() {
     fi
     supervisor_started=0
   }
-  cleanup_owned_run() {
+  cleanup_owned_run_locked() {
     if [ "$supervisor_attested" = 1 ]; then
       if terminate_known_process_group "$pid" "$pgid" "$marker" TERM; then
         remove_owned_run_artifacts
@@ -376,6 +424,13 @@ run_owned_process() {
       remove_unattested_run_lock
     else
       remove_unattested_run_lock
+    fi
+  }
+  cleanup_owned_run() {
+    if [ "$lock_created" = 1 ]; then
+      with_run_lifecycle_gate "$lifecycle_gate" cleanup_owned_run_locked
+    else
+      cleanup_owned_run_locked
     fi
   }
   cleanup_owned_lifecycle() {
@@ -410,6 +465,9 @@ run_owned_process() {
   umask 077
   mkdir "$lock_dir" 2>/dev/null || fail "run is already active"
   lock_created=1
+  if ! : > "$lifecycle_gate" || ! chown root:root "$lifecycle_gate" || ! chmod 0600 "$lifecycle_gate"; then
+    fail "cannot create managed run lifecycle gate"
+  fi
   if registered_process_matches "$run_id" >/dev/null 2>&1; then
     fail "run is already active"
   else
@@ -1245,11 +1303,40 @@ signal_registered_process_run() {
   [ "$#" -eq 2 ] || fail "signal-run requires run id and signal"
   run_id="$(validate_run_id "$1")"
   signal="$(validate_signal "$2")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
+  if [ -e "$lock_dir" ] || [ -L "$lock_dir" ]; then
+    [ ! -e "$terminal_dir" ] && [ ! -L "$terminal_dir" ] || fail "run lifecycle is ambiguous: $run_id"
+    recovery_validate_run_lock "$run_id" || fail "run lock is unsafe: $run_id"
+    with_run_lifecycle_gate "$lock_dir/signal-gate" signal_registered_process_run_locked "$run_id" "$signal" || {
+      signal_status="$?"
+      [ "$signal_status" -eq 2 ] && fail "run lock is unsafe: $run_id"
+      [ "$signal_status" -eq 3 ] && fail "registered process cannot be safely inspected"
+      fail "registered process is stale or invalid"
+    }
+    return 0
+  fi
+  if [ -e "$terminal_dir" ] || [ -L "$terminal_dir" ]; then
+    recovery_validate_run_terminal "$run_id" || fail "run terminal is unsafe: $run_id"
+    with_run_lifecycle_gate "$terminal_dir/signal-gate" signal_registered_terminal_is_complete "$run_id" || {
+      terminal_status="$?"
+      [ "$terminal_status" -eq 2 ] && fail "run terminal cannot be safely inspected: $run_id"
+      fail "run terminal is not complete: $run_id"
+    }
+    return 0
+  fi
+  fail "run lock is unsafe: $run_id"
+}
+
+signal_registered_process_run_locked() {
+  run_id="$(validate_run_id "$1")"
+  signal="$(validate_signal "$2")"
   record="$(registry_record_path "$run_id")"
   lock_dir="$(recovery_lock_path "$run_id")"
   ready_file="$lock_dir/supervisor-ready"
   go_file="$lock_dir/supervisor-go"
-  recovery_validate_run_lock "$run_id" || fail "run lock is unsafe: $run_id"
+  signal_file="$lock_dir/signal-delivery"
+  recovery_validate_run_lock "$run_id" || return 2
   if [ ! -e "$go_file" ] && [ ! -L "$go_file" ]; then
     if read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null; then
       fail "root run attestation is pending: $run_id"
@@ -1258,26 +1345,88 @@ signal_registered_process_run() {
   fi
   target="$(read_owned_run_attestation "$ready_file")" || fail "run lock attestation is invalid: $run_id"
   pid="${target%% *}"
-  target="${target#* }"
-  pgid="${target%% *}"
-  marker="${target#* }"
+  target_rest="${target#* }"
+  pgid="${target_rest%% *}"
+  marker="${target_rest#* }"
+  if [ -e "$signal_file" ] || [ -L "$signal_file" ]; then
+    delivered="$(read_owned_run_signal_delivery "$signal_file")" || return 2
+    delivered_signal="${delivered%% *}"
+    delivered_rest="${delivered#* }"
+    delivered_pid="${delivered_rest%% *}"
+    delivered_rest="${delivered_rest#* }"
+    delivered_pgid="${delivered_rest%% *}"
+    delivered_marker="${delivered_rest#* }"
+    [ "$delivered_pid" = "$pid" ] && [ "$delivered_pgid" = "$pgid" ] && [ "$delivered_marker" = "$marker" ] || return 2
+    [ "$delivered_signal" = "$signal" ] && return 0
+  fi
   if [ -e "$record" ] || [ -L "$record" ]; then
-    recovery_validate_record "$run_id" || fail "run record is unsafe: $run_id"
+    recovery_validate_record "$run_id" || return 2
     [ "$(read_recovery_run_record "$record")" = "$pid $pgid $marker" ] ||
-      fail "run record does not match lock attestation: $run_id"
+      return 2
   fi
   if terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"; then
+    write_owned_run_signal_delivery "$signal_file" "$signal" "$pid" "$pgid" "$marker" || return 2
     if [ -e "$record" ] || [ -L "$record" ]; then
-      recovery_validate_record "$run_id" || fail "run record is unsafe: $run_id"
+      recovery_validate_record "$run_id" || return 2
       [ "$(read_recovery_run_record "$record")" = "$pid $pgid $marker" ] ||
-        fail "run record does not match lock attestation: $run_id"
+        return 2
       rm -f -- "$record"
     fi
   else
     termination_status="$?"
-    [ "$termination_status" -eq 1 ] && fail "registered process is stale or invalid"
-    fail "registered process cannot be safely inspected"
+    [ "$termination_status" -eq 1 ] && return 1
+    return 3
   fi
+}
+
+signal_registered_terminal_is_complete() {
+  run_id="$(validate_run_id "$1")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
+  ready_file="$terminal_dir/supervisor-ready"
+  recovery_validate_run_terminal "$run_id" || return 2
+  target="$(read_owned_run_attestation "$ready_file")" || return 2
+  pid="${target%% *}"
+  target_rest="${target#* }"
+  pgid="${target_rest%% *}"
+  marker="${target_rest#* }"
+  if known_process_group_is_empty "$pid" "$pgid"; then
+    :
+  else
+    return "$?"
+  fi
+  managed_process_is_gone "$pid"
+}
+
+acknowledge_registered_process_run_terminal() {
+  [ "$#" -eq 1 ] || fail "ack-run-terminal requires one run id"
+  run_id="$(validate_run_id "$1")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
+  if [ ! -e "$terminal_dir" ] && [ ! -L "$terminal_dir" ]; then
+    lock_dir="$(recovery_lock_path "$run_id")"
+    record="$(registry_record_path "$run_id")"
+    [ ! -e "$lock_dir" ] && [ ! -L "$lock_dir" ] && [ ! -e "$record" ] && [ ! -L "$record" ] ||
+      fail "run lifecycle is ambiguous: $run_id"
+    return 0
+  fi
+  [ -d "$terminal_dir" ] && [ ! -L "$terminal_dir" ] || fail "run terminal is unsafe: $run_id"
+  with_run_lifecycle_gate "$terminal_dir/signal-gate" acknowledge_registered_process_run_terminal_locked "$run_id" || {
+    ack_status="$?"
+    [ "$ack_status" -eq 2 ] && fail "run terminal cannot be safely inspected: $run_id"
+    fail "run terminal is not complete: $run_id"
+  }
+}
+
+acknowledge_registered_process_run_terminal_locked() {
+  run_id="$(validate_run_id "$1")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
+  record="$(registry_record_path "$run_id")"
+  signal_registered_terminal_is_complete "$run_id" || return "$?"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    return 2
+  fi
+  rm -f -- "$terminal_dir/supervisor-ready" "$terminal_dir/supervisor-go" "$terminal_dir/target-status" \
+    "$terminal_dir/signal-delivery" "$terminal_dir/signal-gate" || return 2
+  rmdir -- "$terminal_dir" 2>/dev/null || return 2
 }
 
 ensure_recovery_run_registry() {
@@ -1330,19 +1479,46 @@ recovery_lock_path() {
   printf '%s/.%s.lock\n' "$RUN_REGISTRY_DIR" "$run_id"
 }
 
-recovery_validate_run_lock() {
+recovery_terminal_path() {
   run_id="$(validate_run_id "${1:-}")"
-  lock_dir="$(recovery_lock_path "$run_id")"
-  ready_file="$lock_dir/supervisor-ready"
-  go_file="$lock_dir/supervisor-go"
-  status_file="$lock_dir/target-status"
+  printf '%s/.%s.terminal\n' "$RUN_REGISTRY_DIR" "$run_id"
+}
+
+read_owned_run_signal_delivery() {
+  signal_file="$1"
+  [ -e "$signal_file" ] || return 1
+  [ -f "$signal_file" ] && [ ! -L "$signal_file" ] || return 2
+  [ "$(stat -c '%u:%g:%a' "$signal_file" 2>/dev/null || true)" = '0:0:600' ] || return 2
+  signal_contents="$(cat "$signal_file")" || return 2
+  IFS=' ' read -r signal_version delivered_signal delivered_pid delivered_pgid delivered_marker signal_extra <<EOF
+$signal_contents
+EOF
+  [ "$signal_version" = helper-signal-v1 ] || return 2
+  [ -n "${delivered_signal:-}" ] && [ -n "${delivered_pid:-}" ] && [ -n "${delivered_pgid:-}" ] && [ -n "${delivered_marker:-}" ] || return 2
+  [ -z "${signal_extra:-}" ] || return 2
+  [ "$signal_contents" = "helper-signal-v1 $delivered_signal $delivered_pid $delivered_pgid $delivered_marker" ] || return 2
+  validate_signal "$delivered_signal" >/dev/null 2>&1 || return 2
+  is_valid_pid "$delivered_pid" && is_valid_pid "$delivered_pgid" && is_valid_process_start_marker "$delivered_marker" || return 2
+  [ "$delivered_pid" = "$delivered_pgid" ] || return 2
+  printf '%s %s %s %s\n' "$delivered_signal" "$delivered_pid" "$delivered_pgid" "$delivered_marker"
+}
+
+recovery_validate_run_lifecycle_dir() {
+  lifecycle_dir="$1"
+  ready_file="$lifecycle_dir/supervisor-ready"
+  go_file="$lifecycle_dir/supervisor-go"
+  status_file="$lifecycle_dir/target-status"
+  lifecycle_gate="$lifecycle_dir/signal-gate"
+  signal_file="$lifecycle_dir/signal-delivery"
   ready_present=0
   go_present=0
   status_present=0
+  gate_present=0
+  signal_present=0
 
-  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || return 1
-  [ "$(stat -c '%u:%g:%a' "$lock_dir" 2>/dev/null || true)" = '0:0:700' ] || return 1
-  for lifecycle_file in "$lock_dir"/* "$lock_dir"/.[!.]* "$lock_dir"/..?*; do
+  [ -d "$lifecycle_dir" ] && [ ! -L "$lifecycle_dir" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$lifecycle_dir" 2>/dev/null || true)" = '0:0:700' ] || return 1
+  for lifecycle_file in "$lifecycle_dir"/* "$lifecycle_dir"/.[!.]* "$lifecycle_dir"/..?*; do
     [ -e "$lifecycle_file" ] || [ -L "$lifecycle_file" ] || continue
     lifecycle_name="${lifecycle_file##*/}"
     case "$lifecycle_name" in
@@ -1358,12 +1534,21 @@ recovery_validate_run_lock() {
         [ "$status_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
         status_present=1
         ;;
+      signal-gate)
+        [ "$gate_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        gate_present=1
+        ;;
+      signal-delivery)
+        [ "$signal_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        signal_present=1
+        ;;
       *) return 1 ;;
     esac
   done
 
+  [ "$gate_present" = 1 ] || return 1
   if [ "$ready_present" = 0 ]; then
-    [ "$go_present" = 0 ] && [ "$status_present" = 0 ] || return 1
+    [ "$go_present" = 0 ] && [ "$status_present" = 0 ] && [ "$signal_present" = 0 ] || return 1
     return 0
   fi
   if [ "$go_present" = 0 ]; then
@@ -1372,16 +1557,41 @@ recovery_validate_run_lock() {
     else
       return 1
     fi
-    [ "$status_present" = 0 ] || return 1
+    [ "$status_present" = 0 ] && [ "$signal_present" = 0 ] || return 1
     return 0
   fi
   ready_target="$(read_owned_run_attestation "$ready_file")" || return 1
   ready_pid="${ready_target%% *}"
+  ready_rest="${ready_target#* }"
+  ready_pgid="${ready_rest%% *}"
+  ready_marker="${ready_rest#* }"
   go_pid="$(read_owned_run_go "$go_file")" || return 1
   [ "$go_pid" = "$ready_pid" ] || return 1
   if [ "$status_present" = 1 ]; then
     read_owned_run_status "$status_file" >/dev/null || return 1
   fi
+  if [ "$signal_present" = 1 ]; then
+    signal_target="$(read_owned_run_signal_delivery "$signal_file")" || return 1
+    signal_rest="${signal_target#* }"
+    signal_pid="${signal_rest%% *}"
+    signal_rest="${signal_rest#* }"
+    signal_pgid="${signal_rest%% *}"
+    signal_marker="${signal_rest#* }"
+    [ "$signal_pid" = "$ready_pid" ] && [ "$signal_pgid" = "$ready_pgid" ] && [ "$signal_marker" = "$ready_marker" ] || return 1
+  fi
+}
+
+recovery_validate_run_lock() {
+  run_id="$(validate_run_id "${1:-}")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  recovery_validate_run_lifecycle_dir "$lock_dir"
+}
+
+recovery_validate_run_terminal() {
+  run_id="$(validate_run_id "${1:-}")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
+  recovery_validate_run_lifecycle_dir "$terminal_dir" || return 1
+  [ -f "$terminal_dir/signal-delivery" ] && [ ! -L "$terminal_dir/signal-delivery" ] || return 1
 }
 
 recovery_validate_record() {
@@ -1404,12 +1614,44 @@ recovery_validate_registry_layout() {
         validate_run_id "$lock_run_id" >/dev/null 2>&1 || return 1
         recovery_validate_run_lock "$lock_run_id" || return 1
         ;;
+      .*.terminal)
+        terminal_run_id="${artifact_name#.}"
+        terminal_run_id="${terminal_run_id%.terminal}"
+        [ ".${terminal_run_id}.terminal" = "$artifact_name" ] || return 1
+        validate_run_id "$terminal_run_id" >/dev/null 2>&1 || return 1
+        recovery_validate_run_terminal "$terminal_run_id" || return 1
+        ;;
       *)
         validate_run_id "$artifact_name" >/dev/null 2>&1 || return 1
         recovery_validate_record "$artifact_name" || return 1
         ;;
     esac
   done
+}
+
+recover_terminal_run() {
+  run_id="$(validate_run_id "${1:-}")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
+  record="$(registry_record_path "$run_id")"
+  ready_file="$terminal_dir/supervisor-ready"
+  signal_registered_terminal_is_complete "$run_id" || {
+    terminal_status="$?"
+    [ "$terminal_status" -eq 1 ] && fail "run terminal is not complete: $run_id"
+    fail "run terminal cannot be safely inspected: $run_id"
+  }
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    recovery_validate_record "$run_id" || fail "run record is unsafe: $run_id"
+    ready_target="$(read_owned_run_attestation "$ready_file")" || fail "run terminal is unsafe: $run_id"
+    [ "$(read_recovery_run_record "$record")" = "$ready_target" ] ||
+      fail "run record does not match terminal attestation: $run_id"
+  fi
+  rm -f -- "$terminal_dir/supervisor-ready" "$terminal_dir/supervisor-go" "$terminal_dir/target-status" \
+    "$terminal_dir/signal-delivery" "$terminal_dir/signal-gate" || fail "cannot remove recovered run terminal: $run_id"
+  rmdir -- "$terminal_dir" 2>/dev/null || fail "cannot remove recovered run terminal: $run_id"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    recovery_validate_record "$run_id" || fail "run record is unsafe: $run_id"
+    rm -f -- "$record" || fail "cannot remove recovered run record: $run_id"
+  fi
 }
 
 remove_recovery_run_artifacts() {
@@ -1422,6 +1664,8 @@ remove_recovery_run_artifacts() {
   ready_file="$lock_dir/supervisor-ready"
   go_file="$lock_dir/supervisor-go"
   status_file="$lock_dir/target-status"
+  lifecycle_gate="$lock_dir/signal-gate"
+  signal_file="$lock_dir/signal-delivery"
 
   # Repeat every ownership and liveness check immediately before destructive cleanup.
   recovery_validate_run_lock "$run_id" || return 2
@@ -1450,7 +1694,7 @@ remove_recovery_run_artifacts() {
   fi
   recovery_ready_pid_is_safe_to_forget "$ready_file" || return 2
 
-  rm -f -- "$ready_file" "$go_file" "$status_file" || return 1
+  rm -f -- "$ready_file" "$go_file" "$status_file" "$lifecycle_gate" "$signal_file" || return 1
   rmdir -- "$lock_dir" 2>/dev/null || return 1
   if [ -n "$expected_record_target" ]; then
     recovery_validate_record "$run_id" || return 2
@@ -1571,7 +1815,12 @@ recover_registered_process_runs() {
   for record in "$RUN_REGISTRY_DIR"/*; do
     [ -e "$record" ] || continue
     run_id="$(basename "$record")"
-    recover_paired_run "$run_id"
+    terminal_dir="$(recovery_terminal_path "$run_id")"
+    if [ -e "$terminal_dir" ] || [ -L "$terminal_dir" ]; then
+      recover_terminal_run "$run_id"
+    else
+      recover_paired_run "$run_id"
+    fi
   done
   for lock_dir in "$RUN_REGISTRY_DIR"/.[!.]*.lock "$RUN_REGISTRY_DIR"/..?*.lock; do
     [ -e "$lock_dir" ] || [ -L "$lock_dir" ] || continue
@@ -1582,6 +1831,15 @@ recover_registered_process_runs() {
     [ ! -e "$record" ] && [ ! -L "$record" ] || continue
     recover_recordless_run_lock "$run_id"
   done
+  for terminal_dir in "$RUN_REGISTRY_DIR"/.[!.]*.terminal "$RUN_REGISTRY_DIR"/..?*.terminal; do
+    [ -e "$terminal_dir" ] || [ -L "$terminal_dir" ] || continue
+    terminal_name="${terminal_dir##*/}"
+    run_id="${terminal_name#.}"
+    run_id="${run_id%.terminal}"
+    record="$(registry_record_path "$run_id")"
+    [ ! -e "$record" ] && [ ! -L "$record" ] || continue
+    recover_terminal_run "$run_id"
+  done
 }
 
 recover_quarantined_process_run() {
@@ -1589,14 +1847,21 @@ recover_quarantined_process_run() {
   run_id="$(validate_run_id "$1")"
   record="$(registry_record_path "$run_id")"
   lock_dir="$(recovery_lock_path "$run_id")"
+  terminal_dir="$(recovery_terminal_path "$run_id")"
   # A quarantined Core state is released only after this exact run has a
-  # root-owned paired record and v2 lock attestation. Missing artifacts are
+  # root-owned paired record and v2 lock attestation, or the terminal proof
+  # created after the attested launcher has been reaped. Missing artifacts are
   # not proof of termination: an untrusted launcher may still be alive.
-  [ -f "$record" ] && [ ! -L "$record" ] || fail "quarantined run recovery artifacts are missing: $run_id"
-  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || fail "quarantined run recovery artifacts are missing: $run_id"
   ensure_recovery_run_registry
   recovery_validate_registry_layout || fail "run registry contains unsafe recovery artifacts"
-  recover_paired_run "$run_id"
+  if [ -e "$terminal_dir" ] || [ -L "$terminal_dir" ]; then
+    recovery_validate_run_terminal "$run_id" || fail "quarantined run terminal is unsafe: $run_id"
+    recover_terminal_run "$run_id"
+  else
+    [ -f "$record" ] && [ ! -L "$record" ] || fail "quarantined run recovery artifacts are missing: $run_id"
+    [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || fail "quarantined run recovery artifacts are missing: $run_id"
+    recover_paired_run "$run_id"
+  fi
   printf 'recovered-run-v1 %s\n' "$run_id"
 }
 
@@ -1613,6 +1878,9 @@ case "$command" in
     ;;
   signal-run)
     with_discovery_gate signal_registered_process_run "$@"
+    ;;
+  ack-run-terminal)
+    with_discovery_gate acknowledge_registered_process_run_terminal "$@"
     ;;
   recover-runs)
     [ "$#" -eq 0 ] || fail "recover-runs accepts no arguments"

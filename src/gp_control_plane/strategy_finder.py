@@ -34,6 +34,7 @@ from .zapret2 import (
     BLOCKCHECK_ENV_KEYS,
     _cleanup_nft_blockcheck_tables,
     _stop_process_group,
+    acknowledge_registered_process_run_terminal,
     root_command,
     signal_registered_process_run,
 )
@@ -2264,6 +2265,13 @@ def _run_process_with_live_stdout(
                     if stop_event is not None and stop_event.is_set():
                         stopped = True
                         status = "stopped"
+                        if run_id:
+                            try:
+                                acknowledge_registered_process_run_terminal(run_id)
+                            except RuntimeError as exc:
+                                raise ManagedRuntimeQuarantinedError(
+                                    f"managed process cleanup is unverified: {exc}"
+                                ) from exc
                         _cleanup_nft_blockcheck_tables()
                         recorder.mark_phase(PHASE_SAVING)
                         break

@@ -159,6 +159,8 @@ def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = Non
     _signal_process_group("TERM", process, run_id)
     try:
         process.wait(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS if run_id else 5)
+        if run_id:
+            acknowledge_registered_process_run_terminal(run_id)
     except subprocess.TimeoutExpired:
         if run_id:
             raise RuntimeError("managed root process did not terminate after registered signal")
@@ -291,6 +293,14 @@ def signal_registered_process_run(run_id: str, signal_name: str) -> None:
         if ROOT_HELPER_ATTESTATION_PENDING_MESSAGE not in error or time.monotonic() >= deadline:
             raise RuntimeError(error)
         time.sleep(min(ROOT_HELPER_RECORD_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+
+
+def acknowledge_registered_process_run_terminal(run_id: str) -> None:
+    run_id = validate_run_id(run_id)
+    runner = _run_recovery_root_helper if _is_root() else _run_root_helper
+    result = runner(["ack-run-terminal", run_id])
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "root-helper rejected managed run terminal acknowledgement")
 
 
 def recover_registered_process_runs() -> bool:

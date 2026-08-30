@@ -3878,8 +3878,12 @@ class WebUiTests(unittest.TestCase):
                         self.assertTrue(worker_finished.wait(timeout=2))
                         runner_threads.join_tracked()
                         state = read_state(config.output.state_dir)
+                        status_code, _status_headers, status_body = _http_request(server.port, "/api/core/status")
+                        self.assertEqual(status_code, 200, status_body.decode("utf-8", errors="replace"))
+                        status_payload = json.loads(status_body.decode("utf-8"))
                         self.assertIsNone(state["current_run_id"])
                         self.assertEqual("stopped", state["last_run_status"])
+                        self.assertEqual("idle", status_payload["state"])
                         self.assertEqual(runner_threads.tracked_count, 1)
 
                         self.assertTrue(snapshot_completed.is_set())

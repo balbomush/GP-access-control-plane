@@ -24,6 +24,7 @@ from gp_control_plane.zapret2 import (
     MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS,
     _blockcheck_nft_tables,
     _cleanup_nft_blockcheck_tables,
+    acknowledge_registered_process_run_terminal,
     _signal_process_group,
     cleanup_nft_blockcheck_tables,
     signal_registered_process_run,
@@ -393,6 +394,7 @@ class Zapret2Tests(unittest.TestCase):
         with (
             mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
             mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.acknowledge_registered_process_run_terminal") as acknowledge_terminal,
             mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
         ):
             _stop_process_group(process, run_id="managed-run")
@@ -401,8 +403,59 @@ class Zapret2Tests(unittest.TestCase):
             signal_registered.call_args_list,
             [mock.call("managed-run", "TERM")],
         )
+        acknowledge_terminal.assert_called_once_with("managed-run")
         killpg.assert_not_called()
         process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
+
+    def test_managed_stop_reaps_launcher_before_acknowledging_verified_terminal(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        events: list[str] = []
+
+        def signal_run(_run_id: str, _signal_name: str) -> None:
+            events.append("signal")
+
+        def wait_for_launcher(*, timeout: float) -> int:
+            self.assertEqual(timeout, MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
+            events.append("reaped")
+            return 143
+
+        def acknowledge_terminal(_run_id: str) -> None:
+            events.append("acknowledged")
+
+        process.wait.side_effect = wait_for_launcher
+        with (
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run", side_effect=signal_run),
+            mock.patch(
+                "gp_control_plane.zapret2.acknowledge_registered_process_run_terminal",
+                side_effect=acknowledge_terminal,
+            ),
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            _stop_process_group(process, run_id="managed-run")
+
+        self.assertEqual(events, ["signal", "reaped", "acknowledged"])
+        killpg.assert_not_called()
+
+    def test_managed_stop_quarantines_terminal_ack_integrity_failure_without_local_signal(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.return_value = 143
+
+        with (
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch(
+                "gp_control_plane.zapret2.acknowledge_registered_process_run_terminal",
+                side_effect=RuntimeError("gp-root-helper: run terminal is unsafe: managed-run"),
+            ) as acknowledge_terminal,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "run terminal is unsafe"):
+                _stop_process_group(process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        acknowledge_terminal.assert_called_once_with("managed-run")
+        killpg.assert_not_called()
 
     def test_managed_stop_propagates_stale_root_record_without_signalling_local_group(self) -> None:
         process = mock.Mock(pid=12345)
@@ -488,11 +541,13 @@ class Zapret2Tests(unittest.TestCase):
         with (
             mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
             mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.acknowledge_registered_process_run_terminal") as acknowledge_terminal,
             mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
         ):
             _stop_process_group(process, run_id="managed-run")
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
+        acknowledge_terminal.assert_called_once_with("managed-run")
         killpg.assert_not_called()
         process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
 
@@ -503,11 +558,13 @@ class Zapret2Tests(unittest.TestCase):
 
         with (
             mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.acknowledge_registered_process_run_terminal") as acknowledge_terminal,
             mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
         ):
             _stop_process_group(process, run_id="managed-run")
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
+        acknowledge_terminal.assert_called_once_with("managed-run")
         process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
         killpg.assert_not_called()
 
@@ -605,6 +662,22 @@ table inet blockcheck42
         root_helper.assert_called_once_with(["signal-run", "a" * 32, "TERM"])
         sudo_helper.assert_not_called()
 
+    def test_terminal_acknowledgement_uses_root_helper_and_preserves_fail_closed_error(self) -> None:
+        run_id = "a" * 32
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+            mock.patch(
+                "gp_control_plane.zapret2._run_recovery_root_helper",
+                return_value=subprocess.CompletedProcess([], 126, "", "gp-root-helper: run terminal is unsafe\n"),
+            ) as root_helper,
+            mock.patch("gp_control_plane.zapret2._run_root_helper") as sudo_helper,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "run terminal is unsafe"):
+                acknowledge_registered_process_run_terminal(run_id)
+
+        root_helper.assert_called_once_with(["ack-run-terminal", run_id])
+        sudo_helper.assert_not_called()
+
     def test_immediate_stop_waits_for_root_attestation_before_signalling(self) -> None:
         for phase in ("v1", "v2-before-go"):
             with self.subTest(phase=phase):
@@ -632,12 +705,15 @@ table inet blockcheck42
     def test_root_helper_marks_only_valid_v1_and_v2_before_go_as_pending(self) -> None:
         helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
         signal_run = helper.split("signal_registered_process_run() {", 1)[1].split("ensure_recovery_run_registry() {", 1)[0]
-        recovery_lock = helper.split("recovery_validate_run_lock() {", 1)[1].split("recovery_validate_record() {", 1)[0]
+        lifecycle_validation = helper.split("recovery_validate_run_lifecycle_dir() {", 1)[1].split(
+            "recovery_validate_run_lock() {", 1
+        )[0]
 
         self.assertIn('read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null', signal_run)
         self.assertIn('fail "root run attestation is pending: $run_id"', signal_run)
-        self.assertIn('read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null', recovery_lock)
-        self.assertIn('[ "$status_present" = 0 ] || return 1', recovery_lock)
+        self.assertIn('read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null', lifecycle_validation)
+        self.assertIn('[ "$gate_present" = 1 ] || return 1', lifecycle_validation)
+        self.assertIn('[ "$status_present" = 0 ] && [ "$signal_present" = 0 ] || return 1', lifecycle_validation)
 
     def test_immediate_stop_waits_through_the_root_helper_supervisor_handshake(self) -> None:
         run_id = "late-root-record"
@@ -1511,6 +1587,9 @@ table inet blockcheck42
         lock_dir = registry / f".{run_id}.lock"
         lock_dir.mkdir()
         lock_dir.chmod(0o700)
+        lifecycle_gate = lock_dir / "signal-gate"
+        lifecycle_gate.touch()
+        lifecycle_gate.chmod(0o600)
         ready_file = lock_dir / "supervisor-ready"
         ready_value = (
             f"helper-ready-v2 {ready_pid} {ready_pid} 101\n"
@@ -1830,6 +1909,7 @@ lock_dir="$registry/.unsafe-identity.lock"
 mkdir "$lock_dir"
 printf 'helper-ready-v2 %s %s 101\n' "$pid" "$pid" > "$lock_dir/supervisor-ready"
 printf 'helper-go-v1 %s\n' "$pid" > "$lock_dir/supervisor-go"
+: > "$lock_dir/signal-gate"
 export PATH GP_ROOT_HELPER_RUN_DIR
 kill() { printf '%s\n' "$*" >> "$signal_log"; }
 set -- signal-run unsafe-identity TERM
@@ -2011,6 +2091,7 @@ mkdir "$lock_dir"
 printf 'helper-ready-v2 %s %s 101\n' "$FAKE_PROCESS_ID" "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-ready"
 printf 'helper-go-v1 %s\n' "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-go"
 printf 'helper-status-v1 7\n' > "$lock_dir/target-status"
+: > "$lock_dir/signal-gate"
 case "$helper_command" in
   signal-run) set -- signal-run "$run_id" TERM ;;
   recover-runs) set -- recover-runs ;;
@@ -2315,7 +2396,7 @@ run_owned_multidomain_target "$2" "$3"
             self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
             self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
 
-    def test_root_owned_multidomain_external_term_cleans_runner_once_and_preserves_other_temp_data(self) -> None:
+    def test_root_owned_multidomain_duplicate_term_is_safe_through_terminal_teardown(self) -> None:
         if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
             self.skipTest("requires a root Linux test environment with setsid")
         helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
@@ -2361,12 +2442,29 @@ run_owned_multidomain_target "$2" "$3"
                 self.assertEqual(stopped.returncode, 0, stopped.stderr)
                 # signal-run may report the target group as stopped before the
                 # wrapper observes target-status. Its original launcher must
-                # still reap promptly and surface that incomplete status.
+                # still reap promptly. Its validated lifecycle evidence stays
+                # intact in the terminal directory until the direct caller has
+                # reaped that launcher and explicitly acknowledges it.
                 self.assertNotEqual(managed.wait(timeout=8), 0)
                 self.assertFalse(runner.exists())
                 self.assertFalse(runner.parent.exists())
                 self.assertFalse((registry / run_id).exists())
                 self.assertFalse((registry / f".{run_id}.lock").exists())
+                terminal_dir = registry / f".{run_id}.terminal"
+                self.assertTrue(terminal_dir.is_dir())
+
+                duplicate = subprocess.run(
+                    ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
+                )
+                self.assertEqual(duplicate.returncode, 0, duplicate.stderr)
+                self.assertNotIn("unsafe", duplicate.stderr)
+                self.assertTrue(terminal_dir.is_dir())
+
+                acknowledged = subprocess.run(
+                    ["sh", str(helper), "ack-run-terminal", run_id], env=env, text=True, capture_output=True, check=False
+                )
+                self.assertEqual(acknowledged.returncode, 0, acknowledged.stderr)
+                self.assertFalse(terminal_dir.exists())
                 self.assertFalse(_any_process_carries_argument(run_id))
                 self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
                 self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
@@ -2382,7 +2480,7 @@ run_owned_multidomain_target "$2" "$3"
         )
         (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "stat").write_text(
-            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*) printf '0:0:600\\n' ;; */runs) printf '0:0:750\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
+            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*|*signal-gate*|*signal-delivery*) printf '0:0:600\\n' ;; */runs) printf '0:0:750\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
             encoding="utf-8",
         )
         (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -2561,11 +2659,16 @@ set -- run-owned "${13}" "${14}" "$4"
         self.assertIn('kill -TERM "$pid"', run_owned)
         self.assertNotIn('kill -TERM -- "-$pid"', run_owned)
         self.assertIn('terminate_known_process_group "$pid" "$pgid" "$marker" TERM', run_owned)
-        cleanup_body = run_owned.split("cleanup_owned_run() {", 1)[1].split("abort_owned_run() {", 1)[0]
+        cleanup_locked = run_owned.split("cleanup_owned_run_locked() {", 1)[1].split("cleanup_owned_run() {", 1)[0]
+        cleanup_wrapper = run_owned.split("cleanup_owned_run() {", 1)[1].split("cleanup_owned_lifecycle() {", 1)[0]
         self.assertLess(
-            cleanup_body.index('stop_unattested_supervisor || return 1'),
-            cleanup_body.index('remove_unattested_run_lock'),
+            cleanup_locked.index('stop_unattested_supervisor || return 1'),
+            cleanup_locked.index('remove_unattested_run_lock'),
         )
+        self.assertIn('with_run_lifecycle_gate "$lifecycle_gate" cleanup_owned_run_locked', cleanup_wrapper)
+        self.assertIn('lifecycle_gate="$lock_dir/signal-gate"', run_owned)
+        self.assertIn('signal_file="$lock_dir/signal-delivery"', run_owned)
+        self.assertIn('mv -- "$lock_dir" "$terminal_dir"', run_owned)
         self.assertIn('if ! write_owned_run_record', run_owned)
         self.assertIn('if ! write_owned_run_go', run_owned)
         self.assertIn("trap 'abort_owned_run 143' TERM", run_owned)
@@ -2737,6 +2840,7 @@ lock_dir="$registry/.$run_id.lock"
 mkdir "$lock_dir"
 printf 'helper-ready-v2 %s %s 101\n' "$FAKE_LEADER_PID" "$FAKE_LEADER_PID" > "$lock_dir/supervisor-ready"
 printf 'helper-go-v1 %s\n' "$FAKE_LEADER_PID" > "$lock_dir/supervisor-go"
+: > "$lock_dir/signal-gate"
 export PATH GP_ROOT_HELPER_RUN_DIR FAKE_SIGNAL_LOG FAKE_LEADER_PID FAKE_CHILD_PID FAKE_PHASE FAKE_LEADER_AFTER_TERM_MARKER
 cleanup() {
   for process_pid in "$FAKE_LEADER_PID" "$FAKE_CHILD_PID"; do
