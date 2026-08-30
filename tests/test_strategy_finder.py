@@ -71,9 +71,9 @@ class StrategyFinderTests(unittest.TestCase):
 
         with patch.object(strategy_finder_module, "_stop_process_group") as stop:
             with self.assertRaisesRegex(RuntimeError, "did not terminate after stop"):
-                _wait_process_after_stop(process, "still-live")
+                _wait_process_after_stop(process, None)
 
-        stop.assert_called_once_with(process, "still-live")
+        stop.assert_called_once_with(process, None)
 
     def test_root_signal_integrity_failure_quarantines_live_process_result(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

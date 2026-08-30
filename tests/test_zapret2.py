@@ -21,6 +21,7 @@ from gp_control_plane.zapret2 import (
     ROOT_HELPER_RECORD_WAIT_SECONDS,
     ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS,
     ROOT_HELPER_ATTESTATION_PENDING_MESSAGE,
+    MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS,
     _blockcheck_nft_tables,
     _cleanup_nft_blockcheck_tables,
     _signal_process_group,
@@ -388,7 +389,6 @@ class Zapret2Tests(unittest.TestCase):
     def test_managed_stop_delegates_to_root_without_signalling_local_group(self) -> None:
         process = mock.Mock(pid=12345)
         process.poll.return_value = None
-        process.wait.return_value = None
 
         with (
             mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
@@ -402,7 +402,7 @@ class Zapret2Tests(unittest.TestCase):
             [mock.call("managed-run", "TERM")],
         )
         killpg.assert_not_called()
-        process.wait.assert_called_once_with(timeout=5)
+        process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
 
     def test_managed_stop_propagates_stale_root_record_without_signalling_local_group(self) -> None:
         process = mock.Mock(pid=12345)
@@ -478,7 +478,7 @@ class Zapret2Tests(unittest.TestCase):
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
         killpg.assert_not_called()
-        process.wait.assert_called_once_with(timeout=5)
+        process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
 
     def test_root_managed_stop_delegates_to_helper_without_signalling_local_group(self) -> None:
         process = mock.Mock(pid=12345)
@@ -494,7 +494,22 @@ class Zapret2Tests(unittest.TestCase):
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
         killpg.assert_not_called()
-        process.wait.assert_called_once_with(timeout=5)
+        process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
+
+    def test_managed_stop_accepts_launcher_exit_after_registered_signal_record_reconciliation(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.return_value = 143
+
+        with (
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            _stop_process_group(process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
+        killpg.assert_not_called()
 
     def test_root_managed_stop_propagates_helper_failure_without_local_signal(self) -> None:
         process = mock.Mock(pid=12345)
@@ -530,7 +545,7 @@ class Zapret2Tests(unittest.TestCase):
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
         killpg.assert_not_called()
-        process.wait.assert_called_once_with(timeout=5)
+        process.wait.assert_called_once_with(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS)
 
     def test_stop_process_group_propagates_timeout_after_kill_wait(self) -> None:
         process = mock.Mock(pid=12345)

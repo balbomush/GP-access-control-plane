@@ -43,6 +43,10 @@ ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS = 10.0
 ROOT_HELPER_RECORD_WAIT_SECONDS = ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS + 2.0
 ROOT_HELPER_RECORD_RETRY_SECONDS = 0.25
 ROOT_HELPER_ATTESTATION_PENDING_MESSAGE = "root run attestation is pending"
+# signal-run confirms the root-owned process group before it returns.  The
+# unprivileged sudo/helper launcher may still need to finish its own bounded
+# record/lock cleanup after that acknowledgement.
+MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS = 10.0
 _INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 _INSTALL_CHECK_LOCK = threading.Lock()
 
@@ -154,7 +158,7 @@ def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = Non
         return
     _signal_process_group("TERM", process, run_id)
     try:
-        process.wait(timeout=5)
+        process.wait(timeout=MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS if run_id else 5)
     except subprocess.TimeoutExpired:
         if run_id:
             raise RuntimeError("managed root process did not terminate after registered signal")
