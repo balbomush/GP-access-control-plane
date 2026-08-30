@@ -23,6 +23,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
+from gp_control_plane.state import read_state, update_state
 from gp_control_plane.web.api_server import serve
 from gp_control_plane.web import api_server
 from gp_control_plane.web.ui import index_html
@@ -398,6 +399,63 @@ class EdgeBearerAuthBrowserTests(unittest.TestCase):
 
 
 class TestServerLifecycleTests(unittest.TestCase):
+    def test_active_root_managed_startup_keeps_state_when_generic_recovery_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            run_id = "interrupted-root-run"
+            update_state(
+                config.output.state_dir,
+                lambda state: {
+                    **state,
+                    "current_run_id": run_id,
+                    "current_run_name": "zapret-multi-domain-discovery",
+                    "current_run_status": "running",
+                },
+            )
+
+            with patch.object(api_server, "recover_registered_process_runs", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "managed runtime recovery could not be verified"):
+                    api_server._recover_runtime_before_serve(config)
+
+            blocked = read_state(config.output.state_dir)
+            self.assertEqual(blocked["current_run_id"], run_id)
+            self.assertEqual(blocked["current_run_status"], "running")
+
+            with patch.object(api_server, "recover_registered_process_runs", return_value=True):
+                api_server._recover_runtime_before_serve(config)
+
+            released = read_state(config.output.state_dir)
+            self.assertIsNone(released["current_run_id"])
+            self.assertIsNone(released["current_run_status"])
+
+    def test_quarantined_startup_requires_matching_root_recovery_before_state_is_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            run_id = "quarantined-run"
+            update_state(
+                config.output.state_dir,
+                lambda state: {
+                    **state,
+                    "current_run_id": run_id,
+                    "current_run_name": "zapret-multi-domain-discovery",
+                    "current_run_status": "quarantined",
+                },
+            )
+            with patch.object(api_server, "recover_quarantined_process_run", side_effect=RuntimeError("root artifacts missing")):
+                with self.assertRaisesRegex(RuntimeError, "root artifacts missing"):
+                    api_server._recover_runtime_before_serve(config)
+            blocked = read_state(config.output.state_dir)
+            self.assertEqual(blocked["current_run_id"], run_id)
+            self.assertEqual(blocked["current_run_status"], "quarantined")
+
+            with patch.object(api_server, "recover_quarantined_process_run") as recovered:
+                api_server._recover_runtime_before_serve(config)
+
+            recovered.assert_called_once_with(run_id)
+            released = read_state(config.output.state_dir)
+            self.assertIsNone(released["current_run_id"])
+            self.assertIsNone(released["current_run_status"])
+
     def test_startup_failure_closes_listener_that_binds_during_cleanup(self) -> None:
         bind_started = threading.Event()
         allow_bind = threading.Event()

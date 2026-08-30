@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .state import active_runtime_payload, append_jsonl, now_iso
+from .jobs import ManagedRuntimeQuarantinedError
 from .strategy_safety import analyze_strategy
 from .storage import (
     append_run,
@@ -2233,12 +2234,15 @@ def _run_process_with_live_stdout(
             deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
             while True:
                 if stop_event is not None and stop_event.is_set():
+                    try:
+                        _stop_process_group(process, run_id)
+                        _cleanup_nft_blockcheck_tables()
+                        recorder.mark_phase(PHASE_SAVING)
+                        returncode = _wait_process_after_stop(process, run_id)
+                    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                        raise ManagedRuntimeQuarantinedError(f"managed process cleanup is unverified: {exc}") from exc
                     stopped = True
                     status = "stopped"
-                    _stop_process_group(process, run_id)
-                    _cleanup_nft_blockcheck_tables()
-                    recorder.mark_phase(PHASE_SAVING)
-                    returncode = _wait_process_after_stop(process, run_id)
                     break
                 wait_timeout = 1.0
                 if deadline is not None:
@@ -2246,10 +2250,13 @@ def _run_process_with_live_stdout(
                     if remaining <= 0:
                         timed_out = True
                         status = "timeout"
-                        _stop_process_group(process, run_id)
-                        _cleanup_nft_blockcheck_tables()
-                        recorder.mark_phase(PHASE_SAVING)
-                        returncode = _wait_process_after_stop(process, run_id)
+                        try:
+                            _stop_process_group(process, run_id)
+                            _cleanup_nft_blockcheck_tables()
+                            recorder.mark_phase(PHASE_SAVING)
+                            returncode = _wait_process_after_stop(process, run_id)
+                        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                            raise ManagedRuntimeQuarantinedError(f"managed process cleanup is unverified: {exc}") from exc
                         break
                     wait_timeout = min(1.0, remaining)
                 try:
@@ -2291,7 +2298,7 @@ def _wait_process_after_stop(
         try:
             return process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            return process.returncode
+            raise RuntimeError("managed process did not terminate after stop")
 
 
 def _run_blockcheck_live(

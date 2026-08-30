@@ -161,6 +161,42 @@ read_owned_run_ready() {
   printf '%s\n' "$ready_pid"
 }
 
+write_owned_run_attestation() {
+  ready_file="$1"
+  attested_pid="$(validate_pid "$2")"
+  attested_pgid="$(validate_pid "$3")"
+  attested_marker="$4"
+  [ "$attested_pid" = "$attested_pgid" ] || return 1
+  is_valid_process_start_marker "$attested_marker" || return 1
+  umask 077
+  tmp_ready="$(mktemp "${ready_file}.XXXXXX")" || return 1
+  if ! printf 'helper-ready-v2 %s %s %s\n' "$attested_pid" "$attested_pgid" "$attested_marker" > "$tmp_ready" ||
+    ! chown root:root "$tmp_ready" ||
+    ! chmod 0600 "$tmp_ready" ||
+    ! mv -f "$tmp_ready" "$ready_file"; then
+    rm -f "$tmp_ready"
+    return 1
+  fi
+}
+
+read_owned_run_attestation() {
+  ready_file="$1"
+  [ -e "$ready_file" ] || return 1
+  [ -f "$ready_file" ] && [ ! -L "$ready_file" ] || return 2
+  [ "$(stat -c '%u:%g:%a' "$ready_file" 2>/dev/null || true)" = '0:0:600' ] || return 2
+  ready_contents="$(cat "$ready_file")" || return 2
+  IFS=' ' read -r ready_version ready_pid ready_pgid ready_marker ready_extra <<EOF
+$ready_contents
+EOF
+  [ "$ready_version" = helper-ready-v2 ] || return 2
+  [ -n "${ready_pid:-}" ] && [ -n "${ready_pgid:-}" ] && [ -n "${ready_marker:-}" ] || return 2
+  [ -z "${ready_extra:-}" ] || return 2
+  [ "$ready_contents" = "helper-ready-v2 $ready_pid $ready_pgid $ready_marker" ] || return 2
+  is_valid_pid "$ready_pid" && is_valid_pid "$ready_pgid" && is_valid_process_start_marker "$ready_marker" || return 2
+  [ "$ready_pid" = "$ready_pgid" ] || return 2
+  printf '%s %s %s\n' "$ready_pid" "$ready_pgid" "$ready_marker"
+}
+
 write_owned_run_go() {
   go_file="$1"
   go_pid="$(validate_pid "$2")"
@@ -439,6 +475,9 @@ run_owned_process() {
     fail "managed process exited before registration"
   fi
   supervisor_attested=1
+  if ! write_owned_run_attestation "$ready_file" "$pid" "$pgid" "$marker"; then
+    abort_owned_run 126
+  fi
   if ! write_owned_run_record "$run_id" "$pid" "$pgid" "$marker"; then
     abort_owned_run 126
   fi
@@ -1197,25 +1236,37 @@ signal_registered_process_run() {
   run_id="$(validate_run_id "$1")"
   signal="$(validate_signal "$2")"
   record="$(registry_record_path "$run_id")"
-  if target="$(registered_process_matches "$run_id")"; then
-    :
-  else
-    registered_status="$?"
-    [ "$registered_status" -eq 1 ] || fail "registered process cannot be safely inspected"
-    rm -f -- "$record"
-    fail "registered process is stale or invalid"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  go_file="$lock_dir/supervisor-go"
+  recovery_validate_run_lock "$run_id" || fail "run lock is unsafe: $run_id"
+  if [ ! -e "$go_file" ] && [ ! -L "$go_file" ]; then
+    if read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null; then
+      fail "root run attestation is pending: $run_id"
+    fi
+    fail "run lock attestation is invalid: $run_id"
   fi
+  target="$(read_owned_run_attestation "$ready_file")" || fail "run lock attestation is invalid: $run_id"
   pid="${target%% *}"
   target="${target#* }"
   pgid="${target%% *}"
   marker="${target#* }"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    recovery_validate_record "$run_id" || fail "run record is unsafe: $run_id"
+    [ "$(read_recovery_run_record "$record")" = "$pid $pgid $marker" ] ||
+      fail "run record does not match lock attestation: $run_id"
+  fi
   if terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"; then
-    rm -f -- "$record"
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      recovery_validate_record "$run_id" || fail "run record is unsafe: $run_id"
+      [ "$(read_recovery_run_record "$record")" = "$pid $pgid $marker" ] ||
+        fail "run record does not match lock attestation: $run_id"
+      rm -f -- "$record"
+    fi
   else
     termination_status="$?"
-    [ "$termination_status" -eq 1 ] || fail "registered process cannot be safely inspected"
-    rm -f -- "$record"
-    fail "registered process is stale or invalid"
+    [ "$termination_status" -eq 1 ] && fail "registered process is stale or invalid"
+    fail "registered process cannot be safely inspected"
   fi
 }
 
@@ -1305,11 +1356,17 @@ recovery_validate_run_lock() {
     [ "$go_present" = 0 ] && [ "$status_present" = 0 ] || return 1
     return 0
   fi
-  ready_pid="$(read_owned_run_ready "$ready_file")" || return 1
   if [ "$go_present" = 0 ]; then
+    if read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null; then
+      :
+    else
+      return 1
+    fi
     [ "$status_present" = 0 ] || return 1
     return 0
   fi
+  ready_target="$(read_owned_run_attestation "$ready_file")" || return 1
+  ready_pid="${ready_target%% *}"
   go_pid="$(read_owned_run_go "$go_file")" || return 1
   [ "$go_pid" = "$ready_pid" ] || return 1
   if [ "$status_present" = 1 ]; then
@@ -1358,8 +1415,20 @@ remove_recovery_run_artifacts() {
 
   # Repeat every ownership and liveness check immediately before destructive cleanup.
   recovery_validate_run_lock "$run_id" || return 2
-  ready_pid="$(read_owned_run_ready "$ready_file")" || return 2
-  [ "$ready_pid" = "$expected_ready_pid" ] || return 2
+  if ready_target="$(read_owned_run_attestation "$ready_file")"; then
+    ready_pid="${ready_target%% *}"
+    ready_rest="${ready_target#* }"
+    ready_pgid="${ready_rest%% *}"
+    ready_marker="${ready_rest#* }"
+    [ "$ready_pid" = "$expected_ready_pid" ] || return 2
+    [ -n "$expected_marker" ] || return 2
+    [ "$ready_pgid" = "$expected_ready_pid" ] && [ "$ready_marker" = "$expected_marker" ] || return 2
+  else
+    read_owned_run_ready "$ready_file" >/dev/null || return 2
+    ready_pid="$(read_owned_run_ready "$ready_file")" || return 2
+    [ "$ready_pid" = "$expected_ready_pid" ] || return 2
+    [ -z "$expected_marker" ] || return 2
+  fi
   if [ -n "$expected_record_target" ]; then
     [ -n "$expected_marker" ] || return 2
     [ "$expected_record_target" = "$expected_ready_pid $expected_ready_pid $expected_marker" ] || return 2
@@ -1381,7 +1450,11 @@ remove_recovery_run_artifacts() {
 }
 
 recovery_ready_pid_is_safe_to_forget() {
-  ready_pid="$(read_owned_run_ready "$1")" || return 1
+  if ready_target="$(read_owned_run_attestation "$1")"; then
+    ready_pid="${ready_target%% *}"
+  else
+    ready_pid="$(read_owned_run_ready "$1")" || return 1
+  fi
   if known_process_group_exists "$ready_pid" "$ready_pid"; then
     return 1
   else
@@ -1414,8 +1487,13 @@ recover_paired_run() {
   record_target="${record_target#* }"
   pgid="${record_target%% *}"
   marker="${record_target#* }"
-  ready_pid="$(read_owned_run_ready "$ready_file")" || fail "run lock is unsafe: $run_id"
-  [ "$ready_pid" = "$pid" ] || fail "run record and lock PID mismatch: $run_id"
+  ready_target="$(read_owned_run_attestation "$ready_file")" || fail "run lock attestation is invalid: $run_id"
+  ready_pid="${ready_target%% *}"
+  ready_rest="${ready_target#* }"
+  ready_pgid="${ready_rest%% *}"
+  ready_marker="${ready_rest#* }"
+  [ "$ready_pid" = "$pid" ] && [ "$ready_pgid" = "$pgid" ] && [ "$ready_marker" = "$marker" ] ||
+    fail "run record and lock attestation mismatch: $run_id"
   registered_stale=0
 
   if registered_target="$(registered_process_matches "$run_id")"; then
@@ -1456,6 +1534,11 @@ recover_recordless_run_lock() {
   ready_file="$lock_dir/supervisor-ready"
   recovery_validate_run_lock "$run_id" || fail "run lock is unsafe: $run_id"
   [ -e "$ready_file" ] || fail "recordless run lock is still starting: $run_id"
+  if ready_target="$(read_owned_run_attestation "$ready_file")"; then
+    ready_pid="${ready_target%% *}"
+  else
+    ready_pid="$(read_owned_run_ready "$ready_file")" || fail "run lock is unsafe: $run_id"
+  fi
   if recovery_ready_pid_is_safe_to_forget "$ready_file"; then
     :
   else
@@ -1491,6 +1574,22 @@ recover_registered_process_runs() {
   done
 }
 
+recover_quarantined_process_run() {
+  [ "$#" -eq 1 ] || fail "recover-run requires one run id"
+  run_id="$(validate_run_id "$1")"
+  record="$(registry_record_path "$run_id")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  # A quarantined Core state is released only after this exact run has a
+  # root-owned paired record and v2 lock attestation. Missing artifacts are
+  # not proof of termination: an untrusted launcher may still be alive.
+  [ -f "$record" ] && [ ! -L "$record" ] || fail "quarantined run recovery artifacts are missing: $run_id"
+  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || fail "quarantined run recovery artifacts are missing: $run_id"
+  ensure_recovery_run_registry
+  recovery_validate_registry_layout || fail "run registry contains unsafe recovery artifacts"
+  recover_paired_run "$run_id"
+  printf 'recovered-run-v1 %s\n' "$run_id"
+}
+
 require_root
 
 command="${1:-}"
@@ -1508,6 +1607,9 @@ case "$command" in
   recover-runs)
     [ "$#" -eq 0 ] || fail "recover-runs accepts no arguments"
     with_recovery_gate recover_registered_process_runs
+    ;;
+  recover-run)
+    with_recovery_gate recover_quarantined_process_run "$@"
     ;;
   run)
     with_discovery_gate run_target "$@"

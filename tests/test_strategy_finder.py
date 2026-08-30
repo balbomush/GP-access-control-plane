@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -9,11 +10,12 @@ import time
 import unittest
 from collections import deque
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane import strategy_finder as strategy_finder_module
+from gp_control_plane.jobs import ManagedRuntimeQuarantinedError
 from gp_control_plane.state import read_state
 from gp_control_plane.storage import (
     append_run,
@@ -35,6 +37,7 @@ from gp_control_plane.strategy_finder import (
     _resolve_blockcheck_script,
     _run_multidomain_blockcheck_live,
     _run_process_with_live_stdout,
+    _wait_process_after_stop,
     _standard_attempt_plan,
     _stdout_log_mode,
     _write_multidomain_runner,
@@ -60,6 +63,62 @@ from gp_control_plane.strategy_finder import (
 
 
 class StrategyFinderTests(unittest.TestCase):
+    def test_wait_process_after_stop_rejects_still_live_process(self) -> None:
+        process = Mock()
+        process.returncode = None
+        timeout = subprocess.TimeoutExpired(["blockcheck2.sh"], 5)
+        process.wait.side_effect = [timeout, timeout]
+
+        with patch.object(strategy_finder_module, "_stop_process_group") as stop:
+            with self.assertRaisesRegex(RuntimeError, "did not terminate after stop"):
+                _wait_process_after_stop(process, "still-live")
+
+        stop.assert_called_once_with(process, "still-live")
+
+    def test_root_signal_integrity_failure_quarantines_live_process_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            stop_event = threading.Event()
+            stdout_log = state_dir / "stdout.log"
+            stderr_log = state_dir / "stderr.log"
+            run = {
+                "id": "root-signal-integrity-failure",
+                "kind": "standard-discovery",
+                "status": "running",
+                "timestamp": "2026-06-20T00:00:00Z",
+                "progress_log": str(state_dir / "progress.json"),
+                "metrics_log": str(state_dir / "metrics.ndjson"),
+                "attempt_plan": {"total": 1, "scripts": {}, "script_order": [], "source": "test"},
+            }
+            recorder = _LiveStdoutRecorder(state_dir, run)
+
+            def request_stop() -> None:
+                time.sleep(0.05)
+                stop_event.set()
+
+            def root_signal_failure(process: subprocess.Popen[str], _run_id: str | None) -> None:
+                process.terminate()
+                process.wait(timeout=2)
+                raise RuntimeError("root run record does not match lock attestation")
+
+            stopper = threading.Thread(target=request_stop)
+            stopper.start()
+            try:
+                with patch.object(strategy_finder_module, "_stop_process_group", side_effect=root_signal_failure):
+                    with self.assertRaisesRegex(ManagedRuntimeQuarantinedError, "root run record does not match"):
+                        _run_process_with_live_stdout(
+                            command=[sys.executable, "-c", "import time; time.sleep(5)"],
+                            env=os.environ.copy(),
+                            stdout_log=stdout_log,
+                            stderr_log=stderr_log,
+                            debug_stdout_log=None,
+                            timeout_seconds=10,
+                            stop_event=stop_event,
+                            recorder=recorder,
+                            run_id=run["id"],
+                        )
+            finally:
+                stopper.join(timeout=2)
     def test_stop_active_blockcheck_runtime_without_active_run_only_cleans_nft_tables(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)

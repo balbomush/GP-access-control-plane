@@ -77,7 +77,12 @@ from ..strategy_finder import (
     run_multi_domain_discovery,
     run_standard_discovery,
 )
-from ..zapret2 import check_install_cached, cleanup_nft_blockcheck_tables, recover_registered_process_runs
+from ..zapret2 import (
+    check_install_cached,
+    cleanup_nft_blockcheck_tables,
+    recover_quarantined_process_run,
+    recover_registered_process_runs,
+)
 from .errors import error_payload, normalize_error_payload
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
@@ -96,6 +101,9 @@ NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8"
 _core_strategy_discovery_job_payload = core_api.strategy_discovery_job_payload
 _EVENT_CURSOR_LOCK = threading.Lock()
 _EVENT_CURSOR_STATE: dict[str, dict[str, Any]] = {}
+_ROOT_MANAGED_DISCOVERY_NAMES = frozenset(
+    {"zapret-standard-discovery", "zapret-multi-domain-discovery"}
+)
 
 
 class RequestBodyTooLarge(ValueError):
@@ -151,8 +159,7 @@ def _clean_install_vault_restore_response(payload: dict[str, Any], vault_id: str
 
 
 def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -> None:
-    recover_registered_process_runs()
-    _clear_stale_current_run(config)
+    _recover_runtime_before_serve(config)
     close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_post_run_snapshot(config.output.state_dir))
     runtime_role = "monolith" if ui_enabled else "core"
@@ -1196,10 +1203,36 @@ def _profile_name(value: Any) -> str:
     return "".join(allowed)[:64]
 
 
-def _clear_stale_current_run(config: AppConfig) -> None:
+def _recover_runtime_before_serve(config: AppConfig) -> None:
+    state = read_state(config.output.state_dir)
+    if str(state.get("current_run_status") or "") == "quarantined":
+        run_id = str(state.get("current_run_id") or "").strip()
+        if not run_id:
+            raise RuntimeError("quarantined runtime has no run id")
+        recover_quarantined_process_run(run_id)
+        _clear_stale_current_run(config, recovered_quarantine_run_id=run_id)
+        return
+    recovered = recover_registered_process_runs()
+    if _requires_verified_root_recovery(state) and not recovered:
+        raise RuntimeError("managed runtime recovery could not be verified")
+    _clear_stale_current_run(config)
+
+
+def _requires_verified_root_recovery(state: dict[str, Any]) -> bool:
+    return (
+        bool(str(state.get("current_run_id") or "").strip())
+        and str(state.get("current_run_name") or "") in _ROOT_MANAGED_DISCOVERY_NAMES
+        and str(state.get("current_run_status") or "") in {"queued", "running", "stopping"}
+    )
+
+
+def _clear_stale_current_run(config: AppConfig, *, recovered_quarantine_run_id: str = "") -> None:
     state = read_state(config.output.state_dir)
     if not state.get("current_run_id"):
         return
+    if str(state.get("current_run_status") or "") == "quarantined":
+        if not recovered_quarantine_run_id or recovered_quarantine_run_id != str(state.get("current_run_id") or ""):
+            return
     if active_job_lock_payload(config.output.state_dir, cleanup_stale=True):
         return
 

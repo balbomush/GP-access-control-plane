@@ -20,6 +20,7 @@ from gp_control_plane.zapret2 import (
     ROOT_HELPER_RECORD_RETRY_SECONDS,
     ROOT_HELPER_RECORD_WAIT_SECONDS,
     ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS,
+    ROOT_HELPER_ATTESTATION_PENDING_MESSAGE,
     _blockcheck_nft_tables,
     _cleanup_nft_blockcheck_tables,
     _signal_process_group,
@@ -31,6 +32,8 @@ from gp_control_plane.zapret2 import (
     clear_install_check_cache,
     root_command,
     root_helper_status,
+    recover_quarantined_process_run,
+    recover_registered_process_runs,
 )
 from gp_control_plane.core_api import preflight_payload
 
@@ -379,7 +382,7 @@ class Zapret2Tests(unittest.TestCase):
         )
         self.assertEqual(process.wait.call_count, 2)
 
-    def test_managed_stop_ignores_stale_root_record_after_signalling_local_supervisor(self) -> None:
+    def test_managed_stop_propagates_stale_root_record_after_signalling_local_supervisor(self) -> None:
         process = mock.Mock(pid=12345)
         process.poll.return_value = None
         process.wait.return_value = None
@@ -393,11 +396,12 @@ class Zapret2Tests(unittest.TestCase):
             mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
             mock.patch("gp_control_plane.zapret2.signal.SIGTERM", "term-signal"),
         ):
-            _stop_process_group(process, run_id="managed-run")
+            with self.assertRaisesRegex(RuntimeError, "stale or invalid"):
+                _stop_process_group(process, run_id="managed-run")
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
         killpg.assert_called_once_with(12345, "term-signal")
-        process.wait.assert_called_once_with(timeout=5)
+        process.wait.assert_not_called()
 
     def test_managed_stop_propagates_integrity_failure_even_if_message_mentions_stale_record(self) -> None:
         process = mock.Mock(pid=12345)
@@ -482,27 +486,39 @@ table inet blockcheck42
 
         self.assertEqual(calls, [["/usr/bin/sudo", "-n", "/helper/gp-root-helper", "signal-run", "a" * 32, "TERM"]])
 
-    def test_immediate_stop_waits_for_helper_owned_record_before_signalling(self) -> None:
-        run_id = "immediate-stop-race"
-        calls: list[list[str]] = []
-        responses = [
-            subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n"),
-            subprocess.CompletedProcess([], 0, "", ""),
-        ]
+    def test_immediate_stop_waits_for_root_attestation_before_signalling(self) -> None:
+        for phase in ("v1", "v2-before-go"):
+            with self.subTest(phase=phase):
+                run_id = f"immediate-stop-{phase}"
+                calls: list[list[str]] = []
+                responses = [
+                    subprocess.CompletedProcess([], 126, "", f"gp-root-helper: {ROOT_HELPER_ATTESTATION_PENDING_MESSAGE}: {run_id}\n"),
+                    subprocess.CompletedProcess([], 0, "", ""),
+                ]
 
-        def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
-            calls.append(command)
-            return responses.pop(0)
+                def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
+                    calls.append(command)
+                    return responses.pop(0)
 
-        with (
-            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
-            mock.patch("gp_control_plane.zapret2._run_root_helper", side_effect=fake_helper),
-            mock.patch("gp_control_plane.zapret2.time.sleep") as sleep,
-        ):
-            signal_registered_process_run(run_id, "TERM")
+                with (
+                    mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+                    mock.patch("gp_control_plane.zapret2._run_root_helper", side_effect=fake_helper),
+                    mock.patch("gp_control_plane.zapret2.time.sleep") as sleep,
+                ):
+                    signal_registered_process_run(run_id, "TERM")
 
-        self.assertEqual(calls, [["signal-run", run_id, "TERM"], ["signal-run", run_id, "TERM"]])
-        sleep.assert_called_once()
+                self.assertEqual(calls, [["signal-run", run_id, "TERM"], ["signal-run", run_id, "TERM"]])
+                sleep.assert_called_once()
+
+    def test_root_helper_marks_only_valid_v1_and_v2_before_go_as_pending(self) -> None:
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+        signal_run = helper.split("signal_registered_process_run() {", 1)[1].split("ensure_recovery_run_registry() {", 1)[0]
+        recovery_lock = helper.split("recovery_validate_run_lock() {", 1)[1].split("recovery_validate_record() {", 1)[0]
+
+        self.assertIn('read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null', signal_run)
+        self.assertIn('fail "root run attestation is pending: $run_id"', signal_run)
+        self.assertIn('read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null', recovery_lock)
+        self.assertIn('[ "$status_present" = 0 ] || return 1', recovery_lock)
 
     def test_immediate_stop_waits_through_the_root_helper_supervisor_handshake(self) -> None:
         run_id = "late-root-record"
@@ -512,7 +528,7 @@ table inet blockcheck42
         def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
             calls.append(command)
             if clock["now"] < ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS:
-                return subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n")
+                return subprocess.CompletedProcess([], 126, "", f"gp-root-helper: {ROOT_HELPER_ATTESTATION_PENDING_MESSAGE}\n")
             return subprocess.CompletedProcess([], 0, "", "")
 
         def fake_sleep(seconds: float) -> None:
@@ -529,12 +545,13 @@ table inet blockcheck42
         self.assertEqual(ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS, 10.0)
         self.assertEqual(ROOT_HELPER_RECORD_WAIT_SECONDS, 12.0)
         self.assertEqual(ROOT_HELPER_RECORD_RETRY_SECONDS, 0.25)
+        self.assertEqual(ROOT_HELPER_ATTESTATION_PENDING_MESSAGE, "root run attestation is pending")
         self.assertEqual(clock["now"], ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS)
         self.assertEqual(calls[-1], ["signal-run", run_id, "TERM"])
         self.assertGreater(len(calls), 2)
 
     def test_signal_registered_process_stops_retrying_at_the_record_wait_deadline(self) -> None:
-        failure = subprocess.CompletedProcess([], 126, "", "gp-root-helper: registered process is stale or invalid\n")
+        failure = subprocess.CompletedProcess([], 126, "", f"gp-root-helper: {ROOT_HELPER_ATTESTATION_PENDING_MESSAGE}\n")
         with (
             mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
             mock.patch("gp_control_plane.zapret2._run_root_helper", return_value=failure) as helper,
@@ -542,11 +559,53 @@ table inet blockcheck42
             mock.patch("gp_control_plane.zapret2.time.monotonic", side_effect=[10.0, 10.1]),
             mock.patch("gp_control_plane.zapret2.time.sleep") as sleep,
         ):
-            with self.assertRaisesRegex(RuntimeError, "stale or invalid"):
+            with self.assertRaisesRegex(RuntimeError, "attestation is pending"):
                 signal_registered_process_run("timeout-race", "TERM")
 
         self.assertEqual(helper.call_count, 1)
         sleep.assert_not_called()
+
+    def test_root_recovery_failure_blocks_only_a_quarantined_runtime(self) -> None:
+        failed = subprocess.CompletedProcess([], 126, "", "gp-root-helper: root record mismatch\n")
+        with (
+            mock.patch("gp_control_plane.zapret2._run_recovery_root_helper", return_value=failed) as helper,
+        ):
+            self.assertFalse(recover_registered_process_runs())
+            with self.assertRaisesRegex(RuntimeError, "root record mismatch"):
+                recover_quarantined_process_run("quarantined-run")
+
+        self.assertEqual(
+            helper.call_args_list,
+            [mock.call(["recover-runs"]), mock.call(["recover-run", "quarantined-run"])],
+        )
+
+    def test_quarantine_recovery_requires_a_matching_root_receipt_and_runs_as_root(self) -> None:
+        run_id = "quarantined-run"
+        with tempfile.TemporaryDirectory() as raw:
+            helper_path = Path(raw) / "gp-root-helper"
+            helper_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(
+                [str(helper_path), "recover-run", run_id],
+                0,
+                f"recovered-run-v1 {run_id}\n",
+                "",
+            )
+            with (
+                mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+                mock.patch("gp_control_plane.zapret2._root_helper_path", return_value=str(helper_path)),
+                mock.patch("gp_control_plane.zapret2.subprocess.run", return_value=completed) as run,
+            ):
+                recover_quarantined_process_run(run_id)
+
+        run.assert_called_once_with([str(helper_path), "recover-run", run_id], text=True, capture_output=True, check=False)
+
+    def test_quarantine_recovery_rejects_a_receipt_for_another_run(self) -> None:
+        with mock.patch(
+            "gp_control_plane.zapret2._run_recovery_root_helper",
+            return_value=subprocess.CompletedProcess([], 0, "recovered-run-v1 another-run\n", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "recovery proof is invalid"):
+                recover_quarantined_process_run("expected-run")
 
     def test_root_helper_exposes_no_direct_pid_registration_or_unscoped_cleanup(self) -> None:
         helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
@@ -699,6 +758,95 @@ table inet blockcheck42
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(recordless_lock.exists())
+
+    def test_recover_run_requires_the_exact_paired_v2_artifacts_and_emits_a_receipt_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        dead_pid = "999999"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            helper_copy, fake_bin, _gate = self._prepare_recovery_identity_test(root, helper)
+            env = self._recovery_identity_env(fake_bin, registry, root)
+            run_id = "quarantined-run"
+
+            missing = subprocess.run(
+                [shell, _posix_shell_path(helper_copy), "recover-run", run_id],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(missing.returncode, 126, missing.stderr)
+            self.assertIn("quarantined run recovery artifacts are missing", missing.stderr)
+
+            lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=dead_pid, go_pid=dead_pid, status=7)
+            record = self._write_recovery_record(registry, run_id, dead_pid, "101")
+            completed = subprocess.run(
+                [shell, _posix_shell_path(helper_copy), "recover-run", run_id],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, f"recovered-run-v1 {run_id}\n")
+            self.assertFalse(record.exists())
+            self.assertFalse(lock_dir.exists())
+
+            v1_run_id = "quarantined-v1"
+            v1_lock = self._write_recovery_lock(registry, v1_run_id, ready_pid=dead_pid)
+            v1_record = self._write_recovery_record(registry, v1_run_id, dead_pid, "101")
+            v1 = subprocess.run(
+                [shell, _posix_shell_path(helper_copy), "recover-run", v1_run_id],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(v1.returncode, 126, v1.stderr)
+            self.assertIn("run lock attestation is invalid", v1.stderr)
+            self.assertTrue(v1_record.exists())
+            self.assertTrue(v1_lock.exists())
+
+    def test_root_helper_emits_pending_only_for_valid_pre_go_lifecycle_locks_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            helper_copy, fake_bin, _gate = self._prepare_recovery_identity_test(root, helper)
+            env = self._recovery_identity_env(fake_bin, registry, root)
+            run_id = "pre-go-run"
+            lock_dir = registry / f".{run_id}.lock"
+
+            for phase, ready_contents, expected_error in (
+                ("v1", "helper-ready-v1 999999\n", "root run attestation is pending"),
+                ("v2-before-go", "helper-ready-v2 999999 999999 101\n", "root run attestation is pending"),
+                ("malformed", "helper-ready-v9 999999\n", "run lock is unsafe"),
+            ):
+                with self.subTest(phase=phase):
+                    lock_dir.mkdir()
+                    lock_dir.chmod(0o700)
+                    ready = lock_dir / "supervisor-ready"
+                    ready.write_text(ready_contents, encoding="utf-8")
+                    ready.chmod(0o600)
+                    completed = subprocess.run(
+                        [shell, _posix_shell_path(helper_copy), "signal-run", run_id, "TERM"],
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 126, completed.stderr)
+                    self.assertIn(expected_error, completed.stderr)
+                    shutil.rmtree(lock_dir)
 
     def test_recover_runs_blocks_before_inspecting_an_early_phase_lock_portably(self) -> None:
         shell = _posix_shell()
@@ -1245,7 +1393,12 @@ table inet blockcheck42
         lock_dir.mkdir()
         lock_dir.chmod(0o700)
         ready_file = lock_dir / "supervisor-ready"
-        ready_file.write_text(f"helper-ready-v1 {ready_pid}\n", encoding="utf-8")
+        ready_value = (
+            f"helper-ready-v2 {ready_pid} {ready_pid} 101\n"
+            if go_pid is not None
+            else f"helper-ready-v1 {ready_pid}\n"
+        )
+        ready_file.write_text(ready_value, encoding="utf-8")
         ready_file.chmod(0o600)
         if go_pid is not None:
             go_file = lock_dir / "supervisor-go"
@@ -1523,7 +1676,10 @@ process_start_time_from_stat "$2"
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
                 "  *discovery-update.lock*) printf '0:0:600\\n' ;;\n"
-                "  *) printf '0:0:700\\n' ;;\n"
+                "  */gates) printf '0:0:700\\n' ;;\n"
+                "  */runs) printf '0:0:750\\n' ;;\n"
+                "  *.lock) printf '0:0:700\\n' ;;\n"
+                "  *) printf '0:0:600\\n' ;;\n"
                 "esac\n",
                 encoding="utf-8",
             )
@@ -1551,6 +1707,10 @@ PATH="$fake_bin:/usr/bin:/bin"
 GP_ROOT_HELPER_RUN_DIR="$registry"
 pid=$$
 printf 'helper-v1 %s %s 101\n' "$pid" "$pid" > "$registry/unsafe-identity"
+lock_dir="$registry/.unsafe-identity.lock"
+mkdir "$lock_dir"
+printf 'helper-ready-v2 %s %s 101\n' "$pid" "$pid" > "$lock_dir/supervisor-ready"
+printf 'helper-go-v1 %s\n' "$pid" > "$lock_dir/supervisor-go"
 export PATH GP_ROOT_HELPER_RUN_DIR
 kill() { printf '%s\n' "$*" >> "$signal_log"; }
 set -- signal-run unsafe-identity TERM
@@ -1631,7 +1791,7 @@ set -- signal-run unsafe-identity TERM
                     if helper_command == "signal-run":
                         self.assertEqual(completed.returncode, 126, completed.stderr)
                         self.assertIn("stale or invalid", completed.stderr)
-                        self.assertFalse((registry / run_id).exists())
+                        self.assertTrue((registry / run_id).exists())
                     else:
                         self.assertEqual(completed.returncode, 126, completed.stderr)
                         self.assertIn("stale or invalid", completed.stderr)
@@ -1643,6 +1803,7 @@ set -- signal-run unsafe-identity TERM
                     self.assertTrue(lock_dir.is_dir())
                     self.assertEqual(status_file.read_text(encoding="utf-8"), "helper-status-v1 7\n")
                     shutil.rmtree(lock_dir)
+                    (registry / run_id).unlink(missing_ok=True)
 
     def _write_root_helper_marker_shims(self, fake_bin: Path) -> None:
         (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
@@ -1728,7 +1889,7 @@ export PATH GP_ROOT_HELPER_RUN_DIR FAKE_MARKER_STATE FAKE_SIGNAL_LOG FAKE_VALID_
 kill() { printf '%s\\n' "$*" >> "$FAKE_SIGNAL_LOG"; }
 lock_dir="$registry/.$run_id.lock"
 mkdir "$lock_dir"
-printf 'helper-ready-v1 %s\n' "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-ready"
+printf 'helper-ready-v2 %s %s 101\n' "$FAKE_PROCESS_ID" "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-ready"
 printf 'helper-go-v1 %s\n' "$FAKE_PROCESS_ID" > "$lock_dir/supervisor-go"
 printf 'helper-status-v1 7\n' > "$lock_dir/target-status"
 case "$helper_command" in
@@ -2266,8 +2427,10 @@ set -- run-owned "${13}" "${14}" "$4"
         run_owned = text.split("run_owned_process() {", 1)[1].split("run_owned_target() {", 1)[0]
 
         self.assertIn('helper-ready-v1 %s', run_owned)
+        self.assertIn('write_owned_run_attestation "$ready_file" "$pid" "$pgid" "$marker"', run_owned)
         self.assertIn('helper-go-v1 $$', run_owned)
         self.assertLess(run_owned.index('wait_for_owned_run_ready'), run_owned.index('write_owned_run_record'))
+        self.assertLess(run_owned.index('write_owned_run_attestation'), run_owned.index('write_owned_run_record'))
         self.assertLess(run_owned.index('write_owned_run_record'), run_owned.index('write_owned_run_go'))
         supervisor_body = run_owned.split("setsid /bin/sh -c '", 1)[1].split("' gp-owned-supervisor", 1)[0]
         self.assertLess(supervisor_body.index('[ "$go_contents" = "helper-go-v1 $$" ]'), supervisor_body.index('( trap - HUP INT TERM; exec "$@" ) &'))
@@ -2350,7 +2513,7 @@ set -- run-owned "${13}" "${14}" "$4"
             actual_signals = signal_log.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(actual_signals), 1, actual_signals)
             self.assertRegex(actual_signals[0], r"^-TERM -- -[1-9][0-9]*$")
-            self.assertFalse((registry / "snapshot-child-leader-reused").exists())
+            self.assertTrue((registry / "snapshot-child-leader-reused").exists())
 
     def _write_root_helper_snapshot_shims(self, fake_bin: Path) -> None:
         (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
@@ -2364,6 +2527,7 @@ set -- run-owned "${13}" "${14}" "$4"
             "case \"$*\" in\n"
             "  *discovery-update.lock*) printf '0:0:600\\n' ;;\n"
             "  */gates) printf '0:0:700\\n' ;;\n"
+            "  *.lock) printf '0:0:700\\n' ;;\n"
             "  *) printf '0:0:600\\n' ;;\n"
             "esac\n",
             encoding="utf-8",
@@ -2446,6 +2610,10 @@ FAKE_PHASE="$registry/phase"
 FAKE_LEADER_AFTER_TERM_MARKER="$leader_after_term_marker"
 printf 'before-term\n' > "$FAKE_PHASE"
 printf 'helper-v1 %s %s 101\n' "$FAKE_LEADER_PID" "$FAKE_LEADER_PID" > "$registry/$run_id"
+lock_dir="$registry/.$run_id.lock"
+mkdir "$lock_dir"
+printf 'helper-ready-v2 %s %s 101\n' "$FAKE_LEADER_PID" "$FAKE_LEADER_PID" > "$lock_dir/supervisor-ready"
+printf 'helper-go-v1 %s\n' "$FAKE_LEADER_PID" > "$lock_dir/supervisor-go"
 export PATH GP_ROOT_HELPER_RUN_DIR FAKE_SIGNAL_LOG FAKE_LEADER_PID FAKE_CHILD_PID FAKE_PHASE FAKE_LEADER_AFTER_TERM_MARKER
 cleanup() {
   for process_pid in "$FAKE_LEADER_PID" "$FAKE_CHILD_PID"; do
@@ -2626,6 +2794,9 @@ set -- signal-run "$run_id" TERM
                 record = registry / run_id
                 _wait_for_path(record)
                 self.assertEqual(record.read_text(encoding="utf-8").split()[0], "helper-v1")
+                ready = registry / f".{run_id}.lock" / "supervisor-ready"
+                _wait_for_path(ready)
+                self.assertEqual(ready.read_text(encoding="utf-8").split()[0], "helper-ready-v2")
 
                 rejected = subprocess.run(
                     ["sh", str(helper), "register-run", "foreign-pid", str(os.getpid()), str(os.getpgrp()), "1"],
@@ -2661,7 +2832,7 @@ set -- signal-run "$run_id" TERM
                     )
                     self.assertEqual(stale_signal.returncode, 126)
                     self.assertIsNone(stale.poll())
-                    self.assertFalse(stale_record.exists())
+                    self.assertTrue(stale_record.exists())
                     self.assertTrue((registry / f".{stale_id}.lock").is_dir())
                 finally:
                     if stale.poll() is None:

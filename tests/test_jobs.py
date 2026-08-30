@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.backups import create_snapshot_if_idle
-from gp_control_plane.core_api import runs_history_payload
-from gp_control_plane.jobs import JobRunner, _CancellationToken
+from gp_control_plane.core_api import runs_history_payload, status_payload
+from gp_control_plane.jobs import JobRunner, ManagedRuntimeQuarantinedError, _CancellationToken
 from gp_control_plane.state import read_state, update_state
 from gp_control_plane.storage import append_run, connect, read_latest_run_payloads
 from gp_control_plane.strategy_finder import latest_log_tail
@@ -92,6 +92,36 @@ class _JobRunnerWorkerCapture:
 
 
 class JobRunnerTests(unittest.TestCase):
+    def test_unverified_managed_cleanup_quarantines_runtime_and_blocks_new_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
+            state_dir = Path(raw)
+            runner = JobRunner(state_dir)
+
+            def unverified_cleanup(_stop: threading.Event, _run_id: str) -> None:
+                raise ManagedRuntimeQuarantinedError("managed process cleanup is unverified: root record mismatch")
+
+            run = runner.start("zapret-multi-domain-discovery", unverified_cleanup)
+            worker = workers.worker_for(runner)
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+
+            state = read_state(state_dir)
+            self.assertEqual(state["current_run_id"], run.run_id)
+            self.assertEqual(state["current_run_status"], "quarantined")
+            self.assertEqual(state["last_run_status"], "failed")
+            self.assertIn("root record mismatch", str(state["last_error"]))
+            self.assertTrue((state_dir / "job-runner.lock").is_file())
+            self.assertEqual(runner.cancel_active()["status"], "quarantined")
+            with self.assertRaisesRegex(RuntimeError, "recovery is required"):
+                runner.start("blocked", lambda _stop, _run_id: {"status": "success"})
+            restarted_runner = JobRunner(state_dir)
+            with self.assertRaisesRegex(RuntimeError, "recovery is required"):
+                restarted_runner.start("blocked-after-restart", lambda _stop, _run_id: {"status": "success"})
+
+            status = status_payload(AppConfig(output=OutputConfig(state_dir=state_dir)))
+            self.assertEqual(status["state"], "error")
+            self.assertEqual(status["current_run"], {"run_id": run.run_id, "status": "quarantined"})
+
     def test_cancellation_token_rejects_child_launch_claim_after_cancellation(self) -> None:
         token = _CancellationToken()
         token.set()

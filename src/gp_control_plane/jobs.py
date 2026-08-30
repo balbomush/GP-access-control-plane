@@ -16,6 +16,7 @@ from .state import (
     is_stale_process_payload,
     now_iso,
     read_job_lock_payload,
+    read_state,
     update_state,
 )
 from .storage import append_run, compact_run_payload, connect
@@ -23,6 +24,10 @@ from .storage import append_run, compact_run_payload, connect
 
 FINAL_JOB_STATUSES = {"success", "failed", "timeout", "stopped"}
 FINALIZATION_ERROR_MESSAGE_MAX_LENGTH = 512
+
+
+class ManagedRuntimeQuarantinedError(RuntimeError):
+    """A root-owned runtime could not be proven stopped and must stay blocked."""
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,7 @@ class JobRunner:
         self._active_cancel: _CancellationToken | None = None
         self._active_cancel_hook: Callable[[], Any] | None = None
         self._active_state_lock: _StateDirJobLock | None = None
+        self._active_quarantined = False
 
     def start(
         self,
@@ -73,6 +79,8 @@ class JobRunner:
         cancel_hook: Callable[[], Any] | None = None,
     ) -> Run:
         with self._lock:
+            if str(read_state(self.state_dir).get("current_run_status") or "") == "quarantined":
+                raise RuntimeError("managed runtime recovery is required before starting a new run")
             if self._active_run_id:
                 raise RuntimeError(f"run already running: {self._active_run_id}")
             run_id = uuid.uuid4().hex
@@ -83,6 +91,7 @@ class JobRunner:
             self._active_cancel = cancel_event
             self._active_cancel_hook = cancel_hook
             self._active_state_lock = state_lock
+            self._active_quarantined = False
         created_at = now_iso()
         run = Run(run_id=run_id, name=name, status="queued", created_at=created_at)
         try:
@@ -102,10 +111,14 @@ class JobRunner:
 
     def cancel_active(self) -> dict[str, str]:
         with self._lock:
-            if not self._active_run_id or not self._active_cancel or not self._active_run_name:
+            if not self._active_run_id or not self._active_run_name:
                 raise RuntimeError("no active run")
             run_id = self._active_run_id
             name = self._active_run_name
+            if self._active_quarantined:
+                return {"run_id": run_id, "name": name, "status": "quarantined"}
+            if not self._active_cancel:
+                raise RuntimeError("no active run")
             cancel_hook = None
             cancellation_started = not self._active_cancel.is_set()
             if cancellation_started:
@@ -137,18 +150,28 @@ class JobRunner:
         self._set_current_run_if_active(run_id, name, "running")
         last_error: str | None = None
         last_run_status = "failed"
+        quarantined = False
         try:
             result = func(cancel_event, run_id)
             status = _status_from_result(result)
             self._record(run_id, name, status, now_iso(), result=result)
             last_error = None
             last_run_status = status
+        except ManagedRuntimeQuarantinedError as exc:
+            completed_at = now_iso()
+            last_error = str(exc)
+            quarantined = True
+            self._record(run_id, name, "failed", completed_at, error=last_error, event="runtime_quarantine")
+            self._persist_failed_run(run_id, name, started_at, completed_at, last_error)
         except Exception as exc:  # noqa: BLE001
             completed_at = now_iso()
             last_error = str(exc)
             self._record(run_id, name, "failed", completed_at, error=last_error)
             self._persist_failed_run(run_id, name, started_at, completed_at, last_error)
         finally:
+            if quarantined:
+                self._quarantine_active_run(run_id, name, last_run_status, last_error)
+                return
             last_snapshot: dict[str, Any] | None = None
             try:
                 try:
@@ -169,6 +192,30 @@ class JobRunner:
                     )
             finally:
                 self._finish_active_run(run_id, last_run_status, last_error, last_snapshot)
+
+    def _quarantine_active_run(
+        self,
+        run_id: str,
+        name: str,
+        last_run_status: str,
+        last_error: str | None,
+    ) -> None:
+        with self._lock:
+            if self._active_run_id != run_id:
+                return
+            self._active_cancel = None
+            self._active_cancel_hook = None
+            self._active_quarantined = True
+
+            def mark_quarantined(state: dict[str, Any]) -> dict[str, Any]:
+                state["last_error"] = last_error
+                state["last_run_status"] = last_run_status
+                state["current_run_id"] = run_id
+                state["current_run_name"] = name
+                state["current_run_status"] = "quarantined"
+                return state
+
+            update_state(self.state_dir, mark_quarantined)
 
     def _run_post_run_finalizer(self) -> dict[str, Any]:
         try:
@@ -245,6 +292,7 @@ class JobRunner:
                     self._active_cancel = None
                     self._active_cancel_hook = None
                     self._active_state_lock = None
+                    self._active_quarantined = False
         finally:
             if state_lock:
                 state_lock.release()
@@ -261,6 +309,7 @@ class JobRunner:
             self._active_cancel = None
             self._active_cancel_hook = None
             self._active_state_lock = None
+            self._active_quarantined = False
         if state_lock:
             state_lock.release()
 

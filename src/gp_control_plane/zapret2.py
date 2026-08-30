@@ -42,6 +42,7 @@ INSTALL_CHECK_CACHE_SECONDS = 30.0
 ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS = 10.0
 ROOT_HELPER_RECORD_WAIT_SECONDS = ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS + 2.0
 ROOT_HELPER_RECORD_RETRY_SECONDS = 0.25
+ROOT_HELPER_ATTESTATION_PENDING_MESSAGE = "root run attestation is pending"
 _INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 _INSTALL_CHECK_LOCK = threading.Lock()
 
@@ -151,14 +152,7 @@ def clear_install_check_cache() -> None:
 def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = None) -> None:
     if process.poll() is not None:
         return
-    try:
-        _signal_process_group("TERM", process, run_id)
-    except RuntimeError as exc:
-        # _signal_process_group has already sent local TERM in its finally
-        # block.  A stale root record therefore only means the remote side is
-        # already gone; other root-helper failures must still be visible.
-        if str(exc).strip() != "gp-root-helper: registered process is stale or invalid":
-            raise
+    _signal_process_group("TERM", process, run_id)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -289,14 +283,24 @@ def signal_registered_process_run(run_id: str, signal_name: str) -> None:
         if result.returncode == 0:
             return
         error = result.stderr.strip() or "root-helper rejected registered process signal"
-        if "registered process is stale or invalid" not in error or time.monotonic() >= deadline:
+        if ROOT_HELPER_ATTESTATION_PENDING_MESSAGE not in error or time.monotonic() >= deadline:
             raise RuntimeError(error)
         time.sleep(min(ROOT_HELPER_RECORD_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
-def recover_registered_process_runs() -> None:
-    if not _is_root():
-        _run_root_helper(["recover-runs"])
+def recover_registered_process_runs() -> bool:
+    result = _run_recovery_root_helper(["recover-runs"])
+    return result.returncode == 0
+
+
+def recover_quarantined_process_run(run_id: str) -> None:
+    run_id = validate_run_id(run_id)
+    result = _run_recovery_root_helper(["recover-run", run_id])
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "root-helper quarantine recovery failed")
+    expected = f"recovered-run-v1 {run_id}"
+    if result.stdout.strip() != expected:
+        raise RuntimeError("root-helper quarantine recovery proof is invalid")
 
 def _cleanup_nft_blockcheck_tables() -> None:
     nft = shutil.which("nft")
@@ -359,6 +363,18 @@ def _run_root_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
     helper = _root_helper_path()
     sudo = shutil.which("sudo")
     if not sudo or not Path(helper).is_file():
+        return subprocess.CompletedProcess(args, 1, "", "root-helper unavailable")
+    return subprocess.run([sudo, "-n", helper, *args], text=True, capture_output=True, check=False)
+
+
+def _run_recovery_root_helper(args: list[str]) -> subprocess.CompletedProcess[str]:
+    helper = _root_helper_path()
+    if not Path(helper).is_file():
+        return subprocess.CompletedProcess(args, 1, "", "root-helper unavailable")
+    if _is_root():
+        return subprocess.run([helper, *args], text=True, capture_output=True, check=False)
+    sudo = shutil.which("sudo")
+    if not sudo:
         return subprocess.CompletedProcess(args, 1, "", "root-helper unavailable")
     return subprocess.run([sudo, "-n", helper, *args], text=True, capture_output=True, check=False)
 
