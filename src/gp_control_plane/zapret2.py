@@ -156,10 +156,12 @@ def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = Non
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
+        if run_id:
+            raise RuntimeError("managed root process did not terminate after registered signal")
         # The managed root helper receives TERM once above.  A local KILL is
-        # only a fallback for this Popen instance: issuing a second managed
-        # signal would race a root-owned process record that TERM may already
-        # have removed.
+        # only valid for an unmanaged local Popen instance. A managed run
+        # shares its process group with root-owned wrappers, so killing it
+        # locally can orphan the wrapper before its cleanup completes.
         _signal_local_process_group("KILL", process)
         process.wait(timeout=5)
 
@@ -274,12 +276,11 @@ def root_helper_status() -> dict[str, str | bool]:
 
 
 def signal_registered_process_run(run_id: str, signal_name: str) -> None:
-    if _is_root():
-        return
     run_id = validate_run_id(run_id)
     deadline = time.monotonic() + ROOT_HELPER_RECORD_WAIT_SECONDS
     while True:
-        result = _run_root_helper(["signal-run", run_id, signal_name])
+        runner = _run_recovery_root_helper if _is_root() else _run_root_helper
+        result = runner(["signal-run", run_id, signal_name])
         if result.returncode == 0:
             return
         error = result.stderr.strip() or "root-helper rejected registered process signal"
@@ -333,11 +334,8 @@ def _blockcheck_nft_tables(output: str) -> list[tuple[str, str]]:
 
 
 def _signal_process_group(signal_name: str, process: subprocess.Popen[str], run_id: str | None = None) -> None:
-    if run_id and not _is_root():
-        try:
-            signal_registered_process_run(run_id, signal_name)
-        finally:
-            _signal_local_process_group(signal_name, process)
+    if run_id:
+        signal_registered_process_run(run_id, signal_name)
         return
     _signal_local_process_group(signal_name, process)
 

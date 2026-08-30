@@ -358,17 +358,15 @@ class Zapret2Tests(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
 
-    def test_managed_stop_signals_root_once_then_escalates_only_local_supervisor(self) -> None:
+    def test_managed_stop_delegates_to_root_without_signalling_local_group(self) -> None:
         process = mock.Mock(pid=12345)
         process.poll.return_value = None
-        process.wait.side_effect = [subprocess.TimeoutExpired(["blockcheck2.sh"], 5), None]
+        process.wait.return_value = None
 
         with (
             mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
             mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
             mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
-            mock.patch("gp_control_plane.zapret2.signal.SIGTERM", "term-signal"),
-            mock.patch("gp_control_plane.zapret2.signal.SIGKILL", "kill-signal", create=True),
         ):
             _stop_process_group(process, run_id="managed-run")
 
@@ -376,13 +374,10 @@ class Zapret2Tests(unittest.TestCase):
             signal_registered.call_args_list,
             [mock.call("managed-run", "TERM")],
         )
-        self.assertEqual(
-            killpg.call_args_list,
-            [mock.call(12345, "term-signal"), mock.call(12345, "kill-signal")],
-        )
-        self.assertEqual(process.wait.call_count, 2)
+        killpg.assert_not_called()
+        process.wait.assert_called_once_with(timeout=5)
 
-    def test_managed_stop_propagates_stale_root_record_after_signalling_local_supervisor(self) -> None:
+    def test_managed_stop_propagates_stale_root_record_without_signalling_local_group(self) -> None:
         process = mock.Mock(pid=12345)
         process.poll.return_value = None
         process.wait.return_value = None
@@ -400,7 +395,7 @@ class Zapret2Tests(unittest.TestCase):
                 _stop_process_group(process, run_id="managed-run")
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
-        killpg.assert_called_once_with(12345, "term-signal")
+        killpg.assert_not_called()
         process.wait.assert_not_called()
 
     def test_managed_stop_propagates_integrity_failure_even_if_message_mentions_stale_record(self) -> None:
@@ -420,10 +415,10 @@ class Zapret2Tests(unittest.TestCase):
                 _stop_process_group(process, run_id="managed-run")
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
-        killpg.assert_called_once_with(12345, "term-signal")
+        killpg.assert_not_called()
         process.wait.assert_not_called()
 
-    def test_managed_signal_still_signals_local_supervisor_when_helper_fails(self) -> None:
+    def test_managed_signal_does_not_signal_local_group_when_helper_fails(self) -> None:
         process = mock.Mock(pid=12345)
 
         with (
@@ -439,7 +434,76 @@ class Zapret2Tests(unittest.TestCase):
                 _signal_process_group("TERM", process, run_id="managed-run")
 
         signal_registered.assert_called_once_with("managed-run", "TERM")
-        killpg.assert_called_once_with(12345, "term-signal")
+        killpg.assert_not_called()
+
+    def test_managed_stop_refuses_local_kill_after_registered_signal_timeout(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired(["blockcheck2.sh"], 5)
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=False),
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "managed root process did not terminate"):
+                _stop_process_group(process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        killpg.assert_not_called()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_root_managed_stop_delegates_to_helper_without_signalling_local_group(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.return_value = None
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            _stop_process_group(process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        killpg.assert_not_called()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_root_managed_stop_propagates_helper_failure_without_local_signal(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+            mock.patch(
+                "gp_control_plane.zapret2.signal_registered_process_run",
+                side_effect=RuntimeError("root-helper rejected registered process signal"),
+            ) as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "root-helper rejected"):
+                _stop_process_group(process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        killpg.assert_not_called()
+        process.wait.assert_not_called()
+
+    def test_root_managed_stop_refuses_local_kill_after_registered_signal_timeout(self) -> None:
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired(["blockcheck2.sh"], 5)
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+            mock.patch("gp_control_plane.zapret2.signal_registered_process_run") as signal_registered,
+            mock.patch("gp_control_plane.zapret2.os.killpg", create=True) as killpg,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "managed root process did not terminate"):
+                _stop_process_group(process, run_id="managed-run")
+
+        signal_registered.assert_called_once_with("managed-run", "TERM")
+        killpg.assert_not_called()
+        process.wait.assert_called_once_with(timeout=5)
 
     def test_stop_process_group_propagates_timeout_after_kill_wait(self) -> None:
         process = mock.Mock(pid=12345)
@@ -485,6 +549,19 @@ table inet blockcheck42
             signal_registered_process_run("a" * 32, "TERM")
 
         self.assertEqual(calls, [["/usr/bin/sudo", "-n", "/helper/gp-root-helper", "signal-run", "a" * 32, "TERM"]])
+
+    def test_root_registered_process_signal_uses_root_helper(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+
+        with (
+            mock.patch("gp_control_plane.zapret2._is_root", return_value=True),
+            mock.patch("gp_control_plane.zapret2._run_recovery_root_helper", return_value=completed) as root_helper,
+            mock.patch("gp_control_plane.zapret2._run_root_helper") as sudo_helper,
+        ):
+            signal_registered_process_run("a" * 32, "TERM")
+
+        root_helper.assert_called_once_with(["signal-run", "a" * 32, "TERM"])
+        sudo_helper.assert_not_called()
 
     def test_immediate_stop_waits_for_root_attestation_before_signalling(self) -> None:
         for phase in ("v1", "v2-before-go"):
