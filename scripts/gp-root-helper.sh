@@ -266,6 +266,16 @@ wait_for_owned_run_status() {
       status_result="$?"
     fi
     [ "$status_result" -eq 1 ] || return 2
+    # A killed supervisor can remain as this shell's unreaped zombie.  Its
+    # /proc identity still matches, but the attested process group is already
+    # empty.  Treat that as a terminal missing-status result so the caller can
+    # wait(1) for and reap its child instead of polling the zombie forever.
+    if known_process_group_is_empty "$known_pid" "$known_pgid"; then
+      return 1
+    else
+      group_status="$?"
+      [ "$group_status" -eq 1 ] || return 2
+    fi
     if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
       :
     else

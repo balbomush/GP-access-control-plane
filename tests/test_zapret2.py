@@ -2359,11 +2359,15 @@ run_owned_multidomain_target "$2" "$3"
                     ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
                 )
                 self.assertEqual(stopped.returncode, 0, stopped.stderr)
-                self.assertEqual(managed.wait(timeout=8), 143)
+                # signal-run may report the target group as stopped before the
+                # wrapper observes target-status. Its original launcher must
+                # still reap promptly and surface that incomplete status.
+                self.assertNotEqual(managed.wait(timeout=8), 0)
                 self.assertFalse(runner.exists())
                 self.assertFalse(runner.parent.exists())
                 self.assertFalse((registry / run_id).exists())
                 self.assertFalse((registry / f".{run_id}.lock").exists())
+                self.assertFalse(_any_process_carries_argument(run_id))
                 self.assertEqual(sorted(path.name for path in temp_root.iterdir()), ["keep"])
                 self.assertEqual((keep / "sentinel").read_text(encoding="utf-8"), "keep\n")
             finally:
@@ -3133,6 +3137,14 @@ def _pid_is_live(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def _any_process_carries_argument(argument: str) -> bool:
+    """Check the root-helper regression only after its original launcher reaps."""
+    completed = subprocess.run(["ps", "-eo", "args="], text=True, capture_output=True, check=False)
+    if completed.returncode != 0:
+        raise AssertionError(f"ps inspection failed: {completed.stderr}")
+    return any(argument in line for line in completed.stdout.splitlines())
 
 
 def _posix_shell() -> str | None:

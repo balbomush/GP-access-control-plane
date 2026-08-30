@@ -63,6 +63,36 @@ from gp_control_plane.strategy_finder import (
 
 
 class StrategyFinderTests(unittest.TestCase):
+    def test_managed_stop_reports_terminal_result_only_after_helper_launcher_exits(self) -> None:
+        process = Mock()
+        process.returncode = None
+        process.wait.side_effect = [subprocess.TimeoutExpired(["sudo", "gp-root-helper"], 5), 143]
+
+        with patch.object(strategy_finder_module, "_stop_process_group") as stop:
+            result = _wait_process_after_stop(process, "helper-owned-launcher")
+
+        self.assertEqual(result, 143)
+        stop.assert_called_once_with(process, "helper-owned-launcher")
+        self.assertEqual(process.wait.call_count, 2)
+
+    def test_managed_launcher_nontermination_is_not_locally_killed(self) -> None:
+        process = Mock()
+        process.returncode = None
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["sudo", "gp-root-helper"], 5),
+            subprocess.TimeoutExpired(["sudo", "gp-root-helper"], 5),
+        ]
+
+        with (
+            patch.object(strategy_finder_module, "_stop_process_group") as stop,
+            patch("gp_control_plane.zapret2._signal_local_process_group") as local_signal,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not terminate after stop"):
+                _wait_process_after_stop(process, "helper-launcher-still-live")
+
+        stop.assert_called_once_with(process, "helper-launcher-still-live")
+        local_signal.assert_not_called()
+
     def test_wait_process_after_stop_rejects_still_live_process(self) -> None:
         process = Mock()
         process.returncode = None
