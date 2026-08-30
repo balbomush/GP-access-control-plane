@@ -27,11 +27,32 @@ git -C "$source_dir" checkout --detach "$CANDIDATE_SHA"
 [ "$(git -C "$source_dir" rev-parse refs/remotes/origin/dev)" = "$CANDIDATE_SHA" ] || fail 'candidate SHA is not the frozen origin/dev tip'
 [ -z "$(git -C "$source_dir" status --porcelain)" ] || fail 'exact candidate source tree is not clean'
 initial_install=off
-if python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"; then
+if [ -e "$legacy_state" ] || [ -L "$legacy_state" ]; then
+  [ -d "$legacy_state" ] && [ ! -L "$legacy_state" ] \
+    || fail "canonical legacy state is not a non-symlink directory: $legacy_state"
+  legacy_state_canonical="$(readlink -f -- "$legacy_state" 2>/dev/null || true)"
+  [ "$legacy_state_canonical" = "$legacy_state" ] \
+    || fail "canonical legacy state path is unsafe: $legacy_state"
+  legacy_strategy_dir="$legacy_state/strategy-finder"
+  [ -d "$legacy_strategy_dir" ] && [ ! -L "$legacy_strategy_dir" ] \
+    || fail "canonical legacy strategy-finder is not a non-symlink directory: $legacy_strategy_dir"
+  legacy_strategy_dir_canonical="$(readlink -f -- "$legacy_strategy_dir" 2>/dev/null || true)"
+  [ "$legacy_strategy_dir_canonical" = "$legacy_state_canonical/strategy-finder" ] \
+    || fail "canonical legacy strategy-finder path escapes state: $legacy_strategy_dir"
+  legacy_sqlite="$legacy_strategy_dir/state.sqlite3"
+  [ -f "$legacy_sqlite" ] && [ ! -L "$legacy_sqlite" ] \
+    || fail "canonical legacy state has an invalid layout: $legacy_state"
+  legacy_sqlite_canonical="$(readlink -f -- "$legacy_sqlite" 2>/dev/null || true)"
+  [ "$legacy_sqlite_canonical" = "$legacy_strategy_dir_canonical/state.sqlite3" ] \
+    || fail "canonical legacy state database path escapes state: $legacy_sqlite"
+  if python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"; then
+    :
+  else
+    python3 "$source_dir/scripts/clean-install-vault.py" --state-dir "$legacy_state" --home "$HOME"
+    python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"
+  fi
+elif python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"; then
   :
-elif [ -d "$legacy_state" ] && [ ! -L "$legacy_state" ]; then
-  python3 "$source_dir/scripts/clean-install-vault.py" --state-dir "$legacy_state" --home "$HOME"
-  python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"
 else
   initial_install=on
 fi

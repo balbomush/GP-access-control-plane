@@ -57,7 +57,7 @@ Headless-сценарий устанавливает только `gp-control-pl
 - Чтение storage, backups, candidates, runs, settings, release metadata.
 - Вызов `gp-root-helper` для привилегированных операций.
 
-Такой режим остается для ручного rollback и совместимости. Установщик в обычном режиме должен использовать split-runtime: `gp-control-plane core` + `gp-control-plane web --core-url http://127.0.0.1:8081`.
+Такой режим сохраняется только как compatibility-mode процесса. Установщик в обычном режиме использует split-runtime: `gp-control-plane core` + `gp-control-plane web --core-url http://127.0.0.1:8081`.
 
 ## Ответственность Процессов
 
@@ -95,7 +95,6 @@ Core service не должен отдавать готовые UI-карточк
 
 - запуск `blockcheck2`/`nfqws2` с нужными правами;
 - остановка процессов и cleanup сетевых артефактов;
-- установка/обновление/rollback через root-level действия;
 - операции, которые нельзя безопасно выполнять из непривилегированного Core process.
 
 Core API вызывает root-helper через явные команды. Web service не должен вызывать root-helper напрямую.
@@ -322,15 +321,28 @@ Compatibility-mode:
 - старый единый web-режим не удаляется без отдельного решения;
 - установленный default-runtime использует split: Core service + Web proxy service.
 
-## Migration И Rollback
+## Поддерживаемая Установка И Перенос Данных
 
 ### Постоянный Каталог Данных (v0.4.0)
 
 Для новой рабочей установки каталог данных является соседним с каталогом проекта. Например, при `~/gp/GP-access-control-plane` состояние находится в `~/gp/.GP-access-control-plane.data/state`, а файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
 
-При строгом обновлении релиза установщик автоматически переносит прежние данные из каталога проекта в этот постоянный каталог. Явно заданный внешний `GP_STATE_DIR` не переносится и остаётся по указанному пути.
+Текущий v0.4.0 release route не является update или возвратом к старой
+установке. Поддерживается только односторонняя последовательность:
 
-Откат кода возвращает предыдущий код и перезапускает сервисы, но не откатывает пользовательские данные и не отменяет перенос. Для возврата данных нужен ранее созданный бекап.
+`vault → fresh install → verified restore`.
+
+Legacy-приложение создаёт vault на той же плате. Затем fresh install удаляет
+только фиксированную GP-поверхность и ставит v0.4.0. После явного подтверждения
+restore продукт проверяет импорт и SQLite; источник удаляется только при
+`completed=true`, `verification.verified=true`, `storage_status.ready=true` и
+`cleanup.source_deleted=true`. При сбое vault/handoff остаются на этой же
+плате для повторного fresh install или restore. Vault, handoff, raw SQLite и
+ZIP не переносятся между платами. Root не читает, не копирует и не удаляет эти
+user-owned private материалы.
+
+Эта документация не задаёт privileged transport, snapshot или историческую
+процедуру возврата. Они не являются текущим эксплуатационным маршрутом.
 
 ### Durable/Ephemeral State Plan
 
@@ -344,7 +356,7 @@ Compatibility-mode:
 
 Очередь реализации:
 
-Статус текущего переходного этапа: пункты 1-3 реализованы. `app_settings` добавлен в SQLite schema v11; `GET /api/core/run-settings` и `POST /api/core/run-settings/save` используют SQLite как основной источник, а `state.json.settings` остается совместимой копией для rollback. Backup schema v6 переносит `app_settings`; старые snapshot schema v5 поддерживаются, но настройки не заменяют.
+Статус текущего переходного этапа: пункты 1-3 реализованы. `app_settings` добавлен в SQLite schema v11; `GET /api/core/run-settings` и `POST /api/core/run-settings/save` используют SQLite как основной источник, а `state.json.settings` остаётся временной совместимой копией. Backup schema v6 переносит `app_settings`; старые snapshot schema v5 поддерживаются, но настройки не заменяют.
 
 Статус модульного split: `index_html()` вынесен в `web/ui.py`, Swagger/OpenAPI helpers - в `web/docs.py`, Web proxy - в `web/proxy.py`, Core entrypoint - в `web/core_server.py`; `web.app` сохраняет compatibility-wrapper'ы для старых импортов.
 
@@ -356,12 +368,7 @@ Compatibility-mode:
 4. После стабильного релиза удалить запись новых `settings` в `state.json`; HTTP compatibility для legacy `/api/settings` в alpha уже удалена.
 5. `run_preferences` оставить в web/ephemeral state до отдельного решения, потому что это состояние формы UI, а не Core product data.
 
-Rollback:
-
-- До пункта 4 rollback безопасен: старый код продолжает читать `state.json.settings`.
-- После пункта 4 rollback требует либо предварительного backup, либо compatibility-write в `state.json.settings` на один переходный релиз.
-- Backup/restore включает `app_settings` в schema v6; старые snapshot schema v5 не трогают настройки.
-- Если SQLite migration не проходит, сервис не должен очищать `state.json`; API возвращает понятную ошибку storage/data state.
+Если SQLite migration не проходит, сервис не должен очищать `state.json`; API возвращает понятную ошибку storage/data state. Backup/restore включает `app_settings` в schema v6; старые snapshot schema v5 не трогают настройки.
 
 Минимальные тесты:
 
@@ -378,14 +385,6 @@ Rollback:
 4. Выполнено: legacy root-level `/api/...` URL удалены; proxy отклоняет legacy/unknown API как 404 и не ведет old-to-new mapping table.
 5. Выполнено: `index_html`, Swagger/OpenAPI helpers, Web proxy и Core entrypoint вынесены в отдельные модули.
 6. Выполнено: resource budget для Pi2 зафиксирован в `docs/resource-budget.md`, backup upload снижен до 64 MiB, streaming chunks вынесены в `resource_budget.py`.
-
-Rollback:
-
-- строгое обновление при ошибке после публикации возвращает предыдущий код и точную legacy-привилегированную поверхность, включая service unit (`rollback_scope=legacy-privileged-surface`); оно не создаёт резервную копию данных перед миграцией;
-- постоянный state-dir не возвращается к прежнему расположению вместе с кодом;
-- старый `gp-control-plane web` продолжает запускаться на том же state-dir;
-- rollback возвращает прежний service unit и установленный ref/tag;
-- backup restore остается через Core storage model.
 
 ## Compatibility Decisions
 
@@ -408,5 +407,4 @@ Rollback:
 - alpha-решение по старым URL зафиксировано: legacy root-level `/api/...` удалены, compatibility layer/aliasing до 1.0 не добавляется;
 - тесты для legacy/unknown API 404 без old-to-new mapping;
 - installer/systemd сценарии для default Web UI и headless install;
-- сценарий отката кода при строгом обновлении с проверкой совместимости state-dir;
 - оценку нагрузки на слабой плате только как архитектурную проверку, без релизного использования feature-ветки на контрольной плате.

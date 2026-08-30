@@ -13,6 +13,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.backups import (
+    clean_install_vault_info,
+    create_clean_install_vault,
     create_post_run_snapshot,
     create_snapshot,
     create_snapshot_if_idle,
@@ -33,6 +35,29 @@ from gp_control_plane.strategy_finder import parse_blockcheck_stdout, read_candi
 
 
 class BackupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "vault ownership and modes are POSIX-only")
+    def test_clean_install_vault_requires_private_target_user_ownership_and_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw) / "home"
+            state_dir = Path(raw) / "state"
+            create_clean_install_vault(state_dir, target_home=home)
+            vault = home / ".local" / "share" / "gp-control-plane" / "clean-install-vault"
+            archive = vault / "archive.zip"
+
+            vault.chmod(0o755)
+            with self.assertRaisesRegex(PermissionError, "vault ownership or permissions are unsafe"):
+                clean_install_vault_info(target_home=home)
+            vault.chmod(0o700)
+
+            archive.chmod(0o640)
+            with self.assertRaisesRegex(PermissionError, "archive ownership or permissions are unsafe"):
+                clean_install_vault_info(target_home=home)
+            archive.chmod(0o600)
+
+            with mock.patch("gp_control_plane.backups.os.getuid", return_value=os.getuid() + 1):
+                with self.assertRaisesRegex(PermissionError, "vault ownership or permissions are unsafe"):
+                    clean_install_vault_info(target_home=home)
+
     def test_snapshot_uses_one_read_transaction_during_concurrent_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw) / "state"

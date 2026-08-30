@@ -47,6 +47,33 @@ def _root_helper_test_source(helper: Path) -> str:
 
 
 class Zapret2Tests(unittest.TestCase):
+    def test_root_helper_accepts_only_blockcheck_digits_table_names(self) -> None:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX sh interpreter")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            calls = root / "nft.log"
+            (fake_bin / "nft").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GP_TEST_NFT_LOG"\n', encoding="utf-8")
+            (fake_bin / "nft").chmod(0o700)
+            helper_copy = root / "helper.sh"
+            helper_copy.write_text(
+                _root_helper_test_source(helper).replace(
+                    "\nrequire_root\n\ncommand=", "\n: # parser test intentionally bypasses root requirement\n\ncommand=", 1
+                ),
+                encoding="utf-8",
+            )
+            env = {**os.environ, "PATH": _posix_shell_path(fake_bin), "GP_TEST_NFT_LOG": _posix_shell_path(calls)}
+            accepted = subprocess.run([shell, _posix_shell_path(helper_copy), "nft-delete-blockcheck-table", "inet", "blockcheck1"], env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            rejected = subprocess.run([shell, _posix_shell_path(helper_copy), "nft-delete-blockcheck-table", "inet", "blockcheck1-other"], env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(rejected.returncode, 126)
+            self.assertIn("unsupported nft table", rejected.stderr)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["delete table inet blockcheck1"])
+
     def test_public_cleanup_nft_blockcheck_tables_delegates_to_private_cleanup(self) -> None:
         with mock.patch("gp_control_plane.zapret2._cleanup_nft_blockcheck_tables") as private_cleanup:
             cleanup_nft_blockcheck_tables()

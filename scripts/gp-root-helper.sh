@@ -1686,8 +1686,11 @@ case "$command" in
       *) fail "unsupported nft family: $family" ;;
     esac
     case "$table" in
-      blockcheck[0-9]*) ;;
+      blockcheck*) table_digits="${table#blockcheck}" ;;
       *) fail "unsupported nft table: $table" ;;
+    esac
+    case "$table_digits" in
+      ''|*[!0-9]*) fail "unsupported nft table: $table" ;;
     esac
     exec nft delete table "$family" "$table"
     ;;

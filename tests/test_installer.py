@@ -23,7 +23,11 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('python3 "$source_dir/scripts/clean-install-vault.py"', self.bootstrap)
         self.assertEqual(self.bootstrap.count("sudo --"), 1)
         self.assertIn('git -C "$source_dir" status --porcelain', self.bootstrap)
-        self.assertIn('if [ -d "$legacy_state" ]', self.bootstrap)
+        self.assertIn('[ -e "$legacy_state" ] || [ -L "$legacy_state" ]', self.bootstrap)
+        self.assertIn('canonical legacy state is not a non-symlink directory', self.bootstrap)
+        self.assertIn('canonical legacy state has an invalid layout', self.bootstrap)
+        self.assertIn('canonical legacy strategy-finder is not a non-symlink directory', self.bootstrap)
+        self.assertIn('canonical legacy strategy-finder path escapes state', self.bootstrap)
         self.assertIn('--verify --state-dir "$legacy_state"', self.bootstrap)
         self.assertLess(self.bootstrap.index('--verify --state-dir "$legacy_state"'), self.bootstrap.index('python3 "$source_dir/scripts/clean-install-vault.py" --state-dir'))
         self.assertIn('initial_install=on', self.bootstrap)
@@ -115,7 +119,10 @@ class CleanInstallerTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as raw:
             sandbox = Path(raw); fake_bin = sandbox / "bin"; home = sandbox / "home"; log = sandbox / "calls.log"
-            fake_bin.mkdir(); (home / "gp" / "GP-access-control-plane" / "build" / "state").mkdir(parents=True)
+            fake_bin.mkdir()
+            legacy_state = home / "gp" / "GP-access-control-plane" / "build" / "state"
+            (legacy_state / "strategy-finder").mkdir(parents=True)
+            (legacy_state / "strategy-finder" / "state.sqlite3").write_bytes(b"sqlite")
             def bash_path(path: Path) -> str:
                 raw_path = path.resolve().as_posix()
                 return f"/{raw_path[0].lower()}{raw_path[2:]}" if len(raw_path) > 2 and raw_path[1] == ":" else raw_path
@@ -132,6 +139,70 @@ class CleanInstallerTests(unittest.TestCase):
             second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["VERIFY", "SUDO", "VERIFY", "SUDO"])
+
+    def test_present_invalid_legacy_state_stops_before_sudo_for_both_bootstraps(self) -> None:
+        git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+        bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
+        if not bash:
+            self.skipTest("bash is required")
+        root = Path(__file__).resolve().parents[1]
+        candidate = "a" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            sandbox = Path(raw)
+            fake_bin = sandbox / "bin"
+            fake_bin.mkdir()
+
+            def bash_path(path: Path) -> str:
+                raw_path = path.resolve().as_posix()
+                return f"/{raw_path[0].lower()}{raw_path[2:]}" if len(raw_path) > 2 and raw_path[1] == ":" else raw_path
+
+            def fake(name: str, body: str) -> None:
+                path = fake_bin / name
+                path.write_text("#!/usr/bin/env bash\nset -eu\n" + body, encoding="utf-8")
+                path.chmod(0o755)
+
+            fake("id", 'case "$1" in -u) echo 1000;; -un) echo gpuser;; *) exit 64;; esac\n')
+            fake("git", 'case "$1" in clone) dest="${!#}"; mkdir -p "$dest/scripts";; -C) shift 2; case "$1" in cat-file) echo tag;; checkout|status) :;; rev-parse) printf "%s\\n" "${GP_TEST_CANDIDATE_SHA}";; *) exit 64;; esac;; *) exit 64;; esac\n')
+            fake("python3", 'echo PYTHON >> "$TEST_LOG"; exit 99\n')
+            fake("sudo", 'echo SUDO >> "$TEST_LOG"; exit 64\n')
+
+            for kind in ("symlink", "file", "invalid-directory", "strategy-finder-symlink"):
+                for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh"):
+                    with self.subTest(kind=kind, script=script):
+                        home = sandbox / f"home-{kind}-{script}"
+                        legacy_state = home / "gp" / "GP-access-control-plane" / "build" / "state"
+                        legacy_state.parent.mkdir(parents=True)
+                        if kind == "symlink":
+                            target = sandbox / f"target-{script}"
+                            target.mkdir()
+                            try:
+                                legacy_state.symlink_to(target, target_is_directory=True)
+                            except OSError as exc:
+                                self.skipTest(f"symlink creation is unavailable: {exc}")
+                        elif kind == "file":
+                            legacy_state.write_text("not a directory", encoding="utf-8")
+                        elif kind == "invalid-directory":
+                            legacy_state.mkdir()
+                        else:
+                            legacy_state.mkdir()
+                            target = sandbox / f"strategy-target-{script}"
+                            target.mkdir()
+                            (target / "state.sqlite3").write_bytes(b"sqlite")
+                            try:
+                                (legacy_state / "strategy-finder").symlink_to(target, target_is_directory=True)
+                            except OSError as exc:
+                                self.skipTest(f"symlink creation is unavailable: {exc}")
+                        log = sandbox / f"{kind}-{script}.log"
+                        env = {**os.environ, "HOME": bash_path(home), "TEST_LOG": bash_path(log), "GP_TEST_CANDIDATE_SHA": candidate}
+                        if script == "bootstrap-linux.sh":
+                            env["GP_BRANCH"] = "v0.4.0"
+                            command = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / script)]
+                        else:
+                            command = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), candidate]
+                        completed = subprocess.run(command, env=env, capture_output=True, text=True)
+                        self.assertNotEqual(completed.returncode, 0)
+                        self.assertIn("canonical legacy", completed.stderr)
+                        self.assertFalse(log.exists(), "invalid legacy state must stop before Python or sudo")
 
     def test_hardware_bootstrap_rejects_non_frozen_or_short_sha_before_sudo(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")

@@ -1435,14 +1435,24 @@ def _local_device_binding() -> str:
 def _simple_private_file(path: Path, label: str) -> None:
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"{label} is missing or unsafe")
-    if os.name == "posix" and path.stat().st_mode & 0o777 != _VAULT_FILE_MODE:
-        raise PermissionError(f"{label} permissions are unsafe")
+    if os.name == "posix":
+        metadata = path.stat()
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != _VAULT_FILE_MODE:
+            raise PermissionError(f"{label} ownership or permissions are unsafe")
+
+
+def _simple_private_directory(path: Path, label: str) -> None:
+    if not path.is_dir() or path.is_symlink():
+        raise ValueError(f"{label} is missing or unsafe")
+    if os.name == "posix":
+        metadata = path.stat()
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != _VAULT_DIRECTORY_MODE:
+            raise PermissionError(f"{label} ownership or permissions are unsafe")
 
 
 def _simple_read_vault(target_home: Path | None) -> tuple[Path, Path, Path, Path, dict[str, Any]]:
     vault, archive, entry, handoff = _simple_vault_paths(target_home)
-    if not vault.is_dir() or vault.is_symlink():
-        raise ValueError("clean-install vault is missing or unsafe")
+    _simple_private_directory(vault, "clean-install vault")
     if {item.name for item in vault.iterdir()} != {_VAULT_ARCHIVE_NAME, _VAULT_ENTRY_NAME, handoff.name}:
         raise ValueError("clean-install vault has unexpected source members")
     _simple_private_file(archive, "clean-install vault archive")
