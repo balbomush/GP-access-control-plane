@@ -1047,6 +1047,7 @@ pktws_check_https_tls12()
     def test_read_candidate_page_keeps_large_database_paged(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
+            candidate_count = 250  # Ten pages: enough to exercise a nontrivial paged result set.
             candidates = [
                 {
                     "protocol": "tls",
@@ -1054,13 +1055,13 @@ pktws_check_https_tls12()
                     "status": "candidate",
                     "seen": [{"domain": "youtube.com"}],
                 }
-                for index in range(1200)
+                for index in range(candidate_count)
             ]
             _store_candidate_rows(state_dir, candidates)
 
             page = read_candidate_page(state_dir, limit=25, domain="youtube.com")
 
-            self.assertEqual(page["total"], 1200)
+            self.assertEqual(page["total"], candidate_count)
             self.assertEqual(len(page["candidates"]), 25)
             self.assertTrue(page["has_more"])
             self.assertLess(len(json.dumps(page, ensure_ascii=False)), 20000)
