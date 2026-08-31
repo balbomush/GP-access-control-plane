@@ -36,6 +36,8 @@ from ..domain_sources import (
     read_v2fly_group_manifest,
     write_v2fly_catalog_cache,
 )
+from ..blockchecks_backend import export_nfconf, run_blockchecks_discovery, stop_blockchecks
+from ..discovery_engine import campaign_lock_busy_message, is_blockchecks_job, normalize_engine
 from ..jobs import JobRunner
 from ..releases import release_channel_info
 from ..resource_budget import (
@@ -356,18 +358,30 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return core_api.action_accepted_payload(job), HTTPStatus.ACCEPTED
 
             def start_strategy_discovery() -> tuple[dict[str, Any], HTTPStatus]:
-                name, core_payload = core_api.strategy_discovery_job_payload(payload)
-                func = (
-                    (lambda stop, run_id: _job_zapret_multi_domain_discovery(config, core_payload, stop, run_id))
-                    if name == "zapret-multi-domain-discovery"
-                    else (lambda stop, run_id: _job_zapret_standard_discovery(config, core_payload, stop, run_id))
-                )
+                incoming = dict(payload)
+                nested = incoming.get("settings") if isinstance(incoming.get("settings"), dict) else {}
+                if "discovery_engine" not in nested:
+                    incoming["settings"] = {
+                        **nested,
+                        "discovery_engine": read_run_settings(config).get("discovery_engine"),
+                    }
+                name, core_payload = core_api.strategy_discovery_job_payload(incoming)
+                if is_blockchecks_job(name) and campaign_lock_busy_message():
+                    raise RuntimeBusyError()
+                func = lambda stop, run_id: _job_discovery(config, name, core_payload, stop, run_id)
+                cancel_hook = stop_blockchecks if is_blockchecks_job(name) else cleanup_nft_blockcheck_tables
                 job = runner.start(
                     name,
                     func,
-                    cancel_hook=cleanup_nft_blockcheck_tables,
+                    cancel_hook=cancel_hook,
                 )
                 return core_api.run_accepted_payload(job), HTTPStatus.ACCEPTED
+
+            def export_blockchecks_nfconf() -> tuple[dict[str, Any], HTTPStatus]:
+                raw_dir = payload.get("out_dir")
+                out_dir = Path(str(raw_dir)) if raw_dir else None
+                limit = int(payload.get("limit") or 5)
+                return export_nfconf(out_dir=out_dir, limit=limit), HTTPStatus.OK
 
             def create_core_backup() -> tuple[dict[str, Any], HTTPStatus]:
                 created = create_snapshot_if_idle(config.output.state_dir)
@@ -443,6 +457,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 ),
                 "/api/core/strategy-discovery/stop-current-run": (stop_current_run, HTTPStatus.CONFLICT, HTTPStatus.CONFLICT),
                 "/api/core/strategy-discovery/start-run": (start_strategy_discovery, HTTPStatus.CONFLICT, HTTPStatus.BAD_REQUEST),
+                "/api/core/strategy-discovery/export-nfconf": (
+                    export_blockchecks_nfconf,
+                    HTTPStatus.CONFLICT,
+                    HTTPStatus.BAD_REQUEST,
+                ),
                 "/api/core/presets/save-domain-list": (
                     lambda: (core_api.save_domain_list_payload(config, payload), HTTPStatus.OK),
                     HTTPStatus.BAD_REQUEST,
@@ -1445,6 +1464,51 @@ def _multipart_file_bytes(body: bytes, boundary: str) -> bytes:
         if payload:
             return payload
     raise ValueError("backup file is missing")
+
+
+def _job_discovery(
+    config: AppConfig, name: str, payload: dict[str, Any], stop_event: Any, run_id: str = ""
+) -> dict[str, Any]:
+    if is_blockchecks_job(name):
+        kind = "multi-domain-discovery" if "multi-domain" in name else "standard-discovery"
+        return _job_blockchecks_discovery(config, payload, stop_event, run_id, kind=kind)
+    if name == "zapret-multi-domain-discovery":
+        return _job_zapret_multi_domain_discovery(config, payload, stop_event, run_id)
+    return _job_zapret_standard_discovery(config, payload, stop_event, run_id)
+
+
+def _job_blockchecks_discovery(
+    config: AppConfig, payload: dict[str, Any], stop_event: Any, run_id: str, *, kind: str
+) -> dict[str, Any]:
+    domains = _payload_domains(payload)
+    settings = read_run_settings(config)
+    max_parallelism = _minimum_int(settings.get("curl_parallelism_max"), default=10, minimum=1)
+    return run_blockchecks_discovery(
+        domains,
+        config.output.state_dir,
+        timeout_seconds=_payload_timeout_seconds(payload, default=0),
+        include_quic=_payload_bool(payload, "include_quic", True),
+        enable_http=_payload_bool(payload, "enable_http", False),
+        enable_tls12=_payload_bool(payload, "enable_tls12", True),
+        enable_tls13=_payload_bool(payload, "enable_tls13", False),
+        enable_ipv6=_payload_bool(payload, "enable_ipv6", bool(settings.get("enable_ipv6"))),
+        scan_level=str(payload.get("scan_level") or "standard"),
+        repeats=_payload_int(payload, "repeats", 1),
+        repeat_parallel=_payload_bool(payload, "repeat_parallel", False),
+        skip_dnscheck=_payload_bool(payload, "skip_dnscheck", True),
+        skip_ipblock=_payload_bool(payload, "skip_ipblock", True),
+        curl_max_time=_minimum_int(payload.get("curl_max_time", settings.get("curl_max_time")), default=2, minimum=1),
+        curl_parallelism=_bounded_int(
+            payload.get("curl_parallelism"),
+            default=int(settings.get("curl_parallelism_default") or 4),
+            minimum=1,
+            maximum=max_parallelism,
+        ),
+        debug_stdout=_payload_bool(payload, "debug_stdout", bool(settings.get("debug_stdout"))),
+        stop_event=stop_event,
+        run_id=run_id,
+        kind=kind,
+    )
 
 
 def _job_zapret_standard_discovery(

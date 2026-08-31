@@ -19,6 +19,7 @@ DEFAULT_RUN_SETTINGS = {
     "curl_max_time_doh": 2,
     "enable_ipv6": False,
     "debug_stdout": False,
+    "discovery_engine": "blockcheck2",
 }
 
 DEFAULT_SERVICE_SETTINGS = {
@@ -104,6 +105,7 @@ def normalize_run_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "curl_max_time_doh": _minimum_int(raw.get("curl_max_time_doh"), default=2, minimum=1),
         "enable_ipv6": bool(raw.get("enable_ipv6")),
         "debug_stdout": bool(raw.get("debug_stdout")),
+        "discovery_engine": _normalize_discovery_engine(raw.get("discovery_engine")),
     }
 
 
@@ -129,6 +131,12 @@ def _migrate_service_settings(config: AppConfig, source: dict[str, Any]) -> None
         return
     if any(key in source for key in SERVICE_SETTING_KEYS):
         save_app_setting(config.output.state_dir, SERVICE_SETTINGS_KEY, normalize_service_settings(source), now_iso())
+
+
+def _normalize_discovery_engine(value: Any) -> str:
+    from .discovery_engine import normalize_engine
+
+    return normalize_engine(value)
 
 
 def _select_keys(payload: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:

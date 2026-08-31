@@ -1308,6 +1308,7 @@ def _run_settings_for_progress(run: dict[str, Any]) -> dict[str, Any]:
         "enable_quic": bool(option_value("enable_quic", ("include_quic",), True)),
         "enable_ipv6": bool(option_value("enable_ipv6", default=False)),
         "scan_level": str(option_value("scan_level", default="standard") or "standard"),
+        "discovery_engine": str(option_value("discovery_engine", default="blockcheck2") or "blockcheck2"),
         "repeats": _bounded_int(option_value("repeats", default=1), default=1, minimum=1, maximum=10),
         "repeat_parallel": bool(option_value("repeat_parallel", default=False)),
         "skip_dnscheck": bool(option_value("skip_dnscheck", default=True)),

@@ -1670,7 +1670,15 @@ pre {
                 <span class="domain-title">Расширенные параметры</span>
                 <span class="helper-text">глубина, повторы, DNS/IP-check, лимиты и timeout</span>
               </summary>
-              <div class="field scan-level-field">
+            <div class="field">
+              <label for="finder-discovery-engine">Движок подбора</label>
+              <select id="finder-discovery-engine">
+                <option value="blockcheck2">blockcheck2.sh (zapret2)</option>
+                <option value="blockchecks">blockcheckS (`bs scan`)</option>
+              </select>
+              <div class="helper-text">blockcheck2 — штатный stdout-парсер. blockcheckS — матрица `bs scan`, без эмуляции маркеров AVAILABLE. Не стартует многосуточный `bs full`.</div>
+            </div>
+            <div class="field scan-level-field">
                 <label for="discovery-profile-select">Глубина проверки стратегий</label>
                 <select id="discovery-profile-select"></select>
                 <input id="scan-level" type="hidden" value="standard">
@@ -1957,6 +1965,14 @@ pre {
             <h2>Параметры подбора</h2>
           </div>
           <div class="preset-grid">
+            <div class="field">
+              <label for="settings-discovery-engine">Движок подбора</label>
+              <select id="settings-discovery-engine">
+                <option value="blockcheck2">blockcheck2.sh (zapret2, по умолчанию)</option>
+                <option value="blockchecks">blockcheckS (`bs scan`)</option>
+              </select>
+              <div class="setting-note">Сохраняется в run_settings. blockcheckS не требует blockcheck2.sh в preflight.</div>
+            </div>
             <label class="checkbox-row">
               <input id="settings-enable-ipv6" type="checkbox">
               IPv6-проверки
@@ -2091,6 +2107,8 @@ const state = { status: null, settings: null, settingsTouched: false, runPrefere
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
+  'blockchecks-standard-discovery': 'Поиск стратегий (blockcheckS)',
+  'blockchecks-multi-domain-discovery': 'Все домены на одной стратегии (blockcheckS)',
   'standard-discovery': 'Поиск стратегий',
   'multi-domain-discovery': 'Все домены на одной стратегии'
 };
@@ -2118,6 +2136,7 @@ const API_ENDPOINTS = Object.freeze({
   core: Object.freeze({
     status: '/api/core/status',
     startStrategyDiscoveryRun: '/api/core/strategy-discovery/start-run',
+    exportNfconf: '/api/core/strategy-discovery/export-nfconf',
     stopCurrentStrategyDiscoveryRun: '/api/core/strategy-discovery/stop-current-run',
     backupsList: '/api/core/backups/list',
     backupsCreate: '/api/core/backups/create',
@@ -2561,6 +2580,19 @@ function runTimeoutSettings(){
     curl_max_time_doh: minimumInputSeconds('run-curl-max-time-doh', settings.curl_max_time_doh || 2)
   };
 }
+function selectedDiscoveryEngine(){
+  const finder = el('finder-discovery-engine');
+  if (finder && finder.value) return finder.value;
+  const settings = el('settings-discovery-engine');
+  if (settings && settings.value) return settings.value;
+  return String((state.settings || {}).discovery_engine || 'blockcheck2');
+}
+function discoveryEngineReady(status){
+  const engine = selectedDiscoveryEngine();
+  const zapret = (status || {}).zapret2 || {};
+  if (engine === 'blockchecks') return Boolean(zapret.nfqws2_found);
+  return zapretCompactStatus(zapret).ready;
+}
 function discoveryOptions(){
   const timeouts = runTimeoutSettings();
   return {
@@ -2574,6 +2606,7 @@ function discoveryOptions(){
     repeat_parallel: el('repeat-parallel').checked,
     skip_dnscheck: el('skip-dnscheck').checked,
     skip_ipblock: el('skip-ipblock').checked,
+    discovery_engine: selectedDiscoveryEngine(),
     ...timeouts
   };
 }
@@ -2606,7 +2639,7 @@ function protocolSummary(options){
 }
 function runLaunchReadiness(domains, options){
   const status = state.status || {};
-  const ready = zapretCompactStatus(status.zapret2 || {}).ready;
+  const ready = discoveryEngineReady(status);
   if (isBusy()) return { text: 'Идет подбор', tone: 'warn' };
   if (!ready) return { text: 'Требуется настройка', tone: 'warn' };
   if (!domains.length) return { text: 'Нужны домены', tone: 'warn' };
@@ -3312,7 +3345,7 @@ function renderMetrics(){
   const status = state.status || {};
   const zapret = status.zapret2 || {};
   const zapretCompact = zapretCompactStatus(zapret);
-  const ready = zapretCompact.ready;
+  const ready = discoveryEngineReady(status);
   const busy = isBusy();
   const jobStatus = currentRun()?.status || (busy ? 'running' : '');
   const version = (state.status || {}).version || '-';
@@ -3698,6 +3731,7 @@ function renderCandidateResult(){
   </details>
   <div class="candidate-result-actions">
     <button class="secondary" data-action="copy-candidate-result" type="button"${strategies.length ? '' : ' disabled'}>Скопировать для zapret2</button>
+    <button class="secondary" data-action="export-nfconf" type="button">Экспорт nfqws2 (bc-nfconf)</button>
     <button class="secondary" data-action="export-candidate-result" type="button"${strategies.length ? '' : ' disabled'}>Экспорт TXT</button>
     <button class="secondary" data-action="use-candidate-result-domains" type="button">Повторить подбор</button>
     <button class="secondary" data-action="open-candidate-result" type="button">Открыть детали</button>
@@ -4951,6 +4985,10 @@ function renderSettings(){
   const runCurlMaxTimeQuic = el('run-curl-max-time-quic');
   const runCurlMaxTimeDoh = el('run-curl-max-time-doh');
   if (ipv6) ipv6.checked = Boolean(settings.enable_ipv6);
+  const engineSelect = el('settings-discovery-engine');
+  if (engineSelect) engineSelect.value = settings.discovery_engine || 'blockcheck2';
+  const finderEngine = el('finder-discovery-engine');
+  if (finderEngine && !state.settingsTouched) finderEngine.value = settings.discovery_engine || 'blockcheck2';
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
   renderReleaseInfo();
@@ -5018,6 +5056,7 @@ function currentSettingsFromForm(){
   const timeouts = runTimeoutSettings();
   return {
     enable_ipv6: Boolean(el('settings-enable-ipv6')?.checked),
+    discovery_engine: el('settings-discovery-engine')?.value || selectedDiscoveryEngine(),
     debug_stdout: Boolean(el('settings-debug-stdout')?.checked),
     curl_parallelism_max: Number(el('settings-curl-max')?.value || 10),
     curl_parallelism_default: Number(current.curl_parallelism_default || 4),
@@ -5031,7 +5070,8 @@ const RUN_SETTING_PAYLOAD_KEYS = Object.freeze([
   'curl_max_time_quic',
   'curl_max_time_doh',
   'enable_ipv6',
-  'debug_stdout'
+  'debug_stdout',
+  'discovery_engine'
 ]);
 function runSettingsPayloadFromSettings(payload){
   const source = payload || {};
@@ -6272,6 +6312,15 @@ function selectedCoreProtocols(options){
   if (options.include_quic) protocols.push('quic');
   return protocols;
 }
+async function exportNfconfNow(){
+  try {
+    const result = await postJson(apiEndpoint('core', 'exportNfconf'), { limit: 5 });
+    const paths = (result.paths || []).join(', ');
+    setMessage(paths ? `nfconf: ${paths}` : `nfconf записан в ${result.out_dir || '-'}`, 'good');
+  } catch (error) {
+    setMessage(error.message, 'bad');
+  }
+}
 function coreStrategyDiscoveryPayload(mode, domains, options, timeout){
   const payload = {
     mode: mode === 'multi' ? 'multi_domain' : 'standard',
@@ -6397,6 +6446,10 @@ const button = event.target.closest('button');
   }
   if (button.dataset.action === 'copy-candidate-result') {
     copyCandidateResult();
+    return;
+  }
+  if (button.dataset.action === 'export-nfconf') {
+    exportNfconfNow();
     return;
   }
   if (button.dataset.action === 'export-candidate-result') {
@@ -6618,6 +6671,14 @@ document.addEventListener('change', (event) => {
   }
   if (event.target && String(event.target.id || '').startsWith('settings-')) {
     state.settingsTouched = true;
+  }
+  if (event.target && event.target.id === 'finder-discovery-engine') {
+    const settingsEngine = el('settings-discovery-engine');
+    if (settingsEngine) settingsEngine.value = event.target.value;
+  }
+  if (event.target && event.target.id === 'settings-discovery-engine') {
+    const finderEngine = el('finder-discovery-engine');
+    if (finderEngine) finderEngine.value = event.target.value;
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-category-search') {

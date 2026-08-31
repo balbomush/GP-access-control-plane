@@ -269,6 +269,47 @@
         }
       }
     },
+    "/api/core/strategy-discovery/export-nfconf": {
+      "post": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "exportStrategyDiscoveryNfconf",
+        "summary": "Export nfqws2 configs from blockcheckS state.db via bc-nfconf",
+        "description": "Does not start bs full. Reads the local blockcheckS SQLite database and writes nfqws2 .conf files.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportNfconfRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Export completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportNfconfResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/core/strategy-discovery/stop-current-run": {
       "post": {
         "tags": [
@@ -2541,6 +2582,49 @@
         },
         "additionalProperties": false
       },
+      "ExportNfconfRequest": {
+        "type": "object",
+        "properties": {
+          "out_dir": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExportNfconfResponse": {
+        "type": "object",
+        "required": [
+          "engine",
+          "out_dir",
+          "paths",
+          "db"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string",
+            "enum": [
+              "blockchecks"
+            ]
+          },
+          "out_dir": {
+            "type": "string"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "db": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "ErrorResponse": {
         "type": "object",
         "required": [
@@ -3141,6 +3225,13 @@
           },
           "debug_stdout": {
             "type": "boolean"
+          },
+          "discovery_engine": {
+            "type": "string",
+            "enum": [
+              "blockcheck2",
+              "blockchecks"
+            ]
           }
         },
         "additionalProperties": false
@@ -3410,6 +3501,16 @@
               },
               "skip_dnscheck": {
                 "type": "boolean"
+              },
+              "skip_ipblock": {
+                "type": "boolean"
+              },
+              "discovery_engine": {
+                "type": "string",
+                "enum": [
+                  "blockcheck2",
+                  "blockchecks"
+                ]
               }
             },
             "additionalProperties": false
@@ -4711,7 +4812,8 @@
           "curl_max_time_quic": 7,
           "curl_max_time_doh": 10,
           "enable_ipv6": false,
-          "debug_stdout": false
+          "debug_stdout": false,
+          "discovery_engine": "blockcheck2"
         }
       },
       "RunHistoryResponse": {

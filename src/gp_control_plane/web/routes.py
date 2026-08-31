@@ -75,6 +75,7 @@ ROUTES = (
     _route("/api/auth/change-password", {"POST"}, "auth", "json-post", openapi=True),
     _route("/api/core/status", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-discovery/start-run", {"POST"}, "core", "json-post", openapi=True),
+    _route("/api/core/strategy-discovery/export-nfconf", {"POST"}, "core", "json-post", openapi=True),
     _route("/api/core/strategy-discovery/stop-current-run", {"POST"}, "core", "json-post", openapi=True),
     _route("/api/core/strategy-discovery/current-run-progress", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-discovery/current-run-latest-log", {"GET"}, "core", "json-get", openapi=True),

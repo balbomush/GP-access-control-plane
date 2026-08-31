@@ -25,6 +25,8 @@ from .storage import (
 )
 from .strategy_finder import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_runs_page, read_strategy_candidates_filtered
 from .v2fly_payloads import v2fly_storage_status_payload
+from .discovery_engine import check_blockchecks_install, discovery_job_name, normalize_engine
+from .settings import read_run_settings
 from .zapret2 import check_install_cached
 
 
@@ -52,6 +54,7 @@ STRATEGY_DISCOVERY_START_RUN_SETTINGS_KEYS = {
     "scan_level",
     "skip_dnscheck",
     "skip_ipblock",
+    "discovery_engine",
 }
 
 
@@ -115,6 +118,9 @@ def current_progress_payload(config: AppConfig) -> dict[str, Any]:
 
 
 def preflight_payload(config: AppConfig) -> dict[str, Any]:
+    engine = normalize_engine(read_run_settings(config).get("discovery_engine"))
+    if engine == "blockchecks":
+        return check_blockchecks_install()
     zapret = check_install_cached()
     checks = []
     diagnostics = zapret.get("diagnostics") if isinstance(zapret.get("diagnostics"), list) else []
@@ -144,6 +150,7 @@ def run_settings_payload(settings: dict[str, Any]) -> dict[str, Any]:
         "curl_max_time_doh": settings.get("curl_max_time_doh"),
         "enable_ipv6": settings.get("enable_ipv6"),
         "debug_stdout": settings.get("debug_stdout"),
+        "discovery_engine": settings.get("discovery_engine"),
     }
 
 
@@ -383,11 +390,7 @@ def strategy_discovery_job_payload(payload: dict[str, Any]) -> tuple[str, dict[s
         raise ValueError("domains are required")
 
     mode = str(payload.get("mode") or "standard").strip().lower().replace("-", "_")
-    if mode in {"multi_domain", "common_strategy"}:
-        job_name = "zapret-multi-domain-discovery"
-    elif mode == "standard":
-        job_name = "zapret-standard-discovery"
-    else:
+    if mode not in {"standard", "multi_domain", "common_strategy"}:
         raise ValueError("unsupported strategy discovery mode")
 
     settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
@@ -416,7 +419,9 @@ def strategy_discovery_job_payload(payload: dict[str, Any]) -> tuple[str, dict[s
             job_payload.setdefault("enable_tls12", True)
             job_payload.setdefault("enable_tls13", False)
 
-    return job_name, job_payload
+    engine = normalize_engine(job_payload.get("discovery_engine"))
+    job_payload["discovery_engine"] = engine
+    return discovery_job_name(engine, mode), job_payload
 
 
 def payload_snapshot_id(payload: dict[str, Any]) -> str:
