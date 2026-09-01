@@ -164,6 +164,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_post_run_snapshot(config.output.state_dir))
     runtime_role = "monolith" if ui_enabled else "core"
     web_install_enabled = True if ui_enabled else None
+    # ThreadingHTTPServer handles requests concurrently.  A v2fly preparation
+    # replaces the whole local catalog, so concurrent writes must fail rather
+    # than interleave their staged storage.
+    v2fly_update_lock = threading.RLock()
 
     class Handler(BaseHTTPRequestHandler):
         def handle_one_request(self) -> None:
@@ -208,6 +212,10 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._not_found()
 
         def _json_get_routes(self, query: dict[str, list[str]]) -> dict[str, Any]:
+            def read_v2fly_catalog(action: Any) -> Any:
+                with v2fly_update_lock:
+                    return action()
+
             return {
                 "/api/health": health_payload,
                 "/api/core/status": lambda: core_api.status_payload(config),
@@ -215,8 +223,8 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/strategy-discovery/current-run-latest-log": lambda: _current_run_latest_log_payload(config, query),
                 "/api/core/strategy-discovery/preflight": lambda: core_api.preflight_payload(config),
                 "/api/core/presets/domain-lists": lambda: core_api.domain_lists_payload(config),
-                "/api/core/presets/v2fly/categories": lambda: core_api.v2fly_categories_payload(config, query),
-                "/api/core/presets/v2fly/category-domains": lambda: core_api.v2fly_category_domains_payload(config, query),
+                "/api/core/presets/v2fly/categories": lambda: read_v2fly_catalog(lambda: core_api.v2fly_categories_payload(config, query)),
+                "/api/core/presets/v2fly/category-domains": lambda: read_v2fly_catalog(lambda: core_api.v2fly_category_domains_payload(config, query)),
                 "/api/core/backups/list": lambda: core_api.backups_list_payload(config),
                 "/api/core/clean-install-vaults/list": lambda: {
                     "vaults": [
@@ -233,16 +241,16 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/runs/latest-log": lambda: _latest_log_payload(config, query),
                 "/api/core/strategy-candidates": lambda: core_api.strategy_candidates_payload(config, query),
                 "/api/core/events": lambda: _events_response_payload(config, query, stream="core"),
-                "/api/service/status": lambda: service_api.service_status_payload(
+                "/api/service/status": lambda: read_v2fly_catalog(lambda: service_api.service_status_payload(
                     config,
                     current_version=__version__,
                     runtime_role=runtime_role,
                     web_enabled=web_install_enabled,
-                ),
+                )),
                 "/api/service/releases/available": lambda: service_api.available_releases_payload(
                     read_service_settings(config), current_version=__version__
                 ),
-                "/api/service/v2fly/local-storage-status": lambda: service_api.v2fly_storage_status_payload(config),
+                "/api/service/v2fly/local-storage-status": lambda: read_v2fly_catalog(lambda: service_api.v2fly_storage_status_payload(config)),
             }
 
         def _dispatch_json_get(self, path: str, query: dict[str, list[str]]) -> None:
@@ -420,12 +428,20 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
 
             def v2fly_check_updates() -> tuple[dict[str, Any], HTTPStatus]:
                 ensure_service_action_idle()
-                return service_api.v2fly_check_updates_payload(config), HTTPStatus.OK
+                with v2fly_update_lock:
+                    return service_api.v2fly_check_updates_payload(config), HTTPStatus.OK
 
             def v2fly_update_local_storage() -> tuple[dict[str, Any], HTTPStatus]:
                 if not payload.get("dry_run"):
                     ensure_service_action_idle()
-                return service_api.v2fly_update_local_storage_payload(config, payload), HTTPStatus.OK
+                    if not v2fly_update_lock.acquire(blocking=False):
+                        raise RuntimeError("v2fly catalog update is already running")
+                    try:
+                        return service_api.v2fly_update_local_storage_payload(config, payload), HTTPStatus.OK
+                    finally:
+                        v2fly_update_lock.release()
+                with v2fly_update_lock:
+                    return service_api.v2fly_update_local_storage_payload(config, payload), HTTPStatus.OK
 
             return {
                 "/api/auth/login": (
@@ -809,6 +825,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
 
 def web_json_get_payload(config: AppConfig, path: str, query: dict[str, list[str]]) -> dict[str, Any]:
     routes = {
+        "/api/web/status": lambda: status_payload(config),
         "/api/web/run-preferences": lambda: {"run_preferences": read_run_preferences(config)},
         "/api/web/runs/history-page": lambda: _runs_page_payload(config, query),
         "/api/web/candidate-domain-index-page": lambda: _candidate_domain_index_payload(config, query),

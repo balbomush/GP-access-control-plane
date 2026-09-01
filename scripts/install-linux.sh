@@ -74,6 +74,11 @@ install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$state_parent" "$state_dir"
 runuser -u "$INSTALL_USER" -- python3 -m venv "$install_dir/.venv"
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"
+# The v2fly cache is disposable service data.  A network failure must not undo a
+# successful clean install: the authenticated Web action can retry it later.
+if ! runuser -u "$INSTALL_USER" -- env GP_STATE_DIR="$state_dir" "$install_dir/.venv/bin/gp-control-plane" domain-sources prepare-v2fly; then
+  printf '%s\n' 'WARNING: v2fly catalog was not prepared; start the service and retry from the Web interface.' >&2
+fi
 install -d -m 0755 /usr/local/libexec/gp-control-plane
 install -m 0755 "$install_dir/scripts/gp-root-helper.sh" /usr/local/libexec/gp-control-plane/gp-root-helper
 cat > /etc/sudoers.d/gp-control-plane-root-helper <<EOF

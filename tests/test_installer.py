@@ -83,6 +83,71 @@ class CleanInstallerTests(unittest.TestCase):
             self.installer,
         )
 
+    def test_installer_prepares_v2fly_once_as_install_user_without_blocking_service_start(self) -> None:
+        prepare = 'runuser -u "$INSTALL_USER" -- env GP_STATE_DIR="$state_dir" "$install_dir/.venv/bin/gp-control-plane" domain-sources prepare-v2fly'
+        pip_install = 'runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"'
+        first_service_start = 'systemctl daemon-reload; systemctl enable --now gp-control-plane-core.service'
+
+        self.assertEqual(self.installer.count(prepare), 1)
+        self.assertLess(self.installer.index(pip_install), self.installer.index(prepare))
+        self.assertLess(self.installer.index(prepare), self.installer.index(first_service_start))
+        self.assertIn(f'if ! {prepare}; then', self.installer)
+        self.assertIn('WARNING: v2fly catalog was not prepared; start the service and retry from the Web interface.', self.installer)
+        prepare_block_start = self.installer.index(f'if ! {prepare}; then')
+        prepare_block_end = self.installer.index('\nfi\n', prepare_block_start)
+        self.assertNotIn('sudo', self.installer[prepare_block_start:prepare_block_end])
+
+    def test_v2fly_prepare_failure_is_best_effort_and_reaches_the_core_service_start(self) -> None:
+        git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+        bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
+        if not bash:
+            self.skipTest("bash is required")
+        start = self.installer.index("# The v2fly cache is disposable service data.")
+        end = self.installer.index("install -d -m 0755 /usr/local/libexec/gp-control-plane", start)
+        v2fly_block = self.installer[start:end]
+        with tempfile.TemporaryDirectory() as raw:
+            sandbox = Path(raw)
+            fake_bin = sandbox / "bin"
+            fake_bin.mkdir()
+            log = sandbox / "calls.log"
+
+            def bash_path(path: Path) -> str:
+                value = path.resolve().as_posix()
+                return f"/{value[0].lower()}{value[2:]}" if len(value) > 2 and value[1] == ":" else value
+
+            for name, body in {
+                "runuser": 'printf "runuser:%s\\n" "$*" >> "$TEST_LOG"\nexit 42\n',
+                "systemctl": 'printf "systemctl:%s\\n" "$*" >> "$TEST_LOG"\n',
+            }.items():
+                path = fake_bin / name
+                path.write_text("#!/usr/bin/env bash\nset -eu\n" + body, encoding="utf-8")
+                path.chmod(0o755)
+            result = subprocess.run(
+                [
+                    bash,
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    'PATH="$1:/usr/bin:/bin"; export PATH; exec bash -c "$2"',
+                    "bash",
+                    bash_path(fake_bin),
+                    v2fly_block + 'systemctl enable --now gp-control-plane-core.service\n',
+                ],
+                env={
+                    **os.environ,
+                    "TEST_LOG": bash_path(log),
+                    "INSTALL_USER": "gpuser",
+                    "state_dir": bash_path(sandbox / "state"),
+                    "install_dir": bash_path(sandbox / "install"),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("WARNING: v2fly catalog was not prepared", result.stderr)
+            self.assertEqual(log.read_text(encoding="utf-8").splitlines()[-1], "systemctl:enable --now gp-control-plane-core.service")
+            self.assertIn("GP_STATE_DIR=", log.read_text(encoding="utf-8"))
+
     def test_retired_transition_entrypoints_are_absent(self) -> None:
         root = Path(__file__).resolve().parents[1] / "scripts"
         for name in ("clean-install-vault.sh", "gp-clean-remove-root.sh", "gp-clean-remove-preflight.sh", "gp-clean-remove-provision-root.sh", "legacy-bootstrap.sh", "legacy-bootstrap-launcher.sh"):

@@ -4,16 +4,21 @@ import http.client
 import ast
 import contextlib
 import errno
+import io
 import importlib
 import json
 import os
+import re
 import socket
 import socketserver
 import struct
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import unittest
 from pathlib import Path
 from typing import Any
@@ -113,6 +118,16 @@ class WebUiTests(unittest.TestCase):
             payload = web_app.core_api.status_payload(config)
 
             self.assertEqual(payload["last_snapshot"], expected_snapshot)
+
+    def test_web_status_includes_zapret_diagnostics_for_the_system_card(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            expected = {"nfqws2_found": True, "blockcheck_found": True, "root_helper_ready": True}
+
+            with mock.patch.object(web_app, "check_install_cached", return_value=expected):
+                payload = web_app.web_json_get_payload(config, "/api/web/status", {})
+
+            self.assertEqual(payload["zapret2"], expected)
 
 
     def test_core_status_uses_lightweight_storage_runtime_status(self) -> None:
@@ -516,6 +531,63 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("if (state.activeTab === 'candidates') ensureCandidateViewLoaded();", html)
         self.assertNotIn("if (!state.candidateDomainsLoaded) refreshDomainIndex();\n    else if", html)
 
+    def test_web_color_hierarchy_uses_semantic_roles_without_changing_actions(self) -> None:
+        """WEBC-001..008/T01..T05: color is semantic, with text and a marker."""
+        html = index_html()
+
+        root_css = html[html.index(":root {"):html.index("}\n* {", html.index(":root {"))]
+        allowed_base_tokens = {
+            "--surface": "#1b2434", "--surface-soft": "#202b3d", "--surface-code": "#0f1623",
+            "--surface-code-gutter": "#151d2b", "--line": "rgba(255, 255, 255, .08)",
+            "--line-strong": "#3a4658", "--text-soft": "#949b9f", "--blue": "#0097dc",
+            "--blue-strong": "#5cc8ff", "--green": "#22c55e", "--green-soft": "rgba(34, 197, 94, .14)",
+            "--amber": "#f59e0b", "--amber-soft": "rgba(245, 158, 11, .14)",
+            "--red": "#ef4444", "--red-soft": "rgba(239, 68, 68, .14)",
+            "--code-text": "#d7e0ea", "--code-muted": "#6f7a89",
+        }
+        for token, value in allowed_base_tokens.items():
+            self.assertIn(f"{token}: {value};", root_css)
+        palette_values = set(re.findall(r"--[a-z-]+:\s*(#[0-9a-f]{6}|rgba\([^;]+\));", root_css))
+        self.assertEqual(palette_values, set(allowed_base_tokens.values()))
+        css = html[html.index("<style>") : html.index("</style>", html.index("<style>"))]
+        allowed_component_literals = set(allowed_base_tokens.values()) | {
+            "#161c27", "#e6edf3", "#eed09a",
+            "rgba(0, 0, 0, .3)", "rgba(255, 174, 66, .65)", "rgba(83, 221, 133, .65)",
+            "rgba(255, 76, 86, .75)", "rgba(83, 221, 133, .8)", "rgba(83, 221, 133, .18)",
+            "rgba(255, 76, 86, .8)", "rgba(255, 76, 86, .16)", "rgba(0, 0, 0, .28)",
+            "rgba(120, 211, 255, .35)", "rgba(23, 33, 43, .16)", "rgba(255, 255, 255, .03)",
+        }
+        literal_colors = set(re.findall(r"#[0-9a-fA-F]{6}|rgba\([^)]*\)", css))
+        self.assertTrue(literal_colors <= allowed_component_literals, literal_colors - allowed_component_literals)
+
+        for alias in ("--text", "--muted", "--accent", "--warn", "--danger", "--surface-strong"):
+            self.assertRegex(html, rf"{re.escape(alias)}:\s*var\(")
+        self.assertIn("--mono: Menlo", html)
+        self.assertNotIn("linear-gradient", html)
+        self.assertNotIn("#ffffff", html)
+        self.assertIn("button[data-action=\"stop-current\"]", html)
+        self.assertIn("button[data-backup-delete]", html)
+        self.assertNotIn('danger[data-action="preset-editor-delete"]', html)
+        self.assertIn("queued: 'queue'", html)
+        self.assertIn("queue: 'В очереди'", html)
+        self.assertIn(".status-marker.queue, .status-marker.pending { background: var(--accent); }", html)
+        self.assertIn("function statusBadge(text, tone)", html)
+        self.assertIn("return `<span class=\"badge\">${esc(text)}</span>`;", html)
+        self.assertIn("status-badge.queue", html)
+        self.assertIn(".message.queue, .toast.queue, .status-badge.queue, .event-card.queue", html)
+        self.assertIn("color: var(--surface-code)", html)
+        self.assertIn("Найденные стратегии сохранятся", html)
+        self.assertIn("Восстановление заменит текущие данные", html)
+        self.assertIn("backup-danger-zone", html)
+        self.assertIn("Архив и его файлы будут удалены", html)
+        self.assertIn("function setStatusContent(node, text, tone)", html)
+        self.assertIn('marker.setAttribute(\'aria-hidden\', \'true\')', html)
+        self.assertIn("function statusMarkup(text, tone)", html)
+        self.assertIn("function setBadge(node, text, tone)", html)
+        self.assertIn("setBadge(badgeNode, summary.readiness.text, summary.readiness.tone)", html)
+        self.assertIn("setBadge(jobBadge, action.text, action.tone)", html)
+        self.assertIn("setBadge(badgeNode, status, statusTone[status] || '')", html)
+
     def test_index_html_is_focused_on_strategy_finder_only(self) -> None:
         html = index_html()
 
@@ -564,29 +636,21 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("backup-archive-link", html)
         self.assertNotIn("backup-file-links", html)
         self.assertIn("backup-upload-file", html)
-        self.assertIn("Vault для чистой установки", html)
-        self.assertIn(
-            "Создает одну защищенную локальную копию для отдельного сценария чистой установки. "
-            "Сервис автоматически сохраняет защищенный device-local handoff вне очищаемых GP-данных; "
-            "для восстановления выберите vault и явно подтвердите восстановление с удалением источника.",
-            html,
-        )
-        self.assertIn("clean-install-vaults/create", html)
-        self.assertIn("clean-install-vaults/list", html)
-        self.assertIn("clean-install-vaults/status", html)
-        self.assertIn("clean-install-vaults/restore", html)
-        self.assertIn("function createCleanInstallVault()", html)
-        self.assertIn("function restoreCleanInstallVault(vaultId)", html)
-        self.assertIn("window.confirm(`Восстановить данные из vault ${id}", html)
-        self.assertIn(
-            "После явного подтверждения восстановление проверит данные и SQLite. "
-            "При успехе исходный vault будет удален автоматически.",
-            html,
-        )
-        self.assertIn(
-            "Vault создан. После чистой установки выберите его и явно подтвердите восстановление с удалением источника.",
-            html,
-        )
+        # WEBL-017/T09: clean-install vault stays a backend/installer path,
+        # never an ordinary-panel operation.  The dedicated HTTP contract tests
+        # above deliberately continue to cover that retained backend surface.
+        for marker in (
+            "Vault для чистой установки",
+            "clean-install-vault",
+            "cleanInstallVault",
+            "create-clean-install-vault",
+            "refresh-clean-install-vaults",
+            "data-clean-install-vault-restore",
+        ):
+            self.assertNotIn(marker, html)
+        # WEBL-F08: the entire ordinary Web document, including visible copy,
+        # must not leak the clean-install concept under a new client-side name.
+        self.assertNotRegex(html, r"(?i)vault")
         self.assertNotIn("window.prompt(", html)
         self.assertNotIn("Токен подтверждения", html)
         self.assertNotIn("одноразовый токен", html)
@@ -670,6 +734,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("v2fly-domains", html)
         self.assertIn("suggestV2flyPresetName", html)
         self.assertIn("data-action=\"v2fly-load-categories\"", html)
+        self.assertIn("data-action=\"v2fly-update-local-storage\"", html)
         self.assertIn("data-action=\"v2fly-select-category\"", html)
         self.assertIn("v2fly-preset-name", html)
         self.assertIn("v2fly-preview-result", html)
@@ -701,6 +766,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("data-backup-delete", html)
         self.assertNotIn("backup-restore-select", html)
         self.assertNotIn("backup-restore-preview", html)
+
         self.assertNotIn("data-action=\"restore-selected-backup\"", html)
         self.assertIn("restoreBackup", html)
         self.assertIn("deleteBackup", html)
@@ -963,7 +1029,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("function refreshRequestMap(light)", html)
         self.assertIn("Promise.allSettled", html)
         self.assertIn("const status = settledValue(results, 'status');", html)
-        self.assertIn("if (status) mergeStatusPayload(status);", html)
+        self.assertIn("if (hasCompleteSystemStatus(status)) {", html)
+        self.assertIn("clearInitialSystemStatusRetry();", html)
+        self.assertIn("mergeStatusPayload(status);", html)
         self.assertIn("const finderRuns = settledValue(results, 'finderRuns');", html)
         self.assertIn("if (finderRuns) mergeRunPage(finderRuns, true);", html)
         self.assertIn("refreshFailureMessages(results)", html)
@@ -1075,6 +1143,384 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/jobs/zapret-strategy-check", html)
         self.assertNotIn("/api/jobs/zapret-custom-verification", html)
 
+    def test_v2fly_catalog_update_uses_the_existing_service_api_and_recovers_ui_state(self) -> None:
+        html = index_html()
+
+        self.assertIn("v2flyUpdateLocalStorage: '/api/service/v2fly/update-local-storage'", html)
+        self.assertIn("async function updateV2flyLocalStorage()", html)
+        self.assertIn("if (state.v2flyCatalogUpdateLoading) return;", html)
+        self.assertIn("state.v2flyCatalogUpdateLoading = true;", html)
+        self.assertIn("updateButton.textContent = state.v2flyCatalogUpdateLoading ? 'Загружаю каталог'", html)
+        self.assertIn("const controlsBlocked = isBusy() || !hasCompleteSystemStatus();", html)
+        self.assertIn("reloadButton.disabled = loading || state.v2flyCatalogUpdateLoading || controlsBlocked;", html)
+        self.assertIn("updateButton.disabled = state.v2flyCatalogUpdateLoading || controlsBlocked;", html)
+        self.assertIn("const v2flyCatalogAction = button.dataset.action === 'v2fly-load-categories' || button.dataset.action === 'v2fly-update-local-storage';", html)
+        self.assertIn("button.disabled = (v2flyCatalogAction && state.v2flyCatalogUpdateLoading) || controlsBlocked;", html)
+        self.assertIn("postJson(apiEndpoint('service', 'v2flyUpdateLocalStorage'), {})", html)
+        self.assertIn("async function loadV2flyCategories(refreshCatalog, { throwOnError = false } = {})", html)
+        self.assertIn("if (throwOnError) throw error;", html)
+        self.assertIn("await loadV2flyCategories(true, { throwOnError: true });", html)
+        self.assertIn("Каталог v2fly обновлен: ${groups} групп", html)
+        self.assertIn("const revisionWarning = String(result?.result?.revision_warning || '').trim();", html)
+        self.assertIn("Каталог v2fly готов: ${groups} групп, но ревизия источника не подтверждена: ${revisionWarning}", html)
+        self.assertIn("setMessage(`Каталог v2fly готов: ${groups} групп, но ревизия источника не подтверждена: ${revisionWarning}`, 'warn');", html)
+        self.assertIn("Не удалось загрузить каталог v2fly: ${message}", html)
+        self.assertIn("state.v2flyCatalogUpdateLoading = false;", html)
+        self.assertIn("button.dataset.action === 'v2fly-update-local-storage'", html)
+        self.assertIn("'button[data-action=\"v2fly-update-local-storage\"]'", html)
+        self.assertIn("Загрузить/обновить каталог v2fly", html)
+        self.assertIn("Перечитывает уже загруженный локальный каталог групп v2fly.", html)
+        self.assertNotIn("Каталог скачивается при установке или обновлении сервиса.", html)
+        self.assertNotIn("Повторите установку или обновление сервиса.", html)
+        self.assertNotIn("/api/web/v2fly", html)
+
+    def test_v2fly_catalog_update_browser_race_keeps_controls_locked_and_never_reports_false_success(self) -> None:
+        edge_candidates = (
+            shutil.which("msedge"),
+            shutil.which("chrome"),
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        )
+        browser = next((Path(candidate) for candidate in edge_candidates if candidate and Path(candidate).is_file()), None)
+        if browser is None:
+            self.skipTest("a Chromium browser is required for the v2fly UI runtime test")
+
+        bootstrap = """
+localStorage.setItem('gp-control-plane.auth-token', 'test-token');
+window.__v2flyUpdateResolve = null;
+window.__failV2flyCategories = false;
+window.__v2flyUpdateWarning = false;
+window.fetch = (input) => {
+  const url = String(input);
+  const response = (payload, status = 200) => Promise.resolve(new Response(JSON.stringify(payload), {status, headers: {'Content-Type': 'application/json'}}));
+  if (url.includes('/api/service/v2fly/update-local-storage')) {
+    if (window.__v2flyUpdateWarning) return response({status: 'success', storage: {group_count: 2}, result: {revision_warning: '<img src=x onerror=alert(1)>'}});
+    return new Promise((resolve) => { window.__v2flyUpdateResolve = () => resolve(new Response(JSON.stringify({status: 'success', storage: {group_count: 2}}), {status: 200, headers: {'Content-Type': 'application/json'}})); });
+  }
+  if (url.includes('/api/core/presets/v2fly/categories')) {
+    if (window.__failV2flyCategories) return response({error: {message: 'forced category reload failure'}}, 503);
+    return response({categories: [{name: 'youtube'}], storage: {state: 'ready', group_count: 1}});
+  }
+  if (url.includes('/api/web/status')) return response({state: 'idle', zapret2: {ready: true}});
+  if (url.includes('/api/web/runs/history-page')) return response({runs: [], total: 0, limit: 50, offset: 0, has_more: false});
+  return response({});
+};
+"""
+        probe = """
+<output id="v2fly-browser-probe"></output>
+<script>
+window.addEventListener('load', async () => {
+  const probe = document.getElementById('v2fly-browser-probe');
+  mergeStatusPayload({state: 'idle', zapret2: {ready: true}});
+  renderMetrics();
+  updateV2flyLocalStorage();
+  setTimeout(async () => {
+    const reload = document.querySelector('[data-action="v2fly-load-categories"]');
+    const update = document.querySelector('[data-action="v2fly-update-local-storage"]');
+    renderMetrics();
+    probe.dataset.r02 = String(Boolean(reload && reload.disabled && update && update.disabled));
+    window.__failV2flyCategories = true;
+    window.__v2flyUpdateResolve();
+    setTimeout(async () => {
+      probe.dataset.r03 = String(
+        !document.getElementById('message').textContent.includes('Каталог v2fly обновлен') &&
+        Boolean(update && !update.disabled)
+      );
+      mergeStatusPayload({state: 'running', current_run: {run_id: 'run-1', status: 'running'}, zapret2: {ready: true}});
+      await loadV2flyCategories(true);
+      probe.dataset.f02ActiveRun = String(Boolean(reload && reload.disabled && update && update.disabled));
+      mergeStatusPayload({state: 'idle'});
+      await loadV2flyCategories(true);
+      probe.dataset.f02IncompleteStatus = String(Boolean(reload && reload.disabled && update && update.disabled));
+      mergeStatusPayload({state: 'idle', zapret2: {ready: true}});
+      window.__failV2flyCategories = false;
+      window.__v2flyUpdateWarning = true;
+      await updateV2flyLocalStorage();
+      const message = document.getElementById('message');
+      probe.dataset.f01Warning = String(
+        message.textContent.includes('Каталог v2fly готов: 2 групп, но ревизия источника не подтверждена:') &&
+        message.textContent.includes('<img src=x onerror=alert(1)>') &&
+        !message.querySelector('img')
+      );
+    }, 100);
+  }, 25);
+});
+</script>
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            page = Path(raw) / "v2fly-ui-race.html"
+            profile = Path(raw) / "browser-profile"
+            html = index_html().replace("<script>", f"<script>{bootstrap}", 1).replace("</body>", f"{probe}</body>")
+            page.write_text(html, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    str(browser),
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-first-run",
+                    "--allow-file-access-from-files",
+                    f"--user-data-dir={profile}",
+                    "--virtual-time-budget=2000",
+                    "--dump-dom",
+                    page.as_uri(),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            r'<output[^>]*id="v2fly-browser-probe"[^>]*data-r02="true"[^>]*data-r03="true"[^>]*data-f02-active-run="true"[^>]*data-f02-incomplete-status="true"[^>]*data-f01-warning="true"',
+        )
+
+    def test_wbg_browser_bootstrap_gate_is_atomic_generic_and_race_safe(self) -> None:
+        """WBG-001..006: run the generated boot UI in Chromium with controlled fetches."""
+        edge_candidates = (
+            shutil.which("msedge"),
+            shutil.which("chrome"),
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        )
+        browser = next((Path(candidate) for candidate in edge_candidates if candidate and Path(candidate).is_file()), None)
+        if browser is None:
+            self.skipTest("a Chromium browser is required for the Web bootstrap runtime test")
+
+        bootstrap = """
+localStorage.setItem('gp-control-plane-auth-token', 'test-token');
+window.__wbg = { attempt: 0, pending: {}, signals: {}, events: 0, eventsBeforeReady: null };
+window.fetch = (input, options) => {
+  const url = String(input);
+  const key = url.includes('/api/web/status') ? 'status'
+    : url.includes('/api/web/runs/history-page') ? 'runs'
+    : url.includes('/api/core/runs/latest-log') ? 'log'
+    : url.includes('/api/web/presets') ? 'presets'
+    : url.includes('/api/core/run-settings') ? 'settings' : null;
+  if (url.includes('/api/web/events/stream')) {
+    window.__wbg.events += 1;
+    return Promise.resolve(new Response('', {status: 200, headers: {'Content-Type': 'text/event-stream'}}));
+  }
+  if (!key) return Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
+  if (key === 'status') window.__wbg.attempt += 1;
+  const attempt = window.__wbg.attempt;
+  window.__wbg.signals[attempt] = options && options.signal;
+  return new Promise((resolve, reject) => {
+    (window.__wbg.pending[attempt] ||= {})[key] = {resolve, reject};
+  });
+};
+window.__wbgPayload = (attempt, key) => {
+  if (key === 'status') return {version: `attempt-${attempt}`, state: 'idle', zapret2: {ready: true}, settings: {}, run_preferences: {}};
+  if (key === 'runs') return {runs: [], total: 0, limit: 50, offset: 0, has_more: false};
+  if (key === 'log') return {events: []};
+  if (key === 'presets') return {custom: {}, system: {}, metadata: {}, system_metadata: {}};
+  return {settings: {}};
+};
+window.__wbgComplete = (attempt, failure) => {
+  for (const key of ['status', 'runs', 'log', 'presets', 'settings']) {
+    const pending = window.__wbg.pending[attempt][key];
+    if (key === failure) pending.reject(new Error(`transport-${key}-secret`));
+    else pending.resolve(new Response(JSON.stringify(window.__wbgPayload(attempt, key)), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  }
+};
+window.__wbgFailOnly = (attempt, key) => window.__wbg.pending[attempt][key].reject(new Error('transport-rejected-secret'));
+window.__wbgWait = (predicate, timeout = 500) => new Promise((resolve, reject) => {
+  const deadline = Date.now() + timeout;
+  const check = () => predicate() ? resolve() : Date.now() >= deadline ? reject(new Error('wbg wait timeout')) : setTimeout(check, 5);
+  check();
+});
+"""
+        probe = """
+<output id="wbg-browser-probe"></output>
+<script>
+window.addEventListener('load', async () => {
+  const probe = document.getElementById('wbg-browser-probe');
+  const loadingOnly = () => !document.getElementById('app-shell') && !document.querySelector('.tabs') && !document.getElementById('message') && document.getElementById('boot-screen').innerText.includes('Загрузка интерфейса');
+  try {
+    await __wbgWait(() => __wbg.attempt === 1);
+    __wbg.eventsBeforeReady = __wbg.events;
+    probe.dataset.loading = String(loadingOnly());
+    __wbgFailOnly(1, 'status');
+    await __wbgWait(() => document.getElementById('boot-retry').hidden === false);
+    probe.dataset.regularFailureAbort = String(__wbg.signals[1].aborted && !document.getElementById('app-shell') && Object.keys(__wbg.pending[1]).length === 5);
+    document.getElementById('boot-retry').click();
+    await __wbgWait(() => __wbg.attempt === 2);
+    __wbgComplete(2, null);
+    await __wbgWait(() => Boolean(document.getElementById('app-shell')) && bootstrapState === 'ready');
+    probe.dataset.regularFailureRetryReady = String(state.status.version === 'attempt-2' && document.getElementById('boot-screen').hidden);
+    for (const failure of ['status', 'runs', 'log', 'presets', 'settings']) {
+      startAuthenticatedUi();
+      await __wbgWait(() => __wbg.pending[__wbg.attempt] && __wbg.pending[__wbg.attempt].settings);
+      const attempt = __wbg.attempt;
+      __wbgComplete(attempt, failure);
+      await __wbgWait(() => document.getElementById('boot-retry').hidden === false);
+      const text = document.getElementById('boot-screen').innerText;
+      probe.dataset[`failure${failure}`] = String(!document.getElementById('app-shell') && !document.querySelector('.tabs') && !document.getElementById('message') && text.includes('Не удалось загрузить интерфейс') && !text.includes('transport-') && !text.includes('/api/'));
+    }
+    const duplicateBase = __wbg.attempt;
+    document.getElementById('boot-retry').click();
+    document.getElementById('boot-retry').click();
+    await __wbgWait(() => __wbg.attempt === duplicateBase + 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    probe.dataset.duplicateRetry = String(__wbg.attempt === duplicateBase + 1);
+    const retryAttempt = __wbg.attempt;
+    __wbgComplete(retryAttempt, null);
+    await __wbgWait(() => Boolean(document.getElementById('app-shell')) && bootstrapState === 'ready');
+    probe.dataset.retryReady = String(state.status.version === `attempt-${retryAttempt}` && document.getElementById('boot-screen').hidden && Boolean(document.querySelector('.tabs')) && !document.getElementById('message').textContent.includes('transport-'));
+    const oldAttempt = __wbg.attempt;
+    startAuthenticatedUi();
+    await __wbgWait(() => __wbg.attempt === oldAttempt + 1);
+    const staleAttempt = __wbg.attempt;
+    startAuthenticatedUi();
+    await __wbgWait(() => __wbg.attempt === staleAttempt + 1);
+    const currentAttempt = __wbg.attempt;
+    __wbgComplete(currentAttempt, null);
+    await __wbgWait(() => Boolean(document.getElementById('app-shell')) && bootstrapState === 'ready');
+    const readyVersion = state.status.version;
+    __wbgComplete(staleAttempt, null);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    probe.dataset.staleIgnored = String(state.status.version === readyVersion && state.status.version === `attempt-${currentAttempt}`);
+    probe.dataset.eventsAfterReady = String(__wbg.events > __wbg.eventsBeforeReady);
+  } catch (error) {
+    probe.dataset.error = String(error && error.message || error);
+  }
+});
+</script>
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            page = Path(raw) / "wbg-bootstrap.html"
+            profile = Path(raw) / "browser-profile"
+            html = index_html().replace("<script>", f"<script>{bootstrap}", 1).replace("</body>", f"{probe}</body>")
+            page.write_text(html, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    str(browser),
+                    "--headless=new",
+                    "--no-first-run",
+                    "--password-store=basic",
+                    "--allow-file-access-from-files",
+                    f"--user-data-dir={profile}",
+                    "--virtual-time-budget=3000",
+                    "--dump-dom",
+                    page.as_uri(),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+
+        if result.returncode != 0 and "GPU process isn't usable" in result.stderr:
+            self.skipTest("Chromium headless GPU process is unusable in this Windows sandbox")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            r'<output[^>]*id="wbg-browser-probe"[^>]*data-loading="true"[^>]*data-regular-failure-abort="true"[^>]*data-regular-failure-retry-ready="true"[^>]*data-failurestatus="true"[^>]*data-failureruns="true"[^>]*data-failurelog="true"[^>]*data-failurepresets="true"[^>]*data-failuresettings="true"[^>]*data-duplicate-retry="true"[^>]*data-retry-ready="true"[^>]*data-stale-ignored="true"[^>]*data-events-after-ready="true"',
+        )
+
+    def test_wbg_browser_timeout_fails_current_attempt_then_retry_reaches_ready(self) -> None:
+        """WBG-R04: one pending bootstrap request reaches generic failed then a user retry succeeds."""
+        edge_candidates = (
+            shutil.which("msedge"),
+            shutil.which("chrome"),
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        )
+        browser = next((Path(candidate) for candidate in edge_candidates if candidate and Path(candidate).is_file()), None)
+        if browser is None:
+            self.skipTest("a Chromium browser is required for the Web bootstrap timeout runtime test")
+
+        bootstrap = """
+localStorage.setItem('gp-control-plane-auth-token', 'test-token');
+window.__wbgTimeout = {attempt: 0, pending: {}, signals: {}, events: 0};
+window.fetch = (input, options) => {
+  const url = String(input);
+  const key = url.includes('/api/web/status') ? 'status'
+    : url.includes('/api/web/runs/history-page') ? 'runs'
+    : url.includes('/api/core/runs/latest-log') ? 'log'
+    : url.includes('/api/web/presets') ? 'presets'
+    : url.includes('/api/core/run-settings') ? 'settings' : null;
+  if (url.includes('/api/web/events/stream')) {
+    window.__wbgTimeout.events += 1;
+    return Promise.resolve(new Response('', {status: 200, headers: {'Content-Type': 'text/event-stream'}}));
+  }
+  if (!key) return Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
+  if (key === 'status') window.__wbgTimeout.attempt += 1;
+  const attempt = window.__wbgTimeout.attempt;
+  window.__wbgTimeout.signals[attempt] = options && options.signal;
+  return new Promise((resolve) => { (window.__wbgTimeout.pending[attempt] ||= {})[key] = resolve; });
+};
+window.__wbgTimeoutComplete = (attempt) => {
+  const payloads = {
+    status: {version: 'timeout-retry-' + attempt, state: 'idle', zapret2: {ready: true}, settings: {}, run_preferences: {}},
+    runs: {runs: [], total: 0, limit: 50, offset: 0, has_more: false},
+    log: {events: []},
+    presets: {custom: {}, system: {}, metadata: {}, system_metadata: {}},
+    settings: {settings: {}}
+  };
+  for (const key of Object.keys(payloads)) {
+    window.__wbgTimeout.pending[attempt][key](new Response(JSON.stringify(payloads[key]), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  }
+};
+window.__wbgTimeoutWait = (predicate, timeout = 500) => new Promise((resolve, reject) => {
+  const deadline = Date.now() + timeout;
+  const check = () => predicate() ? resolve() : Date.now() >= deadline ? reject(new Error('timeout probe wait')) : setTimeout(check, 5);
+  check();
+});
+"""
+        probe = """
+<output id="wbg-timeout-browser-probe"></output>
+<script>
+window.addEventListener('load', async () => {
+  const probe = document.getElementById('wbg-timeout-browser-probe');
+  try {
+    await __wbgTimeoutWait(() => __wbgTimeout.attempt === 1);
+    await __wbgTimeoutWait(() => document.getElementById('boot-retry').hidden === false);
+    const failed = document.getElementById('boot-screen').innerText;
+    probe.dataset.timeoutFailed = String(!document.getElementById('app-shell') && __wbgTimeout.signals[1].aborted && failed.includes('Не удалось загрузить интерфейс') && !failed.includes('timeout') && !failed.includes('/api/'));
+    document.getElementById('boot-retry').click();
+    await __wbgTimeoutWait(() => __wbgTimeout.attempt === 2);
+    __wbgTimeoutComplete(2);
+    await __wbgTimeoutWait(() => bootstrapState === 'ready' && Boolean(document.getElementById('app-shell')));
+    probe.dataset.retryReady = String(state.status.version === 'timeout-retry-2' && document.getElementById('boot-screen').hidden && Boolean(document.querySelector('.tabs')) && __wbgTimeout.events > 0);
+  } catch (error) {
+    probe.dataset.error = String(error && error.message || error);
+  }
+});
+</script>
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            page = Path(raw) / "wbg-timeout.html"
+            profile = Path(raw) / "browser-profile"
+            html = index_html().replace("const BOOTSTRAP_TIMEOUT_MS = 15000;", "const BOOTSTRAP_TIMEOUT_MS = 50;").replace("<script>", f"<script>{bootstrap}", 1).replace("</body>", f"{probe}</body>")
+            page.write_text(html, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    str(browser),
+                    "--headless=new",
+                    "--no-first-run",
+                    "--password-store=basic",
+                    "--allow-file-access-from-files",
+                    f"--user-data-dir={profile}",
+                    "--virtual-time-budget=1500",
+                    "--dump-dom",
+                    page.as_uri(),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+
+        if result.returncode != 0 and "GPU process isn't usable" in result.stderr:
+            self.skipTest("Chromium headless GPU process is unusable in this Windows sandbox")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            r'<output[^>]*id="wbg-timeout-browser-probe"[^>]*data-timeout-failed="true"[^>]*data-retry-ready="true"',
+        )
+
     def test_common_tested_preset_waits_for_loaded_tested_domains(self) -> None:
         html = index_html()
 
@@ -1133,12 +1579,121 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("runLaunchReadiness", html)
+        self.assertIn("if (!hasCompleteSystemStatus()) return { text: 'Проверяем систему', tone: 'pending' };", html)
         self.assertIn("Готово к старту", html)
         self.assertIn("Требуется настройка", html)
         self.assertIn("Нужны домены", html)
         self.assertIn("Нужен протокол", html)
         self.assertIn("Идет подбор", html)
+
+    def test_initial_missing_system_status_is_neutral_and_retries(self) -> None:
+        html = index_html()
+
+        self.assertIn("INITIAL_SYSTEM_STATUS_RETRY_DELAY_MS = 750", html)
+        self.assertIn("INITIAL_SYSTEM_STATUS_RETRY_LIMIT = 3", html)
+        self.assertIn("function scheduleInitialSystemStatusRetry()", html)
+        self.assertIn("function hasCompleteSystemStatus(status = state.status)", html)
+        self.assertIn("refresh({ silent: true });", html)
+        self.assertIn("if (!hasCompleteSystemStatus()) state.statusLoading = true;", html)
+        self.assertIn("scheduleInitialSystemStatusRetry();", html)
+        self.assertIn("status: getJson(apiEndpoint('web', 'status'))", html)
+        self.assertIn("status: '/api/web/status'", html)
+        self.assertIn("compact-status ${pending ? 'pending' : 'unknown'}", html)
+        self.assertIn("${pending ? 'Проверяем' : 'Нет статуса'}", html)
+        self.assertIn("button.disabled = controlsBlocked;", html)
         self.assertIn("hasEnabledProtocol(options)", html)
+
+    def test_wbg_001_boot_loading_has_no_mounted_dashboard(self) -> None:
+        """WBG-001: the shell is not part of the active DOM while booting."""
+        html = index_html()
+
+        self.assertIn('<section class="boot-screen" id="boot-screen"', html)
+        self.assertIn('id="boot-message">Загрузка интерфейса…</div>', html)
+        self.assertIn('<template id="app-shell-template">', html)
+        self.assertLess(html.index('<template id="app-shell-template">'), html.index('<div class="shell" id="app-shell">'))
+        self.assertIn("showBoot('loading');", html)
+
+    def test_wbg_002_boot_success_mounts_once_after_all_five_requests(self) -> None:
+        """WBG-002: only a complete five-response set mounts and renders the shell."""
+        html = index_html()
+
+        start = html.index('async function startAuthenticatedUi()')
+        end = html.index('async function submitLogin', start)
+        bootstrap = html[start:end]
+        self.assertIn('const requests = Promise.all([', bootstrap)
+        self.assertIn('await Promise.race([requests, timeout]);', bootstrap)
+        self.assertIn('const BOOTSTRAP_TIMEOUT_MS = 15000;', html)
+        self.assertIn('controller.abort();', bootstrap)
+        for request in ('status', 'runHistoryPage', 'latestLog', 'presets', 'fetchSettingsPayload'):
+            self.assertIn(request, bootstrap)
+        self.assertLess(bootstrap.index('showApplication();'), bootstrap.index('renderAll({ skipCandidates: true });'))
+        self.assertLess(bootstrap.index('renderAll({ skipCandidates: true });'), bootstrap.index('startRealtimeEvents();'))
+
+    def test_wbg_003_boot_failure_exposes_only_generic_retry_screen(self) -> None:
+        """WBG-003: bootstrap errors never interpolate transport details into the page."""
+        html = index_html()
+
+        self.assertIn('Не удалось загрузить интерфейс. Попробуйте ещё раз.', html)
+        self.assertIn('<button id="boot-retry" type="button" hidden>Повторить</button>', html)
+        start = html.index('async function startAuthenticatedUi()')
+        end = html.index('async function submitLogin', start)
+        self.assertIn("} catch (_error) {", html[start:end])
+        self.assertNotIn('error.message', html[html.index("} catch (_error) {", start):end])
+
+    def test_wbg_004_retry_returns_from_failure_to_ready_without_message_area(self) -> None:
+        """WBG-004: retry invokes a fresh bootstrap and does not use dashboard messaging."""
+        html = index_html()
+
+        retry_start = html.index("el('boot-retry').addEventListener")
+        retry = html[retry_start:html.index('if (authToken())', retry_start)]
+        self.assertIn("if (bootstrapState === 'failed') startAuthenticatedUi();", retry)
+        self.assertNotIn('setMessage(', retry)
+
+    def test_wbg_005_repeated_failure_keeps_the_isolated_error_screen(self) -> None:
+        """WBG-005: every failed bootstrap removes any previously mounted shell."""
+        html = index_html()
+
+        start = html.index('function showBoot(state)')
+        end = html.index('function stopRealtimeEvents()', start)
+        boot = html[start:end]
+        self.assertIn("el('app-shell')?.remove();", boot)
+        self.assertIn("retry.hidden = state !== 'failed';", boot)
+
+    def test_wbg_006_retry_aborts_and_ignores_stale_bootstrap_results(self) -> None:
+        """WBG-006: retry uses both cancellation and an epoch guard."""
+        html = index_html()
+
+        self.assertIn('let bootstrapEpoch = 0;', html)
+        self.assertIn('let bootstrapController = null;', html)
+        start = html.index('async function startAuthenticatedUi()')
+        end = html.index('async function submitLogin', start)
+        bootstrap = html[start:end]
+        self.assertIn('if (bootstrapController) bootstrapController.abort();', bootstrap)
+        self.assertIn('const epoch = ++bootstrapEpoch;', bootstrap)
+        self.assertIn('if (epoch !== bootstrapEpoch || controller.signal.aborted) return;', bootstrap)
+        self.assertLess(
+            bootstrap.index('if (epoch !== bootstrapEpoch || controller.signal.aborted) return;', bootstrap.index('} catch (_error) {')),
+            bootstrap.index('controller.abort();', bootstrap.index('} catch (_error) {')),
+        )
+
+    def test_wbg_post_ready_refresh_contract_is_not_part_of_bootstrap_gate(self) -> None:
+        """WBG-R01: retain the existing post-ready refresh map and silent fallback."""
+        html = index_html()
+
+        map_start = html.index('function refreshRequestMap(light)')
+        map_end = html.index('function settledValue(', map_start)
+        refresh_map = html[map_start:map_end]
+        self.assertIn('const bootstrap = !light || !hasCompleteSystemStatus();', refresh_map)
+        self.assertIn("status: getJson(apiEndpoint('web', 'status'))", refresh_map)
+        self.assertIn("finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0)))", refresh_map)
+        self.assertIn("finderLog: getJson(apiEndpoint('core', 'latestLog'))", refresh_map)
+        self.assertIn('if (bootstrap) {', refresh_map)
+        self.assertIn("requests.presets = getJson(apiEndpoint('web', 'presets'));", refresh_map)
+        self.assertIn('requests.settings = fetchSettingsPayload();', refresh_map)
+        self.assertNotIn('bootstrapEpoch', refresh_map)
+        fallback_start = html.index('function startRealtimeFallback()')
+        fallback_end = html.index('function refreshRequestMap(', fallback_start)
+        self.assertIn("if (!realtimeConnected) refresh({ light: true, silent: true });", html[fallback_start:fallback_end])
 
     def test_curl_parallelism_field_is_scoped_to_multi_domain_mode(self) -> None:
         html = index_html()
@@ -1189,10 +1744,79 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("details.preset-panel > summary::before", html)
-        self.assertIn('content: "Раскрыть";', html)
-        self.assertIn("details.preset-panel[open] > summary::after", html)
-        self.assertIn('content: "Свернуть";', html)
+        self.assertIn("details.preset-panel[open] > summary::before", html)
+        self.assertNotIn('content: "Раскрыть";', html)
+        self.assertNotIn('content: "Свернуть";', html)
+        self.assertNotIn('<span class="helper-text">глубина, повторы, DNS/IP-check, лимиты и timeout</span>', html)
         self.assertIn("details.preset-panel > summary:focus-visible", html)
+
+    def test_single_action_rows_are_balanced_on_non_mobile_widths(self) -> None:
+        html = index_html()
+
+        self.assertIn(".button-row.l-action-grid > :only-child", html)
+        self.assertIn("grid-column: 1 / -1", html)
+        self.assertIn("width: 100%", html)
+        self.assertNotIn("action-row-single", html)
+
+    def test_domain_group_disclosure_has_a_stateful_css_marker(self) -> None:
+        html = index_html()
+
+        self.assertIn(".domain-group > .domain-header::after", html)
+        self.assertIn('content: "";', html)
+        self.assertIn(".domain-group[open] > .domain-header::after", html)
+        self.assertIn("transform: rotate(225deg);", html)
+
+    def test_domain_meta_precedes_the_disclosure_indicator_in_each_domain_header(self) -> None:
+        """WEBL-016: metadata remains part of the header, before its chevron."""
+        html = index_html()
+
+        for function_name, next_function in (
+            ("function renderDomainCandidates()", "function renderCommonCandidates("),
+            ("function renderCommonCandidates(", "function candidateDomainPager("),
+        ):
+            rendered = html[html.index(function_name):html.index(next_function, html.index(function_name))]
+            header_start = rendered.index('<summary class="domain-header">')
+            header_end = rendered.index("</summary>", header_start)
+            header = rendered[header_start:header_end]
+            self.assertLess(header.index('class="domain-title"'), header.index('class="domain-meta"'))
+
+    def test_settings_hides_vault_but_keeps_backup_action_semantics_and_debug_note_grouping(self) -> None:
+        """WEBL-017/018/019/T10: no UI vault, safe restore, destructive delete, grouped help."""
+        html = index_html()
+
+        backup_card = html[html.index("function backupCard(item)"):html.index("function normalizeBackupSnapshot", html.index("function backupCard(item)"))]
+        self.assertRegex(
+            backup_card,
+            r'<button class="secondary(?![^\"]*danger)[^\"]*" data-backup-restore=',
+        )
+        self.assertIn('class="secondary danger" data-backup-delete=', backup_card)
+        self.assertIn("item.checksum_ok ? '' : statusBadge('checksum fail', 'bad')", backup_card)
+        self.assertNotIn("checksum ok", backup_card)
+        for selector, handler in (
+            ("data-backup-restore", "button.dataset.backupRestore"),
+            ("data-backup-delete", "button.dataset.backupDelete"),
+        ):
+            self.assertIn(selector, backup_card)
+            self.assertIn(handler, html)
+
+        debug_note = (
+            "Включает расширенную запись stdout проверки стратегий в debug-файл. Обычный терминал остается "
+            "компактным; debug нужен только для диагностики и может увеличить запись на диск."
+        )
+        self.assertRegex(
+            html,
+            rf'<div[^>]*>\s*<label[^>]*>\s*<input id="settings-debug-stdout" type="checkbox">[\s\S]*?</label>\s*'
+            rf'<div class="setting-note">{re.escape(debug_note)}</div>\s*</div>',
+        )
+
+    def test_protocol_controls_use_the_responsive_form_grid_primitive(self) -> None:
+        html = index_html()
+
+        self.assertIn('<div class="protocol-grid l-form-grid">', html)
+        self.assertIn('id="enable-http"', html)
+        self.assertIn('id="enable-tls12"', html)
+        self.assertIn(".protocol-grid.l-form-grid > * { grid-column: span 4; }", html)
+        self.assertIn(".protocol-grid.l-form-grid > * { grid-column: span 6; }", html)
 
     def test_time_limit_panel_keeps_layout_stable_when_disabled(self) -> None:
         html = index_html()
@@ -1360,7 +1984,7 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("const MUTATING_ACTIONS = new Set", html)
-        for action in ("save-settings", "create-backup", "upload-backup", "preset-editor-save", "preset-editor-delete", "preset-new-save"):
+        for action in ("save-settings", "create-backup", "upload-backup", "preset-editor-save", "preset-editor-delete", "preset-new-save", "v2fly-update-local-storage"):
             self.assertIn(action, html)
         self.assertIn("requireNoActiveRun()", html)
         self.assertIn("protectedMutation", html)
@@ -1369,7 +1993,8 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("mutatingSelectors", html)
-        self.assertIn("button.disabled = busy;", html)
+        self.assertIn("const controlsBlocked = busy || !hasSystemStatus;", html)
+        self.assertIn("button.disabled = controlsBlocked;", html)
         self.assertIn("button.disabled = !busy;", html)
         self.assertNotIn("'open-log'", html[html.index("const MUTATING_ACTIONS = new Set"):html.index("]);", html.index("const MUTATING_ACTIONS = new Set"))])
 
@@ -1405,6 +2030,64 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("End", html)
         self.assertIn("button.tabIndex = active ? 0 : -1;", html)
         self.assertIn("if (handleTabControlKeydown(event)) return;", html)
+
+    def test_responsive_layout_keeps_tab_aria_actions_and_layout_primitives(self) -> None:
+        """WEBL-002/005/006/007/008/010 and WEBL-T06: layout must not rewrite UI contracts."""
+        html = index_html()
+        primary_tabs = (
+            ("finder", "Подбор"),
+            ("history", "История"),
+            ("candidates", "Кандидаты"),
+            ("terminal", "Терминал"),
+            ("lists", "Списки и профили"),
+            ("settings", "Настройки"),
+        )
+        for name, label in primary_tabs:
+            tab_id = f"tab-{name}"
+            panel_id = f"tab-panel-{name}"
+            self.assertRegex(
+                html,
+                rf'<button[^>]*id="{tab_id}"[^>]*role="tab"[^>]*aria-controls="{panel_id}"[^>]*data-tab="{name}"[^>]*>{label}</button>',
+            )
+            self.assertRegex(
+                html,
+                rf'<section[^>]*id="{panel_id}"[^>]*role="tabpanel"[^>]*aria-labelledby="{tab_id}"[^>]*data-tab-page="{name}"',
+            )
+
+        for view in ("domain", "common"):
+            self.assertRegex(
+                html,
+                rf'<button[^>]*id="candidate-view-{view}"[^>]*role="tab"[^>]*aria-controls="candidates-table"[^>]*data-candidate-view="{view}"',
+            )
+        for mode in ("coverage", "minimal", "balance"):
+            self.assertRegex(
+                html,
+                rf'<button[^>]*id="candidate-result-mode-{mode}"[^>]*role="tab"[^>]*aria-controls="candidate-result-body"[^>]*data-candidate-result-mode="{mode}"',
+            )
+        self.assertIn('id="candidate-result-body" class="candidate-result-body" role="tabpanel"', html)
+
+        # All existing static actions are a layout-only compatibility boundary.
+        for action in (
+            "add-common-domain", "build-candidate-result", "change-password", "check-releases",
+            "copy-candidate-result", "copy-diagnostics", "create-backup",
+            "export-candidate-result", "logout", "open-candidate-result", "open-candidates", "open-log",
+            "preset-editor-delete", "preset-editor-export", "preset-editor-save", "preset-new-save",
+            "refresh-backups", "repeat-last-run", "run-selected-discovery",
+            "save-settings", "stop-current", "upload-backup", "use-candidate-result-domains", "v2fly-import",
+            "v2fly-load-categories", "v2fly-update-local-storage", "v2fly-preview", "v2fly-select-category",
+        ):
+            self.assertIn(f'data-action="{action}"', html)
+        self.assertIn('data-action="${esc(action)}"', html)
+
+        for primitive in ("l-container", "l-page-stack", "l-grid", "l-stack", "l-form-grid", "l-action-grid", "l-cluster"):
+            self.assertRegex(html, rf'\.{primitive}(?:[\s,.:{{])')
+        self.assertIn("@media", html)
+        self.assertIn("600px", html)
+        self.assertIn("960px", html)
+        for columns in (4, 8, 12):
+            self.assertRegex(html, rf'--[a-zA-Z0-9-]+:\s*{columns}\s*;')
+        for spacing in (16, 24):
+            self.assertRegex(html, rf'(?:--[a-zA-Z0-9-]+:\s*{spacing}px\s*;|\bpadding:\s*{spacing}px)')
 
     def test_progress_and_focus_have_accessibility_contract(self) -> None:
         html = index_html()
@@ -1880,6 +2563,7 @@ class WebUiTests(unittest.TestCase):
         self.assertEqual("core", web_routes.route_for("GET", "/api/core/backups/download-archive").namespace)
         self.assertIsNone(web_routes.route_for("POST", "/api/service/releases/install"))
         self.assertIsNone(web_routes.route_for("GET", "/api/service/releases/install-plan"))
+        self.assertEqual("web", web_routes.route_for("GET", "/api/web/status").namespace)
         self.assertEqual("web", web_routes.route_for("GET", "/api/web/run-preferences").namespace)
         self.assertEqual("web", web_routes.route_for("GET", "/api/web/candidate-domain-index-page").namespace)
         self.assertEqual("web", web_routes.route_for("GET", "/api/web/presets").namespace)
@@ -1904,6 +2588,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/core/backups/download-file", web_routes.route_paths(method="GET"))
         self.assertIn("/api/service/status", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertNotIn("/api/service/releases/install-plan", web_routes.JSON_GET_ROUTE_PATHS)
+        self.assertIn("/api/web/status", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertIn("/api/web/run-preferences", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertIn("/api/web/candidate-domain-index-page", web_routes.JSON_GET_ROUTE_PATHS)
         self.assertIn("/api/web/presets", web_routes.JSON_GET_ROUTE_PATHS)
@@ -2093,6 +2778,7 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/service/v2fly/local-storage-status", None, {}),
                     ("POST", "/api/service/v2fly/check-updates", {}, {}),
                     ("POST", "/api/service/v2fly/update-local-storage", {"dry_run": True}, {}),
+                    ("GET", "/api/web/status", None, {}),
                     ("GET", "/api/web/run-preferences", None, {}),
                     ("POST", "/api/web/run-preferences", {"run_preferences": {"domains": ["youtube.com"], "run_mode": "multi"}}, {}),
                     ("GET", "/api/web/runs/history-page", None, {}),
@@ -2165,6 +2851,7 @@ class WebUiTests(unittest.TestCase):
                     },
                     ("POST", "/api/service/v2fly/check-updates"): {"status", "operation_id", "storage"},
                     ("POST", "/api/service/v2fly/update-local-storage"): {"status", "operation_id", "storage"},
+                    ("GET", "/api/web/status"): {"version", "state", "settings", "run_preferences", "zapret2"},
                     ("GET", "/api/web/run-preferences"): {"run_preferences"},
                     ("POST", "/api/web/run-preferences"): {"run_preferences"},
                     ("GET", "/api/web/runs/history-page"): {"runs", "total", "limit", "offset", "has_more"},
@@ -2551,6 +3238,99 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(dry_payload["operation_id"], "v2fly-update-local-storage")
             self.assertNotIn("accepted", dry_payload)
 
+    def test_service_v2fly_update_rejects_a_parallel_request_without_second_prepare(self) -> None:
+        with _captured_server_temporary_directory() as (raw, start_server):
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            entered = threading.Event()
+            release = threading.Event()
+            calls = 0
+            calls_lock = threading.Lock()
+
+            def prepare(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                nonlocal calls
+                with calls_lock:
+                    calls += 1
+                entered.set()
+                self.assertTrue(release.wait(timeout=3), "test did not release the first v2fly update")
+                return {"count": 2, "categories": ["discord", "youtube"]}
+
+            with mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", side_effect=prepare):
+                port = start_server(serve_core, config).port
+                first: dict[str, Any] = {}
+
+                def invoke_first() -> None:
+                    first["response"] = _http_request(
+                        port,
+                        "/api/service/v2fly/update-local-storage",
+                        method="POST",
+                        body=json.dumps({}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    )
+
+                worker = threading.Thread(target=invoke_first, daemon=True)
+                worker.start()
+                self.assertTrue(entered.wait(timeout=3), "first v2fly update did not start")
+                second_status, second_headers, second_body = _http_request(
+                    port,
+                    "/api/service/v2fly/update-local-storage",
+                    method="POST",
+                    body=json.dumps({}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                release.set()
+                worker.join(timeout=3)
+
+            self.assertFalse(worker.is_alive(), "first v2fly update did not finish")
+            first_status, _first_headers, _first_body = first["response"]
+            self.assertEqual(first_status, 200)
+            self.assertEqual(second_status, 409)
+            self.assertEqual(second_headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertApiError(json.loads(second_body.decode("utf-8")), "conflict")
+            self.assertEqual(calls, 1)
+
+    def test_v2fly_catalog_reads_wait_for_an_in_progress_update(self) -> None:
+        with _captured_server_temporary_directory() as (raw, start_server):
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            entered = threading.Event()
+            release = threading.Event()
+            reader_done = threading.Event()
+
+            def prepare(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                entered.set()
+                self.assertTrue(release.wait(timeout=3), "test did not release v2fly update")
+                return {"count": 0, "categories": []}
+
+            with mock.patch.object(web_app.service_api, "prepare_v2fly_local_storage", side_effect=prepare):
+                port = start_server(serve_core, config).port
+                updater = threading.Thread(
+                    target=lambda: _http_request(
+                        port,
+                        "/api/service/v2fly/update-local-storage",
+                        method="POST",
+                        body=json.dumps({}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    daemon=True,
+                )
+                reader: dict[str, Any] = {}
+
+                def read_categories() -> None:
+                    reader["response"] = _http_request(port, "/api/core/presets/v2fly/categories")
+                    reader_done.set()
+
+                updater.start()
+                self.assertTrue(entered.wait(timeout=3), "v2fly update did not start")
+                reader_thread = threading.Thread(target=read_categories, daemon=True)
+                reader_thread.start()
+                self.assertFalse(reader_done.wait(timeout=0.1), "reader observed storage during v2fly publication")
+                release.set()
+                updater.join(timeout=3)
+                reader_thread.join(timeout=3)
+
+            self.assertFalse(updater.is_alive())
+            self.assertFalse(reader_thread.is_alive())
+            self.assertEqual(reader["response"][0], 200)
+
     def test_core_start_run_conflicts_when_state_idle_but_runner_lock_exists(self) -> None:
         with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
@@ -2685,6 +3465,7 @@ class WebUiTests(unittest.TestCase):
 
             core_status, _core_headers, core_body = _http_request(web_port, "/api/core/status")
             service_status, _service_headers, service_body = _http_request(web_port, "/api/service/status")
+            web_system_status, _web_system_headers, web_system_body = _http_request(web_port, "/api/web/status")
             web_status, _web_headers, web_body = _http_request(web_port, "/api/web/run-preferences")
             legacy_status, _legacy_headers, legacy_body = _http_request(web_port, "/api/status")
 
@@ -2694,6 +3475,8 @@ class WebUiTests(unittest.TestCase):
             self.assertIn('"state"', core_body.decode("utf-8"))
             self.assertEqual(service_status, 200)
             self.assertIn('"version"', service_body.decode("utf-8"))
+            self.assertEqual(web_system_status, 200)
+            self.assertIn('"zapret2"', web_system_body.decode("utf-8"))
             self.assertEqual(web_status, 200)
             self.assertIn('"run_preferences"', web_body.decode("utf-8"))
             self.assertEqual(legacy_status, 404)
@@ -2786,6 +3569,9 @@ class WebUiTests(unittest.TestCase):
             openapi_status, openapi_headers, openapi_body = _http_request(web_port, "/openapi.json")
             swagger_status, swagger_headers, swagger_body = _http_request(web_port, "/swagger")
             core_status, _, core_body = _http_request(web_port, "/api/core/status", headers=protected_headers)
+            web_system_status, web_system_headers, web_system_body = _http_request(
+                web_port, "/api/web/status", headers=protected_headers
+            )
             web_status, web_headers, web_body = _http_request(web_port, "/api/web/run-preferences", headers=protected_headers)
             legacy_status, legacy_headers, legacy_body = _http_request(web_port, "/api/status", headers=protected_headers)
             unknown_status, unknown_headers, unknown_body = _http_request(web_port, "/api/unknown", headers=protected_headers)
@@ -2798,6 +3584,9 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("SwaggerUIBundle", swagger_body.decode("utf-8"))
             self.assertEqual(core_status, 502)
             self.assertApiError(json.loads(core_body.decode("utf-8")), "core_unavailable")
+            self.assertEqual(web_system_status, 200)
+            self.assertEqual(web_system_headers.get("content-type"), "application/json; charset=utf-8")
+            self.assertIn("zapret2", json.loads(web_system_body.decode("utf-8")))
             self.assertEqual(web_status, 200)
             self.assertEqual(web_headers.get("content-type"), "application/json; charset=utf-8")
             self.assertIn('"run_preferences"', web_body.decode("utf-8"))
@@ -3902,9 +4691,21 @@ class WebUiTests(unittest.TestCase):
                 release_worker = threading.Event()
                 worker_finished = threading.Event()
                 cleanup_completed = threading.Event()
+                worker_tokens: list[object] = []
+                child_popen_commands: list[object] = []
+                child_popen_stacks: list[str] = []
+                original_popen = strategy_finder.subprocess.Popen
+
+                def reject_blockcheck_popen(command: object, *args: object, **kwargs: object) -> object:
+                    if command == ["/test/blockcheck2.sh"]:
+                        child_popen_commands.append(command)
+                        child_popen_stacks.append("".join(traceback.format_stack()))
+                        raise AssertionError("privileged blockcheck child must not start after immediate stop")
+                    return original_popen(command, *args, **kwargs)
 
                 class BarrierJobRunner(original_runner):
                     def _run(self, *args: object, **kwargs: object) -> None:
+                        worker_tokens.append(args[4])
                         worker_at_barrier.set()
                         try:
                             if not release_worker.wait(timeout=2):
@@ -3915,6 +4716,7 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", BarrierJobRunner),
+                    mock.patch.object(web_app, "recover_registered_process_runs", return_value=True),
                     mock.patch.object(
                         web_app,
                         "create_post_run_snapshot",
@@ -3926,14 +4728,15 @@ class WebUiTests(unittest.TestCase):
                         },
                     ),
                     mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(
                         strategy_finder,
                         "root_command",
                         side_effect=AssertionError("root_command must not run after immediate stop"),
                     ) as root_command,
                     mock.patch.object(
-                        strategy_finder.subprocess, "Popen", side_effect=AssertionError("privileged child must not start")
-                    ) as popen,
+                        strategy_finder.subprocess, "Popen", side_effect=reject_blockcheck_popen
+                    ),
                     mock.patch.object(
                         strategy_finder,
                         "signal_registered_process_run",
@@ -3960,6 +4763,9 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
                         accepted = json.loads(start_body.decode("utf-8"))
                         self.assertTrue(worker_at_barrier.wait(timeout=2))
+                        self.assertEqual(1, len(worker_tokens))
+                        self.assertIsInstance(worker_tokens[0], jobs._CancellationToken)
+                        self.assertFalse(worker_tokens[0].is_set())
 
                         stop_status, _headers, stop_body = _http_request(
                             server.port,
@@ -3972,10 +4778,12 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
                         self.assertTrue(cleanup_completed.wait(timeout=2))
                         cleanup.assert_called_once_with()
+                        self.assertTrue(worker_tokens[0].is_set())
 
                         release_worker.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
                         runner_threads.join_tracked()
+                        self.assertEqual([], child_popen_commands, "".join(child_popen_stacks))
 
                         state = read_state(config.output.state_dir)
                         status_status, _headers, status_body = _http_request(server.port, "/api/core/status")
@@ -3992,7 +4800,7 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
                         self.assertEqual("stopped", history["runs"][0]["status"])
                         root_command.assert_not_called()
-                        popen.assert_not_called()
+                        self.assertEqual([], child_popen_commands)
                         root_signal.assert_not_called()
                         self.assertEqual(runner_threads.tracked_count, 1)
 
@@ -4010,9 +4818,21 @@ class WebUiTests(unittest.TestCase):
                 release_root_command = threading.Event()
                 worker_finished = threading.Event()
                 cleanup_completed = threading.Event()
+                worker_tokens: list[object] = []
+                child_popen_commands: list[object] = []
+                child_popen_stacks: list[str] = []
+                original_popen = strategy_finder.subprocess.Popen
+
+                def reject_blockcheck_popen(command: object, *args: object, **kwargs: object) -> object:
+                    if command == ["/test/blockcheck2.sh"]:
+                        child_popen_commands.append(command)
+                        child_popen_stacks.append("".join(traceback.format_stack()))
+                        raise AssertionError("privileged blockcheck child must not start after stop during root_command")
+                    return original_popen(command, *args, **kwargs)
 
                 class ObservingJobRunner(original_runner):
                     def _run(self, *args: object, **kwargs: object) -> None:
+                        worker_tokens.append(args[4])
                         try:
                             super()._run(*args, **kwargs)
                         finally:
@@ -4026,6 +4846,7 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(web_app, "recover_registered_process_runs", return_value=True),
                     mock.patch.object(
                         web_app,
                         "create_post_run_snapshot",
@@ -4037,6 +4858,7 @@ class WebUiTests(unittest.TestCase):
                         },
                     ),
                     mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(
                         strategy_finder,
                         "root_command",
@@ -4045,8 +4867,8 @@ class WebUiTests(unittest.TestCase):
                     mock.patch.object(
                         strategy_finder.subprocess,
                         "Popen",
-                        side_effect=AssertionError("privileged child must not start after stop during root_command"),
-                    ) as popen,
+                        side_effect=reject_blockcheck_popen,
+                    ),
                     mock.patch.object(
                         strategy_finder,
                         "signal_registered_process_run",
@@ -4072,7 +4894,10 @@ class WebUiTests(unittest.TestCase):
                         )
                         self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
                         accepted = json.loads(start_body.decode("utf-8"))
-                        self.assertTrue(root_command_entered.wait(timeout=2))
+                        self.assertTrue(root_command_entered.wait(timeout=2), "".join(child_popen_stacks))
+                        self.assertEqual(1, len(worker_tokens))
+                        self.assertIsInstance(worker_tokens[0], jobs._CancellationToken)
+                        self.assertFalse(worker_tokens[0].is_set())
 
                         stop_status, _headers, stop_body = _http_request(
                             server.port,
@@ -4085,10 +4910,12 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
                         self.assertTrue(cleanup_completed.wait(timeout=2))
                         cleanup.assert_called_once_with()
+                        self.assertTrue(worker_tokens[0].is_set())
 
                         release_root_command.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
                         runner_threads.join_tracked()
+                        self.assertEqual([], child_popen_commands, "".join(child_popen_stacks))
 
                         state = read_state(config.output.state_dir)
                         history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
@@ -4099,7 +4926,7 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
                         self.assertEqual("stopped", history["runs"][0]["status"])
                         root_command.assert_called_once()
-                        popen.assert_not_called()
+                        self.assertEqual([], child_popen_commands)
                         root_signal.assert_not_called()
                         self.assertEqual(runner_threads.tracked_count, 1)
 
@@ -4118,9 +4945,31 @@ class WebUiTests(unittest.TestCase):
                 release_stdout_log = threading.Event()
                 worker_finished = threading.Event()
                 cleanup_completed = threading.Event()
+                worker_tokens: list[object] = []
+                claim_observations: list[tuple[object, bool, bool | None]] = []
+                child_popen_commands: list[object] = []
+                child_popen_stacks: list[str] = []
+                original_popen = strategy_finder.subprocess.Popen
+                original_claim_child_launch = strategy_finder._claim_child_launch
+
+                def reject_blockcheck_popen(command: object, *args: object, **kwargs: object) -> object:
+                    if command == ["/test/blockcheck2.sh"]:
+                        child_popen_commands.append(command)
+                        child_popen_stacks.append("".join(traceback.format_stack()))
+                        raise AssertionError("privileged blockcheck child must not start after stop before Popen")
+                    return original_popen(command, *args, **kwargs)
+
+                @contextlib.contextmanager
+                def observe_child_launch_claim(stop_event: object) -> object:
+                    is_set = getattr(stop_event, "is_set")
+                    claim_observations.append((stop_event, bool(is_set()), None))
+                    with original_claim_child_launch(stop_event) as claimed:
+                        claim_observations.append((stop_event, bool(is_set()), bool(claimed)))
+                        yield claimed
 
                 class ObservingJobRunner(original_runner):
                     def _run(self, *args: object, **kwargs: object) -> None:
+                        worker_tokens.append(args[4])
                         try:
                             super()._run(*args, **kwargs)
                         finally:
@@ -4136,6 +4985,7 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(web_app, "recover_registered_process_runs", return_value=True),
                     mock.patch.object(
                         web_app,
                         "create_post_run_snapshot",
@@ -4147,17 +4997,19 @@ class WebUiTests(unittest.TestCase):
                         },
                     ),
                     mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(
                         strategy_finder._RotatingTextWriter,
                         "__enter__",
                         new=open_stdout_log_at_barrier,
                     ),
+                    mock.patch.object(strategy_finder, "_claim_child_launch", side_effect=observe_child_launch_claim),
                     mock.patch.object(
                         strategy_finder.subprocess,
                         "Popen",
-                        side_effect=AssertionError("privileged child must not start after stop before Popen"),
-                    ) as popen,
+                        side_effect=reject_blockcheck_popen,
+                    ),
                     mock.patch.object(
                         strategy_finder,
                         "signal_registered_process_run",
@@ -4183,7 +5035,10 @@ class WebUiTests(unittest.TestCase):
                         )
                         self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
                         accepted = json.loads(start_body.decode("utf-8"))
-                        self.assertTrue(stdout_log_opened.wait(timeout=2))
+                        self.assertTrue(stdout_log_opened.wait(timeout=2), "".join(child_popen_stacks))
+                        self.assertEqual(1, len(worker_tokens))
+                        self.assertIsInstance(worker_tokens[0], jobs._CancellationToken)
+                        self.assertFalse(worker_tokens[0].is_set())
 
                         stop_status, _headers, stop_body = _http_request(
                             server.port,
@@ -4196,10 +5051,12 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
                         self.assertTrue(cleanup_completed.wait(timeout=2))
                         cleanup.assert_called_once_with()
+                        self.assertTrue(worker_tokens[0].is_set())
 
                         release_stdout_log.set()
                         self.assertTrue(worker_finished.wait(timeout=2))
                         runner_threads.join_tracked()
+                        self.assertEqual([], child_popen_commands, "".join(child_popen_stacks))
 
                         state = read_state(config.output.state_dir)
                         status_status, _headers, status_body = _http_request(server.port, "/api/core/status")
@@ -4216,13 +5073,234 @@ class WebUiTests(unittest.TestCase):
                         self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
                         self.assertEqual("stopped", history["runs"][0]["status"])
                         root_command.assert_called_once()
-                        popen.assert_not_called()
+                        self.assertEqual([], child_popen_commands)
+                        self.assertEqual(
+                            [(worker_tokens[0], True, None), (worker_tokens[0], True, False)],
+                            claim_observations,
+                        )
                         root_signal.assert_not_called()
                         self.assertEqual(runner_threads.tracked_count, 1)
 
         for mode in ("standard", "multi_domain"):
             with self.subTest(mode=mode):
                 run_stop_after_precheck_before_popen(mode)
+
+    def test_strategy_discovery_without_stop_reaches_actual_privileged_child(self) -> None:
+        def run_without_stop(mode: str) -> None:
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                worker_finished = threading.Event()
+                child_started = threading.Event()
+                child_commands: list[list[str]] = []
+                child_kwargs: list[dict[str, object]] = []
+
+                class CompletedChild:
+                    def __init__(self) -> None:
+                        self.stdout = io.StringIO("")
+                        self.returncode: int | None = None
+
+                    def wait(self, timeout: float | None = None) -> int:
+                        self.returncode = 0
+                        return 0
+
+                child = CompletedChild()
+                original_runner = web_app.JobRunner
+
+                class ObservingJobRunner(original_runner):
+                    def _run(self, *args: object, **kwargs: object) -> None:
+                        try:
+                            super()._run(*args, **kwargs)
+                        finally:
+                            worker_finished.set()
+
+                def launch_child(command: list[str], *args: object, **kwargs: object) -> CompletedChild:
+                    child_commands.append(command)
+                    child_kwargs.append(dict(kwargs))
+                    child_started.set()
+                    return child
+
+                with (
+                    mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(web_app, "recover_registered_process_runs", return_value=True),
+                    mock.patch.object(
+                        web_app,
+                        "create_post_run_snapshot",
+                        return_value={
+                            "kind": "snapshot",
+                            "status": "success",
+                            "completed_at": "2026-08-12T00:00:00Z",
+                            "snapshot_id": "post-run-snapshot",
+                        },
+                    ),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
+                    mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
+                    mock.patch.object(strategy_finder.subprocess, "Popen", side_effect=launch_child),
+                ):
+                    server = _start_captured_server(serve, config)
+                    with server, _JobRunnerThreadTracker() as runner_threads:
+                        start_status, _headers, start_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/start-run",
+                            method="POST",
+                            body=json.dumps({"mode": mode, "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                                "utf-8"
+                            ),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
+                        accepted = json.loads(start_body.decode("utf-8"))
+                        self.assertTrue(child_started.wait(timeout=2))
+                        self.assertTrue(worker_finished.wait(timeout=2))
+                        runner_threads.join_tracked()
+
+                        state = read_state(config.output.state_dir)
+                        history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
+                        self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
+                        history = json.loads(history_body.decode("utf-8"))
+                        self.assertEqual([["/test/blockcheck2.sh"]], child_commands)
+                        self.assertEqual(1, len(child_kwargs))
+                        self.assertTrue(child_kwargs[0]["start_new_session"])
+                        self.assertEqual(0, child.returncode)
+                        self.assertIsNone(state["current_run_id"])
+                        self.assertIsNone(state["last_error"])
+                        self.assertEqual("success", state["last_run_status"])
+                        self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
+                        self.assertEqual("success", history["runs"][0]["status"])
+                        root_command.assert_called_once()
+                        self.assertEqual(runner_threads.tracked_count, 1)
+
+        for mode in ("standard", "multi_domain"):
+            with self.subTest(mode=mode):
+                run_without_stop(mode)
+
+    def test_strategy_discovery_stop_after_actual_child_launch_terminates_and_cleans_up(self) -> None:
+        def run_stop_after_launch(mode: str) -> None:
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
+                worker_finished = threading.Event()
+                child_started = threading.Event()
+                child_commands: list[list[str]] = []
+                termination_calls: list[tuple[object, str]] = []
+                cleanup_calls: list[str] = []
+                original_popen = strategy_finder.subprocess.Popen
+
+                class ControlledChild:
+                    def __init__(self) -> None:
+                        self.stdout = io.StringIO("")
+                        self.returncode: int | None = None
+                        self.terminated = threading.Event()
+
+                    def wait(self, timeout: float | None = None) -> int:
+                        if not self.terminated.is_set():
+                            raise subprocess.TimeoutExpired("/test/blockcheck2.sh", timeout)
+                        assert self.returncode is not None
+                        return self.returncode
+
+                child = ControlledChild()
+                original_runner = web_app.JobRunner
+
+                class ObservingJobRunner(original_runner):
+                    def _run(self, *args: object, **kwargs: object) -> None:
+                        try:
+                            super()._run(*args, **kwargs)
+                        finally:
+                            worker_finished.set()
+
+                def launch_child(command: list[str], *args: object, **_kwargs: object) -> ControlledChild:
+                    if command == ["/test/blockcheck2.sh"]:
+                        child_commands.append(command)
+                        child_started.set()
+                        return child
+                    return original_popen(command, *args, **_kwargs)
+
+                def terminate_child(process: object, run_id: str | None = None) -> None:
+                    self.assertIs(process, child)
+                    self.assertIsNotNone(run_id)
+                    termination_calls.append((process, str(run_id)))
+                    child.returncode = -15
+                    child.terminated.set()
+
+                def record_cleanup() -> None:
+                    cleanup_calls.append("cleanup")
+
+                with (
+                    mock.patch.object(web_app, "JobRunner", ObservingJobRunner),
+                    mock.patch.object(web_app, "recover_registered_process_runs", return_value=True),
+                    mock.patch.object(
+                        web_app,
+                        "create_post_run_snapshot",
+                        return_value={
+                            "kind": "snapshot",
+                            "status": "success",
+                            "completed_at": "2026-08-12T00:00:00Z",
+                            "snapshot_id": "post-run-snapshot",
+                        },
+                    ),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
+                    mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
+                    mock.patch.object(strategy_finder.subprocess, "Popen", side_effect=launch_child),
+                    mock.patch.object(strategy_finder, "_stop_process_group", side_effect=terminate_child),
+                    mock.patch.object(strategy_finder, "_cleanup_nft_blockcheck_tables", side_effect=record_cleanup),
+                ):
+                    server = _start_captured_server(serve, config)
+                    with server, _JobRunnerThreadTracker() as runner_threads:
+                        runner_threads.add_release_action(
+                            "stop active JobRunner after child-launch test failure",
+                            lambda: _stop_current_run_if_started(server.port, child_started, worker_finished),
+                        )
+                        start_status, _headers, start_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/start-run",
+                            method="POST",
+                            body=json.dumps({"mode": mode, "domains": ["youtube.com"], "protocols": ["tcp"]}).encode(
+                                "utf-8"
+                            ),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(start_status, 202, start_body.decode("utf-8", errors="replace"))
+                        accepted = json.loads(start_body.decode("utf-8"))
+                        self.assertTrue(child_started.wait(timeout=2))
+
+                        stop_status, _headers, stop_body = _http_request(
+                            server.port,
+                            "/api/core/strategy-discovery/stop-current-run",
+                            method="POST",
+                            body=b"{}",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(stop_status, 202, stop_body.decode("utf-8", errors="replace"))
+                        self.assertEqual(accepted["run_id"], json.loads(stop_body.decode("utf-8"))["run_id"])
+                        self.assertTrue(worker_finished.wait(timeout=2))
+                        runner_threads.join_tracked()
+
+                        state = read_state(config.output.state_dir)
+                        history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
+                        self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
+                        history = json.loads(history_body.decode("utf-8"))
+                        self.assertEqual([["/test/blockcheck2.sh"]], child_commands)
+                        self.assertTrue(
+                            child.terminated.is_set(),
+                            f"termination_calls={termination_calls!r}, state={state!r}, history={history!r}",
+                        )
+                        self.assertEqual(-15, child.returncode)
+                        self.assertTrue(child.stdout.closed)
+                        self.assertEqual([(child, accepted["run_id"])], termination_calls)
+                        self.assertEqual(["cleanup"], cleanup_calls)
+                        self.assertIsNone(state["current_run_id"])
+                        self.assertIsNone(state["last_error"])
+                        self.assertEqual("stopped", state["last_run_status"])
+                        self.assertEqual(accepted["run_id"], history["runs"][0]["run_id"])
+                        self.assertEqual("stopped", history["runs"][0]["status"])
+                        root_command.assert_called_once()
+                        self.assertEqual(runner_threads.tracked_count, 1)
+
+        for mode in ("standard", "multi_domain"):
+            with self.subTest(mode=mode):
+                run_stop_after_launch(mode)
 
     def test_core_strategy_discovery_start_run_rejects_unknown_protocols(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported protocols"):

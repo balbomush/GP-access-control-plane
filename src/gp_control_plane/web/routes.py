@@ -106,6 +106,7 @@ ROUTES = (
     _route("/api/service/v2fly/local-storage-status", {"GET"}, "service", "json-get", openapi=True),
     _route("/api/service/v2fly/check-updates", {"POST"}, "service", "json-post", openapi=True),
     _route("/api/service/v2fly/update-local-storage", {"POST"}, "service", "json-post", openapi=True),
+    _route("/api/web/status", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
     _route("/api/web/run-preferences", {"GET", "POST", "HEAD"}, "web", "json-get-post", openapi=True, allowed_in_core=False),
     _route("/api/web/runs/history-page", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
     _route("/api/web/candidate-domain-index-page", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),

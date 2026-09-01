@@ -31,9 +31,17 @@ def index_html() -> str:
   --red-soft: rgba(239, 68, 68, .14);
   --code-text: #d7e0ea;
   --code-muted: #6f7a89;
+  /* Semantic aliases keep component rules independent from the base palette. */
+  --text: var(--code-text);
+  --muted: var(--text-soft);
+  --accent: var(--blue);
+  --warn: var(--amber);
+  --danger: var(--red);
+  --surface-strong: var(--surface-soft);
+  --mono: Menlo, Monaco, Consolas, "Andale Mono", "Ubuntu Mono", "Courier New", monospace;
 }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; }
+body { margin: 0; min-width: 0; }
 .shell { min-height: 100vh; }
 .login-screen {
   min-height: 100vh;
@@ -52,7 +60,8 @@ body { margin: 0; min-width: 320px; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, .3);
 }
 .login-card h1 { font-size: 22px; }
-.login-error { min-height: 20px; color: var(--red); font-size: 13px; }
+.login-error { min-height: 20px; color: var(--text); font-size: 13px; }
+.login-error:not(:empty) { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border: 1px solid var(--danger); border-radius: 6px; background: var(--surface); }
 .topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
 .topbar-inner {
   max-width: 1240px;
@@ -116,10 +125,27 @@ h1 { font-size: 24px; line-height: 1.2; margin: 0; letter-spacing: 0; }
   border-color: var(--line-strong);
 }
 .metric-status-running,
-.metric-status-queued,
 .metric-status-stopping {
   border-color: rgba(255, 174, 66, .65);
 }
+.boot-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.boot-card {
+  width: min(100%, 400px);
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .3);
+  text-align: center;
+}
+.metric-status-queued { border-color: var(--blue); }
 .metric-status-success {
   border-color: rgba(83, 221, 133, .65);
 }
@@ -241,8 +267,10 @@ input { min-height: 38px; }
 select { min-height: 38px; }
 textarea { min-height: 118px; resize: vertical; line-height: 1.45; }
 input:focus, textarea:focus, select:focus {
-  outline: 2px solid rgba(0, 151, 220, .55);
-  border-color: var(--blue);
+  outline: 2px solid var(--surface-code);
+  outline-offset: -5px;
+  border-color: var(--blue-strong);
+  box-shadow: none;
 }
 .checkbox-row {
   display: flex;
@@ -256,7 +284,7 @@ button {
   min-width: 0;
   border: 1px solid var(--blue);
   background: var(--blue);
-  color: #ffffff;
+  color: var(--surface-code);
   border-radius: 6px;
   padding: 8px 12px;
   font-size: 14px;
@@ -271,16 +299,18 @@ button:focus-visible,
 a:focus-visible,
 summary:focus-visible,
 label.file-button:focus-visible {
-  outline: 3px solid rgba(120, 211, 255, .78);
-  outline-offset: 2px;
+  outline: 2px solid var(--surface-code);
+  outline-offset: -5px;
+  border-color: var(--blue-strong);
+  box-shadow: none;
 }
 button.secondary { background: var(--surface-soft); color: var(--blue-strong); }
-button.secondary:hover { background: #243149; }
+button.secondary:hover { background: var(--surface); }
 a.button-link {
   min-height: 44px;
   border: 1px solid var(--blue);
   background: var(--blue);
-  color: #ffffff;
+  color: var(--surface-code);
   border-radius: 6px;
   padding: 8px 12px;
   font-size: 14px;
@@ -295,7 +325,7 @@ a.button-link {
 }
 a.button-link.secondary { background: var(--surface-soft); color: var(--blue-strong); }
 a.button-link:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
-a.button-link.secondary:hover { background: #243149; }
+a.button-link.secondary:hover { background: var(--surface); }
 label.file-button {
   min-height: 44px;
   border: 1px solid var(--blue);
@@ -312,11 +342,15 @@ label.file-button {
   justify-content: center;
   text-align: center;
 }
-label.file-button:hover { background: #243149; }
-button.danger { border-color: var(--red); background: var(--red); color: #ffffff; }
-button.danger:hover { border-color: #8f1d14; background: #8f1d14; }
-button.secondary.danger { background: var(--surface-soft); color: var(--red); }
-button.secondary.danger:hover { background: var(--red-soft); }
+label.file-button:hover { background: var(--surface); }
+button.danger { border-color: var(--blue); background: var(--surface-soft); color: var(--blue-strong); }
+button.danger:hover { border-color: var(--blue-strong); background: var(--surface); }
+button.secondary.danger { background: var(--surface-soft); color: var(--blue-strong); }
+button.secondary.danger:hover { background: var(--surface); }
+button.secondary.danger[data-backup-delete] { border-color: var(--danger); background: var(--danger); color: var(--surface-code); }
+button.secondary.danger[data-backup-delete]:hover { border-color: var(--danger); background: var(--danger); }
+button[data-action="stop-current"] { border-color: var(--blue); background: var(--surface-soft); color: var(--blue-strong); }
+button[data-action="stop-current"]:hover { border-color: var(--blue-strong); background: var(--surface); }
 button:disabled { opacity: .55; cursor: default; }
 .button-row {
   display: grid;
@@ -380,7 +414,7 @@ details.preset-panel > summary {
   list-style: none;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding-right: 118px;
+  padding-right: 40px;
 }
 details.preset-panel > summary::-webkit-details-marker {
   display: none;
@@ -388,7 +422,7 @@ details.preset-panel > summary::-webkit-details-marker {
 details.preset-panel > summary::before {
   content: "";
   position: absolute;
-  right: 92px;
+  right: 16px;
   top: 50%;
   width: 8px;
   height: 8px;
@@ -398,19 +432,6 @@ details.preset-panel > summary::before {
 }
 details.preset-panel[open] > summary::before {
   transform: translateY(-35%) rotate(225deg);
-}
-details.preset-panel > summary::after {
-  content: "Раскрыть";
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--blue-strong);
-  font-size: 12px;
-  font-weight: 800;
-}
-details.preset-panel[open] > summary::after {
-  content: "Свернуть";
 }
 details.preset-panel > summary:hover,
 details.preset-panel > summary:focus-visible {
@@ -538,8 +559,8 @@ details.preset-panel > summary:focus-visible {
 }
 .domain-suggestion:hover,
 .domain-suggestion:focus {
-  background: rgba(0, 151, 220, .18);
-  color: #ffffff;
+  background: var(--surface-soft);
+  color: var(--text);
 }
 .domain-suggestion-empty {
   padding: 9px 10px;
@@ -599,7 +620,7 @@ details.preset-panel > summary:focus-visible {
 .segment-option:has(input:checked) {
   border-color: var(--blue);
   background: var(--blue);
-  color: #ffffff;
+  color: var(--surface-code);
   opacity: 1;
   box-shadow: 0 0 0 1px rgba(120, 211, 255, .35) inset;
 }
@@ -652,6 +673,8 @@ details.preset-panel > summary:focus-visible {
 .compact-status.bad .compact-status-mark {
   color: var(--red);
 }
+.compact-status.pending .compact-status-mark { color: var(--accent); }
+.compact-status.unknown .compact-status-mark { color: var(--muted); }
 .release-log {
   white-space: pre-wrap;
   max-height: 220px;
@@ -677,7 +700,7 @@ details.preset-panel > summary:focus-visible {
 }
 .category-match.active {
   background: var(--blue);
-  color: #ffffff;
+  color: var(--surface-code);
   border-color: var(--blue);
 }
 .v2fly-catalog-status {
@@ -692,8 +715,8 @@ details.preset-panel > summary:focus-visible {
 }
 .source-preview.bad {
   border-color: var(--danger);
-  color: var(--danger);
-  background: var(--red-soft);
+  color: var(--text);
+  background: var(--surface);
 }
 .helper-text {
   color: var(--text-soft);
@@ -851,7 +874,7 @@ details.preset-panel > summary:focus-visible {
 }
 .subtab-button.active {
   background: var(--blue);
-  color: #ffffff;
+  color: var(--surface-code);
   border-color: var(--blue);
 }
 .candidate-groups {
@@ -904,18 +927,18 @@ details.preset-panel > summary:focus-visible {
   text-transform: uppercase;
 }
 .backup-archive-link {
-  color: #ffffff;
+  color: var(--blue-strong);
   border: 1px solid var(--blue);
   border-radius: 6px;
   padding: 10px 12px;
   text-decoration: none;
-  background: var(--blue);
+  background: var(--surface-soft);
   font-size: 13px;
   font-weight: 800;
   text-align: center;
 }
 .backup-archive-link:hover {
-  background: var(--blue-strong);
+  background: var(--surface);
   border-color: var(--blue-strong);
 }
 .domain-group {
@@ -1039,8 +1062,10 @@ details.preset-panel > summary:focus-visible {
 }
 .strategy-code:focus,
 .line-numbered-textarea:focus {
-  outline: 2px solid rgba(0, 151, 220, .55);
-  outline-offset: -2px;
+  outline: 2px solid var(--surface-code);
+  outline-offset: -5px;
+  border-color: var(--blue-strong);
+  box-shadow: none;
 }
 .tabs {
   display: flex;
@@ -1057,7 +1082,7 @@ details.preset-panel > summary:focus-visible {
 }
 .tab-button.active {
   background: var(--blue);
-  color: #ffffff;
+  color: var(--surface-code);
   border-color: var(--blue);
 }
 .tab-page { display: none; min-width: 0; }
@@ -1152,14 +1177,8 @@ details.preset-panel > summary:focus-visible {
   flex-wrap: wrap;
   gap: 8px;
 }
-.event-card.warn {
-  border-color: #eed09a;
-  background: var(--amber-soft);
-}
-.event-card.bad {
-  border-color: #f0b9b5;
-  background: var(--red-soft);
-}
+.event-card.warn,
+.event-card.bad { background: var(--surface-soft); }
 .event-meta {
   color: var(--text-soft);
   font-size: 12px;
@@ -1224,9 +1243,7 @@ details.preset-panel > summary:focus-visible {
   color: var(--text-soft);
   font-size: 13px;
 }
-.message.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
-.message.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
-.message.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
+.message.good, .message.warn, .message.bad { background: var(--surface-soft); color: var(--text); }
 .toast {
   position: fixed;
   top: max(14px, env(safe-area-inset-top));
@@ -1250,9 +1267,7 @@ details.preset-panel > summary:focus-visible {
   opacity: 1;
   transform: translate(-50%, 0);
 }
-.toast.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
-.toast.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
-.toast.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
+.toast.good, .toast.warn, .toast.bad { background: var(--surface); color: var(--text); }
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1268,9 +1283,7 @@ details.preset-panel > summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.badge.good { background: var(--green-soft); color: var(--green); border-color: #b8dfca; }
-.badge.warn { background: var(--amber-soft); color: var(--amber); border-color: #eed09a; }
-.badge.bad { background: var(--red-soft); color: var(--red); border-color: #f0b9b5; }
+.badge.good, .badge.warn, .badge.bad { background: var(--surface-soft); color: var(--text); }
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; min-width: 0; max-width: 100%; }
 table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; table-layout: auto; }
 th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
@@ -1288,7 +1301,7 @@ tr:last-child td { border-bottom: 0; }
   background: var(--surface);
   box-shadow: 0 1px 0 rgba(255, 255, 255, .03);
 }
-.run-card:nth-child(even) { background: #1d2738; }
+.run-card:nth-child(even) { background: var(--surface); }
 .run-card-status-success { border-left-color: var(--green); }
 .run-card-status-running,
 .run-card-status-queued { border-left-color: var(--blue); }
@@ -1296,9 +1309,7 @@ tr:last-child td { border-bottom: 0; }
 .run-card-status-stopped,
 .run-card-status-timeout { border-left-color: var(--amber); }
 .run-card-status-failed { border-left-color: var(--red); }
-.run-card-kind-multi .run-card-main {
-  background: linear-gradient(90deg, rgba(0, 151, 220, .07), transparent 42%);
-}
+.run-card-kind-multi .run-card-main { background: var(--surface); }
 .run-card-main {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
@@ -1493,16 +1504,7 @@ code {
   min-height: 160px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background:
-    linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent),
-    linear-gradient(180deg, var(--surface), var(--surface-strong));
-  background-size: 220px 100%, 100% 100%;
-  background-repeat: no-repeat;
-  animation: skeleton-sweep 1.2s ease-in-out infinite;
-}
-@keyframes skeleton-sweep {
-  from { background-position: -240px 0, 0 0; }
-  to { background-position: calc(100% + 240px) 0, 0 0; }
+  background: var(--surface-strong);
 }
 pre {
   margin: 0;
@@ -1517,19 +1519,203 @@ pre {
   border-radius: 8px;
   padding: 12px;
 }
+.status-marker {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+.status-marker.good { background: var(--green); }
+.status-marker.queue, .status-marker.pending { background: var(--accent); }
+.status-marker.warn { background: var(--warn); }
+.status-marker.bad { background: var(--danger); }
+.message.good, .toast.good, .status-badge.good, .event-card.good { border-color: var(--green); }
+.message.queue, .toast.queue, .status-badge.queue, .event-card.queue,
+.message.pending, .toast.pending, .status-badge.pending, .event-card.pending { border-color: var(--accent); }
+.message.warn, .toast.warn, .status-badge.warn, .event-card.warn { border-color: var(--warn); }
+.message.bad, .toast.bad, .status-badge.bad, .event-card.bad { border-color: var(--danger); }
+.status-label { font-weight: 800; }
+.status-reason { color: var(--text); overflow-wrap: anywhere; }
+.message, .toast { display: flex; align-items: center; gap: 7px; }
+.badge { gap: 7px; }
+.badge .status-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-consequence {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  flex: 1 1 100%;
+}
+.backup-danger-zone {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.backup-danger-zone .backup-section-title { color: var(--text); }
+/* Responsive layout primitives. Keep component appearance above; these only own flow. */
+:root {
+  --l-columns: 4;
+  --l-outer: 16px;
+  --l-gutter: 16px;
+  --l-space-1: 8px;
+  --l-space-2: 16px;
+  --l-space-3: 24px;
+  --l-space-4: 32px;
+}
+body { min-width: 0; }
+.l-container {
+  width: min(100%, 1240px);
+  margin-inline: auto;
+  padding-inline: var(--l-outer);
+  min-width: 0;
+}
+.l-page-stack, .l-stack { display: grid; gap: var(--l-space-2); min-width: 0; }
+.l-grid { display: grid; grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-gutter); min-width: 0; }
+.l-form-grid, .l-action-grid { display: grid; grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-space-2); min-width: 0; }
+.l-cluster { display: flex; flex-wrap: wrap; gap: var(--l-space-1); min-width: 0; }
+.l-grid > *, .l-form-grid > *, .l-action-grid > *, .l-cluster > * { min-width: 0; }
+.l-form-grid > *, .l-action-grid > * { grid-column: 1 / -1; }
+.l-form-grid > .field, .l-form-grid > .preset-panel, .l-form-grid > .run-launch-summary,
+.l-action-grid > button, .l-action-grid > .file-button, .l-action-grid > .button-link { min-width: 0; }
+.l-container.main { max-width: none; padding-top: var(--l-space-3); padding-bottom: var(--l-space-4); gap: var(--l-space-3); }
+.topbar-inner.l-container { max-width: none; padding-block: var(--l-space-2); }
+.login-screen { padding: var(--l-outer); }
+.login-card.l-stack { gap: var(--l-space-2); }
+.login-error, .subtitle, .helper-text, .setting-note, .message, .empty,
+.source-preview, .event-meta, .progress-note, .candidate-summary { overflow-wrap: anywhere; }
+.topbar-inner { align-items: flex-start; flex-wrap: wrap; }
+.topbar-badges { margin-left: auto; }
+.status-grid.l-grid { grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-gutter); }
+.status-grid.l-grid > * { grid-column: span 2; }
+.status-grid.l-grid > :last-child { grid-column: span 4; }
+.finder-layout.l-grid > .stack { grid-column: 1 / -1; }
+.settings-access-grid.l-form-grid > .field { grid-column: 1 / -1; align-content: start; }
+.domain-group.l-stack { gap: 0; }
+.domain-group > .domain-header::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid var(--blue-strong);
+  border-bottom: 2px solid var(--blue-strong);
+  transform: rotate(45deg);
+  transition: transform .15s ease;
+}
+.domain-group[open] > .domain-header::after { transform: rotate(225deg); }
+.domain-group > .domain-header {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.domain-group > .domain-header .domain-meta {
+  margin-left: auto;
+  justify-content: flex-end;
+  min-width: 0;
+}
+.tabs { overflow-x: auto; max-width: 100%; scrollbar-width: thin; }
+.tabs .tab-button { flex: 0 0 auto; }
+.panel-header, .run-launch-summary-header, .candidate-result-head, .domain-header,
+.protocol-header, .live-run-header, .event-header { min-width: 0; flex-wrap: wrap; }
+.domain-header > :first-child, .backup-meta > * { min-width: 0; }
+.backup-meta, .backup-meta > * { overflow-wrap: anywhere; }
+.domain-header h3, .domain-header code, .backup-meta code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.form-grid.l-form-grid { gap: var(--l-space-2); }
+.form-grid.l-form-grid > .preset-panel, .form-grid.l-form-grid > details,
+.form-grid.l-form-grid > .run-launch-summary, .form-grid.l-form-grid > .button-row,
+.form-grid.l-form-grid > .message { grid-column: 1 / -1; }
+.form-grid.l-form-grid > .preset-grid, .form-grid.l-form-grid > .button-row.run-actions {
+  display: grid;
+  grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr));
+  gap: var(--l-space-2);
+}
+.form-grid.l-form-grid > .preset-grid > *, .form-grid.l-form-grid > .button-row.run-actions > * { grid-column: 1 / -1; min-width: 0; }
+.button-row.l-action-grid, .domain-picker-row.l-action-grid, .category-toolbar.l-action-grid { grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-space-2); }
+.button-row.l-action-grid > * { grid-column: 1 / -1; }
+.domain-picker-row.l-action-grid > *, .category-toolbar.l-action-grid > * { grid-column: 1 / -1; }
+.candidate-tabs.l-cluster, .terminal-actions.l-cluster, .candidate-result-toolbar.l-cluster,
+.candidate-result-modes.l-cluster, .backup-card-actions.l-cluster, .live-run-actions.l-cluster,
+.event-actions.l-cluster, .category-match-list.l-cluster { align-items: center; }
+.candidate-tabs.l-cluster > button, .terminal-actions.l-cluster > button,
+.candidate-result-toolbar.l-cluster > button, .candidate-result-modes.l-cluster > button,
+.backup-card-actions.l-cluster > button, .backup-card-actions.l-cluster > a,
+.live-run-actions.l-cluster > button, .event-actions.l-cluster > button { flex: 1 1 100%; }
+.preset-grid.l-form-grid, .settings-access-grid.l-form-grid, .protocol-grid.l-form-grid,
+.release-grid.l-grid, .progress-grid.l-grid, .run-launch-summary-grid.l-grid,
+.candidate-result-grid.l-grid, .live-run-grid.l-grid { grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); }
+.preset-grid.l-form-grid > *, .settings-access-grid.l-form-grid > *, .protocol-grid.l-form-grid > *,
+.release-grid.l-grid > *, .progress-grid.l-grid > *, .run-launch-summary-grid.l-grid > *,
+.candidate-result-grid.l-grid > *, .live-run-grid.l-grid > * { grid-column: 1 / -1; }
+.settings-stack.l-stack, .backup-list.l-stack, .candidate-groups.l-stack, .run-history.l-stack,
+.live-run-panel.l-stack, .events-panel.l-stack { gap: var(--l-space-2); }
+.table-wrap { max-width: 100%; }
+.run-card, .backup-card, .event-card, .live-run-card, .domain-group, .protocol-group,
+.candidate-result-panel, .preset-panel { min-width: 0; }
+@media (min-width: 600px) {
+  :root { --l-columns: 8; --l-outer: 24px; --l-gutter: 16px; }
+  .status-grid.l-grid > * { grid-column: span 4; }
+  .status-grid.l-grid > :last-child { grid-column: span 8; }
+  .l-form-grid > .field, .l-form-grid > .preset-panel, .l-form-grid > details { grid-column: span 4; }
+  .l-form-grid > .field:first-child, .l-form-grid > .run-launch-summary, .l-form-grid > .button-row, .l-form-grid > .message { grid-column: 1 / -1; }
+  .button-row.l-action-grid > * { grid-column: span 4; }
+  .button-row.l-action-grid > :only-child {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .form-grid.l-form-grid > .preset-grid > *, .form-grid.l-form-grid > .button-row.run-actions > * { grid-column: span 4; }
+  .domain-picker-row.l-action-grid > :first-child, .category-toolbar.l-action-grid > :first-child { grid-column: span 5; }
+  .domain-picker-row.l-action-grid > :last-child, .category-toolbar.l-action-grid > :last-child { grid-column: span 3; }
+  .preset-grid.l-form-grid > *, .settings-access-grid.l-form-grid > *, .protocol-grid.l-form-grid > * { grid-column: span 4; }
+  .settings-access-grid.l-form-grid > .field { grid-column: span 4; }
+  .release-grid.l-grid > *, .progress-grid.l-grid > *, .run-launch-summary-grid.l-grid > *,
+  .candidate-result-grid.l-grid > *, .live-run-grid.l-grid > * { grid-column: span 4; }
+  .candidate-tabs.l-cluster > button, .terminal-actions.l-cluster > button,
+  .candidate-result-toolbar.l-cluster > button, .candidate-result-modes.l-cluster > button,
+  .backup-card-actions.l-cluster > button, .backup-card-actions.l-cluster > a,
+  .live-run-actions.l-cluster > button, .event-actions.l-cluster > button { flex: 0 1 auto; }
+}
+@media (min-width: 960px) {
+  :root { --l-columns: 12; --l-outer: 24px; --l-gutter: 24px; }
+  .status-grid.l-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .status-grid.l-grid > * { grid-column: span 4; }
+  .status-grid.l-grid > :last-child { grid-column: span 4; }
+  .l-form-grid > .field, .l-form-grid > .preset-panel, .l-form-grid > details { grid-column: span 6; }
+  .l-form-grid > .field:first-child, .l-form-grid > .run-launch-summary, .l-form-grid > .button-row, .l-form-grid > .message { grid-column: 1 / -1; }
+  .button-row.l-action-grid > * { grid-column: span 6; }
+  .form-grid.l-form-grid > .preset-grid > *, .form-grid.l-form-grid > .button-row.run-actions > * { grid-column: span 6; }
+  .domain-picker-row.l-action-grid > :first-child, .category-toolbar.l-action-grid > :first-child { grid-column: span 8; }
+  .domain-picker-row.l-action-grid > :last-child, .category-toolbar.l-action-grid > :last-child { grid-column: span 4; }
+  .preset-grid.l-form-grid > *, .settings-access-grid.l-form-grid > *, .protocol-grid.l-form-grid > * { grid-column: span 6; }
+  .settings-access-grid.l-form-grid > .field { grid-column: span 6; }
+  .release-grid.l-grid > *, .progress-grid.l-grid > *, .run-launch-summary-grid.l-grid > *,
+  .candidate-result-grid.l-grid > *, .live-run-grid.l-grid > * { grid-column: span 4; }
+  .run-launch-summary-grid.l-grid {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 220px));
+    gap: var(--l-space-1);
+    justify-content: start;
+  }
+  .run-launch-summary-grid.l-grid > * { grid-column: auto; }
+}
 @media (max-width: 960px) {
   .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .layout { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
-  .topbar-inner, .main { padding-left: 14px; padding-right: 14px; }
+  .topbar-inner, .main { padding-left: var(--l-outer); padding-right: var(--l-outer); }
   .topbar-inner { align-items: stretch; flex-direction: column; }
   .status-grid, .button-row, .fill-row, .preset-grid, .settings-access-grid, .preset-actions, .domain-picker-row, .backup-downloads, .release-grid, .category-toolbar, .time-limit-row { grid-template-columns: 1fr; }
+  .settings-access-grid.l-form-grid { grid-template-columns: 1fr; }
   .protocol-grid { grid-template-columns: 1fr; }
+  .candidate-result-head { grid-template-columns: 1fr; }
+  .candidate-result-toolbar { grid-column: 1 / -1; width: 100%; }
   .progress-grid { grid-template-columns: 1fr; }
   .tabs { display: grid; grid-template-columns: 1fr; }
   .candidate-summary { white-space: normal; }
   .domain-header, .protocol-header { align-items: stretch; flex-direction: column; }
+  .domain-group > .domain-header { align-items: center; flex-direction: row; }
   h1 { font-size: 22px; }
   .metric-value { font-size: 18px; }
   button { width: 100%; }
@@ -1537,8 +1723,8 @@ pre {
 </style>
 </head>
 <body>
-<section class="login-screen" id="login-screen" aria-labelledby="login-title" hidden>
-  <form class="login-card" id="login-form">
+<section class="login-screen l-container" id="login-screen" aria-labelledby="login-title" hidden>
+  <form class="login-card l-stack" id="login-form">
     <div class="brand">
       <h1 id="login-title">GP Control Plane</h1>
       <div class="subtitle">Войдите, чтобы продолжить работу с панелью.</div>
@@ -1555,9 +1741,16 @@ pre {
     <button type="submit">Войти</button>
   </form>
 </section>
-<div class="shell" id="app-shell" hidden>
+<section class="boot-screen" id="boot-screen" aria-live="polite" hidden>
+  <div class="boot-card">
+    <div id="boot-message">Загрузка интерфейса…</div>
+    <button id="boot-retry" type="button" hidden>Повторить</button>
+  </div>
+</section>
+<template id="app-shell-template">
+<div class="shell" id="app-shell">
   <header class="topbar">
-    <div class="topbar-inner">
+    <div class="topbar-inner l-container">
       <div class="brand">
         <h1>Подбор стратегий zapret2</h1>
         <div class="subtitle">GP Control Plane · локальная web panel · Linux host</div>
@@ -1568,8 +1761,8 @@ pre {
         <button class="secondary" data-action="logout" type="button">Выйти</button>
     </div>
   </header>
-  <main class="main">
-    <section class="status-grid" aria-label="Сводка">
+  <main class="main l-container l-page-stack">
+    <section class="status-grid l-grid" aria-label="Сводка">
       <div class="metric">
         <div class="metric-label">Система</div>
         <div class="metric-value" id="metric-zapret">Загрузка</div>
@@ -1587,7 +1780,7 @@ pre {
       </button>
     </section>
 
-    <nav class="tabs" role="tablist" aria-label="Разделы">
+    <nav class="tabs l-cluster" role="tablist" aria-label="Разделы">
       <button class="tab-button active" id="tab-finder" role="tab" aria-selected="true" aria-controls="tab-panel-finder" data-tab="finder" type="button">Подбор</button>
       <button class="tab-button" id="tab-history" role="tab" aria-selected="false" aria-controls="tab-panel-history" data-tab="history" type="button" tabindex="-1">История</button>
       <button class="tab-button" id="tab-candidates" role="tab" aria-selected="false" aria-controls="tab-panel-candidates" data-tab="candidates" type="button" tabindex="-1">Кандидаты</button>
@@ -1597,14 +1790,14 @@ pre {
     </nav>
 
     <section class="tab-page active" id="tab-panel-finder" role="tabpanel" aria-labelledby="tab-finder" data-tab-page="finder">
-    <div class="layout finder-layout">
-      <div class="stack">
+    <div class="layout finder-layout l-grid">
+      <div class="stack l-stack">
         <section class="panel">
           <div class="panel-header">
             <h2>Запуск поиска</h2>
             <span class="badge" id="job-badge">Можно запускать</span>
           </div>
-          <div class="form-grid">
+          <div class="form-grid l-form-grid">
             <div class="field">
               <label for="finder-domains">Домены</label>
               <div class="code-editor text-editor">
@@ -1642,7 +1835,7 @@ pre {
             </div>
             <div class="preset-panel finder-options-panel">
               <div class="helper-text">Основные проверки, которые реально влияют на подбор стратегий.</div>
-              <div class="protocol-grid">
+              <div class="protocol-grid l-form-grid">
                 <label class="checkbox-row">
                   <input id="enable-http" type="checkbox">
                   <span>HTTP</span>
@@ -1668,7 +1861,6 @@ pre {
             <details class="preset-panel">
               <summary class="domain-header">
                 <span class="domain-title">Расширенные параметры</span>
-                <span class="helper-text">глубина, повторы, DNS/IP-check, лимиты и timeout</span>
               </summary>
               <div class="field scan-level-field">
                 <label for="discovery-profile-select">Глубина проверки стратегий</label>
@@ -1725,11 +1917,12 @@ pre {
                 <div class="run-launch-summary-title">Параметры запуска</div>
                 <span class="badge" id="run-launch-readiness">-</span>
               </div>
-              <div class="run-launch-summary-grid" id="run-launch-summary-grid"></div>
+              <div class="run-launch-summary-grid l-grid" id="run-launch-summary-grid"></div>
             </section>
             <div class="button-row run-actions">
               <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, глубиной проверки и параметрами." type="button">Запустить выбранный режим</button>
               <button class="secondary danger tooltip-button" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
+              <div class="action-consequence">Найденные стратегии сохранятся; остановка не удаляет результаты.</div>
             </div>
             <div class="message" id="message">Готово</div>
           </div>
@@ -1755,12 +1948,12 @@ pre {
           <span class="badge" id="candidates-count">0</span>
         </div>
         <div class="candidate-summary" id="candidate-summary">-</div>
-        <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
+        <div class="candidate-tabs l-cluster" role="tablist" aria-label="Вид кандидатов">
           <button class="subtab-button active" id="candidate-view-domain" role="tab" aria-selected="true" aria-controls="candidates-table" data-candidate-view="domain" type="button">По доменам</button>
           <button class="subtab-button" id="candidate-view-common" role="tab" aria-selected="false" aria-controls="candidates-table" data-candidate-view="common" type="button" tabindex="-1">Общие стратегии</button>
         </div>
-        <div class="common-filter-panel" id="common-controls" hidden>
-          <div class="preset-grid">
+        <div class="common-filter-panel l-stack" id="common-controls" hidden>
+          <div class="preset-grid l-form-grid">
             <div class="field">
               <label for="common-preset-select">Пресет доменов для пересечения</label>
               <select id="common-preset-select"></select>
@@ -1773,7 +1966,7 @@ pre {
               <textarea id="common-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="discord.com&#10;discordcdn.com"></textarea>
             </div>
           </div>
-          <div class="domain-picker-row">
+          <div class="domain-picker-row l-action-grid">
             <div class="common-domain-picker">
               <input id="common-domain-add" list="tested-domain-options" autocomplete="off" placeholder="Начните вводить протестированный домен">
               <div id="common-domain-suggestions" class="common-domain-suggestions" role="listbox" hidden></div>
@@ -1788,9 +1981,9 @@ pre {
                 <h3>Итоговый набор общих стратегий</h3>
                 <div class="helper-text" id="candidate-result-source">Выберите домены для пересечения и соберите итоговый набор.</div>
               </div>
-              <div class="candidate-result-toolbar">
+              <div class="candidate-result-toolbar l-cluster">
                 <button data-action="build-candidate-result" type="button">Собрать итоговый набор</button>
-                <div class="candidate-result-modes" role="tablist" aria-label="Режим итогового набора">
+                <div class="candidate-result-modes l-cluster" role="tablist" aria-label="Режим итогового набора">
                   <button class="subtab-button" id="candidate-result-mode-coverage" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="coverage" type="button" tabindex="-1">Максимум покрытия</button>
                   <button class="subtab-button" id="candidate-result-mode-minimal" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="minimal" type="button" tabindex="-1">Минимум стратегий</button>
                   <button class="subtab-button active" id="candidate-result-mode-balance" role="tab" aria-selected="true" aria-controls="candidate-result-body" data-candidate-result-mode="balance" type="button">Баланс</button>
@@ -1810,17 +2003,18 @@ pre {
       <section class="panel terminal-panel">
         <div class="panel-header">
           <h2>Терминал</h2>
-          <div class="terminal-actions">
+          <div class="terminal-actions l-cluster">
             <span class="badge" id="finder-log-status">-</span>
             <button class="secondary danger" data-action="stop-current" title="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." disabled>Остановить</button>
+            <div class="action-consequence">Найденные стратегии сохранятся после остановки.</div>
           </div>
         </div>
-        <section class="live-run-panel" id="live-run-panel" aria-label="Текущий подбор" aria-live="polite"></section>
+        <section class="live-run-panel l-stack" id="live-run-panel" aria-label="Текущий подбор" aria-live="polite"></section>
         <div class="progress-panel">
           <div class="progress-bar" id="progress-bar" role="progressbar" aria-label="Прогресс подбора" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div class="progress-fill" id="progress-fill"></div>
           </div>
-          <div class="progress-grid">
+          <div class="progress-grid l-grid">
             <div class="progress-cell">
               <div class="progress-label">Проверено попыток</div>
               <div class="progress-value" id="progress-attempted">-</div>
@@ -1853,8 +2047,8 @@ pre {
           <div class="progress-note" id="progress-note">расчитанное среднее время попытки: -</div>
           <div class="progress-note" id="progress-metrics">Настройки запуска появятся после старта подбора.</div>
         </div>
-        <section class="events-panel" id="events-panel" aria-label="Ошибки и предупреждения"></section>
-        <div id="stderr-diagnostics" class="stderr-diagnostics" hidden></div>
+        <section class="events-panel l-stack" id="events-panel" aria-label="Ошибки и предупреждения"></section>
+        <div id="stderr-diagnostics" class="stderr-diagnostics l-stack" hidden></div>
         <details class="raw-log-panel">
           <summary>Raw log / debug</summary>
           <pre id="finder-log">Лога пока нет</pre>
@@ -1867,7 +2061,7 @@ pre {
         <div class="panel-header">
           <h2>Списки и профили</h2>
         </div>
-        <div class="settings-stack">
+        <div class="settings-stack l-stack">
         <div class="preset-panel domain-preset-manager-panel">
           <div class="panel-header">
             <h2>Доменные пресеты</h2>
@@ -1884,7 +2078,7 @@ pre {
               <textarea id="preset-editor-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube.com&#10;discord.com"></textarea>
             </div>
           </div>
-          <div class="button-row">
+          <div class="button-row l-action-grid">
             <button data-action="preset-editor-save" type="button">Сохранить список</button>
             <button class="secondary" data-action="preset-editor-export" type="button">Скачать TXT</button>
             <button class="secondary danger" data-action="preset-editor-delete" type="button" disabled>Удалить пользовательский список</button>
@@ -1902,7 +2096,7 @@ pre {
                 <textarea id="preset-new-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube.com&#10;discord.com"></textarea>
               </div>
             </div>
-            <div class="button-row">
+            <div class="button-row l-action-grid">
               <button data-action="preset-new-save" type="button">Сохранить новый список</button>
             </div>
             <div class="source-preview" id="preset-new-preview">Новый список еще не сохранялся.</div>
@@ -1913,7 +2107,7 @@ pre {
             <h2>Импорт из v2fly</h2>
             <span class="badge">domain-list-community</span>
           </div>
-          <div class="preset-grid">
+          <div class="preset-grid l-form-grid">
             <div class="field">
               <label for="v2fly-preset-name">Название пресета</label>
               <input id="v2fly-preset-name" autocomplete="off" placeholder="v2fly-youtube">
@@ -1921,13 +2115,14 @@ pre {
           </div>
           <div class="field">
             <label for="v2fly-category-search">Каталог групп v2fly</label>
-            <div class="category-toolbar">
+            <div class="category-toolbar l-action-grid">
               <input id="v2fly-category-search" list="v2fly-category-options" autocomplete="off" placeholder="Начните вводить название группы: youtube, google, discord">
               <datalist id="v2fly-category-options"></datalist>
-              <button class="secondary" data-action="v2fly-load-categories" type="button" title="Перечитывает локальный каталог групп v2fly. Каталог скачивается при установке или обновлении сервиса.">Перечитать каталог</button>
+              <button class="secondary" data-action="v2fly-load-categories" type="button" title="Перечитывает уже загруженный локальный каталог групп v2fly.">Перечитать каталог</button>
+              <button data-action="v2fly-update-local-storage" type="button" title="Загружает или обновляет локальный каталог групп v2fly.">Загрузить/обновить каталог v2fly</button>
             </div>
           </div>
-          <div class="v2fly-catalog-status" id="v2fly-category-status">Каталог групп загрузится автоматически при открытии вкладки.</div>
+          <div class="v2fly-catalog-status" id="v2fly-category-status">Загрузите каталог v2fly, затем выберите группу для импорта.</div>
           <div class="category-match-list" id="v2fly-category-matches"></div>
           <div class="field">
             <label for="v2fly-domains">Итоговые домены пресета</label>
@@ -1936,7 +2131,7 @@ pre {
               <textarea id="v2fly-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="После проверки здесь появятся домены. Список можно отредактировать перед сохранением."></textarea>
             </div>
           </div>
-          <div class="button-row">
+          <div class="button-row l-action-grid">
             <button class="secondary" data-action="v2fly-preview" type="button">Проверить и развернуть список</button>
             <button data-action="v2fly-import" type="button">Сохранить пресет</button>
           </div>
@@ -1951,28 +2146,30 @@ pre {
         <div class="panel-header">
           <h2>Настройки</h2>
         </div>
-        <div class="settings-stack">
+        <div class="settings-stack l-stack">
         <div class="preset-panel settings-discovery-panel">
           <div class="panel-header">
             <h2>Параметры подбора</h2>
           </div>
-          <div class="preset-grid">
+          <div class="preset-grid l-form-grid">
             <label class="checkbox-row">
               <input id="settings-enable-ipv6" type="checkbox">
               IPv6-проверки
             </label>
-            <label class="checkbox-row">
-              <input id="settings-debug-stdout" type="checkbox">
-              Подробный debug-лог stdout
-            </label>
-            <div class="setting-note">Включает расширенную запись stdout проверки стратегий в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
+            <div class="field">
+              <label class="checkbox-row">
+                <input id="settings-debug-stdout" type="checkbox">
+                Подробный debug-лог stdout
+              </label>
+              <div class="setting-note">Включает расширенную запись stdout проверки стратегий в debug-файл. Обычный терминал остается компактным; debug нужен только для диагностики и может увеличить запись на диск.</div>
+            </div>
             <div class="field">
               <label for="settings-curl-max">Максимум параллельных проверочных запросов</label>
               <input id="settings-curl-max" type="number" min="1" value="10">
               <div class="setting-note">Верхняя граница для запуска параллельных проверочных запросов. Можно ставить любое число от 1, если плата и сеть справляются.</div>
             </div>
           </div>
-          <div class="button-row">
+          <div class="button-row l-action-grid">
             <button data-action="save-settings" type="button">Сохранить настройки</button>
           </div>
         </div>
@@ -1981,7 +2178,7 @@ pre {
             <h2 id="settings-access-heading">Доступ к панели</h2>
           </div>
           <div class="helper-text">Смена пароля</div>
-          <div class="settings-access-grid">
+          <div class="settings-access-grid l-form-grid">
             <div class="field">
               <label for="settings-current-password">Текущий пароль</label>
               <input id="settings-current-password" name="current_password" type="password" autocomplete="current-password" required>
@@ -1992,7 +2189,7 @@ pre {
               <div class="setting-note" id="settings-new-password-hint">Используйте не менее 8 символов или admin для возврата стандартного доступа.</div>
             </div>
           </div>
-          <div class="button-row">
+          <div class="button-row l-action-grid">
             <button data-action="change-password" type="submit">Изменить пароль</button>
           </div>
           <div class="setting-note" id="change-password-status" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -2001,7 +2198,7 @@ pre {
           <div class="panel-header">
             <h2>Релизы и обновления</h2>
           </div>
-          <div class="release-grid">
+          <div class="release-grid l-grid">
             <div class="release-card">
               <span class="helper-text">Текущая версия</span>
               <strong id="settings-release-current">v-</strong>
@@ -2019,18 +2216,18 @@ pre {
               </a>
             </div>
           </div>
-          <div class="button-row">
+          <div class="button-row l-action-grid">
             <button class="secondary" data-action="check-releases" type="button">Проверить обновления</button>
           </div>
           <div class="source-preview" id="settings-release-result" hidden></div>
-          <div class="setting-note">Переход на новую версию выполняется только как отдельная чистая установка по точному тегу с локальным vault пользовательских данных.</div>
+          <div class="setting-note">Переход на новую версию выполняется только как отдельная чистая установка по точному тегу с сохранением пользовательских данных.</div>
         </div>
         <div class="preset-panel settings-backups-panel">
           <div class="panel-header">
             <h2>Бекапы и восстановление</h2>
             <span class="badge" id="backups-count">0</span>
           </div>
-          <div class="button-row">
+          <div class="button-row l-action-grid">
             <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
             <button data-action="create-backup" type="button">Создать бекап сейчас</button>
           </div>
@@ -2040,27 +2237,14 @@ pre {
             <div class="panel-header">
               <h2>Загрузка ZIP-бекапа</h2>
             </div>
-            <div class="button-row">
+            <div class="button-row l-action-grid">
               <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
               <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
               <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
             </div>
             <div class="helper-text">Загруженный архив появится в списке ниже. Восстановление выполняется только из карточки конкретного бекапа.</div>
           </div>
-          <div id="backups-table" class="backup-list"></div>
-        </div>
-        <div class="preset-panel settings-backups-panel" aria-labelledby="clean-install-vault-title">
-          <div class="panel-header">
-            <h2 id="clean-install-vault-title">Vault для чистой установки</h2>
-            <span class="badge" id="clean-install-vault-count">0</span>
-          </div>
-          <div class="helper-text">Создает одну защищенную локальную копию для отдельного сценария чистой установки. Сервис автоматически сохраняет защищенный device-local handoff вне очищаемых GP-данных; для восстановления выберите vault и явно подтвердите восстановление с удалением источника.</div>
-          <div class="button-row">
-            <button data-action="create-clean-install-vault" type="button">Создать vault для чистой установки</button>
-            <button class="secondary" data-action="refresh-clean-install-vaults" type="button">Обновить статус vault</button>
-          </div>
-          <div class="helper-text" id="clean-install-vault-updated-at"></div>
-          <div id="clean-install-vaults" class="backup-list"></div>
+          <div id="backups-table" class="backup-list l-stack"></div>
         </div>
         <div class="preset-panel settings-danger-panel">
           <div class="panel-header">
@@ -2074,6 +2258,7 @@ pre {
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
+</template>
 <script>
 const CUSTOM_PRESETS_KEY = 'gp-control-plane-domain-presets-v1';
 const STRATEGY_LIST_LIMIT = 200;
@@ -2087,17 +2272,25 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', backups: [], backupsLoaded: false, cleanInstallVaults: [], cleanInstallVaultsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, statusLoading: false, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', v2flyCatalogUpdateLoading: false, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
   'standard-discovery': 'Поиск стратегий',
   'multi-domain-discovery': 'Все домены на одной стратегии'
 };
-const statusTone = { success: 'good', failed: 'bad', error: 'bad', running: 'warn', queued: 'warn', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
+const statusTone = { success: 'good', failed: 'bad', error: 'bad', running: 'warn', queued: 'queue', stopping: 'warn', stopped: 'warn', timeout: 'warn' };
 const AUTH_TOKEN_KEY = 'gp-control-plane-auth-token';
+const BOOTSTRAP_TIMEOUT_MS = 15000;
+const INITIAL_SYSTEM_STATUS_RETRY_DELAY_MS = 750;
+const INITIAL_SYSTEM_STATUS_RETRY_LIMIT = 3;
 let toastTimer = null;
 let refreshInFlight = false;
+let bootstrapEpoch = 0;
+let bootstrapController = null;
+let bootstrapState = 'idle';
+let initialSystemStatusRetryTimer = null;
+let initialSystemStatusRetryCount = 0;
 let realtimeSource = null;
 let realtimeConnected = false;
 let realtimeFallbackTimer = null;
@@ -2111,8 +2304,6 @@ state.candidateLoading = false;
 state.candidateUpdatedAt = '';
 state.backupsLoading = false;
 state.backupsUpdatedAt = '';
-state.cleanInstallVaultsLoading = false;
-state.cleanInstallVaultsUpdatedAt = '';
 
 const API_ENDPOINTS = Object.freeze({
   core: Object.freeze({
@@ -2125,10 +2316,6 @@ const API_ENDPOINTS = Object.freeze({
     backupsDelete: '/api/core/backups/delete',
     backupsDownloadArchive: '/api/core/backups/download-archive',
     backupsUpload: '/api/core/backups/upload',
-    cleanInstallVaultsCreate: '/api/core/clean-install-vaults/create',
-    cleanInstallVaultsList: '/api/core/clean-install-vaults/list',
-    cleanInstallVaultsStatus: '/api/core/clean-install-vaults/status',
-    cleanInstallVaultsRestore: '/api/core/clean-install-vaults/restore',
     runSettings: '/api/core/run-settings',
     saveRunSettings: '/api/core/run-settings/save',
     latestLog: '/api/core/runs/latest-log',
@@ -2137,9 +2324,11 @@ const API_ENDPOINTS = Object.freeze({
   }),
   service: Object.freeze({
     releasesAvailable: '/api/service/releases/available',
-    v2flyLocalStorageStatus: '/api/service/v2fly/local-storage-status'
+    v2flyLocalStorageStatus: '/api/service/v2fly/local-storage-status',
+    v2flyUpdateLocalStorage: '/api/service/v2fly/update-local-storage'
   }),
   web: Object.freeze({
+    status: '/api/web/status',
     runPreferences: '/api/web/run-preferences',
     runHistoryPage: '/api/web/runs/history-page',
     candidateDomainIndexPage: '/api/web/candidate-domain-index-page',
@@ -2160,19 +2349,42 @@ function esc(value){
   }[char]));
 }
 function setText(id, value){ el(id).textContent = value; }
+function statusLabel(tone){
+  return ({ good: 'Готово', queue: 'В очереди', pending: 'Проверяем', unknown: 'Нет статуса', warn: 'Внимание', bad: 'Ошибка' })[tone] || 'Статус';
+}
+function setStatusContent(node, text, tone){
+  node.replaceChildren();
+  const marker = document.createElement('span');
+  marker.className = `status-marker ${tone || ''}`;
+  marker.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.className = 'status-label';
+  label.textContent = statusLabel(tone);
+  const reason = document.createElement('span');
+  reason.className = 'status-reason';
+  reason.textContent = text || '';
+  node.append(marker, label, reason);
+}
+function statusMarkup(text, tone){
+  return `<span class="status-marker ${esc(tone || '')}" aria-hidden="true"></span><span class="status-label">${esc(statusLabel(tone))}</span><span class="status-reason">${esc(text)}</span>`;
+}
+function setBadge(node, text, tone){
+  node.className = `badge status-badge ${tone || ''}`;
+  setStatusContent(node, text, tone);
+}
 function setMessage(text, tone){
   const node = el('message');
   state.formMessage = text || '';
   state.formMessageTone = tone || '';
-  node.textContent = text;
   node.className = 'message' + (tone ? ' ' + tone : '');
+  setStatusContent(node, text, tone);
   renderMetrics();
 }
 function showToast(text, tone){
   const node = el('toast');
   if (toastTimer) clearTimeout(toastTimer);
-  node.textContent = text;
   node.className = 'toast' + (tone ? ' ' + tone : '');
+  setStatusContent(node, text, tone);
   node.hidden = false;
   requestAnimationFrame(() => node.classList.add('show'));
   toastTimer = setTimeout(() => {
@@ -2183,8 +2395,8 @@ function showToast(text, tone){
     }, 180);
   }, 2000);
 }
-async function getJson(url){
-  const response = await authFetch(url);
+async function getJson(url, options){
+  const response = await authFetch(url, options);
   if (!response.ok) throw new Error(await response.text());
   return await response.json();
 }
@@ -2226,14 +2438,48 @@ function storeAuthToken(payload){
   return token;
 }
 function showLogin(message){
-  el('app-shell').hidden = true;
+  bootstrapEpoch += 1;
+  if (bootstrapController) bootstrapController.abort();
+  bootstrapController = null;
+  bootstrapState = 'idle';
+  el('app-shell')?.remove();
+  el('boot-screen').hidden = true;
   el('login-screen').hidden = false;
-  el('login-error').textContent = message || '';
+  setLoginError(message);
   requestAnimationFrame(() => el('login-username').focus());
 }
+function setLoginError(message){
+  const node = el('login-error');
+  if (!message) {
+    node.replaceChildren();
+    return;
+  }
+  setStatusContent(node, message, 'bad');
+}
+function mountApplication(){
+  if (el('app-shell')) return;
+  const template = el('app-shell-template');
+  document.body.append(template.content.cloneNode(true));
+}
 function showApplication(){
+  mountApplication();
   el('login-screen').hidden = true;
+  el('boot-screen').hidden = true;
   el('app-shell').hidden = false;
+}
+function showBoot(state){
+  bootstrapState = state;
+  el('login-screen').hidden = true;
+  el('app-shell')?.remove();
+  const screen = el('boot-screen');
+  const message = el('boot-message');
+  const retry = el('boot-retry');
+  screen.hidden = false;
+  retry.hidden = state !== 'failed';
+  retry.disabled = state !== 'failed';
+  message.textContent = state === 'failed'
+    ? 'Не удалось загрузить интерфейс. Попробуйте ещё раз.'
+    : 'Загрузка интерфейса…';
 }
 function stopRealtimeEvents(){
   if (realtimeReconnectTimer) clearTimeout(realtimeReconnectTimer);
@@ -2273,18 +2519,62 @@ async function authFetch(url, options){
   if (response.status === 401) handleUnauthorized();
   return response;
 }
-function startAuthenticatedUi(){
-  showApplication();
-  refresh();
-  startRealtimeEvents();
-  startRealtimeFallback();
+async function startAuthenticatedUi(){
+  const epoch = ++bootstrapEpoch;
+  if (bootstrapController) bootstrapController.abort();
+  stopRealtimeEvents();
+  stopRealtimeFallback();
+  const controller = new AbortController();
+  bootstrapController = controller;
+  showBoot('loading');
+  let timeoutId = null;
+  try {
+    const requests = Promise.all([
+      getJson(apiEndpoint('web', 'status'), { signal: controller.signal }),
+      getJson(apiUrl('web', 'runHistoryPage', runParams(0)), { signal: controller.signal }),
+      getJson(apiEndpoint('core', 'latestLog'), { signal: controller.signal }),
+      getJson(apiEndpoint('web', 'presets'), { signal: controller.signal }),
+      fetchSettingsPayload({ signal: controller.signal })
+    ]);
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        const error = new Error('Bootstrap timed out');
+        error.name = 'BootstrapTimeoutError';
+        reject(error);
+      }, BOOTSTRAP_TIMEOUT_MS);
+    });
+    const [status, finderRuns, finderLog, presets, settings] = await Promise.race([requests, timeout]);
+    if (epoch !== bootstrapEpoch || controller.signal.aborted) return;
+    state.statusLoading = false;
+    clearInitialSystemStatusRetry();
+    state.status = status;
+    state.settings = (settings || {}).settings || (status || {}).settings || {};
+    if (status && status.run_preferences) state.runPreferences = status.run_preferences;
+    if (status && status.candidate_version) syncCandidateVersion(status.candidate_version);
+    mergeRunPage(finderRuns, true);
+    if (finderLog && finderLog.progress) finderLog.progress.received_at_ms = Date.now();
+    state.finderLog = finderLog;
+    mergePresetResponse(presets);
+    showApplication();
+    renderAll({ skipCandidates: true });
+    bootstrapState = 'ready';
+    startRealtimeEvents();
+    startRealtimeFallback();
+  } catch (_error) {
+    if (epoch !== bootstrapEpoch || controller.signal.aborted) return;
+    controller.abort();
+    showBoot('failed');
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    if (epoch === bootstrapEpoch) bootstrapController = null;
+  }
 }
 async function submitLogin(event){
   event.preventDefault();
   const errorNode = el('login-error');
   const form = el('login-form');
   const button = form.querySelector('button[type="submit"]');
-  errorNode.textContent = '';
+  setLoginError('');
   button.disabled = true;
   try {
     const response = await fetch('/api/auth/login', {
@@ -2301,7 +2591,7 @@ async function submitLogin(event){
     storeAuthToken(data);
     startAuthenticatedUi();
   } catch (error) {
-    errorNode.textContent = error.message || 'Unable to sign in';
+    setLoginError(error.message || 'Unable to sign in');
   } finally {
     button.disabled = false;
   }
@@ -2357,7 +2647,10 @@ function shortPath(value){
   return parts.length > 3 ? '...' + parts.slice(-3).join('/') : String(value);
 }
 function badge(text, tone){
-  return `<span class="badge ${esc(tone || '')}">${esc(text)}</span>`;
+  return `<span class="badge">${esc(text)}</span>`;
+}
+function statusBadge(text, tone){
+  return `<span class="badge status-badge ${esc(tone || '')}">${statusMarkup(text, tone)}</span>`;
 }
 function table(targetId, columns, rows, emptyText){
   if (!rows.length) {
@@ -2369,7 +2662,7 @@ function table(targetId, columns, rows, emptyText){
     const value = column.render ? column.render(row) : esc(row[column.key]);
     return `<td>${value}</td>`;
   }).join('') + '</tr>').join('');
-  el(targetId).innerHTML = `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  el(targetId).innerHTML = `<div class="table-wrap l-stack"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 function latestById(rows){
   const byId = new Map();
@@ -2382,7 +2675,7 @@ function listLoadMore(action, hasMore, loading){
   if (!hasMore) return '';
   const label = loading ? 'Загружается...' : 'Загрузить еще';
   const disabled = loading ? ' disabled' : '';
-  return `<div class="button-row list-load-more"><button class="secondary" data-action="${esc(action)}" type="button"${disabled}>${label}</button></div>`;
+  return `<div class="button-row list-load-more l-action-grid"><button class="secondary" data-action="${esc(action)}" type="button"${disabled}>${label}</button></div>`;
 }
 function runParams(offset){
   const params = new URLSearchParams();
@@ -2468,7 +2761,6 @@ function setActiveTab(tabName){
   if (tabName === 'settings') {
     if (!mutatingBlocked() && !state.releaseChecked && !state.releaseChecking) checkReleases({ silent: true });
     if (!state.backupsLoaded) refreshBackups();
-    if (!state.cleanInstallVaultsLoaded) refreshCleanInstallVaults();
   }
 }
 function latestRun(){
@@ -2605,6 +2897,7 @@ function protocolSummary(options){
   return protocols.join(' + ') || 'не выбран';
 }
 function runLaunchReadiness(domains, options){
+  if (!hasCompleteSystemStatus()) return { text: 'Проверяем систему', tone: 'pending' };
   const status = state.status || {};
   const ready = zapretCompactStatus(status.zapret2 || {}).ready;
   if (isBusy()) return { text: 'Идет подбор', tone: 'warn' };
@@ -2651,9 +2944,8 @@ function renderRunLaunchSummary(){
   const badgeNode = el('run-launch-readiness');
   if (!grid || !badgeNode) return;
   const summary = runLaunchSummaryItems();
-  badgeNode.textContent = summary.readiness.text;
-  badgeNode.className = `badge ${summary.readiness.tone}`;
-  grid.innerHTML = summary.items.map(([label, value]) => `<div class="run-launch-summary-item">
+  setBadge(badgeNode, summary.readiness.text, summary.readiness.tone);
+  grid.innerHTML = summary.items.map(([label, value]) => `<div class="run-launch-summary-item l-stack">
     <div class="run-launch-summary-label">${esc(label)}</div>
     <div class="run-launch-summary-value">${esc(value)}</div>
   </div>`).join('');
@@ -2768,11 +3060,11 @@ const MUTATING_ACTIONS = new Set([
   'save-settings',
   'create-backup',
   'upload-backup',
-  'create-clean-install-vault',
   'preset-editor-save',
   'preset-editor-delete',
   'preset-new-save',
   'v2fly-load-categories',
+  'v2fly-update-local-storage',
   'v2fly-preview',
   'v2fly-import'
 ]);
@@ -3271,6 +3563,27 @@ function zapretCompactStatus(zapret){
   }).join('\\n');
   return { ok, total, ready, tooltip };
 }
+function hasCompleteSystemStatus(status = state.status){
+  return Boolean(status && typeof status === 'object' && status.zapret2 && typeof status.zapret2 === 'object');
+}
+function clearInitialSystemStatusRetry(){
+  if (initialSystemStatusRetryTimer) clearTimeout(initialSystemStatusRetryTimer);
+  initialSystemStatusRetryTimer = null;
+  initialSystemStatusRetryCount = 0;
+}
+function scheduleInitialSystemStatusRetry(){
+  if (hasCompleteSystemStatus() || initialSystemStatusRetryTimer || initialSystemStatusRetryCount >= INITIAL_SYSTEM_STATUS_RETRY_LIMIT) return;
+  initialSystemStatusRetryCount += 1;
+  initialSystemStatusRetryTimer = setTimeout(() => {
+    initialSystemStatusRetryTimer = null;
+    refresh({ silent: true });
+  }, INITIAL_SYSTEM_STATUS_RETRY_DELAY_MS);
+}
+function initialSystemStatusState(){
+  if (hasCompleteSystemStatus()) return 'known';
+  if (state.statusLoading || initialSystemStatusRetryTimer) return 'pending';
+  return 'unknown';
+}
 function testedDomainCount(){
   const domains = new Set(Array.isArray(state.testedDomains) ? state.testedDomains : []);
   (state.candidateDomains || []).forEach((item) => {
@@ -3309,6 +3622,8 @@ function jobStatusClass(status, busy){
   return `metric metric-button metric-status-${safe}`;
 }
 function renderMetrics(){
+  const hasSystemStatus = hasCompleteSystemStatus();
+  const systemStatusState = initialSystemStatusState();
   const status = state.status || {};
   const zapret = status.zapret2 || {};
   const zapretCompact = zapretCompactStatus(zapret);
@@ -3316,37 +3631,47 @@ function renderMetrics(){
   const busy = isBusy();
   const jobStatus = currentRun()?.status || (busy ? 'running' : '');
   const version = (state.status || {}).version || '-';
-  const action = nextActionStatus(ready, busy, jobStatus, status);
+  const action = hasSystemStatus
+    ? nextActionStatus(ready, busy, jobStatus, status)
+    : systemStatusState === 'pending'
+      ? { text: 'состояние системы', tone: 'pending' }
+      : { text: 'повторите обновление', tone: 'unknown' };
   setText('app-version-badge', `v${version}`);
   const zapretValue = el('metric-zapret');
   if (zapretValue) {
-    zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${ready ? 'Готова' : 'Проблема'}</span></span>`;
-    zapretValue.title = zapretCompact.tooltip;
+    if (!hasSystemStatus) {
+      const pending = systemStatusState === 'pending';
+      zapretValue.innerHTML = `<span class="compact-status ${pending ? 'pending' : 'unknown'}"><span class="compact-status-mark">${pending ? '…' : '—'}</span><span>${pending ? 'Проверяем' : 'Нет статуса'}</span></span>`;
+      zapretValue.title = pending ? 'Получаем состояние системы' : 'Не удалось получить состояние системы';
+    } else {
+      zapretValue.innerHTML = `<span class="compact-status ${ready ? 'ok' : 'bad'}"><span class="compact-status-mark">${ready ? '✓' : '!'}</span><span>${ready ? 'Готова' : 'Проблема'}</span></span>`;
+      zapretValue.title = zapretCompact.tooltip;
+    }
   }
   const zapretNote = el('metric-zapret-note');
   if (zapretNote) {
-    zapretNote.textContent = ready ? 'службы готовы' : 'проверьте систему';
-    zapretNote.title = zapretCompact.tooltip;
+    zapretNote.textContent = !hasSystemStatus
+      ? (systemStatusState === 'pending' ? 'получаем состояние' : 'обновите страницу')
+      : (ready ? 'службы готовы' : 'проверьте систему');
+    zapretNote.title = hasSystemStatus ? zapretCompact.tooltip : zapretValue?.title || '';
   }
-  setText('metric-job', busy ? runStatusLabel(jobStatus) : 'Свободно');
+  setText('metric-job', !hasSystemStatus ? 'Ожидание' : (busy ? runStatusLabel(jobStatus) : 'Свободно'));
   const jobCard = el('metric-job-card');
-  if (jobCard) jobCard.className = jobStatusClass(jobStatus, busy);
-  setText('metric-job-note', metricJobNoteText(ready, busy, jobStatus, status));
+  if (jobCard) jobCard.className = hasSystemStatus ? jobStatusClass(jobStatus, busy) : 'metric metric-button';
+  setText('metric-job-note', !hasSystemStatus ? 'проверяем систему' : metricJobNoteText(ready, busy, jobStatus, status));
   const testedCount = testedDomainCount();
   setText('metric-candidates', String(testedCount));
   setText('metric-candidates-note', state.candidateDomainsLoaded ? `загружено ${state.candidateDomains.length} доменов` : 'открыть список');
   const jobBadge = el('job-badge');
-  jobBadge.textContent = action.text;
-  jobBadge.className = `badge ${action.tone}`;
+  setBadge(jobBadge, action.text, action.tone);
+  const controlsBlocked = busy || !hasSystemStatus;
   document.querySelectorAll('button[data-action="run-selected-discovery"]').forEach((button) => {
-    button.disabled = busy;
+    button.disabled = controlsBlocked;
   });
   const mutatingSelectors = [
     'button[data-action="save-settings"]',
     'button[data-action="create-backup"]',
     'button[data-action="upload-backup"]',
-    'button[data-action="create-clean-install-vault"]',
-    'button[data-clean-install-vault-restore]',
     'button[data-backup-restore]',
     'button[data-backup-delete]',
     'button[data-action="preset-editor-save"]',
@@ -3354,10 +3679,12 @@ function renderMetrics(){
     'button[data-action="preset-new-save"]',
     'button[data-action="v2fly-preview"]',
     'button[data-action="v2fly-import"]',
-    'button[data-action="v2fly-load-categories"]'
+    'button[data-action="v2fly-load-categories"]',
+    'button[data-action="v2fly-update-local-storage"]'
   ].join(', ');
   document.querySelectorAll(mutatingSelectors).forEach((button) => {
-    button.disabled = busy;
+    const v2flyCatalogAction = button.dataset.action === 'v2fly-load-categories' || button.dataset.action === 'v2fly-update-local-storage';
+    button.disabled = (v2flyCatalogAction && state.v2flyCatalogUpdateLoading) || controlsBlocked;
     if (busy && !button.dataset.tooltip) button.dataset.tooltip = mutatingBlockedMessage();
     if (!busy && button.dataset.tooltip === mutatingBlockedMessage()) delete button.dataset.tooltip;
   });
@@ -3414,13 +3741,13 @@ function renderDomainCandidates(){
     el('candidates-table').innerHTML = `<div class="empty">${state.candidateDomainsLoaded ? 'По фильтру ничего не найдено' : 'Откройте вкладку или обновите список, чтобы загрузить домены'}</div>`;
     return;
   }
-  el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((domainGroup) => {
+  el('candidates-table').innerHTML = `<div class="candidate-groups l-stack">${groups.map((domainGroup) => {
     const expanded = Boolean(state.openCandidateDomains[domainGroup.domain]);
     const open = expanded ? ' open' : '';
     const protocolBadges = domainGroup.protocols.map((item) => {
       return badge(`${item.protocol}: ${item.count}`, item.protocol === 'quic' ? 'warn' : 'good');
     }).join('');
-    return `<details class="domain-group" data-domain="${esc(domainGroup.domain)}"${open}>
+    return `<details class="domain-group l-stack" data-domain="${esc(domainGroup.domain)}"${open}>
       <summary class="domain-header">
         <div class="domain-title">${esc(domainGroup.domain)}</div>
         <div class="domain-meta">
@@ -3448,20 +3775,20 @@ function renderCommonCandidates(rows){
     el('candidates-table').innerHTML = `<div class="empty">${state.candidatesLoaded ? 'Общих стратегий для выбранных доменов пока нет. Если подбор остановлен, сюда попадут уже сохраненные стратегии, которые встречаются у каждого выбранного домена.' : 'Кандидатов пока нет'}</div>`;
     return;
   }
-  el('candidates-table').innerHTML = `<div class="candidate-groups">${groups.map((protocolGroup) => {
+  el('candidates-table').innerHTML = `<div class="candidate-groups l-stack">${groups.map((protocolGroup) => {
     const domains = selectedDomains;
     const expanded = state.openCommonProtocols[protocolGroup.protocol] !== false;
     const loadedTotal = uniqueStrategyArgs(protocolGroup.rows).length;
     const remoteTotal = groups.length === 1 ? Number(state.candidateTotal || loadedTotal) : loadedTotal;
     const hasRemoteMore = groups.length === 1 && Boolean(state.candidateHasMore);
-    return `<details class="domain-group" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
+    return `<details class="domain-group l-stack" data-common-protocol="${esc(protocolGroup.protocol)}"${expanded ? ' open' : ''}>
       <summary class="domain-header">
         <div class="domain-title">${esc(protocolGroup.protocol)}</div>
         <div class="domain-meta">
           ${badge(`${loadedTotal} из ${remoteTotal} стратегий`, '')}${domains.length ? badge(`${domains.length} доменов`, 'good') : ''}
         </div>
       </summary>
-      <div class="protocol-group">
+      <div class="protocol-group l-stack">
         <div class="protocol-header">
         <div>${badge('COMMON', 'good')} ${domains.length ? esc(domains.join(', ')) : 'домены из проверки стратегий'}</div>
         </div>
@@ -3491,7 +3818,7 @@ function domainStrategyContent(domain){
   const grouped = groups.map((protocolGroup) => {
     const key = `domain:${domain}:${protocolGroup.protocol}`;
     const total = uniqueStrategyArgs(protocolGroup.rows).length;
-    return `<section class="protocol-group">
+    return `<section class="protocol-group l-stack">
       <div class="protocol-header">
         <div>${badge(protocolGroup.protocol, protocolGroup.protocol === 'quic' ? 'warn' : 'good')}</div>
         <div class="helper-text">${total} стратегий</div>
@@ -3671,7 +3998,7 @@ function renderCandidateResult(){
         <div class="candidate-result-domains">${esc(item.protocol || '-')} · ${esc((item.domains || []).join(', ') || '-')}</div>
       </div>`).join('')}</div>`
     : '<div class="empty">По загруженным стратегиям нет покрытия выбранных доменов.</div>';
-  body.innerHTML = `<div class="candidate-result-grid">
+  body.innerHTML = `<div class="candidate-result-grid l-grid">
     <div class="candidate-result-cell">
       <div class="candidate-result-label">mode</div>
       <div class="candidate-result-value">${esc(result.mode)}</div>
@@ -4160,7 +4487,7 @@ function renderRuns(){
     el('finder-runs-table').innerHTML = '<div class="empty">Запусков поиска пока не было</div>';
     return;
   }
-  el('finder-runs-table').innerHTML = `<div class="run-history">${visible.map(renderRunCard).join('')}</div>${runPager()}`;
+  el('finder-runs-table').innerHTML = `<div class="run-history l-stack">${visible.map(renderRunCard).join('')}</div>${runPager()}`;
 }
 function runPager(){
   return listLoadMore('load-more-runs', state.finderRunHasMore, state.finderRunsLoading);
@@ -4169,13 +4496,13 @@ function renderRunCard(row){
   const count = runCandidateCount(row);
   const status = row.status || '-';
   const domainKey = runDomainKey(row);
-  return `<article class="run-card ${esc(runCardClass(row))}">
+  return `<article class="run-card l-stack ${esc(runCardClass(row))}">
     <div class="run-card-main">
       ${runField('Время', friendlyDate(row.timestamp))}
       ${runField('Режим', runMode(row))}
       <div class="run-field">
         <div class="run-field-label">Статус</div>
-        <div class="run-field-value run-status">${badge(runStatusLabel(status), statusTone[status] || '')}</div>
+        <div class="run-field-value run-status">${statusBadge(runStatusLabel(status), statusTone[status] || '')}</div>
       </div>
       ${runField('Этап', runPhaseText(row))}
       <div class="run-field">
@@ -4189,7 +4516,7 @@ function renderRunCard(row){
     </div>
     ${runDomains(row, domainKey)}
     ${runDiagnostics(row)}
-    <div class="run-card-actions">
+    <div class="run-card-actions l-cluster">
       <button class="secondary" data-run-repeat="${esc(domainKey)}" type="button">Повторить с этими настройками</button>
     </div>
   </article>`;
@@ -4214,7 +4541,7 @@ function runStatusLabel(status){
     failed: 'Ошибка',
     error: 'Ошибка',
     running: 'Идет подбор',
-    queued: 'Запускается',
+    queued: 'В очереди',
     stopping: 'Останавливается',
     stopped: 'Остановлено',
     timeout: 'Таймаут',
@@ -4500,8 +4827,7 @@ function renderLog(){
   const log = state.finderLog || {};
   const status = log.status || '-';
   const badgeNode = el('finder-log-status');
-  badgeNode.textContent = status;
-  badgeNode.className = 'badge ' + (statusTone[status] || '');
+  setBadge(badgeNode, status, statusTone[status] || '');
   const parts = [];
   if (log.stdout_tail) parts.push(log.stdout_tail);
   if (log.stderr_tail) parts.push('--- stderr ---\\n' + log.stderr_tail);
@@ -4526,7 +4852,7 @@ function renderStderrDiagnostics(items){
   target.hidden = false;
   target.innerHTML = rows.map((item) => {
     const severity = item.severity === 'warning' ? 'warn' : '';
-    return `<div class="stderr-diagnostic ${severity}">
+    return `<div class="stderr-diagnostic l-stack ${severity}">
       <div class="stderr-diagnostic-title">${esc(item.label || item.status || 'Диагностика stderr')}</div>
       <div>${esc(item.message || '')}</div>
     </div>`;
@@ -4554,78 +4880,29 @@ function renderBackups(){
   target.innerHTML = rows.map((item) => backupCard(item)).join('');
   renderMetrics();
 }
-function renderCleanInstallVaults(){
-  const rows = Array.isArray(state.cleanInstallVaults) ? state.cleanInstallVaults : [];
-  const countNode = el('clean-install-vault-count');
-  if (countNode) countNode.textContent = String(rows.length);
-  const updatedNode = el('clean-install-vault-updated-at');
-  if (updatedNode) {
-    const updated = friendlyTime(state.cleanInstallVaultsUpdatedAt);
-    updatedNode.textContent = updated ? `Статус обновлен ${updated}` : '';
-  }
-  const target = el('clean-install-vaults');
-  if (!target) return;
-  if (state.cleanInstallVaultsLoading && !state.cleanInstallVaultsLoaded) {
-    target.innerHTML = '<div class="loading-skeleton" aria-label="Загрузка vault"></div>';
-    return;
-  }
-  if (!rows.length) {
-    target.innerHTML = `<div class="empty">${state.cleanInstallVaultsLoaded ? 'Pending vault для чистой установки нет' : 'Откройте вкладку, чтобы загрузить статус vault'}</div>`;
-    return;
-  }
-  target.innerHTML = rows.map((item) => {
-    const id = String(item.vault_id || '');
-    return `<article class="backup-card">
-      <div class="domain-header">
-        <div>
-          <h3>${esc(id)}</h3>
-          <div class="helper-text">${esc(item.created_at || '-')}</div>
-        </div>
-        ${badge(item.pending ? 'ожидает clean install' : 'не ожидает', item.pending ? 'warn' : 'bad')}
-      </div>
-      <div class="backup-meta">
-        <div>Schema: ${esc(item.schema_version || '-')}</div>
-        <div>Размер: ${esc(formatBytes(item.archive_size_bytes || 0))}</div>
-        <div>SHA-256: <code>${esc(item.archive_sha256 || '-')}</code></div>
-        <div>Проверка: ${esc(item.verification || '-')}</div>
-      </div>
-      <div class="helper-text">После явного подтверждения восстановление проверит данные и SQLite. При успехе исходный vault будет удален автоматически.</div>
-      <div class="backup-card-actions">
-        <button class="secondary danger" data-clean-install-vault-restore="${esc(id)}" type="button">Восстановить и удалить vault</button>
-      </div>
-    </article>`;
-  }).join('');
-}
-function cleanInstallVaultListFromPayload(data){
-  const items = Array.isArray((data || {}).vaults) ? data.vaults : [];
-  return items.map((item) => ({
-    vault_id: String((item || {}).vault_id || '').trim(),
-    created_at: String((item || {}).created_at || ''),
-    schema_version: String((item || {}).schema_version || ''),
-    archive_sha256: String((item || {}).archive_sha256 || ''),
-    archive_size_bytes: Number((item || {}).archive_size_bytes || 0),
-    verification: String((item || {}).verification || ''),
-    pending: Boolean((item || {}).pending)
-  })).filter((item) => item.vault_id);
-}
 function backupCard(item){
   const id = String(item.id || '');
-  return `<article class="backup-card">
+  return `<article class="backup-card l-stack">
     <div class="domain-header">
       <div>
         <h3>${esc(id)}</h3>
         <div class="helper-text">${esc(item.created_at || '-')}</div>
       </div>
-      ${badge(item.checksum_ok ? 'checksum ok' : 'checksum fail', item.checksum_ok ? 'good' : 'bad')}
+      ${item.checksum_ok ? '' : statusBadge('checksum fail', 'bad')}
     </div>
     <div class="backup-meta">
       <div>Размер: ${esc(formatBytes(item.size_bytes || 0))}</div>
       <div>Стратегий: ${esc(item.strategy_count || 0)}</div>
     </div>
-    <div class="backup-card-actions">
+    <div class="backup-card-actions l-cluster">
       <button class="backup-archive-link" data-backup-download="${esc(id)}" type="button">Download archive</button>
-      <button class="secondary danger" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
+      <button class="secondary" data-backup-restore="${esc(id)}" type="button">Восстановить из бекапа</button>
+      <div class="action-consequence">Восстановление заменит текущие данные данными из этого бекапа.</div>
+    </div>
+    <div class="backup-danger-zone">
+      <div class="backup-section-title">Необратимое удаление</div>
       <button class="secondary danger" data-backup-delete="${esc(id)}" type="button">Удалить бекап</button>
+      <div class="action-consequence">Архив и его файлы будут удалены без возможности восстановления.</div>
     </div>
   </article>`;
 }
@@ -4756,22 +5033,23 @@ function renderLiveRun(){
   const interrupted = interruptedRunWarning();
   const important = interrupted || latestImportantLogMessage();
   const tone = isBusy() ? 'warn' : (interrupted ? 'warn' : '');
-  target.innerHTML = `<article class="live-run-card">
+  target.innerHTML = `<article class="live-run-card l-stack">
     <div class="live-run-header">
       <div class="live-run-title">Текущий подбор</div>
-      ${badge(liveRunStatusText(), tone)}
+      ${statusBadge(liveRunStatusText(), tone)}
     </div>
-    <div class="live-run-grid">
+    <div class="live-run-grid l-grid">
       ${liveRunCells(progress).map(([label, value]) => `<div class="live-run-cell">
         <div class="live-run-label">${esc(label)}</div>
         <div class="live-run-value">${esc(value || '-')}</div>
       </div>`).join('')}
     </div>
     <div class="helper-text">${important ? esc(important) : 'Ошибок и предупреждений в текущем срезе нет.'}</div>
-    <div class="live-run-actions">
+    <div class="live-run-actions l-cluster">
       <button class="secondary danger" data-action="stop-current" type="button"${isBusy() ? '' : ' disabled'}>Остановить</button>
       <button class="secondary" data-action="open-log" type="button">Открыть лог</button>
       <button class="secondary" data-action="open-candidates" type="button">Открыть результаты</button>
+      <div class="action-consequence">Найденные стратегии сохранятся после остановки.</div>
     </div>
   </article>`;
 }
@@ -4842,10 +5120,10 @@ function renderEvents(){
   if (!target) return;
   const rows = eventRows();
   if (!rows.length) {
-    target.innerHTML = `<article class="event-card">
+    target.innerHTML = `<article class="event-card l-stack">
       <div class="event-header">
         <div class="event-title">Ошибки и предупреждения</div>
-        ${badge('нет активных событий', 'good')}
+        ${statusBadge('нет активных событий', 'good')}
       </div>
       <div class="event-meta">Текущий срез не содержит значимых ошибок.</div>
     </article>`;
@@ -4853,14 +5131,14 @@ function renderEvents(){
   }
   target.innerHTML = rows.map((row) => {
     const tone = row.severity === 'error' ? 'bad' : 'warn';
-    return `<article class="event-card ${tone}">
+    return `<article class="event-card l-stack ${tone}">
       <div class="event-header">
         <div class="event-title">${esc(row.title)}</div>
-        ${badge(row.severity === 'error' ? 'Ошибка' : 'Предупреждение', tone)}
+        ${statusBadge(row.severity === 'error' ? 'Ошибка' : 'Предупреждение', tone)}
       </div>
       <div>${esc(row.message || '-')}</div>
       <div class="event-meta">${esc(friendlyTime(row.time) || '-')} · ${esc(row.source || '-')}</div>
-      <div class="event-actions">
+      <div class="event-actions l-cluster">
         <button class="secondary" data-action="repeat-last-run" type="button">Повторить</button>
         <button class="secondary" data-action="open-log" type="button">Открыть лог</button>
         <button class="secondary" data-action="copy-diagnostics" type="button">Скопировать диагностику</button>
@@ -5041,8 +5319,8 @@ function runSettingsPayloadFromSettings(payload){
   });
   return result;
 }
-async function fetchSettingsPayload(){
-  const runSettings = await getJson(apiEndpoint('core', 'runSettings'));
+async function fetchSettingsPayload(options){
+  const runSettings = await getJson(apiEndpoint('core', 'runSettings'), options);
   return { settings: runSettings || {} };
 }
 async function saveRunSettingsPayload(payload){
@@ -5183,7 +5461,7 @@ function renderV2flyPreview(){
     return;
   }
   if (preview.error) {
-    target.textContent = preview.message || 'Ошибка v2fly.';
+    target.innerHTML = statusMarkup(preview.message || 'Ошибка v2fly.', 'bad');
     return;
   }
   const added = Array.isArray(preview.added) ? preview.added.length : 0;
@@ -5219,20 +5497,31 @@ function renderV2flyCategoryCatalog(){
       ? matches.map((category) => `<button class="secondary category-match${category === exact ? ' active' : ''}" type="button" data-action="v2fly-select-category" data-category="${esc(category)}">${esc(category)}</button>`).join('')
       : '';
   }
-  const button = document.querySelector('[data-action="v2fly-load-categories"]');
+  const reloadButton = document.querySelector('[data-action="v2fly-load-categories"]');
   const loading = state.v2flyCategorySource === 'loading';
-  if (button) {
-    button.disabled = loading;
-    button.textContent = loading ? 'Читаю каталог' : 'Перечитать каталог';
-    button.title = 'Перечитывает локальный каталог групп v2fly. Каталог скачивается при установке или обновлении сервиса.';
+  const controlsBlocked = isBusy() || !hasCompleteSystemStatus();
+  const updateButton = document.querySelector('[data-action="v2fly-update-local-storage"]');
+  if (reloadButton) {
+    reloadButton.disabled = loading || state.v2flyCatalogUpdateLoading || controlsBlocked;
+    reloadButton.textContent = loading ? 'Читаю каталог' : 'Перечитать каталог';
+    reloadButton.title = 'Перечитывает уже загруженный локальный каталог групп v2fly.';
+  }
+  if (updateButton) {
+    updateButton.disabled = state.v2flyCatalogUpdateLoading || controlsBlocked;
+    updateButton.textContent = state.v2flyCatalogUpdateLoading ? 'Загружаю каталог' : 'Загрузить/обновить каталог v2fly';
+    updateButton.title = 'Загружает или обновляет локальный каталог групп v2fly.';
   }
   if (!target) return;
+  if (state.v2flyCatalogUpdateLoading) {
+    target.textContent = 'Загружаю и подготавливаю локальный каталог v2fly...';
+    return;
+  }
   if (loading) {
     target.textContent = 'Читаю локальный каталог v2fly...';
     return;
   }
   if (!categories.length) {
-    target.textContent = data.error_message ? `Локальный каталог v2fly недоступен: ${data.error_message}` : 'Локальный каталог v2fly еще не подготовлен. Он скачивается при установке или обновлении сервиса.';
+    target.textContent = data.error_message ? `Локальный каталог v2fly недоступен: ${data.error_message}` : 'Локальный каталог v2fly еще не подготовлен. Нажмите «Загрузить/обновить каталог v2fly».';
     return;
   }
   const selected = exact || '';
@@ -5282,6 +5571,11 @@ function renderPresetEditorPreview(preview){
   if (!target) return;
   if (!preview) {
     target.textContent = 'Изменения еще не проверялись.';
+    return;
+  }
+  target.classList.toggle('bad', Boolean(preview.error));
+  if (preview.error) {
+    target.innerHTML = statusMarkup(preview.message || 'Ошибка списка.', 'bad');
     return;
   }
   target.innerHTML = [
@@ -5411,8 +5705,12 @@ function presetNewDomains(){
 function renderPresetNewPreview(message, tone){
   const target = el('preset-new-preview');
   if (!target) return;
-  target.textContent = message || 'Новый список еще не сохранялся.';
   target.classList.toggle('bad', tone === 'bad');
+  if (tone === 'bad') {
+    target.innerHTML = statusMarkup(message || 'Ошибка списка.', 'bad');
+    return;
+  }
+  target.textContent = message || 'Новый список еще не сохранялся.';
 }
 async function savePresetNew(){
   const scope = 'finder';
@@ -5476,7 +5774,7 @@ async function exportPresetEditor(){
     setMessage(`Ошибка экспорта списка: ${error.message}`, 'bad');
   }
 }
-async function loadV2flyCategories(refreshCatalog){
+async function loadV2flyCategories(refreshCatalog, { throwOnError = false } = {}){
   state.v2flyCategorySource = 'loading';
   renderV2flyCategoryCatalog();
   try {
@@ -5491,6 +5789,30 @@ async function loadV2flyCategories(refreshCatalog){
     state.v2flyCategorySource = '';
     renderV2flyCategoryCatalog();
     setV2flyLocalError(`Не удалось прочитать локальный каталог v2fly: ${error.message}`);
+    if (throwOnError) throw error;
+  }
+}
+async function updateV2flyLocalStorage(){
+  if (state.v2flyCatalogUpdateLoading) return;
+  state.v2flyCatalogUpdateLoading = true;
+  renderV2flyCategoryCatalog();
+  try {
+    const result = await postJson(apiEndpoint('service', 'v2flyUpdateLocalStorage'), {});
+    await loadV2flyCategories(true, { throwOnError: true });
+    const groups = Number(result?.storage?.group_count || result?.result?.categories?.length || v2flyAllCategories().length || 0);
+    const revisionWarning = String(result?.result?.revision_warning || '').trim();
+    if (revisionWarning) {
+      setMessage(`Каталог v2fly готов: ${groups} групп, но ревизия источника не подтверждена: ${revisionWarning}`, 'warn');
+    } else {
+      setMessage(`Каталог v2fly обновлен: ${groups} групп`, 'good');
+    }
+  } catch (error) {
+    const message = error.message || 'Неизвестная ошибка';
+    setV2flyLocalError(`Не удалось загрузить каталог v2fly: ${message}`);
+    setMessage(`Ошибка загрузки v2fly: ${message}`, 'bad');
+  } finally {
+    state.v2flyCatalogUpdateLoading = false;
+    renderV2flyCategoryCatalog();
   }
 }
 async function fetchV2flyCategoryDomains(categories){
@@ -5534,7 +5856,7 @@ async function previewV2flyPreset(){
     return;
   }
   if (!v2flyAllCategories().length) {
-    setV2flyLocalError('Локальный каталог v2fly не подготовлен. Повторите установку или обновление сервиса.');
+    setV2flyLocalError('Локальный каталог v2fly не подготовлен. Нажмите «Загрузить/обновить каталог v2fly».');
     return;
   }
   if (!payload.categories.length) {
@@ -5564,7 +5886,7 @@ async function importV2flyPreset(){
     return;
   }
   if (!v2flyAllCategories().length) {
-    setV2flyLocalError('Локальный каталог v2fly не подготовлен. Повторите установку или обновление сервиса.');
+    setV2flyLocalError('Локальный каталог v2fly не подготовлен. Нажмите «Загрузить/обновить каталог v2fly».');
     return;
   }
   if (!payload.categories.length) {
@@ -6017,9 +6339,9 @@ function startRealtimeFallback(){
   }, 30000);
 }
 function refreshRequestMap(light){
-  const bootstrap = !light || !state.status;
+  const bootstrap = !light || !hasCompleteSystemStatus();
   const requests = {
-    status: getJson(apiEndpoint('core', 'status')),
+    status: getJson(apiEndpoint('web', 'status')),
     finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0))),
     finderLog: getJson(apiEndpoint('core', 'latestLog'))
   };
@@ -6041,6 +6363,7 @@ function refreshFailureMessages(results){
 async function refresh(options = {}){
   if (refreshInFlight) return;
   refreshInFlight = true;
+  if (!hasCompleteSystemStatus()) state.statusLoading = true;
   const light = Boolean(options.light);
   const { bootstrap, requests } = refreshRequestMap(light);
   const keys = Object.keys(requests);
@@ -6048,7 +6371,15 @@ async function refresh(options = {}){
     const settled = await Promise.allSettled(keys.map((key) => requests[key]));
     const results = Object.fromEntries(keys.map((key, index) => [key, settled[index]]));
     const status = settledValue(results, 'status');
-    if (status) mergeStatusPayload(status);
+    if (hasCompleteSystemStatus(status)) {
+      state.statusLoading = false;
+      clearInitialSystemStatusRetry();
+      mergeStatusPayload(status);
+    } else if (!hasCompleteSystemStatus()) {
+      state.statusLoading = false;
+      if (status) mergeStatusPayload(status);
+      scheduleInitialSystemStatusRetry();
+    }
     const settings = settledValue(results, 'settings');
     if (settings) state.settings = (settings || {}).settings || (status || {}).settings || state.settings || {};
     const finderRuns = settledValue(results, 'finderRuns');
@@ -6093,59 +6424,6 @@ async function refreshBackups(){
     state.backupsLoading = false;
     renderBackups();
     setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
-  }
-}
-async function refreshCleanInstallVaults(){
-  state.cleanInstallVaultsLoading = true;
-  renderCleanInstallVaults();
-  try {
-    const data = await getJson(apiEndpoint('core', 'cleanInstallVaultsList'));
-    state.cleanInstallVaults = cleanInstallVaultListFromPayload(data);
-    state.cleanInstallVaultsLoaded = true;
-    state.cleanInstallVaultsUpdatedAt = new Date().toISOString();
-  } catch (error) {
-    setMessage(`Ошибка загрузки vault: ${error.message}`, 'bad');
-  } finally {
-    state.cleanInstallVaultsLoading = false;
-    renderCleanInstallVaults();
-  }
-}
-async function createCleanInstallVault(){
-  try {
-    const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsCreate'), {});
-    if (!data.vault_id) throw new Error('Сервер не вернул идентификатор vault');
-    setMessage('Vault создан. После чистой установки выберите его и явно подтвердите восстановление с удалением источника.', 'good');
-    await refreshCleanInstallVaults();
-  } catch (error) {
-    if (isRuntimeBusyError(error)) {
-      setMessage(backupBusyMessage('create'), 'warn');
-      return;
-    }
-    setMessage(`Ошибка создания vault: ${error.message}`, 'bad');
-  }
-}
-async function restoreCleanInstallVault(vaultId){
-  const id = String(vaultId || '').trim();
-  if (!id) return;
-  const confirmed = window.confirm(`Восстановить данные из vault ${id} и удалить источник после проверки? Операция продолжится только после проверки данных и SQLite.`);
-  if (!confirmed) return;
-  try {
-    const data = await postJson(apiEndpoint('core', 'cleanInstallVaultsRestore'), {
-      vault_id: id,
-      confirm_restore: true
-    });
-    if (!data.completed || !data.verification?.verified || !data.storage_status?.ready || !data.cleanup?.source_deleted) {
-      throw new Error('Восстановление не подтвердило данные, SQLite и удаление исходного vault');
-    }
-    setMessage('Данные восстановлены, проверены, а исходный vault удален.', 'good');
-    invalidateCandidateCaches();
-    await Promise.all([refresh(), refreshCleanInstallVaults()]);
-  } catch (error) {
-    if (isRuntimeBusyError(error)) {
-      setMessage(backupBusyMessage('restore'), 'warn');
-      return;
-    }
-    setMessage(`Восстановление vault не завершено: ${error.message}. Исходный vault сохранен.`, 'bad');
   }
 }
 async function createBackup(){
@@ -6351,7 +6629,7 @@ const button = event.target.closest('button');
     logout();
     return;
   }
-  const protectedMutation = MUTATING_ACTIONS.has(action) || Boolean(button.dataset.backupRestore) || Boolean(button.dataset.backupDelete) || Boolean(button.dataset.cleanInstallVaultRestore);
+  const protectedMutation = MUTATING_ACTIONS.has(action) || Boolean(button.dataset.backupRestore) || Boolean(button.dataset.backupDelete);
   if (protectedMutation && !requireNoActiveRun()) return;
   if (button.dataset.commonDomainSuggestion) {
     chooseCommonDomainSuggestion(button.dataset.commonDomainSuggestion);
@@ -6426,16 +6704,8 @@ const button = event.target.closest('button');
     refreshBackups();
     return;
   }
-  if (button.dataset.action === 'refresh-clean-install-vaults') {
-    refreshCleanInstallVaults();
-    return;
-  }
   if (button.dataset.action === 'create-backup') {
     createBackup();
-    return;
-  }
-  if (button.dataset.action === 'create-clean-install-vault') {
-    createCleanInstallVault();
     return;
   }
   if (button.dataset.action === 'save-settings') {
@@ -6448,6 +6718,10 @@ const button = event.target.closest('button');
   }
   if (button.dataset.action === 'v2fly-load-categories') {
     loadV2flyCategories(true);
+    return;
+  }
+  if (button.dataset.action === 'v2fly-update-local-storage') {
+    updateV2flyLocalStorage();
     return;
   }
   if (button.dataset.action === 'v2fly-select-category') {
@@ -6487,10 +6761,6 @@ const button = event.target.closest('button');
   }
   if (button.dataset.backupRestore) {
     restoreBackup(button.dataset.backupRestore);
-    return;
-  }
-  if (button.dataset.cleanInstallVaultRestore) {
-    restoreCleanInstallVault(button.dataset.cleanInstallVaultRestore);
     return;
   }
   if (button.dataset.backupDelete) {
@@ -6692,6 +6962,9 @@ document.addEventListener('toggle', (event) => {
     state.openRunDomains[details.dataset.runDomains] = details.open;
   }
 }, true);
+el('boot-retry').addEventListener('click', () => {
+  if (bootstrapState === 'failed') startAuthenticatedUi();
+});
 if (authToken()) startAuthenticatedUi();
 else showLogin();
 </script>

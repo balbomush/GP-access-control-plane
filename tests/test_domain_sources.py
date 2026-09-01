@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.domain_sources import (
     builtin_preset_sources,
     fetch_v2fly_category_local,
@@ -24,6 +25,7 @@ from gp_control_plane.domain_sources import (
     v2fly_group_cache_dir,
 )
 from gp_control_plane.storage import read_custom_presets
+from gp_control_plane.v2fly_payloads import v2fly_storage_status_payload
 
 
 def _v2fly_archive(files: dict[str, str]) -> bytes:
@@ -150,6 +152,79 @@ domain:youtube.com
             self.assertEqual(categories["revision"], "rev1")
             self.assertEqual(categories["categories"], ["google"])
             self.assertEqual(fetch_v2fly_category_local(state_dir, "youtube"), "domain:youtube.com\n")
+
+    def test_revision_fetch_failure_is_nonfatal_after_a_valid_archive_is_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            result = prepare_v2fly_local_storage(
+                state_dir,
+                archive_fetcher=lambda: _v2fly_archive({"discord": "domain:discord.com\n", "youtube": "domain:youtube.com\n"}),
+                revision_fetcher=lambda: (_ for _ in ()).throw(OSError("revision endpoint unavailable")),
+            )
+
+            categories = list_v2fly_categories_local(state_dir, limit=100)
+            self.assertEqual(result["revision"], "")
+            self.assertIn("revision endpoint unavailable", result["revision_warning"])
+            self.assertEqual(categories["status"], "local")
+            self.assertEqual(categories["revision"], "")
+            self.assertEqual(categories["categories"], ["discord", "youtube"])
+            self.assertEqual(fetch_v2fly_category_local(state_dir, "discord"), "domain:discord.com\n")
+            status = v2fly_storage_status_payload(AppConfig(output=OutputConfig(state_dir=state_dir)))
+            self.assertEqual(status["state"], "ready")
+            self.assertEqual(status["source_commit"], "")
+            self.assertEqual(status["group_count"], 2)
+
+    def test_failed_prepare_keeps_previous_complete_catalog_and_cleans_staging_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            prepare_v2fly_local_storage(
+                state_dir,
+                archive_fetcher=lambda: _v2fly_archive({"youtube": "domain:youtube.com\n"}),
+                revision_fetcher=lambda: "stable-revision",
+            )
+
+            with self.assertRaises(OSError):
+                prepare_v2fly_local_storage(
+                    state_dir,
+                    archive_fetcher=lambda: (_ for _ in ()).throw(OSError("archive unavailable")),
+                    revision_fetcher=lambda: "new-revision",
+                )
+
+            categories = list_v2fly_categories_local(state_dir, limit=100)
+            self.assertEqual(categories["categories"], ["youtube"])
+            self.assertEqual(fetch_v2fly_category_local(state_dir, "youtube"), "domain:youtube.com\n")
+            self.assertFalse(any(path.name.startswith(".v2fly-groups-stage-") for path in v2fly_group_cache_dir(state_dir).parent.iterdir()))
+
+    def test_metadata_publish_failure_restores_the_previous_complete_generation(self) -> None:
+        import gp_control_plane.domain_sources as domain_sources
+
+        for writer_name in ("write_v2fly_group_manifest", "write_v2fly_catalog_cache"):
+            with self.subTest(writer_name=writer_name), tempfile.TemporaryDirectory() as raw:
+                state_dir = Path(raw)
+                prepare_v2fly_local_storage(
+                    state_dir,
+                    archive_fetcher=lambda: _v2fly_archive({"youtube": "domain:youtube.com\n"}),
+                    revision_fetcher=lambda: "old-revision",
+                )
+                manifest_before = domain_sources.v2fly_group_manifest_path(state_dir).read_bytes()
+                cache_before = domain_sources.v2fly_catalog_cache_path(state_dir).read_bytes()
+
+                with patch.object(domain_sources, writer_name, side_effect=OSError(f"forced {writer_name} failure")):
+                    with self.assertRaises(OSError):
+                        prepare_v2fly_local_storage(
+                            state_dir,
+                            archive_fetcher=lambda: _v2fly_archive({"discord": "domain:discord.com\n"}),
+                            revision_fetcher=lambda: "new-revision",
+                        )
+
+                self.assertEqual(domain_sources.v2fly_group_manifest_path(state_dir).read_bytes(), manifest_before)
+                self.assertEqual(domain_sources.v2fly_catalog_cache_path(state_dir).read_bytes(), cache_before)
+                self.assertEqual(list_v2fly_categories_local(state_dir, limit=100)["categories"], ["youtube"])
+                self.assertEqual(fetch_v2fly_category_local(state_dir, "youtube"), "domain:youtube.com\n")
+                self.assertFalse((v2fly_group_cache_dir(state_dir) / "discord").exists())
+                self.assertFalse(
+                    any(path.name.startswith(".v2fly-groups-") for path in v2fly_group_cache_dir(state_dir).parent.iterdir())
+                )
 
     def test_local_v2fly_preview_uses_local_storage_only(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

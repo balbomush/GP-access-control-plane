@@ -1482,6 +1482,31 @@
         }
       }
     },
+    "/api/web/status": {
+      "get": {
+        "tags": [
+          "Web Slices"
+        ],
+        "operationId": "getWebStatus",
+        "summary": "Get Web UI system status",
+        "description": "Returns Web-owned system diagnostics, including zapret2 readiness for the System card. Core status remains limited to product runtime state.",
+        "responses": {
+          "200": {
+            "description": "Web UI system status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebStatusResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/web/run-preferences": {
       "get": {
         "tags": [
@@ -2364,6 +2389,48 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebStatusResponse": {
+        "type": "object",
+        "required": [
+          "version",
+          "state",
+          "settings",
+          "run_preferences",
+          "candidate_version",
+          "paths",
+          "zapret2"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "state": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "run_preferences": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "candidate_version": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "paths": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "zapret2": {
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "additionalProperties": false
