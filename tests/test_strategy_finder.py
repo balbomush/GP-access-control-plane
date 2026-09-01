@@ -361,6 +361,20 @@ class StrategyFinderTests(unittest.TestCase):
             for root_outcome in ("returns", "raises"):
                 with self.subTest(mode=mode, root_outcome=root_outcome):
                     stop_event = threading.Event()
+                    no_preflight_plan = {
+                        **strategy_finder_module._empty_attempt_plan("standard"),
+                        "total": 1,
+                        "scripts": {"standard/test.sh": 1},
+                        "strategy_total": 1,
+                        "strategy_scripts": {"standard/test.sh": 1},
+                        "script_order": ["standard/test.sh"],
+                        "source": "test",
+                    }
+                    attempt_plan_patch = (
+                        {"return_value": no_preflight_plan}
+                        if mode == "standard"
+                        else {"side_effect": AssertionError("attempt plan must not run after multi-domain cancellation")}
+                    )
 
                     def root_command_that_cancels(command: list[str], **_kwargs: object) -> list[str]:
                         stop_event.set()
@@ -377,6 +391,11 @@ class StrategyFinderTests(unittest.TestCase):
                                 "root_command",
                                 side_effect=root_command_that_cancels,
                             ) as root_command,
+                            patch.object(
+                                strategy_finder_module,
+                                "_standard_attempt_plan",
+                                **attempt_plan_patch,
+                            ) as attempt_plan,
                             patch.object(
                                 strategy_finder_module.subprocess,
                                 "Popen",
@@ -404,6 +423,10 @@ class StrategyFinderTests(unittest.TestCase):
                     self.assertIsNone(result["returncode"])
                     self.assertIsNone(state["last_error"])
                     root_command.assert_called_once()
+                    if mode == "standard":
+                        attempt_plan.assert_called_once()
+                    else:
+                        attempt_plan.assert_not_called()
                     popen.assert_not_called()
                     root_signal.assert_not_called()
 
@@ -1878,7 +1901,7 @@ pktws_check_https_tls12()
                 patch(
                     "gp_control_plane.strategy_finder._run_blockcheck_command_live",
                     side_effect=fake_run_blockcheck_command_live,
-                ),
+                ) as run_blockcheck,
             ):
                 _run_multidomain_blockcheck_live(
                     state_dir=state_dir,
@@ -1895,6 +1918,7 @@ pktws_check_https_tls12()
             self.assertEqual(root_calls[0][0], [str(blockcheck.resolve())])
             self.assertEqual(root_calls[0][1]["helper_command"], "run-multidomain")
             self.assertEqual(captured["command"], [str(blockcheck.resolve())])
+            run_blockcheck.assert_called_once()
 
     def test_resolve_blockcheck_script_follows_exec_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

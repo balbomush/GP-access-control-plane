@@ -1029,19 +1029,24 @@ table inet blockcheck42
                 with self.subTest(phase=phase):
                     lock_dir.mkdir()
                     lock_dir.chmod(0o700)
+                    signal_gate = lock_dir / "signal-gate"
+                    signal_gate.touch()
+                    signal_gate.chmod(0o600)
                     ready = lock_dir / "supervisor-ready"
                     ready.write_text(ready_contents, encoding="utf-8")
                     ready.chmod(0o600)
-                    completed = subprocess.run(
-                        [shell, _posix_shell_path(helper_copy), "signal-run", run_id, "TERM"],
-                        env=env,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    self.assertEqual(completed.returncode, 126, completed.stderr)
-                    self.assertIn(expected_error, completed.stderr)
-                    shutil.rmtree(lock_dir)
+                    try:
+                        completed = subprocess.run(
+                            [shell, _posix_shell_path(helper_copy), "signal-run", run_id, "TERM"],
+                            env=env,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(completed.returncode, 126, completed.stderr)
+                        self.assertIn(expected_error, completed.stderr)
+                    finally:
+                        shutil.rmtree(lock_dir)
 
     def test_recover_runs_blocks_before_inspecting_an_early_phase_lock_portably(self) -> None:
         shell = _posix_shell()
@@ -1105,7 +1110,7 @@ table inet blockcheck42
                 helper=helper,
                 root=root,
                 registry=registry,
-                extra_env={"GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid} S\\n"},
+                extra_env={"GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid} S\n"},
             )
 
             self.assertEqual(completed.returncode, 126, completed.stderr)
@@ -1135,9 +1140,9 @@ table inet blockcheck42
                     # The production query is exactly: ps -e -o pgid= -o sid= -o stat=.
                     # It cannot report a member PID, but this row represents a non-leader
                     # child that remains in the original process group and session.
-                    process_table = f"{ready_pid} {ready_pid} S\\n"
+                    process_table = f"{ready_pid} {ready_pid} S\n"
                     if leader_state == "zombie":
-                        process_table = f"{ready_pid} {ready_pid} Z\\n{process_table}"
+                        process_table = f"{ready_pid} {ready_pid} Z\n{process_table}"
 
                     completed = self._run_recovery_with_identity_shims(
                         shell=shell,
@@ -1162,7 +1167,7 @@ table inet blockcheck42
             self.skipTest("requires a POSIX shell with flock")
         helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
         ready_pid = "999999"
-        process_table = f"{ready_pid} {ready_pid} Z\\n"
+        process_table = f"{ready_pid} {ready_pid} Z\n"
         for layout in ("paired", "recordless"):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
@@ -1189,8 +1194,8 @@ table inet blockcheck42
 
     def test_recover_runs_accepts_unrelated_kernel_rows_and_parked_processes_portably(self) -> None:
         shell = _posix_shell()
-        if shell is None:
-            self.skipTest("requires a POSIX shell")
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
         helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
         ready_pid = "999999"
         cases = {
@@ -1232,8 +1237,8 @@ table inet blockcheck42
         ready_pid = "999999"
         inspection_failures = {
             "empty": {"GP_TEST_RECOVERY_PROCESS_TABLE": ""},
-            "whitespace": {"GP_TEST_RECOVERY_PROCESS_TABLE": " \\t\\n"},
-            "malformed": {"GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid}\\n"},
+            "whitespace": {"GP_TEST_RECOVERY_PROCESS_TABLE": " \t\n"},
+            "malformed": {"GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid}\n"},
             "nonzero": {"GP_TEST_RECOVERY_PS_STATUS": "1"},
         }
         for layout in ("paired", "recordless"):
@@ -1279,7 +1284,9 @@ table inet blockcheck42
             registry = root / "runs"
             registry.mkdir()
             run_id = "registered-identity-unavailable"
-            lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
+            lock_dir = self._write_recovery_lock(
+                registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7, marker=marker
+            )
             record = self._write_recovery_record(registry, run_id, ready_pid, marker)
 
             completed = self._run_recovery_with_identity_shims(
@@ -1324,7 +1331,7 @@ table inet blockcheck42
                     root=root,
                     registry=registry,
                     extra_env={
-                        "GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid} Zbad\\n",
+                        "GP_TEST_RECOVERY_PROCESS_TABLE": f"{ready_pid} {ready_pid} Zbad\n",
                         "GP_TEST_RECOVERY_PS_QUERY_LOG": _posix_shell_path(ps_query_log),
                     },
                 )
@@ -1348,14 +1355,14 @@ table inet blockcheck42
         marker = Path(f"/proc/{ready_pid}/stat").read_text(encoding="utf-8").split()[21]
         leader_query = f"-o pgid= -o sid= -o stat= -p {ready_pid}"
         cases = {
-            "empty-group": (f"{ready_pid} {ready_pid} Z\\n", f"{ready_pid} {ready_pid} Z+\\n", 0),
+            "empty-group": (f"{ready_pid} {ready_pid} Z\n", f"{ready_pid} {ready_pid} Z+\n", 0),
             "live-group-member": (
-                f"{ready_pid} {ready_pid} Z\\n{ready_pid} {ready_pid} S\\n",
-                f"{ready_pid} {ready_pid} Z+\\n",
+                f"{ready_pid} {ready_pid} Z\n{ready_pid} {ready_pid} S\n",
+                f"{ready_pid} {ready_pid} Z+\n",
                 126,
             ),
-            "malformed-leader": (f"{ready_pid} {ready_pid} Z\\n", f"{ready_pid} {ready_pid} Zbad\\n", 126),
-            "nonzero-leader": (f"{ready_pid} {ready_pid} Z\\n", "", 126),
+            "malformed-leader": (f"{ready_pid} {ready_pid} Z\n", f"{ready_pid} {ready_pid} Zbad\n", 126),
+            "nonzero-leader": (f"{ready_pid} {ready_pid} Z\n", "", 126),
         }
         for layout in ("paired", "recordless"):
             for case, (process_table, leader_output, expected_code) in cases.items():
@@ -1365,7 +1372,7 @@ table inet blockcheck42
                     registry.mkdir()
                     run_id = f"{layout}-{case}-leader-zombie"
                     lock_dir = self._write_recovery_lock(
-                        registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7
+                        registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7, marker=marker
                     )
                     record = self._write_recovery_record(registry, run_id, ready_pid, marker) if layout == "paired" else None
                     ps_query_log = root / "ps-query-log"
@@ -1419,7 +1426,7 @@ table inet blockcheck42
             lock_dir = self._write_recovery_lock(registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7)
             record = self._write_recovery_record(registry, run_id, ready_pid, "101")
             ps_call_count = root / "ps-call-count"
-            ps_call_count.write_text("0\\n", encoding="utf-8")
+            ps_call_count.write_text("0\n", encoding="utf-8")
 
             completed = self._run_recovery_with_identity_shims(
                 shell=shell,
@@ -1428,14 +1435,14 @@ table inet blockcheck42
                 registry=registry,
                 extra_env={
                     "GP_TEST_RECOVERY_PS_CALL_COUNT_PATH": _posix_shell_path(ps_call_count),
-                    "GP_TEST_RECOVERY_FIRST_PROCESS_TABLE": f"{ready_pid} {ready_pid} Z\\n",
-                    "GP_TEST_RECOVERY_NEXT_PROCESS_TABLE": f"{ready_pid} {ready_pid} S\\n",
+                    "GP_TEST_RECOVERY_FIRST_PROCESS_TABLE": f"{ready_pid} {ready_pid} Z\n",
+                    "GP_TEST_RECOVERY_NEXT_PROCESS_TABLE": f"{ready_pid} {ready_pid} S\n",
                 },
             )
 
             self.assertEqual(completed.returncode, 126, completed.stderr)
             self.assertIn("artifacts changed or cannot be safely inspected", completed.stderr)
-            self.assertEqual(ps_call_count.read_text(encoding="utf-8"), "2\\n")
+            self.assertEqual(ps_call_count.read_text(encoding="utf-8"), "2\n")
             self.assertTrue(record.exists())
             self.assertTrue(lock_dir.is_dir())
             self.assertTrue((lock_dir / "supervisor-ready").is_file())
@@ -1583,6 +1590,7 @@ table inet blockcheck42
         ready_pid: str,
         go_pid: str | None = None,
         status: int | None = None,
+        marker: str = "101",
     ) -> Path:
         lock_dir = registry / f".{run_id}.lock"
         lock_dir.mkdir()
@@ -1592,7 +1600,7 @@ table inet blockcheck42
         lifecycle_gate.chmod(0o600)
         ready_file = lock_dir / "supervisor-ready"
         ready_value = (
-            f"helper-ready-v2 {ready_pid} {ready_pid} 101\n"
+            f"helper-ready-v2 {ready_pid} {ready_pid} {marker}\n"
             if go_pid is not None
             else f"helper-ready-v1 {ready_pid}\n"
         )
@@ -1701,7 +1709,6 @@ table inet blockcheck42
             "exec /usr/bin/ps \"$@\"\n",
             encoding="utf-8",
         )
-        (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         for shim in fake_bin.iterdir():
             shim.chmod(0o700)
 

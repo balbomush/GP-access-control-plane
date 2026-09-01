@@ -2512,7 +2512,7 @@ def _run_multidomain_blockcheck_live(
         stop_event=stop_event,
     )
     return _run_blockcheck_command_live(
-        command=command or [],
+        command=command,
         env=full_env,
         state_dir=state_dir,
         kind="multi-domain-discovery",
@@ -2529,7 +2529,7 @@ def _run_multidomain_blockcheck_live(
 
 
 def _run_blockcheck_command_live(
-    command: list[str],
+    command: list[str] | None,
     env: dict[str, str],
     state_dir: Path,
     kind: str,
@@ -2561,14 +2561,18 @@ def _run_blockcheck_command_live(
     metrics_log = logs / f"{run_id}.{kind}.metrics.ndjson"
     summary_fallback_log = logs / f"{run_id}.{kind}.summary-fallback.ndjson"
     debug_stdout_log = logs / f"{run_id}.{kind}.debug.stdout.log"
-    attempt_plan = _standard_attempt_plan(
-        domains=domains,
-        test=test,
-        enable_http=options.enable_http,
-        enable_tls=options.enable_tls12,
-        enable_tls13=options.enable_tls13,
-        enable_quic=options.enable_quic,
-        enable_ipv6=options.enable_ipv6,
+    attempt_plan = (
+        _empty_attempt_plan(test)
+        if command is None
+        else _standard_attempt_plan(
+            domains=domains,
+            test=test,
+            enable_http=options.enable_http,
+            enable_tls=options.enable_tls12,
+            enable_tls13=options.enable_tls13,
+            enable_quic=options.enable_quic,
+            enable_ipv6=options.enable_ipv6,
+        )
     )
     option_fields = options.to_run_fields()
     started_at = now_iso()
@@ -2576,7 +2580,7 @@ def _run_blockcheck_command_live(
         "id": run_id,
         "kind": kind,
         "candidate_id": candidate_id,
-        "status": "running",
+        "status": "stopped" if command is None else "running",
         "timestamp": started_at,
         "started_at": started_at,
         "domains": domains,
@@ -2600,16 +2604,20 @@ def _run_blockcheck_command_live(
     append_run(state_dir, started)
 
     recorder = _LiveStdoutRecorder(state_dir, started)
-    process_result = _run_process_with_live_stdout(
-        command=command,
-        env=env,
-        stdout_log=stdout_log,
-        stderr_log=stderr_log,
-        debug_stdout_log=debug_stdout_log,
-        timeout_seconds=timeout_seconds,
-        stop_event=stop_event,
-        recorder=recorder,
-        run_id=run_id,
+    process_result = (
+        _stopped_process_result(recorder)
+        if command is None
+        else _run_process_with_live_stdout(
+            command=command,
+            env=env,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            debug_stdout_log=debug_stdout_log,
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            recorder=recorder,
+            run_id=run_id,
+        )
     )
     parsed = recorder.parsed()
     completed_at = now_iso()
@@ -2944,8 +2952,9 @@ def _script_name_from_line(line: str) -> str:
 
 def _attempt_plan_for_run(run: dict[str, Any], current_script: str) -> dict[str, Any]:
     raw_plan = run.get("attempt_plan")
-    if isinstance(raw_plan, dict) and int(raw_plan.get("total") or 0) > 0:
-        return raw_plan
+    if isinstance(raw_plan, dict):
+        if int(raw_plan.get("total") or 0) > 0 or run.get("status") == "stopped" or run.get("stopped"):
+            return raw_plan
     if not current_script.startswith("standard/") and str(run.get("test") or "standard") != "standard":
         return _empty_attempt_plan(str(run.get("test") or ""))
     return _standard_attempt_plan(

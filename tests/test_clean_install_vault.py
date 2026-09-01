@@ -164,6 +164,8 @@ class CleanInstallVaultTests(unittest.TestCase):
     def test_both_supported_legacy_tags_have_the_fixed_state_layout(self) -> None:
         import subprocess
         repo = Path(__file__).resolve().parents[1]
+        if not (repo / ".git").exists():
+            self.skipTest("legacy-tag history is unavailable in an exported source tree")
         for tag in ("v0.3.4", "v0.3.5-alpha.4"):
             shown = subprocess.run(["git", "show", f"{tag}:scripts/install-linux.sh"], cwd=repo, capture_output=True, text=True, check=False)
             if shown.returncode:
