@@ -74,6 +74,32 @@ class CleanInstallerTests(unittest.TestCase):
         for forbidden in ("adapter", "provision", "preflight", "manifest", "rollback", "snapshot"):
             self.assertNotIn(forbidden, self.installer)
 
+    def test_installer_persists_only_the_validated_tag_or_candidate_identity(self) -> None:
+        self.assertIn('SOURCE_COMMIT="$(git -C "$SOURCE_DIR" rev-parse HEAD)"', self.installer)
+        self.assertIn(
+            "printf '%s\\n' \"$SOURCE_COMMIT\" | grep -Eq '^[0-9a-f]{40}$' || fail 'source checkout has an invalid HEAD commit'",
+            self.installer,
+        )
+        self.assertIn('[ "$SOURCE_COMMIT" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ]', self.installer)
+        self.assertIn('INSTALL_REF="$TAG"', self.installer)
+        self.assertIn('[ "$SOURCE_COMMIT" = "$CANDIDATE_SHA" ]', self.installer)
+        self.assertIn('INSTALL_REF="candidate:$CANDIDATE_SHA"', self.installer)
+        self.assertLess(
+            self.installer.index('[ -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]'),
+            self.installer.index('INSTALL_COMMIT="$SOURCE_COMMIT"'),
+        )
+
+        for service in ("core", "web"):
+            default_file = f"/etc/default/gp-control-plane-{service}"
+            start = self.installer.index(f"cat > {default_file} <<EOF")
+            end = self.installer.index("\nEOF\n", start)
+            contents = self.installer[start:end]
+            self.assertIn("GP_INSTALLED_REF='$INSTALL_REF'", contents)
+            self.assertIn("GP_INSTALLED_COMMIT='$INSTALL_COMMIT'", contents)
+
+        self.assertNotIn("GP_INSTALLED_REF='$CANDIDATE_SHA'", self.installer)
+        self.assertNotIn("GP_INSTALLED_COMMIT='$TAG'", self.installer)
+
     def test_state_hierarchy_is_private_and_owned_by_the_install_user(self) -> None:
         self.assertIn('state_parent="$gp_root/.GP-access-control-plane.data"', self.installer)
         self.assertIn('state_dir="$state_parent/state"', self.installer)

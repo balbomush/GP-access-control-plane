@@ -19,15 +19,20 @@ case "$INITIAL_INSTALL" in on|off) ;; *) fail 'initial-install must be on or off
 [ -d "$SOURCE_DIR/.git" ] && [ ! -L "$SOURCE_DIR" ] || fail 'source directory is unsafe'
 [ -z "$TAG" ] || [ -z "$CANDIDATE_SHA" ] || usage
 [ -n "$TAG" ] || [ -n "$CANDIDATE_SHA" ] || usage
+SOURCE_COMMIT="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
+printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || fail 'source checkout has an invalid HEAD commit'
 if [ -n "$TAG" ]; then
   printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'tag must be an exact release tag'
   [ "$(git -C "$SOURCE_DIR" cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ] || fail 'source tag must be annotated'
-  [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+  [ "$SOURCE_COMMIT" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+  INSTALL_REF="$TAG"
 else
   printf '%s\n' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$' || fail 'candidate SHA must be a full lowercase commit SHA'
-  [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA" ] || fail 'source checkout does not match the exact candidate SHA'
+  [ "$SOURCE_COMMIT" = "$CANDIDATE_SHA" ] || fail 'source checkout does not match the exact candidate SHA'
+  INSTALL_REF="candidate:$CANDIDATE_SHA"
 fi
 [ -z "$(git -C "$SOURCE_DIR" status --porcelain)" ] || fail 'exact-tag source tree is not clean'
+INSTALL_COMMIT="$SOURCE_COMMIT"
 target_home="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
 [ -n "$target_home" ] && [ -d "$target_home" ] || fail 'install-user home is unavailable'
 gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; legacy_state="$install_dir/build/state"; state_parent="$gp_root/.GP-access-control-plane.data"; state_dir="$state_parent/state"
@@ -90,6 +95,8 @@ chmod 0440 /etc/sudoers.d/gp-control-plane-root-helper
 cat > /etc/default/gp-control-plane-core <<EOF
 GP_INSTALL_DIR='$install_dir'
 GP_STATE_DIR='$state_dir'
+GP_INSTALLED_REF='$INSTALL_REF'
+GP_INSTALLED_COMMIT='$INSTALL_COMMIT'
 EOF
 cat > /etc/systemd/system/gp-control-plane-core.service <<EOF
 [Unit]
@@ -111,6 +118,8 @@ if [ "$INSTALL_WEB" = on ]; then
 cat > /etc/default/gp-control-plane-web <<EOF
 GP_INSTALL_DIR='$install_dir'
 GP_STATE_DIR='$state_dir'
+GP_INSTALLED_REF='$INSTALL_REF'
+GP_INSTALLED_COMMIT='$INSTALL_COMMIT'
 EOF
 cat > /etc/systemd/system/gp-control-plane-web.service <<EOF
 [Unit]

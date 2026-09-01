@@ -5439,6 +5439,50 @@ window.addEventListener('load', async () => {
             self.assertEqual(payload["data_state"]["v2fly"]["state"], "missing")
             self.assertEqual(payload["data_state"]["v2fly"]["group_count"], 0)
 
+    def test_service_install_identity_environment_overrides_restored_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            state = read_state(config.output.state_dir)
+            state["settings"] = {"installed_ref": "v0.4.0"}
+            write_state(config.output.state_dir, state)
+            release = {
+                "channel": "stable",
+                "available_version": "v0.4.1",
+                "url": "https://example.invalid/release",
+                "published_at": "",
+            }
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"GP_INSTALLED_REF": "candidate:" + "a" * 40, "GP_INSTALLED_COMMIT": "a" * 40},
+                    clear=False,
+                ),
+                mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
+            ):
+                status = web_app.service_api.service_status_payload(config, current_version="0.4.1")
+                available = web_app.service_api.available_releases_payload(
+                    {"installed_ref": "v0.4.0"}, current_version="0.4.1"
+                )
+
+            expected_ref = "candidate:" + "a" * 40
+            self.assertEqual(expected_ref, status["version"]["installed_ref"])
+            self.assertEqual("a" * 40, status["version"]["commit"])
+            self.assertEqual(expected_ref, available["current"]["installed_ref"])
+            self.assertEqual("a" * 40, available["current"]["commit"])
+
+            with (
+                mock.patch.dict(os.environ, {"GP_INSTALLED_REF": "", "GP_INSTALLED_COMMIT": ""}, clear=False),
+                mock.patch.object(web_app.service_api, "release_channel_info", return_value=release),
+            ):
+                fallback_status = web_app.service_api.service_status_payload(config, current_version="0.4.1")
+                fallback_available = web_app.service_api.available_releases_payload(
+                    {"installed_ref": "v0.4.0"}, current_version="0.4.1"
+                )
+            self.assertEqual("v0.4.0", fallback_status["version"]["installed_ref"])
+            self.assertEqual("", fallback_status["version"]["commit"])
+            self.assertEqual("v0.4.0", fallback_available["current"]["installed_ref"])
+            self.assertEqual("", fallback_available["current"]["commit"])
+
     def test_run_preferences_endpoint_saves_last_finder_form(self) -> None:
         with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)

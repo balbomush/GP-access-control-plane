@@ -23,15 +23,15 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 GP_INSTALL_WEB=off bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 GP_INSTALL_WEB=off bash
 ```
 
 Укажите exact annotated release tag в `GP_BRANCH`. До единственного запроса `sudo` bootstrap сначала проверяет уже существующий device-local vault; при его отсутствии экспортирует legacy-state. На чистом хосте без legacy-state он выполняет non-destructive initial install без vault. Затем один штатный installer-process останавливает сервисы, удаляет только прежнюю GP-поверхность и ставит fresh версию из того же tag. При ошибке vault до удаления ничего не меняется; после удаления разрешён только повтор fresh-install. Откат не поддерживается.
@@ -53,7 +53,7 @@ API-контракт доступен здесь:
 
 ### Безопасность и вход
 
-GP Control Plane v0.4.0 рассчитан на доверенную локальную сеть. Веб-интерфейс
+GP Control Plane v0.4.1 рассчитан на доверенную локальную сеть. Веб-интерфейс
 слушает адрес платы на порту `8080`, а при первом запуске намеренно использует
 учётные данные `admin` / `admin`. Это не способ безопасно публиковать сервис в
 интернете или в недоверенной общей сети: не открывайте этот порт наружу и не
@@ -93,13 +93,13 @@ GP_INSTALL_WEB=on
 EOF
 
 set -a; . ./gp-install.env; set +a
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
 ```
 
 Проект ставится в `~/gp/GP-access-control-plane`; clean-install не принимает внешний путь состояния. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
 
-Миграция legacy-state в v0.4.0 поддерживает только стандартный путь `$HOME/gp/GP-access-control-plane/build/state`. Настроенный или внешний путь состояния не входит в scope этой миграции.
+Маршрут миграции legacy-state, введённый в v0.4.0, поддерживает только стандартный путь `$HOME/gp/GP-access-control-plane/build/state`. Настроенный или внешний путь состояния не входит в scope этой миграции.
 
 Топология выбирается только перед запуском: `GP_INSTALL_WEB=on` ставит Core и Web, `off` — только Core. После fresh-install восстановите vault в UI/API, подтвердив `confirm_restore=true`; источник удаляется только после semantic-проверки и готовности/integrity SQLite.
 
@@ -213,8 +213,8 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 Повторно запустите bootstrap:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.0/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.0 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
 ```
 
 Это односторонний clean-install маршрут только из exact annotated tag. Ветки, `dev`, cache/candidate routes и rollback не являются пользовательскими способами установки.

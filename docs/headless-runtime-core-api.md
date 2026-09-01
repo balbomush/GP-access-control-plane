@@ -260,15 +260,13 @@ UI-state вроде выбранной вкладки, раскрытых пан
 
 ### Releases
 
-Управление релизами относится к service:
+`GET /api/service/releases/available` только сообщает о доступных stable и
+prerelease-релизах. Он не запускает установку, не выбирает канал и не строит
+план установки.
 
-- `GET /api/service/releases/available`;
-- `GET /api/service/releases/install-channel`;
-- `POST /api/service/releases/set-install-channel`;
-- `GET /api/service/releases/install-plan`;
-- `POST /api/service/releases/install`.
-
-`GET /api/service/releases/install-plan` показывает, можно ли поставить выбранный канал без запуска root-helper. `POST /api/service/releases/install` должен либо запустить установку, либо вернуть простой error payload `{"error":"..."}` без запуска root-helper.
+Web UI и API не устанавливают релиз. Пользовательская установка выполняется
+только повторным запуском `bootstrap-linux.sh` с выбранным exact annotated
+release tag в `GP_BRANCH`; актуальная команда приведена в README.
 
 ### v2fly Local Storage
 
@@ -323,17 +321,19 @@ Compatibility-mode:
 
 ## Поддерживаемая Установка И Перенос Данных
 
-### Постоянный Каталог Данных (v0.4.0)
+### Постоянный Каталог Данных (правило, введённое в v0.4.0)
 
 Для новой рабочей установки каталог данных является соседним с каталогом проекта. Например, при `~/gp/GP-access-control-plane` состояние находится в `~/gp/.GP-access-control-plane.data/state`, а файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
 
-Текущий v0.4.0 release route не является update или возвратом к старой
-установке. Поддерживается только односторонняя последовательность:
+Маршрут релиза v0.4.0 не являлся update или возвратом к старой установке.
+Это историческое описание границы миграции; текущую версию поставки и команду
+установки задаёт README. Поддерживается только односторонняя последовательность:
 
 `vault → fresh install → verified restore`.
 
 Legacy-приложение создаёт vault на той же плате. Затем fresh install удаляет
-только фиксированную GP-поверхность и ставит v0.4.0. После явного подтверждения
+только фиксированную GP-поверхность и ставит выбранный exact annotated release
+tag. После явного подтверждения
 restore продукт проверяет импорт и SQLite; источник удаляется только при
 `completed=true`, `verification.verified=true`, `storage_status.ready=true` и
 `cleanup.source_deleted=true`. При сбое vault/handoff остаются на этой же

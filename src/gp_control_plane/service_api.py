@@ -60,8 +60,8 @@ def available_releases_payload(settings: dict[str, Any], *, current_version: str
     return {
         "current": {
             "version": current_version,
-            "installed_ref": str(settings.get("installed_ref") or ""),
-            "commit": "",
+            "installed_ref": _installed_ref(settings),
+            "commit": _installed_commit(),
         },
         "releases": [_release_item_payload(stable), _release_item_payload(prerelease)],
         "stable_release_url": str(settings.get("stable_release_url") or ""),
@@ -156,9 +156,17 @@ def _installed_version_payload(state: dict[str, Any], *, current_version: str) -
     settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
     return {
         "version": current_version,
-        "installed_ref": str(settings.get("installed_ref") or os.environ.get("GP_INSTALLED_REF") or ""),
-        "commit": str(os.environ.get("GP_INSTALLED_COMMIT") or ""),
+        "installed_ref": _installed_ref(settings),
+        "commit": _installed_commit(),
     }
+
+
+def _installed_ref(settings: dict[str, Any]) -> str:
+    return str(os.environ.get("GP_INSTALLED_REF") or settings.get("installed_ref") or "")
+
+
+def _installed_commit() -> str:
+    return str(os.environ.get("GP_INSTALLED_COMMIT") or "")
 
 
 def _data_state_payload(config: AppConfig, v2fly: dict[str, Any]) -> dict[str, Any]:
