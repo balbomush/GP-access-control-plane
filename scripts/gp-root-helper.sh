@@ -1689,7 +1689,6 @@ remove_recovery_run_artifacts() {
     recovery_validate_record "$run_id" || return 2
     [ "$(read_recovery_run_record "$record")" = "$expected_record_target" ] || return 2
   else
-    [ -z "$expected_marker" ] || return 2
     [ ! -e "$record" ] && [ ! -L "$record" ] || return 2
   fi
   recovery_ready_pid_is_safe_to_forget "$ready_file" || return 2
@@ -1790,8 +1789,13 @@ recover_recordless_run_lock() {
   [ -e "$ready_file" ] || fail "recordless run lock is still starting: $run_id"
   if ready_target="$(read_owned_run_attestation "$ready_file")"; then
     ready_pid="${ready_target%% *}"
+    ready_rest="${ready_target#* }"
+    ready_pgid="${ready_rest%% *}"
+    ready_marker="${ready_rest#* }"
+    [ "$ready_pgid" = "$ready_pid" ] || fail "run lock attestation is invalid: $run_id"
   else
     ready_pid="$(read_owned_run_ready "$ready_file")" || fail "run lock is unsafe: $run_id"
+    ready_marker=""
   fi
   if recovery_ready_pid_is_safe_to_forget "$ready_file"; then
     :
@@ -1800,7 +1804,7 @@ recover_recordless_run_lock() {
     [ "$recovery_status" -eq 1 ] && fail "run lock supervisor is still live: $run_id"
     fail "run lock supervisor cannot be safely inspected: $run_id"
   fi
-  if remove_recovery_run_artifacts "$run_id" "$ready_pid" "" ""; then
+  if remove_recovery_run_artifacts "$run_id" "$ready_pid" "$ready_marker" ""; then
     :
   else
     removal_status="$?"

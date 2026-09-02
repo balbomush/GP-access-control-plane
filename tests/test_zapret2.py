@@ -954,6 +954,12 @@ table inet blockcheck42
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(recordless_lock.exists())
 
+            v1_recordless_lock = self._write_recovery_lock(registry, "dead-recordless-v1", ready_pid=dead_pid)
+            completed = self._run_recovery_with_identity_shims(shell=shell, helper=helper, root=root, registry=registry)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(v1_recordless_lock.exists())
+
     def test_recover_run_requires_the_exact_paired_v2_artifacts_and_emits_a_receipt_portably(self) -> None:
         shell = _posix_shell()
         if shell is None or shutil.which("flock") is None:
@@ -1153,7 +1159,12 @@ table inet blockcheck42
                     )
 
                     self.assertEqual(completed.returncode, 126, completed.stderr)
-                    self.assertIn("supervisor is still live", completed.stderr)
+                    expected_error = (
+                        f"gp-root-helper: registered process is stale or invalid: {run_id}\n"
+                        if layout == "paired"
+                        else f"gp-root-helper: run lock supervisor is still live: {run_id}\n"
+                    )
+                    self.assertEqual(completed.stderr, expected_error)
                     if record is not None:
                         self.assertTrue(record.exists())
                     self.assertTrue(lock_dir.is_dir())
@@ -1404,7 +1415,13 @@ table inet blockcheck42
                             self.assertFalse(record.exists())
                         self.assertFalse(lock_dir.exists())
                     else:
-                        self.assertIn("supervisor", completed.stderr)
+                        if layout == "paired" and case == "live-group-member":
+                            self.assertEqual(
+                                completed.stderr,
+                                f"gp-root-helper: registered process is stale or invalid: {run_id}\n",
+                            )
+                        else:
+                            self.assertIn("supervisor", completed.stderr)
                         if record is not None:
                             self.assertTrue(record.exists())
                         self.assertTrue(lock_dir.is_dir())
@@ -1444,6 +1461,84 @@ table inet blockcheck42
             self.assertIn("artifacts changed or cannot be safely inspected", completed.stderr)
             self.assertEqual(ps_call_count.read_text(encoding="utf-8"), "2\n")
             self.assertTrue(record.exists())
+            self.assertTrue(lock_dir.is_dir())
+            self.assertTrue((lock_dir / "supervisor-ready").is_file())
+            self.assertTrue((lock_dir / "supervisor-go").is_file())
+            self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_rejects_recordless_v2_marker_changes_before_removal_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            run_id = "recordless-marker-changes-before-removal"
+            lock_dir = self._write_recovery_lock(
+                registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7, marker="101"
+            )
+            ready_file = lock_dir / "supervisor-ready"
+
+            completed = self._run_recovery_with_identity_shims(
+                shell=shell,
+                helper=helper,
+                root=root,
+                registry=registry,
+                extra_env={
+                    "GP_TEST_RECOVERY_PROCESS_TABLE": "",
+                    "GP_TEST_RECOVERY_TAMPER_READY_PATH": _posix_shell_path(ready_file),
+                    "GP_TEST_RECOVERY_TAMPER_READY_CONTENT": f"helper-ready-v2 {ready_pid} {ready_pid} 202\n",
+                },
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertEqual(
+                completed.stderr,
+                f"gp-root-helper: recovered run lock changed or cannot be safely inspected: {run_id}\n",
+            )
+            self.assertEqual(ready_file.read_text(encoding="utf-8"), f"helper-ready-v2 {ready_pid} {ready_pid} 202\n")
+            self.assertTrue(lock_dir.is_dir())
+            self.assertTrue((lock_dir / "supervisor-go").is_file())
+            self.assertTrue((lock_dir / "target-status").is_file())
+
+    def test_recover_runs_rejects_record_appearing_before_recordless_removal_portably(self) -> None:
+        shell = _posix_shell()
+        if shell is None or shutil.which("flock") is None:
+            self.skipTest("requires a POSIX shell with flock")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        ready_pid = "999999"
+        marker = "101"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            registry = root / "runs"
+            registry.mkdir()
+            run_id = "record-appears-before-recordless-removal"
+            lock_dir = self._write_recovery_lock(
+                registry, run_id, ready_pid=ready_pid, go_pid=ready_pid, status=7, marker=marker
+            )
+            record = registry / run_id
+
+            completed = self._run_recovery_with_identity_shims(
+                shell=shell,
+                helper=helper,
+                root=root,
+                registry=registry,
+                extra_env={
+                    "GP_TEST_RECOVERY_PROCESS_TABLE": "",
+                    "GP_TEST_RECOVERY_APPEAR_RECORD_PATH": _posix_shell_path(record),
+                    "GP_TEST_RECOVERY_APPEAR_RECORD_CONTENT": f"helper-v1 {ready_pid} {ready_pid} {marker}\n",
+                },
+            )
+
+            self.assertEqual(completed.returncode, 126, completed.stderr)
+            self.assertEqual(
+                completed.stderr,
+                f"gp-root-helper: recovered run lock changed or cannot be safely inspected: {run_id}\n",
+            )
+            self.assertEqual(record.read_text(encoding="utf-8"), f"helper-v1 {ready_pid} {ready_pid} {marker}\n")
             self.assertTrue(lock_dir.is_dir())
             self.assertTrue((lock_dir / "supervisor-ready").is_file())
             self.assertTrue((lock_dir / "supervisor-go").is_file())
@@ -1666,6 +1761,13 @@ table inet blockcheck42
             "#!/bin/sh\n"
             "case \"$*\" in\n"
             "  '-e -o pgid= -o sid= -o stat=')\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_TAMPER_READY_PATH:-}\" ]; then\n"
+            "      printf '%s' \"$GP_TEST_RECOVERY_TAMPER_READY_CONTENT\" > \"$GP_TEST_RECOVERY_TAMPER_READY_PATH\"\n"
+            "    fi\n"
+            "    if [ -n \"${GP_TEST_RECOVERY_APPEAR_RECORD_PATH:-}\" ]; then\n"
+            "      printf '%s' \"$GP_TEST_RECOVERY_APPEAR_RECORD_CONTENT\" > \"$GP_TEST_RECOVERY_APPEAR_RECORD_PATH\"\n"
+            "      chmod 600 \"$GP_TEST_RECOVERY_APPEAR_RECORD_PATH\"\n"
+            "    fi\n"
             "    if [ -n \"${GP_TEST_RECOVERY_PS_QUERY_LOG:-}\" ]; then\n"
             "      printf '%s\\n' \"$*\" >> \"$GP_TEST_RECOVERY_PS_QUERY_LOG\"\n"
             "    fi\n"
