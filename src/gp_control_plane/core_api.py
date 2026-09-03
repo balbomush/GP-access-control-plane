@@ -54,6 +54,9 @@ STRATEGY_DISCOVERY_START_RUN_SETTINGS_KEYS = {
     "skip_dnscheck",
     "skip_ipblock",
     "discovery_engine",
+    "strategy_preset",
+    "repeats_mode",
+    "bs_adaptive",
 }
 
 

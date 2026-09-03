@@ -44,6 +44,9 @@ def normalize_engine(value: Any) -> str:
     return engine if engine in ENGINES else ENGINE_BLOCKCHECK2
 
 
+# Above this many domains we hand bs a --domains-file instead of repeated -d.
+DOMAIN_ARGV_THRESHOLD = 50
+
 def job_mode(mode: str) -> str:
     raw = str(mode or "standard").strip().lower().replace("-", "_")
     return "multi" if raw in {"multi_domain", "common_strategy", "multi"} else "standard"
@@ -168,10 +171,18 @@ def build_bs_scan_argv(
     skip_dnscheck: bool,
     db_path: str | Path | None = None,
     strategy_preset: str | None = None,
+    repeats_mode: str = "fast",
+    adaptive: bool = True,
+    debug: bool = False,
+    protocol: str = "tls12",
+    skip_ipblock: bool = False,
+    domains_file: str | Path | None = None,
 ) -> list[str]:
     argv = [
         resolve_bs_binary(),
         "scan",
+        "--protocol",
+        "tls13" if str(protocol).lower() == "tls13" else "tls12",
         "--scan-level",
         scan_level_to_bs(scan_level),
         "--repeats",
@@ -183,20 +194,33 @@ def build_bs_scan_argv(
     ]
     if repeat_parallel:
         argv.append("--parallel-repeats")
+    if str(repeats_mode).lower() == "stable":
+        argv.append("--repeats-mode")
+        argv.append("stable")
     if skip_dnscheck:
         argv.append("--skip-dns-audit")
+    if skip_ipblock:
+        argv.append("--skip-ip-block")
+    if not adaptive:
+        argv.append("--no-adaptive")
+    if debug:
+        argv.append("--debug")
     if strategy_preset:
         argv.extend(["-M", strategy_preset])
-    argv.extend(["--tcp-sources", "custom,configs"])
-    argv.extend(["--curl-parallel", str(max(1, int(curl_parallelism)))])
+    else:
+        argv.extend(["--tcp-sources", "custom,configs"])
+    argv.extend(["--curl-parallel", str(max(1, min(8, int(curl_parallelism))))])
     if db_path:
         argv.extend(["--db", str(db_path)])
     if timeout_seconds > 0:
         argv.extend(["--max-timem", str(max(1, int(timeout_seconds) // 60 or 1))])
     else:
         argv.extend(["--max", str(DEFAULT_BS_JOB_CAP)])
-    for domain in domains:
-        argv.extend(["-d", domain])
+    if domains_file:
+        argv.extend(["--domains-file", str(domains_file)])
+    elif domains:
+        for domain in domains:
+            argv.extend(["-d", domain])
     return argv
 
 

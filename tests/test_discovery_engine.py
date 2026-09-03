@@ -75,11 +75,64 @@ class DiscoveryEngineFlagMapTests(unittest.TestCase):
         self.assertIn("--max", argv)
         self.assertEqual("400", argv[argv.index("--max") + 1])
         self.assertIn("--curl-parallel", argv)
-        self.assertEqual("30", argv[argv.index("--curl-parallel") + 1])
+        self.assertEqual("8", argv[argv.index("--curl-parallel") + 1])
         self.assertEqual("4", argv[argv.index("--parallel") + 1])
+        self.assertIn("--protocol", argv)
+        self.assertEqual("tls12", argv[argv.index("--protocol") + 1])
         self.assertIn("--parallel-repeats", argv)
         self.assertIn("--skip-dns-audit", argv)
         self.assertEqual(["-d", "youtube.com", "-d", "discord.com"], argv[-4:])
+
+    def test_build_bs_scan_argv_bs_knobs(self) -> None:
+        fake = Path(tempfile.mkdtemp()) / "bs"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        with mock.patch("gp_control_plane.discovery_engine.resolve_bs_binary", return_value=str(fake)):
+            argv = build_bs_scan_argv(
+                domains=["youtube.com"],
+                scan_level="standard",
+                repeats=3,
+                repeat_parallel=False,
+                curl_max_time=2,
+                timeout_seconds=0,
+                curl_parallelism=2,
+                skip_dnscheck=False,
+                strategy_preset="gp-verified",
+                repeats_mode="stable",
+                adaptive=False,
+                debug=True,
+                protocol="tls13",
+                skip_ipblock=True,
+            )
+        self.assertEqual("tls13", argv[argv.index("--protocol") + 1])
+        self.assertIn("-M", argv)
+        self.assertEqual("gp-verified", argv[argv.index("-M") + 1])
+        self.assertIn("--repeats-mode", argv)
+        self.assertEqual("stable", argv[argv.index("--repeats-mode") + 1])
+        self.assertIn("--no-adaptive", argv)
+        self.assertIn("--debug", argv)
+        self.assertIn("--skip-ip-block", argv)
+        self.assertNotIn("--tcp-sources", argv)
+
+    def test_build_bs_scan_argv_uses_domains_file_instead_of_dash_d(self) -> None:
+        fake = Path(tempfile.mkdtemp()) / "bs"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        with mock.patch("gp_control_plane.discovery_engine.resolve_bs_binary", return_value=str(fake)):
+            argv = build_bs_scan_argv(
+                domains=["a.com", "b.com"],
+                scan_level="standard",
+                repeats=1,
+                repeat_parallel=False,
+                curl_max_time=2,
+                timeout_seconds=0,
+                curl_parallelism=2,
+                skip_dnscheck=True,
+                domains_file="/tmp/doms.txt",
+            )
+        self.assertIn("--domains-file", argv)
+        self.assertEqual("/tmp/doms.txt", argv[argv.index("--domains-file") + 1])
+        self.assertNotIn("-d", argv)
 
     def test_campaign_lock_reports_busy_for_live_pid(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -15,6 +15,7 @@ from typing import Any
 
 from .discovery_engine import (
     DEFAULT_BS_JOB_CAP,
+    DOMAIN_ARGV_THRESHOLD,
     PROGRESS_LINE,
     blockchecks_state_dir,
     bs_run_env,
@@ -160,9 +161,12 @@ def run_blockchecks_discovery(
     stop_event: threading.Event | None = None,
     run_id: str | None = None,
     kind: str = "standard-discovery",
+    strategy_preset: str = "",
+    repeats_mode: str = "fast",
+    adaptive: bool = True,
 ) -> dict[str, Any]:
-    del enable_http, enable_tls12, enable_tls13, enable_ipv6, skip_ipblock
-    del curl_max_time_quic, curl_max_time_doh, debug_stdout, include_quic
+    del enable_http, enable_ipv6, curl_max_time_quic, curl_max_time_doh, include_quic
+    protocol = "tls13" if bool(enable_tls13) and not bool(enable_tls12) else "tls12"
     busy = campaign_lock_busy_message()
     if busy:
         raise RuntimeError(busy)
@@ -175,6 +179,10 @@ def run_blockchecks_discovery(
     bs_runs = bs_state / "bs-runs"
     bs_runs.mkdir(parents=True, exist_ok=True)
     run_db = bs_runs / f"{run_id}.db"
+    domains_file_arg: Path | None = None
+    if len(clean_domains) > DOMAIN_ARGV_THRESHOLD:
+        domains_file_arg = Path(state_dir) / f"bs-domains-{run_id}.txt"
+        domains_file_arg.write_text("\n".join(clean_domains) + "\n", encoding="utf-8")
     argv = build_bs_scan_argv(
         domains=clean_domains,
         scan_level=scan_level,
@@ -185,6 +193,13 @@ def run_blockchecks_discovery(
         curl_parallelism=curl_parallelism,
         skip_dnscheck=skip_dnscheck,
         db_path=run_db,
+        strategy_preset=strategy_preset or None,
+        repeats_mode=repeats_mode,
+        adaptive=adaptive,
+        debug=bool(debug_stdout),
+        protocol=protocol,
+        skip_ipblock=skip_ipblock,
+        domains_file=domains_file_arg,
     )
     logs = _finder_dir(state_dir) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -216,8 +231,13 @@ def run_blockchecks_discovery(
             "scan_level": scan_level,
             "repeats": repeats,
             "repeat_parallel": repeat_parallel,
+            "repeats_mode": repeats_mode,
             "skip_dnscheck": skip_dnscheck,
+            "skip_ipblock": skip_ipblock,
             "curl_max_time": curl_max_time,
+            "strategy_preset": strategy_preset,
+            "adaptive": adaptive,
+            "protocol": protocol,
             "discovery_engine": "blockchecks",
         },
     }
@@ -282,6 +302,8 @@ def run_blockchecks_discovery(
                 process.wait(timeout=5)
         if process.stdout is not None:
             process.stdout.close()
+        if domains_file_arg is not None:
+            domains_file_arg.unlink(missing_ok=True)
     _harvest_passes(state_dir, run_id, kind, harvested, run_db)
     status = "success"
     if stopped:

@@ -20,6 +20,9 @@ DEFAULT_RUN_SETTINGS = {
     "enable_ipv6": False,
     "debug_stdout": False,
     "discovery_engine": "blockcheck2",
+    "strategy_preset": "",
+    "repeats_mode": "fast",
+    "bs_adaptive": True,
 }
 
 DEFAULT_SERVICE_SETTINGS = {
@@ -106,6 +109,9 @@ def normalize_run_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "enable_ipv6": bool(raw.get("enable_ipv6")),
         "debug_stdout": bool(raw.get("debug_stdout")),
         "discovery_engine": _normalize_discovery_engine(raw.get("discovery_engine")),
+        "strategy_preset": str(raw.get("strategy_preset") or "").strip(),
+        "repeats_mode": _normalize_repeats_mode(raw.get("repeats_mode")),
+        "bs_adaptive": bool(raw.get("bs_adaptive", True)),
     }
 
 
@@ -137,6 +143,11 @@ def _normalize_discovery_engine(value: Any) -> str:
     from .discovery_engine import normalize_engine
 
     return normalize_engine(value)
+
+
+def _normalize_repeats_mode(value: Any) -> str:
+    mode = str(value or "fast").strip().lower()
+    return mode if mode in {"fast", "stable"} else "fast"
 
 
 def _select_keys(payload: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
