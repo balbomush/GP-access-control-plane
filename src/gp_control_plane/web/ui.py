@@ -1700,6 +1700,14 @@ pre {
                 <input id="bs-adaptive" type="checkbox" checked>
                 <span>Адаптивная очередь (AQ)</span>
               </label>
+              <div class="field">
+                <label for="bs-run-mode">Тип подбора (blockcheckS)</label>
+                <select id="bs-run-mode">
+                  <option value="tcp">TCP (scan)</option>
+                  <option value="pair">TCP + UDP/пары (pair)</option>
+                </select>
+                <div class="helper-text">pair запускает bs pair — добавляет UDP-стратегии и пары TCP×UDP (по одному домену; UDP лейн создаётся только для UDP-блокнутых доменов).</div>
+              </div>
             </div>
             <div class="field scan-level-field">
                 <label for="discovery-profile-select">Глубина проверки стратегий</label>
@@ -2682,7 +2690,8 @@ function discoveryOptions(){
     ...(engine === 'blockchecks' ? {
       strategy_preset: (el('bs-strategy-preset') || {}).value || '',
       repeats_mode: (el('bs-repeats-mode') || {}).value || 'fast',
-      bs_adaptive: (el('bs-adaptive') || { checked: true }).checked !== false
+      bs_adaptive: (el('bs-adaptive') || { checked: true }).checked !== false,
+      bs_pair_mode: (el('bs-run-mode') || { value: 'tcp' }).value === 'pair'
     } : {})
   };
 }
@@ -5795,9 +5804,13 @@ async function refreshBsDnsPins(force = false){
       box.textContent = 'Файлов hosts пока нет — нужен запуск blockcheckS с DNS/DoH-пинами (domain→IP против hijack).';
       return;
     }
-    box.textContent = providers.map((provider) =>
-      `# ${provider.provider} — ${provider.path}\n${(provider.lines || []).join('\n')}`
-    ).join('\n\n');
+    const NL = String.fromCharCode(10);
+    const parts = [];
+    for (const provider of providers) {
+      parts.push(`# ${provider.provider} - ${provider.path}
+${(provider.lines || []).join(NL)}`);
+    }
+    box.textContent = parts.join(String.fromCharCode(10, 10));
   } catch (error) {
     box.textContent = `Не удалось загрузить DNS-pins: ${error.message}`;
   }

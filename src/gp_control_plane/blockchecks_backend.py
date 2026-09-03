@@ -198,6 +198,7 @@ def run_blockchecks_discovery(
     strategy_preset: str = "",
     repeats_mode: str = "fast",
     adaptive: bool = True,
+    pair_mode: bool = False,
 ) -> dict[str, Any]:
     del enable_http, enable_ipv6, curl_max_time_quic, curl_max_time_doh, include_quic
     protocol = "tls13" if bool(enable_tls13) and not bool(enable_tls12) else "tls12"
@@ -234,6 +235,7 @@ def run_blockchecks_discovery(
         protocol=protocol,
         skip_ipblock=skip_ipblock,
         domains_file=domains_file_arg,
+        pair_mode=pair_mode,
     )
     logs = _finder_dir(state_dir) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -272,7 +274,7 @@ def run_blockchecks_discovery(
             "strategy_preset": strategy_preset,
             "adaptive": adaptive,
             "protocol": protocol,
-            "discovery_engine": "blockchecks",
+            "pair_mode": pair_mode,
         },
     }
     append_run(state_dir, started)
@@ -281,7 +283,7 @@ def run_blockchecks_discovery(
         "attempt_total": 0,
         "strategies_total": 0,
         "last_db_poll": 0.0,
-        "script": f"bs scan{(' -M ' + strategy_preset) if strategy_preset else ''}",
+        "script": f"bs {'pair' if pair_mode else 'scan'}{(' -M ' + strategy_preset) if strategy_preset else ''}",
     }
     _write_progress(
         progress_log,
@@ -370,6 +372,8 @@ def run_blockchecks_discovery(
         if domains_file_arg is not None:
             domains_file_arg.unlink(missing_ok=True)
     _harvest_passes(state_dir, run_id, kind, harvested, run_db)
+    if pair_mode and clean_domains:
+        _harvest_udp(state_dir, run_id, kind, harvested, run_db, clean_domains[0])
     final_counts = _bs_progress_db_counts(run_db)
     status = "success"
     if stopped:
@@ -403,6 +407,73 @@ def run_blockchecks_discovery(
         percent=100,
     )
     return run
+
+
+def _harvest_udp(
+    state_dir: Path,
+    run_id: str,
+    kind: str,
+    harvested: set[tuple[str, str, str]],
+    db: Path,
+    domain: str,
+) -> None:
+    """Harvest working BS UDP strategies (bs pair) as protocol='udp' candidates.
+
+    ``udp_results`` carries no domain; pair matrix runs on the (single) primary
+    domain, so results are attributed to that domain.
+    """
+    host = str(domain or "").strip()
+    if not host or not db.is_file():
+        return
+    source_mode = "multi_domain" if "multi" in kind else "single_domain"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.name, s.config_path
+            FROM strategies s
+            JOIN udp_results u ON u.strategy_id = s.id
+            WHERE s.proto = 'udp'
+              AND u.status IN ('PASS','THROTTLED')
+              AND u.id = (
+                SELECT u2.id FROM udp_results u2
+                WHERE u2.strategy_id = u.strategy_id
+                ORDER BY u2.id DESC LIMIT 1
+              )
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return
+    conn.close()
+    seen_at = now_iso()
+    for name, config_path in rows:
+        base_args = str(config_path or "").strip() or str(name or "").strip()
+        for args in _expand_config_candidate_args(base_args):
+            if not args:
+                continue
+            protocol = "udp"
+            key = (protocol, args, host)
+            if key in harvested:
+                continue
+            harvested.add(key)
+            upsert_candidate_event(
+                state_dir,
+                candidate_id=candidate_id_for(protocol, args),
+                protocol=protocol,
+                args=args,
+                status="working",
+                run_id=run_id,
+                domain=host,
+                domains=[host],
+                test="blockchecks-pair",
+                ip_version="4",
+                seen_at=seen_at,
+                common=source_mode == "multi_domain",
+            )
 
 
 def _write_progress(

@@ -177,10 +177,11 @@ def build_bs_scan_argv(
     protocol: str = "tls12",
     skip_ipblock: bool = False,
     domains_file: str | Path | None = None,
+    pair_mode: bool = False,
 ) -> list[str]:
     argv = [
         resolve_bs_binary(),
-        "scan",
+        "pair" if pair_mode else "scan",
         "--protocol",
         "tls13" if str(protocol).lower() == "tls13" else "tls12",
         "--scan-level",
@@ -205,7 +206,7 @@ def build_bs_scan_argv(
         argv.append("--no-adaptive")
     if debug:
         argv.append("--debug")
-    if strategy_preset:
+    if strategy_preset and not pair_mode:
         argv.extend(["-M", strategy_preset])
     else:
         argv.extend(["--tcp-sources", "custom,configs"])

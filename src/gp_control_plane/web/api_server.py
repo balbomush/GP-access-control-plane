@@ -1516,6 +1516,7 @@ def _job_blockchecks_discovery(
         strategy_preset=str(payload.get("strategy_preset") or settings.get("strategy_preset") or ""),
         repeats_mode=str(payload.get("repeats_mode") or settings.get("repeats_mode") or "fast"),
         adaptive=_payload_bool(payload, "bs_adaptive", bool(settings.get("bs_adaptive", True))),
+        pair_mode=_payload_bool(payload, "bs_pair_mode", False),
     )
 
 

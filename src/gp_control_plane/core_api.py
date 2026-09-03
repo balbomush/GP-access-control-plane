@@ -57,6 +57,7 @@ STRATEGY_DISCOVERY_START_RUN_SETTINGS_KEYS = {
     "strategy_preset",
     "repeats_mode",
     "bs_adaptive",
+    "bs_pair_mode",
 }
 
 

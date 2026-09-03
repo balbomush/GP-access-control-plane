@@ -324,3 +324,58 @@ class DnsPinsTests(unittest.TestCase):
             self.assertEqual("isp_x", prov["provider"])
             self.assertEqual(hosts.as_posix(), prov["path"])
             self.assertIn("# 8.8.8.8  youtube.com", prov["lines"])
+
+
+class PairUdpTests(unittest.TestCase):
+    def test_build_pair_argv_uses_pair_command_without_preset(self) -> None:
+        fake = Path(tempfile.mkdtemp()) / "bs"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        with mock.patch("gp_control_plane.discovery_engine.resolve_bs_binary", return_value=str(fake)):
+            argv = build_bs_scan_argv(
+                domains=["discord.com"],
+                scan_level="standard",
+                repeats=1,
+                repeat_parallel=False,
+                curl_max_time=2,
+                timeout_seconds=0,
+                curl_parallelism=2,
+                skip_dnscheck=True,
+                strategy_preset="gp-verified",
+                pair_mode=True,
+            )
+        self.assertEqual("pair", argv[1])
+        self.assertNotIn("-M", argv)
+        self.assertIn("--tcp-sources", argv)
+
+    def test_harvest_udp_maps_strategies_to_domain(self) -> None:
+        from gp_control_plane.blockchecks_backend import _harvest_udp
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            gp_state = root / "gp"
+            gp_state.mkdir()
+            run_db = root / "u.db"
+            conn = sqlite3.connect(run_db)
+            conn.executescript(
+                """
+                CREATE TABLE strategies (id INTEGER PRIMARY KEY, name TEXT, config_path TEXT, proto TEXT);
+                CREATE TABLE udp_results (
+                    id INTEGER PRIMARY KEY, strategy_id INTEGER, target TEXT, status TEXT
+                );
+                INSERT INTO strategies(id, name, config_path, proto) VALUES
+                    (1, 'slug_u', 'fake:blob=discord_udp:repeats=6', 'udp');
+                INSERT INTO udp_results(id, strategy_id, target, status) VALUES
+                    (1, 1, '35.217.5.42:50006', 'PASS');
+                """
+            )
+            conn.commit()
+            conn.close()
+            _harvest_udp(gp_state, "run", "standard-discovery", set(), run_db, "discord.com")
+            with connect(gp_state) as gp_conn:
+                rows = gp_conn.execute("SELECT protocol, args FROM strategies").fetchall()
+                links = gp_conn.execute(
+                    "SELECT domain_id FROM strategy_domain_results"
+                ).fetchall()
+            self.assertEqual([("udp", "fake:blob=discord_udp:repeats=6")], [(r["protocol"], r["args"]) for r in rows])
+            self.assertEqual(1, len(links))
