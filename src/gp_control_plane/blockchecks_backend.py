@@ -16,6 +16,7 @@ from .discovery_engine import (
     DEFAULT_BS_JOB_CAP,
     PROGRESS_LINE,
     blockchecks_state_dir,
+    bs_run_env,
     build_bs_scan_argv,
     campaign_lock_busy_message,
     resolve_bc_nfconf,
@@ -37,6 +38,22 @@ from .strategy_finder import (
 _PROGRESS_RE = re.compile(PROGRESS_LINE)
 
 
+def _default_export_out_dir() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(data_home) / "blockcheckS" / "export"
+
+
+def latest_bs_run_db() -> Path | None:
+    """Most recent per-GP-run BS database under the blockcheckS state dir."""
+    runs_dir = blockchecks_state_dir() / "bs-runs"
+    if runs_dir.is_dir():
+        dbs = sorted(runs_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if dbs:
+            return dbs[0]
+    default = blockchecks_state_dir() / "state.db"
+    return default if default.is_file() else None
+
+
 def stop_blockchecks() -> None:
     try:
         bs = resolve_bs_binary()
@@ -45,15 +62,17 @@ def stop_blockchecks() -> None:
     subprocess.run([bs, "stop", "--wait"], check=False, timeout=60)
 
 
-def export_nfconf(*, out_dir: Path | None = None, limit: int = 5) -> dict[str, Any]:
+def export_nfconf(*, out_dir: Path | None = None, limit: int = 5, db: Path | None = None) -> dict[str, Any]:
     nfconf = resolve_bc_nfconf()
-    target = Path(out_dir) if out_dir else Path.home() / ".local" / "share" / "blockcheckS" / "export"
+    target = Path(out_dir) if out_dir else _default_export_out_dir()
     target.mkdir(parents=True, exist_ok=True)
-    db = blockchecks_state_dir() / "state.db"
-    if not db.is_file():
-        raise RuntimeError(f"blockcheckS state.db not found: {db}")
+    target_db = Path(db) if db else latest_bs_run_db()
+    if target_db is None:
+        raise RuntimeError(f"blockcheckS run database not found: {blockchecks_state_dir()}")
+    if not target_db.is_file():
+        raise RuntimeError(f"blockcheckS run database not found: {target_db}")
     completed = subprocess.run(
-        [nfconf, "--db", str(db), "--out-dir", str(target), "--limit", str(max(1, int(limit)))],
+        [nfconf, "--db", str(target_db), "--out-dir", str(target), "--limit", str(max(1, int(limit)))],
         check=False,
         capture_output=True,
         text=True,
@@ -62,7 +81,7 @@ def export_nfconf(*, out_dir: Path | None = None, limit: int = 5) -> dict[str, A
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "bc-nfconf failed")
     confs = sorted(str(path) for path in target.glob("*.conf"))
-    return {"engine": "blockchecks", "out_dir": str(target), "paths": confs, "db": str(db)}
+    return {"engine": "blockchecks", "out_dir": str(target), "paths": confs, "db": str(target_db)}
 
 
 def run_blockchecks_discovery(
@@ -97,6 +116,11 @@ def run_blockchecks_discovery(
     clean_domains = list(domain_validation["domains"])
     if not clean_domains:
         raise ValueError("no valid domains to check")
+    run_id = _discovery_run_id(run_id)
+    bs_state = blockchecks_state_dir()
+    bs_runs = bs_state / "bs-runs"
+    bs_runs.mkdir(parents=True, exist_ok=True)
+    run_db = bs_runs / f"{run_id}.db"
     argv = build_bs_scan_argv(
         domains=clean_domains,
         scan_level=scan_level,
@@ -106,11 +130,11 @@ def run_blockchecks_discovery(
         timeout_seconds=timeout_seconds,
         curl_parallelism=curl_parallelism,
         skip_dnscheck=skip_dnscheck,
+        db_path=run_db,
     )
     logs = _finder_dir(state_dir) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     _cleanup_old_strategy_logs(logs)
-    run_id = _discovery_run_id(run_id)
     stdout_log = logs / f"{run_id}.{kind}.stdout.log"
     stderr_log = logs / f"{run_id}.{kind}.stderr.log"
     progress_log = logs / f"{run_id}.{kind}.progress.json"
@@ -131,6 +155,7 @@ def run_blockchecks_discovery(
         "repeats": repeats,
         "timeout_seconds": timeout_seconds,
         "bs_argv": argv[1:],
+        "bs_db": str(run_db),
         "bs_job_cap": DEFAULT_BS_JOB_CAP if timeout_seconds <= 0 else None,
         **_domain_validation_run_fields(domain_validation),
         "discovery_options": {
@@ -151,7 +176,8 @@ def run_blockchecks_discovery(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        env=os.environ.copy(),
+        env=bs_run_env(),
+        start_new_session=True,
     )
     stopped = False
     timed_out = False
@@ -176,7 +202,7 @@ def run_blockchecks_discovery(
                     passed=passed,
                     started=time.monotonic() if processed <= 1 else None,
                 )
-            _harvest_passes(state_dir, run_id, kind, harvested)
+            _harvest_passes(state_dir, run_id, kind, harvested, run_db)
             if stop_event is not None and stop_event.is_set():
                 stopped = True
                 stop_blockchecks()
@@ -195,10 +221,14 @@ def run_blockchecks_discovery(
                 process.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 process.kill()
+                try:
+                    os.killpg(process.pid, 9)
+                except (OSError, ProcessLookupError):
+                    pass
                 process.wait(timeout=5)
         if process.stdout is not None:
             process.stdout.close()
-    _harvest_passes(state_dir, run_id, kind, harvested)
+    _harvest_passes(state_dir, run_id, kind, harvested, run_db)
     status = "success"
     if stopped:
         status = "stopped"
@@ -256,8 +286,8 @@ def _harvest_passes(
     run_id: str,
     kind: str,
     harvested: set[tuple[str, str, str]],
+    db: Path,
 ) -> None:
-    db = blockchecks_state_dir() / "state.db"
     if not db.is_file():
         return
     source_mode = "multi_domain" if "multi" in kind else "single_domain"
@@ -268,10 +298,16 @@ def _harvest_passes(
     try:
         rows = conn.execute(
             """
-            SELECT t.domain, s.name, s.proto
+            SELECT t.domain, s.name, s.config_path, s.proto
             FROM tcp_results t
             JOIN strategies s ON s.id = t.strategy_id
-            WHERE t.status = 'PASS' AND coalesce(t.bridge_applied, 0) = 1
+            WHERE t.status IN ('PASS','THROTTLED')
+              AND (t.bridge_applied IS NULL OR t.bridge_applied = 1)
+              AND t.id = (
+                SELECT t2.id FROM tcp_results t2
+                WHERE t2.strategy_id = s.id AND t2.domain = t.domain
+                ORDER BY t2.id DESC LIMIT 1
+              )
             """
         ).fetchall()
     except sqlite3.Error:
@@ -279,12 +315,13 @@ def _harvest_passes(
         return
     conn.close()
     seen_at = now_iso()
-    for domain, name, proto in rows:
-        args = str(name or "").strip()
+    for domain, name, config_path, proto in rows:
+        args = str(config_path or "").strip() or str(name or "").strip()
         host = str(domain or "").strip()
         if not args or not host:
             continue
-        protocol = "quic" if str(proto or "").lower() == "udp" or "quic" in args.lower() else "tls"
+        proto_raw = str(proto or "").lower()
+        protocol = "quic" if proto_raw in ("quic", "udp") or "quic" in args.lower() else "tls"
         key = (protocol, args, host)
         if key in harvested:
             continue

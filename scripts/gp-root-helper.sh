@@ -57,7 +57,7 @@ validate_env_assignment() {
   esac
   key="${1%%=*}"
   case "$key" in
-    BATCH|DOMAINS|IPVS|TEST|SKIP_DNSCHECK|SKIP_IPBLOCK|ENABLE_HTTP|ENABLE_HTTPS_TLS12|ENABLE_HTTPS_TLS13|ENABLE_HTTP3|SCANLEVEL|REPEATS|PARALLEL|CURL_MAX_TIME|CURL_MAX_TIME_QUIC|CURL_MAX_TIME_DOH|GP_MD_CURL_PARALLELISM|ZAPRET_BASE|ZAPRET_RW|BLOCKCHECKS_BS|BLOCKCHECKS_STATE_HOME|XDG_STATE_HOME|HOME) ;;
+    BATCH|DOMAINS|IPVS|TEST|SKIP_DNSCHECK|SKIP_IPBLOCK|ENABLE_HTTP|ENABLE_HTTPS_TLS12|ENABLE_HTTPS_TLS13|ENABLE_HTTP3|SCANLEVEL|REPEATS|PARALLEL|CURL_MAX_TIME|CURL_MAX_TIME_QUIC|CURL_MAX_TIME_DOH|GP_MD_CURL_PARALLELISM|ZAPRET_BASE|ZAPRET_RW) ;;
     *) fail "unsupported env key: $key" ;;
   esac
 }
@@ -66,22 +66,10 @@ validate_run_target() {
   [ "$#" -ge 1 ] || fail "run target is required"
   target="$(real_path "$1")"
   zapret_blockcheck="$(real_path "$ZAPRET_DIR/blockcheck2.sh")"
-  bs_target=""
-  if [ -n "${BLOCKCHECKS_BS:-}" ]; then
-    bs_target="$(real_path "$BLOCKCHECKS_BS")"
-  fi
-  wrapper=""
-  helper_bs="/usr/local/libexec/gp-control-plane/bs"
-  [ -e "$helper_bs" ] && wrapper="$(real_path "$helper_bs")"
-  allowed=0
-  [ "$target" = "$zapret_blockcheck" ] && allowed=1
-  if [ -n "$bs_target" ] && [ "$target" = "$bs_target" ]; then
-    allowed=1
-  fi
-  if [ -n "$wrapper" ] && [ "$target" = "$wrapper" ]; then
-    allowed=1
-  fi
-  [ "$allowed" -eq 1 ] || fail "unsupported run target: $1"
+  case "$target" in
+    "$zapret_blockcheck") ;;
+    *) fail "unsupported run target: $1" ;;
+  esac
   [ -x "$target" ] || fail "run target is not executable: $target"
   printf '%s\n' "$target"
 }

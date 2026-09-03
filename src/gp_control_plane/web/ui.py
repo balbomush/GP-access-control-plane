@@ -2593,6 +2593,13 @@ function discoveryEngineReady(status){
   if (engine === 'blockchecks') return Boolean(zapret.nfqws2_found);
   return zapretCompactStatus(zapret).ready;
 }
+function syncEngineUi(){
+  const active = selectedDiscoveryEngine() === 'blockchecks';
+  document.querySelectorAll('[data-action="export-nfconf"]').forEach((button) => {
+    button.disabled = !active;
+    button.title = active ? '' : 'Экспорт nfqws2 (bc-nfconf) доступен при движке blockcheckS';
+  });
+}
 function discoveryOptions(){
   const timeouts = runTimeoutSettings();
   return {
@@ -3736,6 +3743,7 @@ function renderCandidateResult(){
     <button class="secondary" data-action="use-candidate-result-domains" type="button">Повторить подбор</button>
     <button class="secondary" data-action="open-candidate-result" type="button">Открыть детали</button>
   </div>`;
+  syncEngineUi();
 }
 async function copyCandidateResult(){
   const result = buildCandidateResult(state.candidateResultMode || 'balance');
@@ -6675,10 +6683,12 @@ document.addEventListener('change', (event) => {
   if (event.target && event.target.id === 'finder-discovery-engine') {
     const settingsEngine = el('settings-discovery-engine');
     if (settingsEngine) settingsEngine.value = event.target.value;
+    syncEngineUi();
   }
   if (event.target && event.target.id === 'settings-discovery-engine') {
     const finderEngine = el('finder-discovery-engine');
     if (finderEngine) finderEngine.value = event.target.value;
+    syncEngineUi();
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-category-search') {

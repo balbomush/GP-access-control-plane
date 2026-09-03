@@ -2051,6 +2051,16 @@ class WebUiTests(unittest.TestCase):
                         "cleanup": {"source_deleted": True},
                     },
                 ),
+                mock.patch.object(
+                    web_app,
+                    "export_nfconf",
+                    return_value={
+                        "engine": "blockchecks",
+                        "out_dir": "/tmp/nfconf-out",
+                        "paths": ["/tmp/nfconf-out/nfqws2.conf"],
+                        "db": "/tmp/state.db",
+                    },
+                ),
             ):
                 port = start_server(serve, config).port
 

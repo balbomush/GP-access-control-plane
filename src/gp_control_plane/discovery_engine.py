@@ -92,10 +92,33 @@ def resolve_bc_nfconf() -> str:
 def blockchecks_state_dir() -> Path:
     override = str(os.environ.get("BLOCKCHECKS_STATE_HOME") or "").strip()
     if override:
-        return Path(override).expanduser()
+        # BS treats BLOCKCHECKS_*_HOME as the XDG root and appends the
+        # application dir (/blockcheckS); mirror that to avoid the
+        # "blockcheckS/blockcheckS" double suffix.
+        return Path(override).expanduser() / "blockcheckS"
     xdg = str(os.environ.get("XDG_STATE_HOME") or "").strip()
     root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
     return root / "blockcheckS"
+
+
+def bs_run_env() -> dict[str, str]:
+    """Child env for `bs` subprocesses: inherit + zapret handoff.
+
+    XDG is intentionally NOT overridden here: GP runs `bs` as the same user
+    and relies on the shared run.lock in the default XDG state dir. Only the
+    zapret tree location is propagated (when GP knows it via ZAPRET_DIR /
+    BLOCKCHECKS_ZAPRET2) so blobs/lua/nfqws2 resolve consistently.
+    """
+    env = dict(os.environ)
+    zapret = (env.get("ZAPRET_DIR") or env.get("BLOCKCHECKS_ZAPRET2") or "").strip()
+    if zapret:
+        env.setdefault("BLOCKCHECKS_ZAPRET2", zapret)
+        env.setdefault("ZAPRET2_ROOT", zapret)
+        if not env.get("BLOCKCHECKS_NFQWS2"):
+            nfq = Path(zapret) / "nfq2" / "nfqws2"
+            if nfq.is_file():
+                env["BLOCKCHECKS_NFQWS2"] = str(nfq)
+    return env
 
 
 def campaign_lock_info() -> dict[str, Any] | None:
@@ -143,6 +166,8 @@ def build_bs_scan_argv(
     timeout_seconds: int,
     curl_parallelism: int,
     skip_dnscheck: bool,
+    db_path: str | Path | None = None,
+    strategy_preset: str | None = None,
 ) -> list[str]:
     argv = [
         resolve_bs_binary(),
@@ -160,8 +185,12 @@ def build_bs_scan_argv(
         argv.append("--parallel-repeats")
     if skip_dnscheck:
         argv.append("--skip-dns-audit")
+    if strategy_preset:
+        argv.extend(["-M", strategy_preset])
     argv.extend(["--tcp-sources", "custom,configs"])
     argv.extend(["--curl-parallel", str(max(1, int(curl_parallelism)))])
+    if db_path:
+        argv.extend(["--db", str(db_path)])
     if timeout_seconds > 0:
         argv.extend(["--max-timem", str(max(1, int(timeout_seconds) // 60 or 1))])
     else:

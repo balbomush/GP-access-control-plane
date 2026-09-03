@@ -37,7 +37,7 @@ from ..domain_sources import (
     write_v2fly_catalog_cache,
 )
 from ..blockchecks_backend import export_nfconf, run_blockchecks_discovery, stop_blockchecks
-from ..discovery_engine import campaign_lock_busy_message, is_blockchecks_job, normalize_engine
+from ..discovery_engine import campaign_lock_busy_message, check_blockchecks_install, is_blockchecks_job, normalize_engine
 from ..jobs import JobRunner
 from ..releases import release_channel_info
 from ..resource_budget import (
@@ -215,7 +215,11 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/status": lambda: core_api.status_payload(config),
                 "/api/core/strategy-discovery/current-run-progress": lambda: core_api.current_progress_payload(config),
                 "/api/core/strategy-discovery/current-run-latest-log": lambda: _current_run_latest_log_payload(config, query),
-                "/api/core/strategy-discovery/preflight": lambda: core_api.preflight_payload(config),
+                "/api/core/strategy-discovery/preflight": lambda: (
+                    check_blockchecks_install()
+                    if normalize_engine(read_run_settings(config).get("discovery_engine")) == "blockchecks"
+                    else core_api.preflight_payload(config)
+                ),
                 "/api/core/presets/domain-lists": lambda: core_api.domain_lists_payload(config),
                 "/api/core/presets/v2fly/categories": lambda: core_api.v2fly_categories_payload(config, query),
                 "/api/core/presets/v2fly/category-domains": lambda: core_api.v2fly_category_domains_payload(config, query),
