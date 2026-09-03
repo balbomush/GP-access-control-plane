@@ -1,7 +1,3 @@
-.event-card.bad {
-  border-color: #f0b9b5;
-  background: var(--red-soft);
-}
 .event-meta {
   color: var(--text-soft);
   font-size: 12px;

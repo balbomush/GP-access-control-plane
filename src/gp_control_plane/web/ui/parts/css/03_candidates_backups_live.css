@@ -377,3 +377,7 @@
   border-color: #eed09a;
   background: var(--amber-soft);
 }
+.event-card.bad {
+  border-color: #f0b9b5;
+  background: var(--red-soft);
+}

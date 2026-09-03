@@ -70,6 +70,30 @@ class UiPartsStructureTests(unittest.TestCase):
         joined = "".join((root / rel).read_text(encoding="utf-8") for rel in PART_ORDER)
         self.assertEqual(joined, index_html())
 
+    def test_js_parts_start_and_end_on_top_level_statements(self) -> None:
+        import re
+
+        start_pat = re.compile(
+            r"^(?:async\s+)?function\s+\w+\s*\(|"
+            r"^(?:const|let|var)\s+\w+\s*=|"
+            r"^document\.addEventListener\(|^if\s*\(|^else\b"
+        )
+        js_dir = _UI_DIR / "parts" / "js"
+        js_files = sorted(js_dir.glob("*.js"))
+        self.assertTrue(js_files, "no js part files found")
+        for path in js_files:
+            lines = path.read_text(encoding="utf-8").split("\n")
+            nonblank = [i for i, l in enumerate(lines) if l.strip()]
+            if not nonblank:
+                continue
+            first = lines[nonblank[0]].lstrip()
+            last = lines[nonblank[-1]].rstrip()
+            self.assertRegex(first, start_pat, f"{path.name}: not a top-level statement start")
+            self.assertTrue(
+                last.endswith(";") or last.endswith("}"),
+                f"{path.name}: does not end on a statement boundary",
+            )
+
     def test_document_has_single_script_and_style_blocks(self) -> None:
         html = index_html()
         self.assertEqual(html.count("<script>"), 1)

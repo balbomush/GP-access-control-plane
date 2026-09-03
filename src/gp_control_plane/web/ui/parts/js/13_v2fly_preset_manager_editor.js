@@ -1,3 +1,210 @@
+function v2flyCategoryName(category){
+  if (typeof category === 'string') return category;
+  if (category && typeof category === 'object') return String(category.name || category.id || '').trim();
+  return '';
+}
+function v2flyAllCategories(){
+  const categories = (state.v2flyCategories || {}).categories;
+  return Array.isArray(categories) ? categories.map(v2flyCategoryName).filter(Boolean) : [];
+}
+function v2flyCategoryQuery(){
+  return String(el('v2fly-category-search')?.value || '').trim().toLowerCase();
+}
+function v2flyExactCategory(){
+  const query = v2flyCategoryQuery();
+  if (!query) return '';
+  return v2flyAllCategories().includes(query) ? query : '';
+}
+function v2flyCategories(){
+  const category = v2flyExactCategory();
+  return category ? [category] : [];
+}
+function clearV2flyDomains(){
+  const domains = el('v2fly-domains');
+  if (!domains) return;
+  domains.value = '';
+  updateEditorLineNumbers('v2fly-domains');
+}
+function suggestV2flyPresetName(){
+  const nameInput = el('v2fly-preset-name');
+  if (!nameInput) return;
+  const current = String(nameInput.value || '').trim();
+  if (current && !current.startsWith('v2fly-')) return;
+  const categories = v2flyCategories();
+  if (!categories.length) return;
+  nameInput.value = `v2fly-${categories.slice(0, 3).join('-')}`.slice(0, 80);
+}
+function v2flyPayload(){
+  return {
+    scope: 'finder',
+    name: String(el('v2fly-preset-name')?.value || '').trim(),
+    categories: v2flyCategories(),
+    domains: parseDomains(el('v2fly-domains')?.value || '')
+  };
+}
+function renderV2flyPreview(){
+  const target = el('v2fly-preview-result');
+  if (!target) return;
+  const preview = state.v2flyPreview;
+  target.classList.toggle('bad', Boolean(preview && preview.error));
+  if (!preview) {
+    target.textContent = 'Список не проверялся.';
+    return;
+  }
+  if (preview.loading) {
+    target.textContent = preview.message || 'Загружаю домены выбранной группы...';
+    return;
+  }
+  if (preview.error) {
+    target.textContent = preview.message || 'Ошибка v2fly.';
+    return;
+  }
+  const added = Array.isArray(preview.added) ? preview.added.length : 0;
+  const removed = Array.isArray(preview.removed) ? preview.removed.length : 0;
+  const skipped = preview.skipped && typeof preview.skipped === 'object'
+    ? Object.values(preview.skipped).reduce((sum, value) => sum + Number(value || 0), 0)
+    : 0;
+  const coverageNote = preview.coverage_note ? 'Публично известный проверяемый набор, не гарантия полного покрытия сервиса.' : '';
+  target.innerHTML = [
+    `<div><strong>${esc(preview.preset || '-')}</strong>: ${esc(preview.count || 0)} доменов</div>`,
+    `<div>Добавится: ${esc(added)}, уйдет: ${esc(removed)}, без изменений: ${esc(preview.unchanged_count || 0)}</div>`,
+    skipped ? `<div>Часть правил не добавлена автоматически: ${esc(skipped)}</div>` : '',
+    coverageNote ? `<div>${esc(coverageNote)}</div>` : ''
+  ].join('');
+}
+function setV2flyLocalError(message){
+  state.v2flyPreview = { error: true, message };
+  renderV2flyPreview();
+}
+function renderV2flyCategoryCatalog(){
+  const target = el('v2fly-category-status');
+  const data = state.v2flyCategories || {};
+  const categories = v2flyAllCategories();
+  const query = v2flyCategoryQuery();
+  const visible = query ? categories.filter((category) => category.includes(query)) : categories;
+  const options = el('v2fly-category-options');
+  if (options) options.innerHTML = visible.slice(0, 500).map((category) => `<option value="${esc(category)}"></option>`).join('');
+  const matchList = el('v2fly-category-matches');
+  const exact = v2flyExactCategory();
+  if (matchList) {
+    const matches = visible.slice(0, 24);
+    matchList.innerHTML = matches.length
+      ? matches.map((category) => `<button class="secondary category-match${category === exact ? ' active' : ''}" type="button" data-action="v2fly-select-category" data-category="${esc(category)}">${esc(category)}</button>`).join('')
+      : '';
+  }
+  const button = document.querySelector('[data-action="v2fly-load-categories"]');
+  const loading = state.v2flyCategorySource === 'loading';
+  if (button) {
+    button.disabled = loading;
+    button.textContent = loading ? 'Читаю каталог' : 'Перечитать каталог';
+    button.title = 'Перечитывает локальный каталог групп v2fly. Каталог скачивается при установке или обновлении сервиса.';
+  }
+  if (!target) return;
+  if (loading) {
+    target.textContent = 'Читаю локальный каталог v2fly...';
+    return;
+  }
+  if (!categories.length) {
+    target.textContent = data.error_message ? `Локальный каталог v2fly недоступен: ${data.error_message}` : 'Локальный каталог v2fly еще не подготовлен. Он скачивается при установке или обновлении сервиса.';
+    return;
+  }
+  const selected = exact || '';
+  const queryText = query ? ` Найдено по вводу: ${visible.length}.` : '';
+  const selectText = selected ? ` Выбрано: ${selected}.` : (query ? ' Выберите точную группу из подсказок ниже.' : '');
+  target.textContent = `Локальный каталог готов: ${data.all_count || categories.length} групп.${queryText}${selectText}`;
+}
+function presetManagerMeta(scope){
+  return (state.customPresetMeta && state.customPresetMeta[scope]) || {};
+}
+function renderPresetManager(){
+  const nameSelect = el('preset-manager-name');
+  if (!nameSelect) return;
+  const manager = state.presetManager;
+  const scope = 'finder';
+  const entries = managerPresetEntries();
+  const names = entries.map((item) => item.name);
+  if (!manager.name || !names.includes(manager.name)) manager.name = names[0] || '';
+  const entry = manager.name ? managerPresetEntry(manager.name) : null;
+  const isStoredUser = manager.name ? hasCustomPreset(scope, manager.name) : false;
+  const isSystem = entry && entry.kind === 'system';
+  const sourceScope = isStoredUser ? customPresetSourceScope(scope, manager.name) : scope;
+  manager.scope = sourceScope;
+  nameSelect.innerHTML = entries.length
+    ? entries.map((item) => `<option value="${esc(item.name)}">${esc(item.label)} (${esc(item.count)})</option>`).join('')
+    : '<option value="">Нет списков</option>';
+  nameSelect.value = manager.name || '';
+  const meta = isSystem ? systemPresetMeta(sourceScope, manager.name) : (isStoredUser ? presetManagerMeta(sourceScope)[manager.name] : null);
+  const count = meta ? `${meta.enabled_count || 0}/${meta.total_count || 0}` : (entry ? `${entry.count}/${entry.count}` : '0');
+  setText('preset-manager-count', count);
+  const deleteButton = document.querySelector('button[data-action="preset-editor-delete"]');
+  if (deleteButton) deleteButton.disabled = !isStoredUser || isSystem;
+  const note = el('preset-manager-note');
+  if (!manager.name) {
+    note.textContent = 'Списков пока нет. Создайте список в подборе или импортируйте его из v2fly.';
+    return;
+  }
+  const updated = meta && meta.updated_at ? ` · обновлено ${friendlyDate(meta.updated_at)}` : '';
+  if (isSystem) {
+    note.textContent = `Системный список "${entry.label}" всегда существует. Домены можно менять до пустого списка, удалить сам список нельзя. Доменов: ${meta ? meta.enabled_count : entry?.count || 0}${updated}.`;
+    return;
+  }
+  note.textContent = `Редактируется список "${manager.name}". Доменов: ${meta ? meta.enabled_count : entry?.count || 0}${updated}${isStoredUser ? '' : ' · готовый список станет редактируемым после сохранения'}.`;
+}
+function renderPresetEditorPreview(preview){
+  const target = el('preset-editor-preview');
+  if (!target) return;
+  if (!preview) {
+    target.textContent = 'Изменения еще не проверялись.';
+    return;
+  }
+  target.innerHTML = [
+    `<div><strong>${esc(preview.name)}</strong>: ${esc(preview.total)} уникальных доменов</div>`,
+    `<div>Добавится: ${esc(preview.added)}, удалится: ${esc(preview.removed)}, без изменений: ${esc(preview.unchanged)}</div>`
+  ].join('');
+}
+function presetEditorDomains(){
+  return uniqueDomains(parseDomains(el('preset-editor-domains')?.value || ''));
+}
+function presetEditorScope(){
+  return 'finder';
+}
+function presetEditorName(){
+  return String(el('preset-manager-name')?.value || '').trim();
+}
+function presetEditorKind(){
+  const entry = managerPresetEntry(presetEditorName());
+  return entry && entry.kind === 'system' ? 'system' : 'user';
+}
+async function loadPresetEditorFromSelection(options){
+  const opts = options || {};
+  const scope = presetEditorScope();
+  const name = el('preset-manager-name')?.value || state.presetManager.name || '';
+  if (!name) {
+    if (!opts.silent) setMessage('Выберите список', 'warn');
+    return;
+  }
+  try {
+    const domains = await fetchAllPresetDomains(scope, name);
+    const domainsInput = el('preset-editor-domains');
+    if (domainsInput) {
+      domainsInput.value = domains.join('\n');
+      updateEditorLineNumbers('preset-editor-domains');
+    }
+    renderPresetEditorPreview({ name, total: domains.length, added: 0, removed: 0, unchanged: domains.length });
+    if (!opts.silent) setMessage('Список загружен в редактор', 'good');
+  } catch (error) {
+    if (!opts.silent) setMessage(`Ошибка загрузки списка в редактор: ${error.message}`, 'bad');
+  }
+}
+async function buildPresetEditorPreview(){
+  const scope = presetEditorScope();
+  const name = presetEditorName();
+  const kind = presetEditorKind();
+  const domains = presetEditorDomains();
+  if (!name || (!domains.length && kind !== 'system')) {
+    setMessage(kind === 'system' ? 'Выберите список' : 'Выберите список и оставьте хотя бы один домен', 'warn');
+    return null;
+  }
   let current = [];
   if (hasCustomPreset(scope, name) || hasSystemPreset(scope, name) || managerPresetEntry(name)) {
     current = await fetchAllPresetDomains(scope, name);
@@ -263,218 +470,3 @@ async function importV2flyPreset(){
     setV2flyLocalError(`Ошибка сохранения v2fly: ${error.message}`);
   }
 }
-function formatDuration(seconds){
-  if (!Number.isFinite(seconds)) return '-';
-  if (seconds <= 0) return '0 мин';
-  const minutes = Math.ceil(seconds / 60);
-  if (minutes < 60) return `${minutes} мин`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
-}
-function scrollLogToBottom(){
-  const logNode = el('finder-log');
-  if (!logNode) return;
-  requestAnimationFrame(() => {
-    logNode.scrollTop = logNode.scrollHeight;
-  });
-}
-function renderAll(options){
-  const opts = options || {};
-  renderPresetSelects();
-  renderSettings();
-  useRunPreferencesOnce();
-  if (!state.domainsInitialized && !state.domainsTouched && !el('finder-domains').value.trim() && state.domainSets) {
-    const selected = el('finder-preset-select')?.value || 'system:required';
-    const domains = uniqueDomains(presetDomains('finder', selected));
-    el('finder-domains').value = domains.join('\n');
-    state.domainsInitialized = true;
-  }
-  renderMetrics();
-  renderRunLaunchSummary();
-  if (!opts.skipCandidates) renderCandidates();
-  renderRuns();
-  renderLog();
-  renderBackups();
-  updateAllEditorLineNumbers();
-  syncActiveTabUi();
-}
-function renderCandidatesOnly(){
-  renderMetrics();
-  renderCandidates();
-  updateEditorLineNumbers('common-domains');
-}
-async function refreshBsDnsPins(force = false){
-  const now = Date.now();
-  if (!force && state.bsDnsPinsAt && now - state.bsDnsPinsAt < 20000) return;
-  const box = el('bs-dns-pins-content');
-  if (!box) return;
-  state.bsDnsPinsAt = now;
-  try {
-    const data = await getJson(apiUrl('web', 'bsDnsPins'));
-    const providers = Array.isArray(data.providers) ? data.providers : [];
-    if (!providers.length) {
-      box.textContent = 'Файлов hosts пока нет — нужен запуск blockcheckS с DNS/DoH-пинами (domain→IP против hijack).';
-      return;
-    }
-    const NL = String.fromCharCode(10);
-    const parts = [];
-    for (const provider of providers) {
-      parts.push(`# ${provider.provider} - ${provider.path}
-${(provider.lines || []).join(NL)}`);
-    }
-    box.textContent = parts.join(String.fromCharCode(10, 10));
-  } catch (error) {
-    box.textContent = `Не удалось загрузить DNS-pins: ${error.message}`;
-  }
-}
-async function refreshStrategyPairs(force = false){
-  const now = Date.now();
-  if (!force && state.strategyPairsAt && now - state.strategyPairsAt < 20000) return;
-  const box = el('strategy-pairs-content');
-  if (!box) return;
-  state.strategyPairsAt = now;
-  try {
-    const data = await getJson(apiEndpoint('core', 'strategyPairs'));
-    const pairs = Array.isArray(data.pairs) ? data.pairs : [];
-    if (!pairs.length) {
-      box.textContent = 'Рабочих пар нет — нужен запуск blockcheckS в режиме TCP + UDP/пары на UDP-блокнутом домене.';
-      return;
-    }
-    const parts = [];
-    for (const p of pairs) {
-      parts.push(`tcp: ${p.tcp_args}
-udp: ${p.udp_args}
-${p.domain} - ${p.overall} (tcp ${p.tcp_ms}ms / udp ${p.udp_ms}ms)`);
-    }
-    box.textContent = parts.join(String.fromCharCode(10, 10));
-  } catch (error) {
-    box.textContent = 'Не удалось загрузить пары: ' + error.message;
-  }
-}
-function ensureCandidateViewLoaded(){
-  refreshBsDnsPins();
-  refreshStrategyPairs();
-  if (state.candidateView === 'domain') {
-    if (!state.candidateDomainsLoaded) refreshDomainIndex();
-    return;
-  }
-  const selectedDomains = selectedCommonDomains();
-  const loaded = prepareCommonCandidateState();
-  if (selectedDomains.length < 2) return;
-  if (!loaded) refreshCandidates(true);
-}
-function setCandidateView(view){
-  state.candidateView = view;
-  if (view === 'common') prepareCommonCandidateState();
-  renderCandidatesOnly();
-  ensureCandidateViewLoaded();
-}
-function candidateParams(offset, options){
-  const params = new URLSearchParams();
-  params.set('limit', String(CANDIDATE_PAGE_LIMIT));
-  params.set('offset', String(Math.max(0, offset || 0)));
-  params.set('view', state.candidateView);
-  if (options && options.view) params.set('view', options.view);
-  if (options && options.domain) params.set('domain', options.domain);
-  if ((options && options.view === 'common') || (!options && state.candidateView === 'common')) {
-    const domains = Array.isArray(options?.domains) ? options.domains : selectedCommonDomains();
-    if (domains.length) params.set('domains', domains.join(','));
-  }
-  return params;
-}
-async function refreshDomainIndex(reset = true){
-  const requestId = ++domainIndexRequestSeq;
-  const offset = reset ? 0 : state.candidateDomainOffset;
-  state.candidateLoading = true;
-  renderCandidatesOnly();
-  try {
-    const params = new URLSearchParams();
-    params.set('limit', String(DOMAIN_PAGE_LIMIT));
-    params.set('offset', String(Math.max(0, offset || 0)));
-    const data = await getJson(apiUrl('web', 'candidateDomainIndexPage', params));
-    if (requestId !== domainIndexRequestSeq) return;
-    const rows = data.domains || [];
-    state.candidateDomains = reset ? rows : [...state.candidateDomains, ...rows];
-    state.candidateDomainTotal = Number(data.total || 0);
-    state.candidateDomainStrategyTotal = Number(data.strategy_total || 0);
-    state.candidateDomainOffset = Number(data.offset || offset) + rows.length;
-    state.candidateDomainHasMore = Boolean(data.has_more);
-    if (state.candidateDomainTotal > 0) state.lastCandidateDomainTotal = state.candidateDomainTotal;
-    if (state.candidateDomainStrategyTotal > 0) state.lastCandidateDomainStrategyTotal = state.candidateDomainStrategyTotal;
-    rememberCandidateVersion(data.version || null);
-    updateTestedDomains(data.tested_domains);
-    state.candidateDomainsLoaded = true;
-    state.candidateUpdatedAt = new Date().toISOString();
-    state.candidateLoading = false;
-    renderCandidatesOnly();
-  } catch (error) {
-    if (requestId !== domainIndexRequestSeq) return;
-    state.candidateLoading = false;
-    renderCandidatesOnly();
-    setMessage(`Ошибка загрузки доменов: ${error.message}`, 'bad');
-  }
-}
-async function refreshDomainStrategies(domain, reset){
-  const key = String(domain || '').trim();
-  if (!key) return;
-  const current = state.domainStrategies[key] || { candidates: [], total: 0, hasMore: false, loaded: false };
-  const offset = reset ? 0 : current.candidates.length;
-  try {
-    const data = await getJson(apiUrl('web', 'strategyCandidatesPage', candidateParams(offset, { view: 'domain', domain: key })));
-    const rows = data.candidates || [];
-    state.domainStrategies[key] = {
-      candidates: reset ? rows : [...current.candidates, ...rows],
-      total: Number(data.total || 0),
-      hasMore: Boolean(data.has_more),
-      loaded: true,
-      loadingMore: false,
-      version: data.version || state.candidateKnownVersion
-    };
-    rememberCandidateVersion(data.version || null);
-    updateTestedDomains(data.tested_domains);
-    renderCandidatesOnly();
-  } catch (error) {
-    setMessage(`Ошибка загрузки стратегий домена: ${error.message}`, 'bad');
-  }
-}
-async function loadMoreDomainStrategies(domain){
-  const key = String(domain || '').trim();
-  if (!key) return;
-  const current = state.domainStrategies[key] || { candidates: [], total: 0, hasMore: false, loaded: false };
-  if (current.loadingMore || !current.hasMore) return;
-  const candidates = Array.isArray(current.candidates) ? current.candidates.slice() : [];
-  let total = Number(current.total || candidates.length);
-  state.domainStrategies[key] = { ...current, candidates, total, hasMore: Boolean(current.hasMore), loaded: true, loadingMore: true };
-  renderCandidatesOnly();
-  try {
-    const data = await getJson(apiUrl('web', 'strategyCandidatesPage', candidateParams(candidates.length, { view: 'domain', domain: key })));
-    const rows = data.candidates || [];
-    const nextCandidates = rows.length ? [...candidates, ...rows] : candidates;
-    total = Number(data.total || total || nextCandidates.length);
-    const hasMore = rows.length ? Boolean(data.has_more) : false;
-    updateTestedDomains(data.tested_domains);
-    rememberCandidateVersion(data.version || null);
-    state.domainStrategies[key] = { candidates: nextCandidates, total, hasMore, loaded: true, loadingMore: false, version: state.candidateKnownVersion };
-    renderCandidatesOnly();
-  } catch (error) {
-    state.domainStrategies[key] = { candidates, total, hasMore: Boolean(current.hasMore), loaded: true, loadingMore: false, version: state.candidateKnownVersion };
-    setMessage(`Ошибка загрузки следующей страницы стратегий домена: ${error.message}`, 'bad');
-    renderCandidatesOnly();
-  }
-}
-async function loadMoreCommonStrategies(){
-  if (state.commonLoadingMore || !state.candidateHasMore) return;
-  const domains = selectedCommonDomains();
-  if (domains.length < 2) return;
-  const queryKey = currentCandidateQueryKey({ view: 'common', domains });
-  const candidates = Array.isArray(state.candidates) ? state.candidates.slice() : [];
-  state.commonLoadingMore = true;
-  renderCandidatesOnly();
-  try {
-    const data = await getJson(apiUrl('web', 'strategyCandidatesPage', candidateParams(candidates.length, { view: 'common', domains })));
-    if (state.candidateQueryKey !== queryKey) {
-      state.commonLoadingMore = false;
-      return;
-    }
-    const rows = data.candidates || [];

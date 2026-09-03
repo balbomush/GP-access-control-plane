@@ -1,103 +1,3 @@
-  const options = row.discovery_options || {};
-  const isBs = String(row.discovery_engine || '').startsWith('blockchecks');
-  const protocols = [];
-  if (truthyOption(options.enable_http, row.enable_http)) protocols.push('HTTP');
-  if (truthyOption(options.enable_tls12, row.enable_tls12 ?? row.enable_tls)) protocols.push('TLS 1.2');
-  if (truthyOption(options.enable_tls13, row.enable_tls13)) protocols.push('TLS 1.3');
-  if (truthyOption(options.enable_quic, row.include_quic ?? row.enable_quic)) protocols.push('QUIC');
-  if (isBs && options.protocol) protocols.push(options.protocol === 'tls13' ? 'TLS 1.3' : 'TLS 1.2');
-  const scan = options.scan_level || row.scan_level || 'standard';
-  const repeats = Number(options.repeats || row.repeats || 1);
-  const repeatParallel = truthyOption(options.repeat_parallel, row.repeat_parallel) ? ', параллельные повторы' : '';
-  const skip = [
-    truthyOption(options.skip_dnscheck, row.skip_dnscheck) ? 'без DNS' : 'с DNS',
-    truthyOption(options.skip_ipblock, row.skip_ipblock) ? 'без IP-проверки' : 'с IP-проверкой',
-  ].join(', ');
-  const ipv6 = truthyOption(options.enable_ipv6, row.enable_ipv6) ? ', IPv6' : '';
-  const debugLog = truthyOption(row.debug_stdout, false) ? ', debug-log' : '';
-  const bsExtras = isBs
-    ? `${options.strategy_preset ? ', пресет ' + options.strategy_preset : ''}` +
-      `${options.repeats_mode ? ', повторы ' + options.repeats_mode : ''}` +
-      `${options.adaptive !== false ? ', AQ вкл' : ', AQ выкл'}`
-    : '';
-  const curl = row.kind === 'multi-domain-discovery' ? `, проверочных запросов ${row.curl_parallelism || 4}` : '';
-  const limit = row.timeout_seconds ? `, лимит ${formatDuration(Number(row.timeout_seconds || 0))}` : ', без лимита';
-  return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${debugLog}${bsExtras}${curl}${limit}`;
-}
-function truthyOption(primary, fallback){
-  const value = primary === undefined || primary === null ? fallback : primary;
-  return Boolean(value);
-}
-function runPayload(row){
-  const options = row.discovery_options || {};
-  const payload = {
-    domains: uniqueDomains(row.domains || []),
-    enable_http: truthyOption(options.enable_http, row.enable_http),
-    enable_tls12: truthyOption(options.enable_tls12, row.enable_tls12 ?? row.enable_tls),
-    enable_tls13: truthyOption(options.enable_tls13, row.enable_tls13),
-    include_quic: truthyOption(options.enable_quic, row.include_quic ?? row.enable_quic),
-    enable_ipv6: truthyOption(options.enable_ipv6, row.enable_ipv6),
-    scan_level: options.scan_level || row.scan_level || 'standard',
-    repeats: Number(options.repeats || row.repeats || 1),
-    repeat_parallel: truthyOption(options.repeat_parallel, row.repeat_parallel),
-    skip_dnscheck: truthyOption(options.skip_dnscheck, row.skip_dnscheck),
-    skip_ipblock: truthyOption(options.skip_ipblock, row.skip_ipblock),
-    debug_stdout: truthyOption(row.debug_stdout, false),
-    curl_max_time: Number(options.curl_max_time || row.curl_max_time || (state.settings || {}).curl_max_time || 2),
-    curl_max_time_quic: Number(options.curl_max_time_quic || row.curl_max_time_quic || (state.settings || {}).curl_max_time_quic || 2),
-    curl_max_time_doh: Number(options.curl_max_time_doh || row.curl_max_time_doh || (state.settings || {}).curl_max_time_doh || 2),
-  };
-  if (row.timeout_seconds) payload.timeout_seconds = Number(row.timeout_seconds);
-  if (row.kind === 'multi-domain-discovery') payload.curl_parallelism = Number(row.curl_parallelism || 4);
-  return payload;
-}
-function fillRunFormFromPayload(row, payload){
-  const data = payload || runPayload(row);
-  const domains = uniqueDomains(data.domains || []);
-  el('finder-domains').value = domains.join('\n');
-  state.domainsTouched = true;
-  markDomainPresetCustom('finder');
-  updateEditorLineNumbers('finder-domains');
-  const multi = row && row.kind === 'multi-domain-discovery';
-  const modeInput = document.querySelector(`input[name="run-mode"][value="${multi ? 'multi' : 'standard'}"]`);
-  if (modeInput) modeInput.checked = true;
-  el('curl-parallelism').value = String(data.curl_parallelism || curlParallelism());
-  el('enable-http').checked = Boolean(data.enable_http);
-  el('enable-tls12').checked = Boolean(data.enable_tls12);
-  el('enable-tls13').checked = Boolean(data.enable_tls13);
-  el('include-quic').checked = Boolean(data.include_quic);
-  el('enable-ipv6').checked = Boolean(data.enable_ipv6);
-  el('scan-level').value = data.scan_level || 'standard';
-  const profileSelect = el('discovery-profile-select');
-  if (profileSelect && [...profileSelect.options].some((option) => option.value === (data.scan_level || 'standard'))) {
-    profileSelect.value = data.scan_level || 'standard';
-  }
-  el('repeats').value = String(data.repeats || 1);
-  el('repeat-parallel').checked = Boolean(data.repeat_parallel);
-  el('skip-dnscheck').checked = Boolean(data.skip_dnscheck);
-  el('skip-ipblock').checked = Boolean(data.skip_ipblock);
-  el('run-curl-max-time').value = String(data.curl_max_time || 2);
-  el('run-curl-max-time-quic').value = String(data.curl_max_time_quic || 2);
-  el('run-curl-max-time-doh').value = String(data.curl_max_time_doh || 2);
-  const timeout = Number(data.timeout_seconds || 0);
-  el('limit-time-enabled').checked = timeout > 0;
-  syncTimeLimitUi();
-  if (timeout > 0) el('finder-timeout-hours').value = String(Math.max(0.1, Math.round((timeout / 3600) * 10) / 10));
-  renderDiscoveryProfileNote();
-  renderRunModeNote();
-  renderRunLaunchSummary();
-  setActiveTab('finder');
-  setMessage('Параметры прошлого подбора перенесены в форму запуска. Проверьте сводку и запустите вручную.', 'good');
-}
-function repeatRun(runKey){
-  const row = state.finderRuns.find((item) => runDomainKey(item) === runKey);
-  if (!row) {
-    setMessage('Запуск не найден в истории', 'bad');
-    return;
-  }
-  const payload = runPayload(row);
-  fillRunFormFromPayload(row, payload);
-}
 function runProgressText(row){
   const progress = row.progress || {};
   const attempted = Number(progress.attempted || 0);
@@ -478,3 +378,35 @@ function renderEvents(){
       </div>
     </article>`;
   }).join('');
+}
+function progressLiveElapsedSeconds(progress){
+  if (progress.elapsed_seconds == null) return null;
+  const base = Math.max(0, Number(progress.elapsed_seconds || 0));
+  const receivedAt = Number(progress.received_at_ms || 0);
+  if (!isBusy() || !receivedAt) return base;
+  return base + Math.max(0, Math.floor((Date.now() - receivedAt) / 1000));
+}
+function progressLiveEtaSeconds(progress){
+  if (progress.eta_seconds == null) return null;
+  const base = Math.max(0, Number(progress.eta_seconds || 0));
+  const baseElapsed = Math.max(0, Number(progress.elapsed_seconds || 0));
+  const liveElapsed = progressLiveElapsedSeconds(progress);
+  if (liveElapsed == null) return base;
+  return Math.max(0, base - Math.max(0, liveElapsed - baseElapsed));
+}
+function etaModeLabel(progress){
+  const status = String(progress.eta_status || '');
+  const progressStatus = String(progress.progress_status || '');
+  if (status === 'sample') return 'по live-скорости';
+  if (status === 'calculating') return 'сбор выборки';
+  if (status === 'elapsed_average') return 'по среднему времени попытки';
+  if (status === 'underestimated' || progressStatus === 'underestimated') return 'уточняется';
+  if (status === 'complete') return 'завершено';
+  if (status === 'estimated') return 'по таймауту';
+  return status || '-';
+}
+function etaStatusText(status){
+  if (status === 'calculating') return 'рассчитывается';
+  if (status === 'underestimated') return 'уточняется';
+  return '-';
+}

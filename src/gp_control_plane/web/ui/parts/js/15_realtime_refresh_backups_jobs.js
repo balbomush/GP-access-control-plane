@@ -1,159 +1,3 @@
-    const nextCandidates = rows.length ? [...candidates, ...rows] : candidates;
-    state.candidates = nextCandidates;
-    state.candidateTotal = Number(data.total || state.candidateTotal || nextCandidates.length);
-    state.candidateOffset = Number(data.offset || candidates.length) + rows.length;
-    state.candidateHasMore = rows.length ? Boolean(data.has_more) : false;
-    rememberCandidateVersion(data.version || null);
-    updateTestedDomains(data.tested_domains);
-    state.candidatesLoaded = true;
-    state.commonLoadingMore = false;
-    storeCommonCandidateCache(queryKey);
-    renderCandidatesOnly();
-  } catch (error) {
-    setMessage(`Ошибка загрузки следующей страницы общих стратегий: ${error.message}`, 'bad');
-    state.commonLoadingMore = false;
-    renderCandidatesOnly();
-  }
-}
-async function refreshCandidates(reset){
-  const requestId = ++candidateRequestSeq;
-  const offset = reset ? 0 : state.candidates.length;
-  const queryKey = currentCandidateQueryKey();
-  state.commonLoadingMore = false;
-  state.candidateLoading = true;
-  renderCandidatesOnly();
-  try {
-    const data = await getJson(apiUrl('web', 'strategyCandidatesPage', candidateParams(offset)));
-    if (requestId !== candidateRequestSeq) return;
-    const rows = data.candidates || [];
-    state.candidates = reset ? rows : [...state.candidates, ...rows];
-    state.candidateTotal = Number(data.total || 0);
-    state.candidateOffset = Number(data.offset || 0);
-    state.candidateHasMore = Boolean(data.has_more);
-    rememberCandidateVersion(data.version || null);
-    updateTestedDomains(data.tested_domains);
-    state.candidatesLoaded = true;
-    state.candidateQueryKey = queryKey;
-    state.candidateUpdatedAt = new Date().toISOString();
-    state.candidateLoading = false;
-    if (queryKey.startsWith('common:')) storeCommonCandidateCache(queryKey);
-    renderCandidatesOnly();
-  } catch (error) {
-    if (requestId !== candidateRequestSeq) return;
-    state.candidateLoading = false;
-    renderCandidatesOnly();
-    setMessage(`Ошибка загрузки кандидатов: ${error.message}`, 'bad');
-  }
-}
-function scheduleCandidateRefresh(){
-  if (candidateRefreshTimer) clearTimeout(candidateRefreshTimer);
-  candidateRefreshTimer = setTimeout(() => {
-    candidateRefreshTimer = null;
-    if (state.candidateView === 'domain') {
-      state.domainStrategies = {};
-      state.openCandidateDomains = {};
-      refreshDomainIndex();
-    } else {
-      state.candidateResultRequested = false;
-      prepareCommonCandidateState();
-      renderCandidatesOnly();
-      if (selectedCommonDomains().length >= 2) refreshCandidates(true);
-    }
-  }, 350);
-}
-function trimTextLines(text, maxLines){
-  const lines = String(text || '').split('\n');
-  if (lines.length <= maxLines) return lines.join('\n');
-  return lines.slice(lines.length - maxLines).join('\n');
-}
-function appendLogText(base, addition){
-  const left = String(base || '');
-  const right = String(addition || '');
-  if (!left || !right || left.endsWith('\n') || right.startsWith('\n')) return left + right;
-  return `${left}\n${right}`;
-}
-function latestLogUrl(incremental){
-  const busy = isBusy();
-  const base = busy ? apiEndpoint('core', 'currentRunLatestLog') : apiEndpoint('core', 'latestLog');
-  if (!incremental || !state.finderLog || !state.finderLog.stdout_log) {
-    return base;
-  }
-  const params = new URLSearchParams();
-  params.set('stdout_log', state.finderLog.stdout_log || '');
-  params.set('stdout_size', String(state.finderLog.stdout_size || 0));
-  params.set('stderr_log', state.finderLog.stderr_log || '');
-  params.set('stderr_size', String(state.finderLog.stderr_size || 0));
-  return `${base}?${params.toString()}`;
-}
-function mergeLogPayload(previous, next){
-  if (!previous || !next) return next;
-  if (next.progress) next.progress.received_at_ms = Date.now();
-  const sameRun = previous.run_id && next.run_id && previous.run_id === next.run_id;
-  const sameStdout = sameRun && previous.stdout_log && previous.stdout_log === next.stdout_log;
-  const sameStderr = sameRun && previous.stderr_log && previous.stderr_log === next.stderr_log;
-  if (sameStdout && next.stdout_append) {
-    next.stdout_tail = trimTextLines(appendLogText(previous.stdout_tail, next.stdout_append), 200);
-  }
-  if (sameStderr && next.stderr_append) {
-    next.stderr_tail = trimTextLines(appendLogText(previous.stderr_tail, next.stderr_append), 200);
-  }
-  if (sameStdout && !next.stdout_tail && !next.stdout_append) next.stdout_tail = previous.stdout_tail || '';
-  if (sameStderr && !next.stderr_tail && !next.stderr_append) next.stderr_tail = previous.stderr_tail || '';
-  return next;
-}
-function mergeStatusPayload(status){
-  if (!status) return false;
-  const previousSettings = JSON.stringify(state.settings || {});
-  state.status = status;
-  if (status.candidate_version) syncCandidateVersion(status.candidate_version);
-  if (status.settings) state.settings = status.settings;
-  if (status.run_preferences) state.runPreferences = status.run_preferences;
-  renderMetrics();
-  renderLiveRun();
-  renderEvents();
-  syncEngineUi();
-  const settingsChanged = previousSettings !== JSON.stringify(state.settings || {});
-  if (settingsChanged) renderSettings();
-  return settingsChanged;
-}
-async function refreshRuns(reset = true){
-  const offset = reset ? 0 : state.finderRunOffset;
-  state.finderRunsLoading = true;
-  renderRuns();
-  try {
-    const finderRuns = await getJson(apiUrl('web', 'runHistoryPage', runParams(offset)));
-    mergeRunPage(finderRuns, reset);
-    renderRuns();
-    renderMetrics();
-  } catch (error) {
-    state.finderRunsLoading = false;
-    renderRuns();
-    setMessage(`Ошибка обновления истории: ${error.message}`, 'bad');
-  }
-}
-async function refreshLog(incremental = false){
-  try {
-    const previous = state.finderLog;
-    const payload = await getJson(latestLogUrl(incremental));
-    if (payload.progress) payload.progress.received_at_ms = Date.now();
-    state.finderLog = incremental ? mergeLogPayload(previous, payload) : payload;
-    logDirty = false;
-    renderLog();
-    renderMetrics();
-  } catch (error) {
-    setMessage(`Ошибка обновления лога: ${error.message}`, 'bad');
-  }
-}
-async function refreshPresets(){
-  try {
-    const presets = await getJson(apiEndpoint('web', 'presets'));
-    mergePresetResponse(presets);
-    renderPresetSelects();
-    renderPresetManager();
-  } catch (error) {
-    setMessage(`Ошибка обновления пресетов: ${error.message}`, 'bad');
-  }
-}
 function handleCandidateEvent(payload){
   const version = payload && payload.version ? payload.version : null;
   if (version) syncCandidateVersion(version);
@@ -478,3 +322,85 @@ async function uploadBackup(){
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       const apiError = data && typeof data.error === 'object' ? data.error : {};
+      if (response.status === 409 && apiError.code === 'runtime_busy') {
+        setMessage(backupBusyMessage('upload'), 'warn');
+        return;
+      }
+      throw new Error(apiError.message || data.message || response.statusText);
+    }
+    setMessage('Бекап загружен и проверен', 'good');
+    input.value = '';
+    await refreshBackups();
+  } catch (error) {
+    setMessage(`Ошибка загрузки бекапа: ${error.message}`, 'bad');
+  }
+}
+async function startJob(url, payload, text){
+  try {
+    setMessage(`${text} запущено`, 'warn');
+    const response = await postJson(url, payload || {});
+    const runId = response?.run_id || '';
+    setMessage(runId ? `Задание ${runId} добавлено` : `${text} принято к выполнению`, 'good');
+    await refresh();
+    return response;
+  } catch (error) {
+    setMessage(error.message, 'bad');
+    await refresh();
+    return null;
+  }
+}
+function selectedCoreProtocols(options){
+  const protocols = [];
+  if (options.enable_http || options.enable_tls12 || options.enable_tls13) protocols.push('tcp');
+  if (options.include_quic) protocols.push('quic');
+  return protocols;
+}
+async function exportNfconfNow(){
+  try {
+    const result = await postJson(apiEndpoint('core', 'exportNfconf'), { limit: 5 });
+    const paths = (result.paths || []).join(', ');
+    setMessage(paths ? `nfconf: ${paths}` : `nfconf записан в ${result.out_dir || '-'}`, 'good');
+  } catch (error) {
+    setMessage(error.message, 'bad');
+  }
+}
+function coreStrategyDiscoveryPayload(mode, domains, options, timeout){
+  const payload = {
+    mode: mode === 'multi' ? 'multi_domain' : 'standard',
+    domains,
+    protocols: selectedCoreProtocols(options),
+    settings: { ...options }
+  };
+  if (mode === 'multi') payload.curl_parallelism = curlParallelism();
+  if (timeout !== null) payload.timeout_seconds = timeout;
+  return payload;
+}
+async function startSelectedDiscovery(){
+  const options = discoveryOptions();
+  if (!hasEnabledProtocol(options)) {
+    setMessage('Выберите хотя бы один протокол для проверки', 'bad');
+    return;
+  }
+  const mode = selectedRunMode();
+  const domains = finderDomains();
+  if (!domains.length) {
+    setMessage('Добавьте хотя бы один домен для подбора', 'bad');
+    return;
+  }
+  const timeout = timeoutSecondsOrNull();
+  const payload = coreStrategyDiscoveryPayload(mode, domains, options, timeout);
+  await saveLaunchTimeoutDefaultsNow();
+  await saveRunPreferencesNow();
+  const title = mode === 'multi' ? 'Все домены на одной стратегии' : 'Поиск стратегий';
+  await startJob(apiEndpoint('core', 'startStrategyDiscoveryRun'), payload, title);
+}
+async function stopCurrentJob(){
+  try {
+    await postJson(apiEndpoint('core', 'stopCurrentStrategyDiscoveryRun'), {});
+    setMessage('Остановка подбора запрошена', 'warn');
+    await refresh();
+  } catch (error) {
+    setMessage(error.message, 'bad');
+    await refresh();
+  }
+}
