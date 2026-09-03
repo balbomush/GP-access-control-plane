@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -62,26 +63,79 @@ def stop_blockchecks() -> None:
     subprocess.run([bs, "stop", "--wait"], check=False, timeout=60)
 
 
-def export_nfconf(*, out_dir: Path | None = None, limit: int = 5, db: Path | None = None) -> dict[str, Any]:
+def export_nfconf(
+    *,
+    out_dir: Path | None = None,
+    limit: int = 5,
+    db: Path | None = None,
+    allow_stock_fallback: bool = True,
+) -> dict[str, Any]:
+    """Re-export nfqws2 confs from a blockcheckS run DB.
+
+    bc-nfconf targets explicit domains only (its built-in set otherwise).
+    We scope it to the distinct domains recorded in the run DB and let it
+    fall back to per-domain best export (``--no-common-only``).
+    """
     nfconf = resolve_bc_nfconf()
     target = Path(out_dir) if out_dir else _default_export_out_dir()
     target.mkdir(parents=True, exist_ok=True)
     target_db = Path(db) if db else latest_bs_run_db()
-    if target_db is None:
+    if target_db is None or not target_db.is_file():
         raise RuntimeError(f"blockcheckS run database not found: {blockchecks_state_dir()}")
-    if not target_db.is_file():
-        raise RuntimeError(f"blockcheckS run database not found: {target_db}")
-    completed = subprocess.run(
-        [nfconf, "--db", str(target_db), "--out-dir", str(target), "--limit", str(max(1, int(limit)))],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "bc-nfconf failed")
+    domains = _distinct_run_domains(target_db)
+    if not domains:
+        raise RuntimeError(f"no tcp_results domains in run database: {target_db}")
+    temp_dir = Path(tempfile.mkdtemp(prefix="gp-bs-nfconf-"))
+    try:
+        domains_file = temp_dir / "domains.txt"
+        domains_file.write_text("\n".join(domains) + "\n", encoding="utf-8")
+        cmd = [
+            nfconf,
+            "--db",
+            str(target_db),
+            "--out-dir",
+            str(target),
+            "--limit",
+            str(max(1, int(limit))),
+            "--domains-file",
+            str(domains_file),
+            "--no-common-only",
+        ]
+        if allow_stock_fallback:
+            cmd.append("--allow-stock-fallback")
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                (completed.stderr or "").strip() or (completed.stdout or "").strip() or "bc-nfconf failed"
+            )
+    finally:
+        import shutil
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
     confs = sorted(str(path) for path in target.glob("*.conf"))
     return {"engine": "blockchecks", "out_dir": str(target), "paths": confs, "db": str(target_db)}
+
+
+def _distinct_run_domains(db: Path) -> list[str]:
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT domain FROM tcp_results WHERE domain IS NOT NULL AND domain != ''"
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        conn.close()
+    return [str(row[0]) for row in rows]
 
 
 def run_blockchecks_discovery(
