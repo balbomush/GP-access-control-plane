@@ -25,7 +25,7 @@ from .discovery_engine import (
     resolve_bs_binary,
 )
 from .state import now_iso
-from .storage import append_run, upsert_candidate_event
+from .storage import append_run, upsert_candidate_event, upsert_strategy_pair
 from .strategy_finder import (
     PHASE_COMPLETE,
     PHASE_DISCOVERY,
@@ -374,6 +374,7 @@ def run_blockchecks_discovery(
     _harvest_passes(state_dir, run_id, kind, harvested, run_db)
     if pair_mode and clean_domains:
         _harvest_udp(state_dir, run_id, kind, harvested, run_db, clean_domains[0])
+        _harvest_pairs(state_dir, run_id, run_db, clean_domains[0])
     final_counts = _bs_progress_db_counts(run_db)
     status = "success"
     if stopped:
@@ -417,11 +418,8 @@ def _harvest_udp(
     db: Path,
     domain: str,
 ) -> None:
-    """Harvest working BS UDP strategies (bs pair) as protocol='udp' candidates.
-
-    ``udp_results`` carries no domain; pair matrix runs on the (single) primary
-    domain, so results are attributed to that domain.
-    """
+    """Harvest working BS UDP strategies (bs pair) as protocol='udp' candidates
+    attributed to the primary domain (udp_results carries no domain column)."""
     host = str(domain or "").strip()
     if not host or not db.is_file():
         return
@@ -474,6 +472,71 @@ def _harvest_udp(
                 seen_at=seen_at,
                 common=source_mode == "multi_domain",
             )
+
+
+def _harvest_pairs(
+    state_dir: Path,
+    run_id: str,
+    db: Path,
+    domain: str,
+) -> None:
+    """Harvest working bs pair_results (TCP×UDP) into GP strategy_pairs.
+
+    pair_results stores strategy *labels* (no ids/run_id); labels are mapped to
+    stored config strings via the run DB's strategies table. For file-based
+    configs the first lua-desync core is used as the display string (MVP).
+    """
+    host = str(domain or "").strip()
+    if not host or not db.is_file():
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return
+    try:
+        strat_rows = conn.execute(
+            "SELECT name, proto, config_path FROM strategies"
+        ).fetchall()
+        pair_rows = conn.execute(
+            """
+            SELECT tcp_strategy, udp_strategy, domain, overall,
+                   tcp_ms, gateway_ms, udp_ms
+            FROM pair_results
+            WHERE overall IN ('PASS','THROTTLED')
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return
+    conn.close()
+
+    def args_for(name: str, proto: str) -> str:
+        for row in strat_rows:
+            if row[0] == name and (row[1] or "") == proto:
+                candidates = _expand_config_candidate_args(str(row[2] or "") or str(row[0] or ""))
+                return candidates[0] if candidates else str(row[0] or "")
+        return str(name or "")
+
+    seen_at = now_iso()
+    for tcp_name, udp_name, pair_domain, overall, tcp_ms, gateway_ms, udp_ms in pair_rows:
+        pd = str(pair_domain or "").strip()
+        if not (pd == host or pd.startswith(host + "@")):
+            continue
+        tcp_args = args_for(str(tcp_name or ""), "tcp")
+        udp_args = args_for(str(udp_name or ""), "udp")
+        if not tcp_args or not udp_args:
+            continue
+        upsert_strategy_pair(
+            state_dir,
+            tcp_args=tcp_args,
+            udp_args=udp_args,
+            domain=pd,
+            overall=str(overall or ""),
+            tcp_ms=float(tcp_ms or 0),
+            udp_ms=float(udp_ms or 0),
+            gateway_ms=float(gateway_ms or 0),
+            updated_at=seen_at,
+        )
 
 
 def _write_progress(

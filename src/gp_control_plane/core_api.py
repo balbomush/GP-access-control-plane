@@ -19,6 +19,7 @@ from .storage import (
     read_custom_presets,
     read_system_preset_index,
     read_system_presets,
+    read_strategy_pairs,
     save_custom_preset,
     save_system_preset,
     storage_runtime_status,
@@ -225,6 +226,12 @@ def v2fly_category_domains_payload(config: AppConfig, query: dict[str, list[str]
         "domains": parse_v2fly_domains(text),
         "storage": v2fly_storage_status_payload(config),
     }
+
+
+def strategy_pairs_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
+    domain = query_str(query, "domain", "")
+    pairs = read_strategy_pairs(config.output.state_dir, domain=domain or None)
+    return {"pairs": pairs, "domain": domain}
 
 
 def strategy_candidates_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:

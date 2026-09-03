@@ -238,6 +238,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 "/api/core/runs/history": lambda: core_api.runs_history_payload(config, query),
                 "/api/core/runs/latest-log": lambda: _latest_log_payload(config, query),
                 "/api/core/strategy-candidates": lambda: core_api.strategy_candidates_payload(config, query),
+                "/api/core/strategy-pairs": lambda: core_api.strategy_pairs_payload(config, query),
                 "/api/core/events": lambda: _events_response_payload(config, query, stream="core"),
                 "/api/service/status": lambda: service_api.service_status_payload(
                     config,

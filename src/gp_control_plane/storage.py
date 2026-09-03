@@ -466,6 +466,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_strategy_domain ON strategy_domain_results(strategy_id, domain_id);
         CREATE INDEX IF NOT EXISTS idx_strategy_domain_results_source ON strategy_domain_results(source_mode);
 
+        CREATE TABLE IF NOT EXISTS strategy_pairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tcp_args TEXT NOT NULL DEFAULT '',
+            udp_args TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL DEFAULT '',
+            overall TEXT NOT NULL DEFAULT '',
+            tcp_ms REAL NOT NULL DEFAULT 0,
+            udp_ms REAL NOT NULL DEFAULT 0,
+            gateway_ms REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT '',
+            UNIQUE(tcp_args, udp_args, domain)
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_pairs_domain ON strategy_pairs(domain);
+
         CREATE TABLE IF NOT EXISTS domain_presets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scope TEXT NOT NULL DEFAULT '',
@@ -1977,3 +1991,63 @@ def _unique_nonempty(values: list[str]) -> list[str]:
         if item and item not in result:
             result.append(item)
     return result
+
+
+def upsert_strategy_pair(
+    state_dir: Path,
+    *,
+    tcp_args: str,
+    udp_args: str,
+    domain: str,
+    overall: str,
+    tcp_ms: float = 0.0,
+    udp_ms: float = 0.0,
+    gateway_ms: float = 0.0,
+    updated_at: str = "",
+) -> None:
+    """Upsert a TCP×UDP pair result (blockcheckS pair engine)."""
+    with connect(state_dir) as conn:
+        conn.execute(
+            """
+            INSERT INTO strategy_pairs
+                (tcp_args, udp_args, domain, overall, tcp_ms, udp_ms, gateway_ms, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tcp_args, udp_args, domain) DO UPDATE SET
+                overall = excluded.overall,
+                tcp_ms = excluded.tcp_ms,
+                udp_ms = excluded.udp_ms,
+                gateway_ms = excluded.gateway_ms,
+                updated_at = excluded.updated_at
+            """,
+            (tcp_args, udp_args, domain, overall, float(tcp_ms or 0), float(udp_ms or 0),
+             float(gateway_ms or 0), updated_at),
+        )
+
+
+def read_strategy_pairs(state_dir: Path, domain: str | None = None) -> list[dict[str, Any]]:
+    """Read TCP×UDP pair rows, newest first (optionally for one domain)."""
+    with connect(state_dir) as conn:
+        if domain:
+            rows = conn.execute(
+                "SELECT tcp_args, udp_args, domain, overall, tcp_ms, udp_ms, gateway_ms, updated_at"
+                " FROM strategy_pairs WHERE domain = ? ORDER BY id DESC",
+                (domain,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT tcp_args, udp_args, domain, overall, tcp_ms, udp_ms, gateway_ms, updated_at"
+                " FROM strategy_pairs ORDER BY id DESC"
+            ).fetchall()
+    return [
+        {
+            "tcp_args": r["tcp_args"],
+            "udp_args": r["udp_args"],
+            "domain": r["domain"],
+            "overall": r["overall"],
+            "tcp_ms": float(r["tcp_ms"] or 0),
+            "udp_ms": float(r["udp_ms"] or 0),
+            "gateway_ms": float(r["gateway_ms"] or 0),
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]

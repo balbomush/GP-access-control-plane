@@ -1848,6 +1848,11 @@ pre {
             (файлы data_block/providers/*/hosts; формат Windows-hosts).</div>
           <pre id="bs-dns-pins-content">Загрузка…</pre>
         </details>
+        <details class="preset-panel" id="strategy-pairs-block">
+          <summary class="domain-header"><span class="domain-title">Пары TCP×UDP (blockcheckS pair)</span></summary>
+          <div class="helper-text">Рабочие пары TCP×UDP из bs pair (overall PASS/THROTTLED).</div>
+          <pre id="strategy-pairs-content">Загрузка…</pre>
+        </details>
       </section>
     </section>
 
@@ -2191,7 +2196,8 @@ const API_ENDPOINTS = Object.freeze({
     saveRunSettings: '/api/core/run-settings/save',
     latestLog: '/api/core/runs/latest-log',
     v2flyCategories: '/api/core/presets/v2fly/categories',
-    v2flyCategoryDomains: '/api/core/presets/v2fly/category-domains'
+    v2flyCategoryDomains: '/api/core/presets/v2fly/category-domains',
+    strategyPairs: '/api/core/strategy-pairs'
   }),
   service: Object.freeze({
     releasesAvailable: '/api/service/releases/available',
@@ -5815,8 +5821,33 @@ ${(provider.lines || []).join(NL)}`);
     box.textContent = `Не удалось загрузить DNS-pins: ${error.message}`;
   }
 }
+async function refreshStrategyPairs(force = false){
+  const now = Date.now();
+  if (!force && state.strategyPairsAt && now - state.strategyPairsAt < 20000) return;
+  const box = el('strategy-pairs-content');
+  if (!box) return;
+  state.strategyPairsAt = now;
+  try {
+    const data = await getJson(apiEndpoint('core', 'strategyPairs'));
+    const pairs = Array.isArray(data.pairs) ? data.pairs : [];
+    if (!pairs.length) {
+      box.textContent = 'Рабочих пар нет — нужен запуск blockcheckS в режиме TCP + UDP/пары на UDP-блокнутом домене.';
+      return;
+    }
+    const parts = [];
+    for (const p of pairs) {
+      parts.push(`tcp: ${p.tcp_args}
+udp: ${p.udp_args}
+${p.domain} - ${p.overall} (tcp ${p.tcp_ms}ms / udp ${p.udp_ms}ms)`);
+    }
+    box.textContent = parts.join(String.fromCharCode(10, 10));
+  } catch (error) {
+    box.textContent = 'Не удалось загрузить пары: ' + error.message;
+  }
+}
 function ensureCandidateViewLoaded(){
   refreshBsDnsPins();
+  refreshStrategyPairs();
   if (state.candidateView === 'domain') {
     if (!state.candidateDomainsLoaded) refreshDomainIndex();
     return;

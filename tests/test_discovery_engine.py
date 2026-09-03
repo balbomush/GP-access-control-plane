@@ -379,3 +379,44 @@ class PairUdpTests(unittest.TestCase):
                 ).fetchall()
             self.assertEqual([("udp", "fake:blob=discord_udp:repeats=6")], [(r["protocol"], r["args"]) for r in rows])
             self.assertEqual(1, len(links))
+
+
+class PairHarvestTests(unittest.TestCase):
+    def test_harvest_pairs_maps_labels_to_args(self) -> None:
+        from gp_control_plane.blockchecks_backend import _harvest_pairs
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            gp_state = root / "gp"
+            gp_state.mkdir()
+            run_db = root / "p.db"
+            conn = sqlite3.connect(run_db)
+            conn.executescript(
+                """
+                CREATE TABLE strategies (
+                    id INTEGER PRIMARY KEY, name TEXT, config_path TEXT, proto TEXT
+                );
+                CREATE TABLE pair_results (
+                    id INTEGER PRIMARY KEY,
+                    tcp_strategy TEXT, udp_strategy TEXT, domain TEXT,
+                    overall TEXT, tcp_ms REAL, gateway_ms REAL, udp_ms REAL
+                );
+                INSERT INTO strategies(id, name, config_path, proto) VALUES
+                    (1, 'slug_t', 'fake:blob=stun:repeats=6', 'tcp'),
+                    (2, 'slug_u', 'fake:blob=discord_udp:repeats=6', 'udp');
+                INSERT INTO pair_results(id, tcp_strategy, udp_strategy, domain, overall,
+                                         tcp_ms, gateway_ms, udp_ms) VALUES
+                    (1, 'slug_t', 'slug_u', 'discord.com', 'PASS', 100.0, 50.0, 30.0);
+                """
+            )
+            conn.commit()
+            conn.close()
+            _harvest_pairs(gp_state, "run", run_db, "discord.com")
+            with connect(gp_state) as gp_conn:
+                rows = gp_conn.execute(
+                    "SELECT tcp_args, udp_args, domain, overall FROM strategy_pairs"
+                ).fetchall()
+            self.assertEqual(
+                [("fake:blob=stun:repeats=6", "fake:blob=discord_udp:repeats=6", "discord.com", "PASS")],
+                [(r["tcp_args"], r["udp_args"], r["domain"], r["overall"]) for r in rows],
+            )

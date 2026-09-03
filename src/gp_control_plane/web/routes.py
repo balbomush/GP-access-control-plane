@@ -101,6 +101,7 @@ ROUTES = (
     _route("/api/core/runs/latest-log", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-candidates", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-candidates/export", {"GET", "HEAD"}, "core", "ndjson-stream", openapi=True),
+    _route("/api/core/strategy-pairs", {"GET"}, "core", "json-get", openapi=False),
     _route("/api/core/events", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/service/status", {"GET"}, "service", "json-get", openapi=True),
     _route("/api/service/releases/available", {"GET"}, "service", "json-get", openapi=True),
