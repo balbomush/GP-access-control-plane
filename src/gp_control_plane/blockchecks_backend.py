@@ -448,6 +448,42 @@ def _bs_progress_db_counts(db: Path) -> dict[str, int]:
     return counts
 
 
+def _looks_like_conf_path(value: str) -> bool:
+    v = str(value or "").strip()
+    return bool(v) and ("/" in v or "\\" in v) and v.lower().endswith(".conf")
+
+
+def _desync_cores_from_conf(path: str) -> list[str]:
+    """Return ``--lua-desync=`` core strings from an nfqws2 .conf file."""
+    cores: list[str] = []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if line.startswith("--lua-desync="):
+                    core = line[len("--lua-desync=") :].strip()
+                    if core:
+                        cores.append(core)
+    except OSError:
+        return []
+    return cores
+
+
+def _expand_config_candidate_args(value: str) -> list[str]:
+    """Turn a stored strategy value into harvest candidate arg strings.
+
+    ``config_path`` may be an nfqws2 .conf file (default BS configs source):
+    each ``--lua-desync=`` core becomes its own inline candidate so the web
+    panel shows real strategy lines instead of file paths.
+    """
+    v = str(value or "").strip()
+    if v and _looks_like_conf_path(v) and os.path.isfile(v):
+        cores = _desync_cores_from_conf(v)
+        if cores:
+            return cores
+    return [v] if v else []
+
+
 def _harvest_passes(
     state_dir: Path,
     run_id: str,
@@ -483,27 +519,32 @@ def _harvest_passes(
     conn.close()
     seen_at = now_iso()
     for domain, name, config_path, proto in rows:
-        args = str(config_path or "").strip() or str(name or "").strip()
         host = str(domain or "").strip()
-        if not args or not host:
+        if not host:
             continue
+        base_args = str(config_path or "").strip() or str(name or "").strip()
         proto_raw = str(proto or "").lower()
-        protocol = "quic" if proto_raw in ("quic", "udp") or "quic" in args.lower() else "tls"
-        key = (protocol, args, host)
-        if key in harvested:
-            continue
-        harvested.add(key)
-        upsert_candidate_event(
-            state_dir,
-            candidate_id=candidate_id_for(protocol, args),
-            protocol=protocol,
-            args=args,
-            status="working",
-            run_id=run_id,
-            domain=host,
-            domains=[host],
-            test="blockchecks-scan",
-            ip_version="4",
-            seen_at=seen_at,
-            common=source_mode == "multi_domain",
-        )
+        protocol = "quic" if proto_raw in ("quic", "udp") else "tls"
+        for args in _expand_config_candidate_args(base_args):
+            if not args:
+                continue
+            if protocol == "tls" and "quic" in args.lower():
+                protocol = "quic"
+            key = (protocol, args, host)
+            if key in harvested:
+                continue
+            harvested.add(key)
+            upsert_candidate_event(
+                state_dir,
+                candidate_id=candidate_id_for(protocol, args),
+                protocol=protocol,
+                args=args,
+                status="working",
+                run_id=run_id,
+                domain=host,
+                domains=[host],
+                test="blockchecks-scan",
+                ip_version="4",
+                seen_at=seen_at,
+                common=source_mode == "multi_domain",
+            )

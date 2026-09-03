@@ -259,3 +259,50 @@ class DiscoveryEngineFlagMapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigHarvestTests(unittest.TestCase):
+    def test_expand_config_candidate_args_splits_desync_cores(self) -> None:
+        from gp_control_plane.blockchecks_backend import _expand_config_candidate_args, _harvest_passes
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            conf = root / "champ.conf"
+            conf.write_text(
+                "--lua-desync=fake:blob=google:repeats=8:tcp_ts=-1000\n"
+                "--lua-desync=hostfakesplit:host=www.google.com:tcp_ts=-1000\n",
+                encoding="utf-8",
+            )
+            expanded = _expand_config_candidate_args(str(conf))
+            self.assertEqual(2, len(expanded))
+            self.assertIn("fake:blob=google:repeats=8:tcp_ts=-1000", expanded)
+            self.assertIn("hostfakesplit:host=www.google.com:tcp_ts=-1000", expanded)
+            self.assertNotIn(str(conf), expanded)
+
+            gp_state = root / "gp"
+            gp_state.mkdir()
+            run_db = root / "run.db"
+            conn = sqlite3.connect(run_db)
+            conn.executescript(
+                """
+                CREATE TABLE strategies (
+                    id INTEGER PRIMARY KEY, name TEXT, config_path TEXT, proto TEXT
+                );
+                CREATE TABLE tcp_results (
+                    id INTEGER PRIMARY KEY, domain TEXT, strategy_id INTEGER,
+                    status TEXT, bridge_applied INTEGER
+                );
+                INSERT INTO strategies(id, name, config_path, proto) VALUES
+                    (1, 'champ', ?, 'tcp');
+                INSERT INTO tcp_results(id, domain, strategy_id, status, bridge_applied) VALUES
+                    (1, 'youtube.com', 1, 'PASS', 1);
+                """.replace("?", f"'{conf.as_posix()}'")
+            )
+            conn.commit()
+            conn.close()
+            _harvest_passes(gp_state, "run", "standard-discovery", set(), run_db)
+            with connect(gp_state) as gp_conn:
+                args = {row["args"] for row in gp_conn.execute("SELECT args FROM strategies")}
+            self.assertIn("fake:blob=google:repeats=8:tcp_ts=-1000", args)
+            self.assertIn("hostfakesplit:host=www.google.com:tcp_ts=-1000", args)
+            self.assertNotIn(conf.as_posix(), args)
