@@ -234,6 +234,12 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 `bs scan` пишет результат в per-run БД `~/.local/state/blockcheckS/bs-runs/` —
 кандидаты и экспорт не пересекаются с другими кампаниями BS.
 
+Настройки blockcheckS (finder → Расширенные параметры): `strategy_preset`
+(`-M`, gp-verified / flowseal-fast…), `repeats_mode` (fast|stable),
+`bs_adaptive` (AQ), TLS-протокол (tls12/tls13), `--debug`/`--skip-ip-block`.
+Большие списки (v2fly, >50 доменов) передаются в `bs scan --domains-file` —
+единый источник — GP-хранилище пресетов (v2fly-группы тоже domain-нейтральны).
+
 ## Обновление
 
 Повторно запустите bootstrap:
