@@ -1678,6 +1678,29 @@ pre {
               </select>
               <div class="helper-text">blockcheck2 — штатный stdout-парсер. blockcheckS — матрица `bs scan`, без эмуляции маркеров AVAILABLE. Не стартует многосуточный `bs full`.</div>
             </div>
+            <div class="bs-options" id="bs-options" hidden>
+              <div class="field">
+                <label for="bs-strategy-preset">Пресет стратегий (blockcheckS)</label>
+                <select id="bs-strategy-preset">
+                  <option value="">Конфиги BS по умолчанию</option>
+                  <option value="gp-verified">gp-verified</option>
+                  <option value="flowseal-fast">flowseal-fast</option>
+                  <option value="blockcheckS-best">blockcheckS-best</option>
+                </select>
+                <div class="helper-text">Только blockcheckS (`-M`). Матрица = только линии пресета.</div>
+              </div>
+              <div class="field">
+                <label for="bs-repeats-mode">Режим повторов (blockcheckS)</label>
+                <select id="bs-repeats-mode">
+                  <option value="fast">fast — стоп на первом PASS</option>
+                  <option value="stable">stable — все N повторов</option>
+                </select>
+              </div>
+              <label class="checkbox-row">
+                <input id="bs-adaptive" type="checkbox" checked>
+                <span>Адаптивная очередь (AQ)</span>
+              </label>
+            </div>
             <div class="field scan-level-field">
                 <label for="discovery-profile-select">Глубина проверки стратегий</label>
                 <select id="discovery-profile-select"></select>
@@ -2136,6 +2159,7 @@ const API_ENDPOINTS = Object.freeze({
   core: Object.freeze({
     status: '/api/core/status',
     startStrategyDiscoveryRun: '/api/core/strategy-discovery/start-run',
+    preflight: '/api/core/strategy-discovery/preflight',
     exportNfconf: '/api/core/strategy-discovery/export-nfconf',
     stopCurrentStrategyDiscoveryRun: '/api/core/strategy-discovery/stop-current-run',
     backupsList: '/api/core/backups/list',
@@ -2587,21 +2611,52 @@ function selectedDiscoveryEngine(){
   if (settings && settings.value) return settings.value;
   return String((state.settings || {}).discovery_engine || 'blockcheck2');
 }
+const BS_ONLY_HIDDEN_IDS = ['enable-http', 'include-quic', 'enable-ipv6', 'run-curl-max-time-quic', 'run-curl-max-time-doh'];
+function hideFieldRow(id, hidden){
+  const node = el(id);
+  if (!node) return;
+  const row = node.closest('.checkbox-row') || node.closest('.field') || node.parentElement;
+  if (row) row.hidden = hidden;
+}
+function engineIsBlockchecks(){
+  return selectedDiscoveryEngine() === 'blockchecks';
+}
 function discoveryEngineReady(status){
-  const engine = selectedDiscoveryEngine();
   const zapret = (status || {}).zapret2 || {};
-  if (engine === 'blockchecks') return Boolean(zapret.nfqws2_found);
+  if (engineIsBlockchecks()){
+    const pre = state.bsPreflight;
+    if (pre && typeof pre.ready === 'boolean') return pre.ready;
+    return Boolean(zapret.nfqws2_found);
+  }
   return zapretCompactStatus(zapret).ready;
 }
+async function refreshBsPreflight(){
+  if (!engineIsBlockchecks()) {
+    state.bsPreflight = null;
+    return;
+  }
+  try {
+    const data = await getJson(apiEndpoint('core', 'preflight'));
+    state.bsPreflight = (data && data.ready !== undefined) ? data : null;
+  } catch (err) {
+    state.bsPreflight = null;
+  }
+  renderRunLaunchSummary();
+}
 function syncEngineUi(){
-  const active = selectedDiscoveryEngine() === 'blockchecks';
+  const active = engineIsBlockchecks();
+  const bsOptions = el('bs-options');
+  if (bsOptions) bsOptions.hidden = !active;
+  BS_ONLY_HIDDEN_IDS.forEach((id) => hideFieldRow(id, active));
   document.querySelectorAll('[data-action="export-nfconf"]').forEach((button) => {
     button.disabled = !active;
     button.title = active ? '' : 'Экспорт nfqws2 (bc-nfconf) доступен при движке blockcheckS';
   });
+  if (active && !state.bsPreflight) refreshBsPreflight();
 }
 function discoveryOptions(){
   const timeouts = runTimeoutSettings();
+  const engine = selectedDiscoveryEngine();
   return {
     enable_http: el('enable-http').checked,
     enable_tls12: el('enable-tls12').checked,
@@ -2613,8 +2668,13 @@ function discoveryOptions(){
     repeat_parallel: el('repeat-parallel').checked,
     skip_dnscheck: el('skip-dnscheck').checked,
     skip_ipblock: el('skip-ipblock').checked,
-    discovery_engine: selectedDiscoveryEngine(),
-    ...timeouts
+    discovery_engine: engine,
+    ...timeouts,
+    ...(engine === 'blockchecks' ? {
+      strategy_preset: (el('bs-strategy-preset') || {}).value || '',
+      repeats_mode: (el('bs-repeats-mode') || {}).value || 'fast',
+      bs_adaptive: (el('bs-adaptive') || { checked: true }).checked !== false
+    } : {})
   };
 }
 function selectedFinderPresetSummary(){
@@ -2659,6 +2719,7 @@ function runLaunchSummaryItems(){
   const settings = state.settings || {};
   const mode = selectedRunMode();
   const limit = timeoutSecondsOrNull();
+  const isBs = engineIsBlockchecks();
   const checks = [
     options.skip_dnscheck ? 'DNS: пропуск' : 'DNS: проверять',
     options.skip_ipblock ? 'IP/port: пропуск' : 'IP/port: проверять'
@@ -2666,7 +2727,17 @@ function runLaunchSummaryItems(){
   const repeats = `${options.repeats} · ${options.repeat_parallel ? 'параллельно' : 'последовательно'}`;
   const curl = mode === 'multi' ? `${curlParallelism()} параллельно` : 'не применяется';
   const timeouts = runTimeoutSettings();
-  const timeoutText = `HTTP/TLS ${timeouts.curl_max_time}с · QUIC ${timeouts.curl_max_time_quic}с · DoH ${timeouts.curl_max_time_doh}с`;
+  const timeoutText = isBs
+    ? `HTTP/TLS ${timeouts.curl_max_time}с`
+    : `HTTP/TLS ${timeouts.curl_max_time}с · QUIC ${timeouts.curl_max_time_quic}с · DoH ${timeouts.curl_max_time_doh}с`;
+  const protocolText = isBs
+    ? (options.enable_tls13 && !options.enable_tls12 ? 'TLS 1.3 (IPv4)' : 'TLS 1.2 (IPv4)')
+    : protocolSummary(options);
+  const engineItems = isBs ? [
+    ['Стратегии (пресет)', options.strategy_preset || 'конфиги BS по умолчанию'],
+    ['Режим повторов', options.repeats_mode || 'fast'],
+    ['Адаптивная очередь', options.bs_adaptive ? 'вкл' : 'выкл']
+  ] : [];
   return {
     readiness: runLaunchReadiness(domains, options),
     items: [
@@ -2676,13 +2747,14 @@ function runLaunchSummaryItems(){
       ['Источник', selectedFinderPresetSummary()],
       ['Режим', selectedRunModeLabel()],
       ['Проверочные запросы', curl],
-      ['Протоколы', protocolSummary(options)],
-      ['IP-режим', options.enable_ipv6 ? 'IPv4 + IPv6' : 'IPv4'],
+      ['Протоколы', protocolText],
+      ['IP-режим', isBs ? 'IPv4' : (options.enable_ipv6 ? 'IPv4 + IPv6' : 'IPv4')],
       ['Глубина', scanLevelLabel(options.scan_level || 'standard')],
       ['DNS/IP-check', checks],
       ['Повторы', repeats],
       ['Лимит времени', limit ? formatDuration(limit) : 'без лимита'],
-      ['Таймауты', timeoutText]
+      ['Таймауты', timeoutText],
+      ...engineItems
     ]
   };
 }
@@ -4214,6 +4286,7 @@ function renderRunCard(row){
   return `<article class="run-card ${esc(runCardClass(row))}">
     <div class="run-card-main">
       ${runField('Время', friendlyDate(row.timestamp))}
+      ${runField('Движок', String(row.discovery_engine || '').startsWith('blockchecks') ? 'blockcheckS' : 'blockcheck2')}
       ${runField('Режим', runMode(row))}
       <div class="run-field">
         <div class="run-field-label">Статус</div>
@@ -4438,11 +4511,13 @@ function runCandidateCount(row){
 }
 function runSettingsText(row){
   const options = row.discovery_options || {};
+  const isBs = String(row.discovery_engine || '').startsWith('blockchecks');
   const protocols = [];
   if (truthyOption(options.enable_http, row.enable_http)) protocols.push('HTTP');
   if (truthyOption(options.enable_tls12, row.enable_tls12 ?? row.enable_tls)) protocols.push('TLS 1.2');
   if (truthyOption(options.enable_tls13, row.enable_tls13)) protocols.push('TLS 1.3');
   if (truthyOption(options.enable_quic, row.include_quic ?? row.enable_quic)) protocols.push('QUIC');
+  if (isBs && options.protocol) protocols.push(options.protocol === 'tls13' ? 'TLS 1.3' : 'TLS 1.2');
   const scan = options.scan_level || row.scan_level || 'standard';
   const repeats = Number(options.repeats || row.repeats || 1);
   const repeatParallel = truthyOption(options.repeat_parallel, row.repeat_parallel) ? ', параллельные повторы' : '';
@@ -4452,9 +4527,14 @@ function runSettingsText(row){
   ].join(', ');
   const ipv6 = truthyOption(options.enable_ipv6, row.enable_ipv6) ? ', IPv6' : '';
   const debugLog = truthyOption(row.debug_stdout, false) ? ', debug-log' : '';
+  const bsExtras = isBs
+    ? `${options.strategy_preset ? ', пресет ' + options.strategy_preset : ''}` +
+      `${options.repeats_mode ? ', повторы ' + options.repeats_mode : ''}` +
+      `${options.adaptive !== false ? ', AQ вкл' : ', AQ выкл'}`
+    : '';
   const curl = row.kind === 'multi-domain-discovery' ? `, проверочных запросов ${row.curl_parallelism || 4}` : '';
   const limit = row.timeout_seconds ? `, лимит ${formatDuration(Number(row.timeout_seconds || 0))}` : ', без лимита';
-  return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${debugLog}${curl}${limit}`;
+  return `${protocols.join('+') || '-'} · ${scan} · повт. ${repeats}${repeatParallel} · ${skip}${ipv6}${debugLog}${bsExtras}${curl}${limit}`;
 }
 function truthyOption(primary, fallback){
   const value = primary === undefined || primary === null ? fallback : primary;
@@ -4997,6 +5077,12 @@ function renderSettings(){
   if (engineSelect) engineSelect.value = settings.discovery_engine || 'blockcheck2';
   const finderEngine = el('finder-discovery-engine');
   if (finderEngine && !state.settingsTouched) finderEngine.value = settings.discovery_engine || 'blockcheck2';
+  const bsPreset = el('bs-strategy-preset');
+  if (bsPreset) bsPreset.value = settings.strategy_preset || '';
+  const bsRepMode = el('bs-repeats-mode');
+  if (bsRepMode) bsRepMode.value = settings.repeats_mode || 'fast';
+  const bsAdaptive = el('bs-adaptive');
+  if (bsAdaptive) bsAdaptive.checked = settings.bs_adaptive !== false;
   if (debugStdout) debugStdout.checked = Boolean(settings.debug_stdout);
   if (curlMax) curlMax.value = String(settings.curl_parallelism_max || 10);
   renderReleaseInfo();
@@ -5018,6 +5104,7 @@ function renderSettings(){
   renderV2flyCategoryCatalog();
   renderV2flyPreview();
   renderPresetManager();
+  syncEngineUi();
 }
 function renderReleaseInfo(){
   const version = (state.status || {}).version || '-';
@@ -6684,11 +6771,13 @@ document.addEventListener('change', (event) => {
     const settingsEngine = el('settings-discovery-engine');
     if (settingsEngine) settingsEngine.value = event.target.value;
     syncEngineUi();
+    renderRunLaunchSummary();
   }
   if (event.target && event.target.id === 'settings-discovery-engine') {
     const finderEngine = el('finder-discovery-engine');
     if (finderEngine) finderEngine.value = event.target.value;
     syncEngineUi();
+    renderRunLaunchSummary();
   }
   if (event.target && String(event.target.id || '').startsWith('v2fly-')) {
     if (event.target.id === 'v2fly-category-search') {
