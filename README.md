@@ -236,9 +236,15 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 
 Настройки blockcheckS (finder → Расширенные параметры): `strategy_preset`
 (`-M`, gp-verified / flowseal-fast…), `repeats_mode` (fast|stable),
-`bs_adaptive` (AQ), TLS-протокол (tls12/tls13), `--debug`/`--skip-ip-block`.
+`bs_adaptive` (AQ), TLS-протокол (tls12/tls13), `--debug`/`--skip-ip-block`,
+«Тип подбора» TCP | **TCP + UDP/пары** (`bs pair`).
 Большие списки (v2fly, >50 доменов) передаются в `bs scan --domains-file` —
 единый источник — GP-хранилище пресетов (v2fly-группы тоже domain-нейтральны).
+
+Кандидаты от config-файлов BS разворачиваются в `--lua-desync=` строки
+(не .conf-пути). На вкладке «Найденные стратегии» также есть read-only блоки
+**DNS-pins / hosts** (domain→IP против hijack из `data_block/providers/*/hosts`)
+и **Пары TCP×UDP** (результаты `bs pair`).
 
 ## Обновление
 
