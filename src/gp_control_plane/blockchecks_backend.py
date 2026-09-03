@@ -61,7 +61,7 @@ def stop_blockchecks() -> None:
         bs = resolve_bs_binary()
     except RuntimeError:
         return
-    subprocess.run([bs, "stop", "--wait"], check=False, timeout=60)
+    subprocess.run([bs, "stop", "--wait", "120"], check=False, timeout=60)
 
 
 def export_nfconf(
