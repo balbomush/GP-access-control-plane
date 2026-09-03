@@ -14,3 +14,6 @@ gp-control-plane = "gp_control_plane.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"gp_control_plane.web.ui.parts" = ["*.html", "css/*.css", "js/*.js", "html/*.html"]

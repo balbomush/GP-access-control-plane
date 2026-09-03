@@ -1,0 +1,304 @@
+<body>
+<section class="login-screen" id="login-screen" aria-labelledby="login-title" hidden>
+  <form class="login-card" id="login-form">
+    <div class="brand">
+      <h1 id="login-title">GP Control Plane</h1>
+      <div class="subtitle">Войдите, чтобы продолжить работу с панелью.</div>
+    </div>
+    <div class="field">
+      <label for="login-username">Логин</label>
+      <input id="login-username" name="username" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="login-password">Пароль</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <div class="login-error" id="login-error" role="alert" aria-live="polite"></div>
+    <button type="submit">Войти</button>
+  </form>
+</section>
+<div class="shell" id="app-shell" hidden>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>Подбор стратегий zapret2</h1>
+        <div class="subtitle">GP Control Plane · локальная web panel · Linux host</div>
+      </div>
+      <div class="topbar-badges">
+        <span class="topbar-version" id="app-version-badge">v-</span>
+      </div>
+        <button class="secondary" data-action="logout" type="button">Выйти</button>
+    </div>
+  </header>
+  <main class="main">
+    <section class="status-grid" aria-label="Сводка">
+      <div class="metric">
+        <div class="metric-label">Система</div>
+        <div class="metric-value" id="metric-zapret">Загрузка</div>
+        <div class="metric-note" id="metric-zapret-note">-</div>
+      </div>
+      <button class="metric metric-button" data-tab="terminal" id="metric-job-card" type="button">
+        <div class="metric-label">Подбор</div>
+        <div class="metric-value" id="metric-job">-</div>
+        <div class="metric-note" id="metric-job-note">-</div>
+      </button>
+      <button class="metric metric-button" data-tab="candidates" type="button">
+        <div class="metric-label">Домены</div>
+        <div class="metric-value" id="metric-candidates">0</div>
+        <div class="metric-note" id="metric-candidates-note">протестировано</div>
+      </button>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="Разделы">
+      <button class="tab-button active" id="tab-finder" role="tab" aria-selected="true" aria-controls="tab-panel-finder" data-tab="finder" type="button">Подбор</button>
+      <button class="tab-button" id="tab-history" role="tab" aria-selected="false" aria-controls="tab-panel-history" data-tab="history" type="button" tabindex="-1">История</button>
+      <button class="tab-button" id="tab-candidates" role="tab" aria-selected="false" aria-controls="tab-panel-candidates" data-tab="candidates" type="button" tabindex="-1">Кандидаты</button>
+      <button class="tab-button" id="tab-terminal" role="tab" aria-selected="false" aria-controls="tab-panel-terminal" data-tab="terminal" type="button" tabindex="-1">Терминал</button>
+      <button class="tab-button" id="tab-lists" role="tab" aria-selected="false" aria-controls="tab-panel-lists" data-tab="lists" type="button" tabindex="-1">Списки и профили</button>
+      <button class="tab-button" id="tab-settings" role="tab" aria-selected="false" aria-controls="tab-panel-settings" data-tab="settings" type="button" tabindex="-1">Настройки</button>
+    </nav>
+
+    <section class="tab-page active" id="tab-panel-finder" role="tabpanel" aria-labelledby="tab-finder" data-tab-page="finder">
+    <div class="layout finder-layout">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Запуск поиска</h2>
+            <span class="badge" id="job-badge">Можно запускать</span>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="finder-domains">Домены</label>
+              <div class="code-editor text-editor">
+                <pre class="line-numbers" data-line-numbers-for="finder-domains" aria-hidden="true">1</pre>
+                <textarea id="finder-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false"></textarea>
+              </div>
+            </div>
+            <div class="preset-panel">
+              <div class="field">
+                <label for="finder-preset-select">Пресет доменов</label>
+                <select id="finder-preset-select"></select>
+              </div>
+              <div class="helper-text">Пресет применяется сразу при выборе. Если вручную изменить список доменов, выбранное значение станет `Custom` и ручной список не будет перезаписан.</div>
+            </div>
+            <div class="preset-panel">
+              <div class="field">
+                <label>Режим поиска</label>
+                <div class="segmented-control" id="run-mode-control">
+                  <label class="segment-option tooltip-button" data-tooltip="Запускает штатную проверку стратегий: домены проверяются обычным порядком. Хороший режим для базовой совместимости.">
+                    <input type="radio" name="run-mode" value="standard" checked>
+                    Домены по очереди
+                  </label>
+                  <label class="segment-option tooltip-button" data-tooltip="Одна стратегия запускается один раз, затем все выбранные домены проверяются параллельными проверочными запросами. Удобно быстрее понять, какие домены покрывает одна стратегия.">
+                    <input type="radio" name="run-mode" value="multi">
+                    Все домены на одной стратегии
+                  </label>
+                </div>
+              </div>
+              <div class="helper-text" id="run-mode-note">Обычный режим: штатная проверка стратегий проходит по своему порядку.</div>
+              <div class="field multi-curl-field" id="multi-curl-field" hidden>
+                <label for="curl-parallelism">Параллельных проверочных запросов</label>
+                <input id="curl-parallelism" type="number" min="1" step="1" value="4">
+                <div class="helper-text">Работает только в режиме `Все домены на одной стратегии`: одна стратегия проверяет несколько доменов параллельно.</div>
+              </div>
+            </div>
+            <div class="preset-panel finder-options-panel">
+              <div class="helper-text">Основные проверки, которые реально влияют на подбор стратегий.</div>
+              <div class="protocol-grid">
+                <label class="checkbox-row">
+                  <input id="enable-http" type="checkbox">
+                  <span>HTTP</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="enable-tls12" type="checkbox" checked>
+                  <span>TLS 1.2</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="enable-tls13" type="checkbox">
+                  <span>TLS 1.3</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="include-quic" type="checkbox" checked>
+                  <span>HTTP3 / QUIC</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="enable-ipv6" type="checkbox">
+                  <span>IPv6</span>
+                </label>
+              </div>
+            </div>
+            <details class="preset-panel">
+              <summary class="domain-header">
+                <span class="domain-title">Расширенные параметры</span>
+                <span class="helper-text">глубина, повторы, DNS/IP-check, лимиты и timeout</span>
+              </summary>
+            <div class="field">
+              <label for="finder-discovery-engine">Движок подбора</label>
+              <select id="finder-discovery-engine">
+                <option value="blockcheck2">blockcheck2.sh (zapret2)</option>
+                <option value="blockchecks">blockcheckS (`bs scan`)</option>
+              </select>
+              <div class="helper-text">blockcheck2 — штатный stdout-парсер. blockcheckS — матрица `bs scan`, без эмуляции маркеров AVAILABLE. Не стартует многосуточный `bs full`.</div>
+            </div>
+            <div class="bs-options" id="bs-options" hidden>
+              <div class="field">
+                <label for="bs-strategy-preset">Пресет стратегий (blockcheckS)</label>
+                <select id="bs-strategy-preset">
+                  <option value="">Конфиги BS по умолчанию</option>
+                  <option value="gp-verified">gp-verified</option>
+                  <option value="flowseal-fast">flowseal-fast</option>
+                  <option value="blockcheckS-best">blockcheckS-best</option>
+                </select>
+                <div class="helper-text">Только blockcheckS (`-M`). Матрица = только линии пресета.</div>
+              </div>
+              <div class="field">
+                <label for="bs-repeats-mode">Режим повторов (blockcheckS)</label>
+                <select id="bs-repeats-mode">
+                  <option value="fast">fast — стоп на первом PASS</option>
+                  <option value="stable">stable — все N повторов</option>
+                </select>
+              </div>
+              <label class="checkbox-row">
+                <input id="bs-adaptive" type="checkbox" checked>
+                <span>Адаптивная очередь (AQ)</span>
+              </label>
+              <div class="field">
+                <label for="bs-run-mode">Тип подбора (blockcheckS)</label>
+                <select id="bs-run-mode">
+                  <option value="tcp">TCP (scan)</option>
+                  <option value="pair">TCP + UDP/пары (pair)</option>
+                </select>
+                <div class="helper-text">pair запускает bs pair — добавляет UDP-стратегии и пары TCP×UDP (по одному домену; UDP лейн создаётся только для UDP-блокнутых доменов).</div>
+              </div>
+            </div>
+            <div class="field scan-level-field">
+                <label for="discovery-profile-select">Глубина проверки стратегий</label>
+                <select id="discovery-profile-select"></select>
+                <input id="scan-level" type="hidden" value="standard">
+                <div class="helper-text" id="discovery-profile-note">Технический профиль проверки: quick, standard или force.</div>
+              </div>
+              <div class="time-limit-panel disabled" id="time-limit-panel">
+                <div class="time-limit-title">Ограничение времени поиска</div>
+                <div class="time-limit-row">
+                  <label class="checkbox-row">
+                    <input id="limit-time-enabled" type="checkbox">
+                    <span>Ограничить время поиска</span>
+                  </label>
+                  <div class="field time-limit-field" id="time-limit-field" aria-disabled="true">
+                    <label for="finder-timeout-hours">Лимит поиска, часов</label>
+                    <input id="finder-timeout-hours" type="number" min="0.1" max="24" step="0.5" value="6" disabled>
+                  </div>
+                </div>
+              </div>
+              <div class="preset-grid">
+                <div class="field">
+                  <label for="repeats">Повторы проверки стратегии</label>
+                  <input id="repeats" type="number" min="1" max="10" step="1" value="1">
+                </div>
+                <div class="field">
+                  <label for="run-curl-max-time">Timeout HTTP/TLS, сек</label>
+                  <input id="run-curl-max-time" type="number" min="1" step="1" value="2">
+                </div>
+                <div class="field">
+                  <label for="run-curl-max-time-quic">Timeout QUIC, сек</label>
+                  <input id="run-curl-max-time-quic" type="number" min="1" step="1" value="2">
+                </div>
+                <div class="field">
+                  <label for="run-curl-max-time-doh">Timeout DoH, сек</label>
+                  <input id="run-curl-max-time-doh" type="number" min="1" step="1" value="2">
+                </div>
+              </div>
+              <label class="checkbox-row">
+                <input id="repeat-parallel" type="checkbox">
+                <span>Запускать повторы параллельно</span>
+              </label>
+              <label class="checkbox-row">
+                <input id="skip-dnscheck" type="checkbox" checked>
+                <span>Пропустить DNS-проверку перед подбором</span>
+              </label>
+              <label class="checkbox-row">
+                <input id="skip-ipblock" type="checkbox" checked>
+                <span>Пропустить проверку IP/port-блокировки</span>
+              </label>
+            </details>
+            <section class="run-launch-summary" aria-label="Сводка параметров запуска">
+              <div class="run-launch-summary-header">
+                <div class="run-launch-summary-title">Параметры запуска</div>
+                <span class="badge" id="run-launch-readiness">-</span>
+              </div>
+              <div class="run-launch-summary-grid" id="run-launch-summary-grid"></div>
+            </section>
+            <div class="button-row run-actions">
+              <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, глубиной проверки и параметрами." type="button">Запустить выбранный режим</button>
+              <button class="secondary danger tooltip-button" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
+            </div>
+            <div class="message" id="message">Готово</div>
+          </div>
+        </section>
+      </div>
+    </div>
+    </section>
+
+    <section class="tab-page history-page" id="tab-panel-history" role="tabpanel" aria-labelledby="tab-history" data-tab-page="history">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>История запусков</h2>
+          <span class="badge" id="finder-runs-count">0</span>
+        </div>
+        <div id="finder-runs-table"></div>
+      </section>
+    </section>
+
+    <section class="tab-page candidates-page" id="tab-panel-candidates" role="tabpanel" aria-labelledby="tab-candidates" data-tab-page="candidates">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Найденные стратегии</h2>
+          <span class="badge" id="candidates-count">0</span>
+        </div>
+        <div class="candidate-summary" id="candidate-summary">-</div>
+        <div class="candidate-tabs" role="tablist" aria-label="Вид кандидатов">
+          <button class="subtab-button active" id="candidate-view-domain" role="tab" aria-selected="true" aria-controls="candidates-table" data-candidate-view="domain" type="button">По доменам</button>
+          <button class="subtab-button" id="candidate-view-common" role="tab" aria-selected="false" aria-controls="candidates-table" data-candidate-view="common" type="button" tabindex="-1">Общие стратегии</button>
+        </div>
+        <div class="common-filter-panel" id="common-controls" hidden>
+          <div class="preset-grid">
+            <div class="field">
+              <label for="common-preset-select">Пресет доменов для пересечения</label>
+              <select id="common-preset-select"></select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="common-domains">Домены для поиска общих стратегий</label>
+            <div class="code-editor text-editor">
+              <pre class="line-numbers" data-line-numbers-for="common-domains" aria-hidden="true">1</pre>
+              <textarea id="common-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="discord.com&#10;discordcdn.com"></textarea>
+            </div>
+          </div>
+          <div class="domain-picker-row">
+            <div class="common-domain-picker">
+              <input id="common-domain-add" list="tested-domain-options" autocomplete="off" placeholder="Начните вводить протестированный домен">
+              <div id="common-domain-suggestions" class="common-domain-suggestions" role="listbox" hidden></div>
+            </div>
+            <button class="secondary" data-action="add-common-domain" title="Добавляет домен в фильтр общих стратегий, если по нему уже есть кандидаты." type="button">Добавить домен</button>
+          </div>
+          <datalist id="tested-domain-options"></datalist>
+          <div class="helper-text" id="common-domain-note">Выберите минимум два протестированных домена.</div>
+          <section class="candidate-result-panel" aria-label="Итоговый набор общих стратегий">
+            <div class="candidate-result-head">
+              <div>
+                <h3>Итоговый набор общих стратегий</h3>
+                <div class="helper-text" id="candidate-result-source">Выберите домены для пересечения и соберите итоговый набор.</div>
+              </div>
+              <div class="candidate-result-toolbar">
+                <button data-action="build-candidate-result" type="button">Собрать итоговый набор</button>
+                <div class="candidate-result-modes" role="tablist" aria-label="Режим итогового набора">
+                  <button class="subtab-button" id="candidate-result-mode-coverage" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="coverage" type="button" tabindex="-1">Максимум покрытия</button>
+                  <button class="subtab-button" id="candidate-result-mode-minimal" role="tab" aria-selected="false" aria-controls="candidate-result-body" data-candidate-result-mode="minimal" type="button" tabindex="-1">Минимум стратегий</button>
+                  <button class="subtab-button active" id="candidate-result-mode-balance" role="tab" aria-selected="true" aria-controls="candidate-result-body" data-candidate-result-mode="balance" type="button">Баланс</button>
+                </div>
+              </div>
+            </div>
+            <div id="candidate-result-body" class="candidate-result-body" role="tabpanel" aria-live="polite" aria-labelledby="candidate-result-mode-balance">
+              <div class="empty">Нажмите «Собрать итоговый набор» после выбора доменов.</div>
+            </div>
+          </section>

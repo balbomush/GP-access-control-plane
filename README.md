@@ -246,6 +246,14 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 **DNS-pins / hosts** (domain→IP против hijack из `data_block/providers/*/hosts`)
 и **Пары TCP×UDP** (результаты `bs pair`).
 
+### Структура web UI (`src/gp_control_plane/web/ui/`)
+
+Страница собирается серверно из маленьких статичных частей
+`web/ui/parts/**` (`.html`/`.css`/`.js`, каждая ≤500 строк) — порядок задан
+`parts/__init__.py::PART_ORDER`, сборка — `_assemble.index_html()` (кэш).
+Части **не отдаются как статические файлы** (единая инлайн-страница как
+раньше, байт-в-байт). Нарезка/перегенерация: `python dev/split_ui.py`.
+
 ## Обновление
 
 Повторно запустите bootstrap:
