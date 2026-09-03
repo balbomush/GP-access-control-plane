@@ -2160,6 +2160,7 @@ const API_ENDPOINTS = Object.freeze({
     status: '/api/core/status',
     startStrategyDiscoveryRun: '/api/core/strategy-discovery/start-run',
     preflight: '/api/core/strategy-discovery/preflight',
+    currentRunLatestLog: '/api/core/strategy-discovery/current-run-latest-log',
     exportNfconf: '/api/core/strategy-discovery/export-nfconf',
     stopCurrentStrategyDiscoveryRun: '/api/core/strategy-discovery/stop-current-run',
     backupsList: '/api/core/backups/list',
@@ -5973,15 +5974,17 @@ function appendLogText(base, addition){
   return `${left}\\n${right}`;
 }
 function latestLogUrl(incremental){
+  const busy = isBusy();
+  const base = busy ? apiEndpoint('core', 'currentRunLatestLog') : apiEndpoint('core', 'latestLog');
   if (!incremental || !state.finderLog || !state.finderLog.stdout_log) {
-    return apiEndpoint('core', 'latestLog');
+    return base;
   }
   const params = new URLSearchParams();
   params.set('stdout_log', state.finderLog.stdout_log || '');
   params.set('stdout_size', String(state.finderLog.stdout_size || 0));
   params.set('stderr_log', state.finderLog.stderr_log || '');
   params.set('stderr_size', String(state.finderLog.stderr_size || 0));
-  return apiUrl('core', 'latestLog', params);
+  return `${base}?${params.toString()}`;
 }
 function mergeLogPayload(previous, next){
   if (!previous || !next) return next;

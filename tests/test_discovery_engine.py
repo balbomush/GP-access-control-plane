@@ -212,6 +212,12 @@ class DiscoveryEngineFlagMapTests(unittest.TestCase):
             self.assertIn("fake:blob=stun:repeats=3:tcp_ts=-1000", args)
             self.assertNotIn("slug_a", args)
             self.assertNotIn("slug_b", args)
+            progress = json.loads(Path(run["progress_log"]).read_text(encoding="utf-8"))
+            self.assertIn("attempted", progress)
+            self.assertIn("attempt_total", progress)
+            self.assertIn("effective_attempt_total", progress)
+            self.assertIn("successful", progress)
+            self.assertIn("elapsed_seconds", progress)
 
 
     def test_blockchecks_state_dir_appends_app_dir_on_override(self) -> None:

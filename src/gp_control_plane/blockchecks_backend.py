@@ -38,6 +38,8 @@ from .strategy_finder import (
 )
 
 _PROGRESS_RE = re.compile(PROGRESS_LINE)
+AQ_JOBS_RE = re.compile(r"AQ pending jobs:\s+(\d+)")
+GEN_TCP_RE = re.compile(r"Generated:\s+(\d+)\s+TCP")
 
 
 def _default_export_out_dir() -> Path:
@@ -242,8 +244,43 @@ def run_blockchecks_discovery(
         },
     }
     append_run(state_dir, started)
-    _write_progress(progress_log, phase=PHASE_DISCOVERY, processed=0, total=0, passed=0, started=time.monotonic())
+    process_started = time.monotonic()
+    progress_state = {
+        "attempt_total": 0,
+        "strategies_total": 0,
+        "last_db_poll": 0.0,
+        "script": f"bs scan{(' -M ' + strategy_preset) if strategy_preset else ''}",
+    }
+    _write_progress(
+        progress_log,
+        phase=PHASE_DISCOVERY,
+        processed=0,
+        total=0,
+        passed=0,
+        started=process_started,
+        current_script=progress_state["script"],
+    )
     harvested: set[tuple[str, str, str]] = set()
+
+    def _refresh_progress(force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - progress_state["last_db_poll"]) < 1.5:
+            return
+        progress_state["last_db_poll"] = now
+        counts = _bs_progress_db_counts(run_db)
+        total = progress_state["attempt_total"] or counts["attempts"]
+        _write_progress(
+            progress_log,
+            phase=PHASE_DISCOVERY,
+            processed=counts["attempts"],
+            total=total,
+            passed=counts["working"],
+            started=process_started,
+            strategies_total=progress_state["strategies_total"] or counts["strategies"],
+            strategies_checked=counts["strategies"],
+            current_script=progress_state["script"],
+        )
+
     process = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
@@ -265,18 +302,14 @@ def run_blockchecks_discovery(
         for line in process.stdout:
             stdout_handle.write(line)
             stdout_handle.flush()
-            match = _PROGRESS_RE.search(line)
-            if match:
-                processed, total, passed = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-                _write_progress(
-                    progress_log,
-                    phase=PHASE_DISCOVERY,
-                    processed=processed,
-                    total=total,
-                    passed=passed,
-                    started=time.monotonic() if processed <= 1 else None,
-                )
+            aq = AQ_JOBS_RE.search(line)
+            if aq:
+                progress_state["attempt_total"] = int(aq.group(1))
+            gen = GEN_TCP_RE.search(line)
+            if gen:
+                progress_state["strategies_total"] = int(gen.group(1))
             _harvest_passes(state_dir, run_id, kind, harvested, run_db)
+            _refresh_progress()
             if stop_event is not None and stop_event.is_set():
                 stopped = True
                 stop_blockchecks()
@@ -305,6 +338,7 @@ def run_blockchecks_discovery(
         if domains_file_arg is not None:
             domains_file_arg.unlink(missing_ok=True)
     _harvest_passes(state_dir, run_id, kind, harvested, run_db)
+    final_counts = _bs_progress_db_counts(run_db)
     status = "success"
     if stopped:
         status = "stopped"
@@ -327,10 +361,14 @@ def run_blockchecks_discovery(
     _write_progress(
         progress_log,
         phase=PHASE_COMPLETE,
-        processed=run.get("candidate_count") or 0,
-        total=run.get("candidate_count") or 0,
+        processed=final_counts["attempts"],
+        total=final_counts["attempts"] or progress_state["attempt_total"] or len(harvested),
         passed=len(harvested),
-        started=None,
+        started=process_started,
+        strategies_total=progress_state["strategies_total"] or final_counts["strategies"],
+        strategies_checked=final_counts["strategies"],
+        current_script=progress_state["script"],
+        percent=100,
     )
     return run
 
@@ -343,18 +381,71 @@ def _write_progress(
     total: int,
     passed: int,
     started: float | None,
+    strategies_total: int = 0,
+    strategies_checked: int | None = None,
+    current_script: str = "",
+    elapsed_seconds: float | None = None,
+    eta_seconds: float | None = None,
+    percent: float | None = None,
 ) -> None:
+    progress_status = "complete" if phase == PHASE_COMPLETE else "running"
+    phase_label = "завершено" if phase == PHASE_COMPLETE else "подбор стратегий"
+    if elapsed_seconds is None:
+        elapsed_seconds = 0.0 if started is None else max(0, round(time.monotonic() - started, 1))
+    if percent is None and total > 0:
+        percent = round(min(100.0, (processed / float(total)) * 100.0), 1)
     payload = {
         "phase": phase,
         "stage": phase,
+        "progress_status": progress_status,
+        "phase_label": phase_label,
+        "attempted": processed,
+        "attempt_total": total,
+        "effective_attempt_total": total,
+        "strategy_checked": strategies_checked if strategies_checked is not None else processed,
+        "strategy_total": strategies_total,
+        "successful": passed,
+        "current_script": current_script,
+        "elapsed_seconds": elapsed_seconds,
+        "eta_seconds": eta_seconds,
+        "eta_status": "complete" if progress_status == "complete" else ("" if eta_seconds is None else "estimated"),
+        "percent": percent or 0,
+        # legacy blockchecks keys (kept for current-run-progress consumers)
         "attempts_processed": processed,
         "attempts_total": total,
         "processed_attempts": processed,
         "total_attempts": total,
         "candidate_count": passed,
-        "progress_status": "complete" if phase == PHASE_COMPLETE else "running",
     }
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _bs_progress_db_counts(db: Path) -> dict[str, int]:
+    """Live attempt/working/strategy counts from the per-run bs database."""
+    counts = {"attempts": 0, "working": 0, "strategies": 0}
+    if not db.is_file():
+        return counts
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return counts
+    try:
+        counts["attempts"] = int(conn.execute("SELECT COUNT(*) FROM tcp_results").fetchone()[0])
+        counts["working"] = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM tcp_results"
+                " WHERE status IN ('PASS','THROTTLED')"
+                " AND (bridge_applied IS NULL OR bridge_applied = 1)"
+            ).fetchone()[0]
+        )
+        counts["strategies"] = int(
+            conn.execute("SELECT COUNT(DISTINCT strategy_id) FROM tcp_results").fetchone()[0]
+        )
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return counts
 
 
 def _harvest_passes(
