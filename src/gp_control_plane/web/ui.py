@@ -2626,7 +2626,7 @@ function discoveryEngineReady(status){
   if (engineIsBlockchecks()){
     const pre = state.bsPreflight;
     if (pre && typeof pre.ready === 'boolean') return pre.ready;
-    return Boolean(zapret.nfqws2_found);
+    return zapret.ready !== undefined ? Boolean(zapret.ready) : Boolean(zapret.nfqws2_found);
   }
   return zapretCompactStatus(zapret).ready;
 }
@@ -2641,6 +2641,7 @@ async function refreshBsPreflight(){
   } catch (err) {
     state.bsPreflight = null;
   }
+  renderMetrics();
   renderRunLaunchSummary();
 }
 function syncEngineUi(){
@@ -6008,6 +6009,7 @@ function mergeStatusPayload(status){
   renderMetrics();
   renderLiveRun();
   renderEvents();
+  syncEngineUi();
   const settingsChanged = previousSettings !== JSON.stringify(state.settings || {});
   if (settingsChanged) renderSettings();
   return settingsChanged;
