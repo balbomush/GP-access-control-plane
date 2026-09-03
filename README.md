@@ -208,6 +208,32 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 - останавливать долгий подбор без потери уже найденных успешных стратегий;
 - создавать и восстанавливать локальные бекапы через UI.
 
+## Два движка подбора (fork: blockcheck2 + blockcheckS)
+
+Ветка `feat/dual-engine-main` добавляет движок **blockcheckS** (`bs`) наряду со
+штатным `blockcheck2.sh`. Переключатель «Движок подбора» (панель подбора и
+Настройки → Параметры подбора) меняет webui:
+
+| | `blockcheck2` (по умолчанию) | `blockcheckS` |
+|---|---|---|
+| Run | `blockcheck2.sh` через root-helper | `bs scan` (subprocess, повторяемый `-d`) |
+| Preflight | GP `check-install` (root-helper) | `check_blockchecks_install` (bs/nfqws2/run.lock) |
+| Результаты | маркеры stdout → кандидаты | harvest `strategies.config_path` из per-run `--db` BS |
+| Экспорт nfqws2 | нет | `bc-nfconf` (кнопка видна только при blockcheckS) |
+
+Требования для `blockcheckS`:
+
+- `bs` и `bc-nfconf` доступны (`BLOCKCHECKS_BS`/`BLOCKCHECKS_NFCONF`, PATH или
+  `/usr/local/libexec/gp-control-plane/{bs,bc-nfconf}`);
+- сервис-юзер GP имеет passwordless `sudo -n` (BS сам поднимает netns/nfqws2);
+- `ZAPRET_DIR`/`BLOCKCHECKS_ZAPRET2` указывают на дерево zapret2 (по умолчанию
+  `/opt/zapret2`);
+- контракт вызова и схема результатов: blockcheckS `docs/api.md` §10a и
+  `docs/cookbook/gp-bridge.md` (ветка `integration/1.4.1`).
+
+`bs scan` пишет результат в per-run БД `~/.local/state/blockcheckS/bs-runs/` —
+кандидаты и экспорт не пересекаются с другими кампаниями BS.
+
 ## Обновление
 
 Повторно запустите bootstrap:
