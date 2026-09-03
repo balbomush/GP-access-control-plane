@@ -306,3 +306,21 @@ class ConfigHarvestTests(unittest.TestCase):
             self.assertIn("fake:blob=google:repeats=8:tcp_ts=-1000", args)
             self.assertIn("hostfakesplit:host=www.google.com:tcp_ts=-1000", args)
             self.assertNotIn(conf.as_posix(), args)
+
+
+class DnsPinsTests(unittest.TestCase):
+    def test_list_bs_dns_pins_reads_provider_hosts(self) -> None:
+        from gp_control_plane.blockchecks_backend import list_bs_dns_pins
+
+        with tempfile.TemporaryDirectory() as raw:
+            data = Path(raw) / "blockcheckS" / "data_block" / "providers" / "isp_x"
+            data.mkdir(parents=True)
+            hosts = data / "hosts"
+            hosts.write_text("# 8.8.8.8  youtube.com\n# 1.1.1.1  discord.com\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": raw}, clear=False):
+                payload = list_bs_dns_pins()
+            self.assertEqual(1, len(payload["providers"]))
+            prov = payload["providers"][0]
+            self.assertEqual("isp_x", prov["provider"])
+            self.assertEqual(hosts.as_posix(), prov["path"])
+            self.assertIn("# 8.8.8.8  youtube.com", prov["lines"])

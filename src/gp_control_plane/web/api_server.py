@@ -36,7 +36,7 @@ from ..domain_sources import (
     read_v2fly_group_manifest,
     write_v2fly_catalog_cache,
 )
-from ..blockchecks_backend import export_nfconf, run_blockchecks_discovery, stop_blockchecks
+from ..blockchecks_backend import export_nfconf, list_bs_dns_pins, run_blockchecks_discovery, stop_blockchecks
 from ..discovery_engine import campaign_lock_busy_message, check_blockchecks_install, is_blockchecks_job, normalize_engine
 from ..jobs import JobRunner
 from ..releases import release_channel_info
@@ -838,6 +838,7 @@ def web_json_get_payload(config: AppConfig, path: str, query: dict[str, list[str
         "/api/web/strategy-candidates-page": lambda: _candidate_page_payload(config, query),
         "/api/web/presets": lambda: _web_presets_payload(config, query),
         "/api/web/presets/domains": lambda: _preset_domains_payload(config, query),
+        "/api/web/bs-dns-pins": lambda: list_bs_dns_pins(),
         "/api/web/events": lambda: _events_response_payload(config, query, stream="web"),
     }
     if path not in routes:

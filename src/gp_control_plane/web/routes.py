@@ -115,6 +115,7 @@ ROUTES = (
     _route("/api/web/presets/domains", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
     _route("/api/web/presets/save", {"POST"}, "web", "json-post", openapi=True, allowed_in_core=False),
     _route("/api/web/presets/delete-user-lists", {"POST"}, "web", "json-post", openapi=True, allowed_in_core=False),
+    _route("/api/web/bs-dns-pins", {"GET"}, "web", "json-get", openapi=False, allowed_in_core=False),
     _route("/api/web/events", {"GET"}, "web", "json-get", openapi=True, allowed_in_core=False),
     _route("/api/web/events/stream", {"GET", "HEAD"}, "web", "sse", openapi=True, allowed_in_core=False),
 )

@@ -1834,6 +1834,12 @@ pre {
           </section>
         </div>
         <div id="candidates-table"></div>
+        <details class="preset-panel" id="bs-dns-pins-block">
+          <summary class="domain-header"><span class="domain-title">DNS-pins / hosts (blockcheckS)</span></summary>
+          <div class="helper-text">Рабочие domain→IP, которые blockcheckS записал против DNS-hijack
+            (файлы data_block/providers/*/hosts; формат Windows-hosts).</div>
+          <pre id="bs-dns-pins-content">Загрузка…</pre>
+        </details>
       </section>
     </section>
 
@@ -2188,6 +2194,7 @@ const API_ENDPOINTS = Object.freeze({
     runHistoryPage: '/api/web/runs/history-page',
     candidateDomainIndexPage: '/api/web/candidate-domain-index-page',
     strategyCandidatesPage: '/api/web/strategy-candidates-page',
+    bsDnsPins: '/api/web/bs-dns-pins',
     presets: '/api/web/presets',
     presetDomains: '/api/web/presets/domains',
     presetSave: '/api/web/presets/save',
@@ -5775,7 +5782,28 @@ function renderCandidatesOnly(){
   renderCandidates();
   updateEditorLineNumbers('common-domains');
 }
+async function refreshBsDnsPins(force = false){
+  const now = Date.now();
+  if (!force && state.bsDnsPinsAt && now - state.bsDnsPinsAt < 20000) return;
+  const box = el('bs-dns-pins-content');
+  if (!box) return;
+  state.bsDnsPinsAt = now;
+  try {
+    const data = await getJson(apiUrl('web', 'bsDnsPins'));
+    const providers = Array.isArray(data.providers) ? data.providers : [];
+    if (!providers.length) {
+      box.textContent = 'Файлов hosts пока нет — нужен запуск blockcheckS с DNS/DoH-пинами (domain→IP против hijack).';
+      return;
+    }
+    box.textContent = providers.map((provider) =>
+      `# ${provider.provider} — ${provider.path}\n${(provider.lines || []).join('\n')}`
+    ).join('\n\n');
+  } catch (error) {
+    box.textContent = `Не удалось загрузить DNS-pins: ${error.message}`;
+  }
+}
 function ensureCandidateViewLoaded(){
+  refreshBsDnsPins();
   if (state.candidateView === 'domain') {
     if (!state.candidateDomainsLoaded) refreshDomainIndex();
     return;
