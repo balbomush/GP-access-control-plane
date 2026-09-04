@@ -94,7 +94,7 @@ class CleanInstallerTests(unittest.TestCase):
             self.skipTest("bash is required")
         root = Path(__file__).resolve().parents[1]
         for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh", "install-linux.sh"):
-            result = subprocess.run([bash, "-n", str(root / "scripts" / script)], capture_output=True, text=True)
+            result = subprocess.run([bash, "-n", str(root / "scripts" / script)], capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_gp_owned_zapret_wrapper_is_discoverable_in_service_path_model(self) -> None:
@@ -106,7 +106,7 @@ class CleanInstallerTests(unittest.TestCase):
             libexec.mkdir(parents=True); zapret.mkdir(parents=True)
             target = zapret / "nfqws2"; target.write_text("#!/bin/sh\nprintf 'ready:%s\\n' \"$1\"\n", encoding="utf-8"); target.chmod(0o755)
             wrapper = libexec / "nfqws2"; wrapper.write_text(f"#!/bin/sh\nexec '{target.as_posix()}' \"$@\"\n", encoding="utf-8"); wrapper.chmod(0o755)
-            result = subprocess.run([bash, "-c", "command -v nfqws2; nfqws2 probe"], env={"PATH": str(libexec)}, capture_output=True, text=True)
+            result = subprocess.run([bash, "-c", "command -v nfqws2; nfqws2 probe"], env={"PATH": str(libexec)}, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(str(wrapper), result.stdout)
             self.assertIn("ready:probe", result.stdout)
@@ -134,9 +134,9 @@ class CleanInstallerTests(unittest.TestCase):
             fake("sudo", 'echo SUDO >> "$TEST_LOG"; exit "${SUDO_RESULT:-73}"\n')
             env = {**os.environ, "HOME": bash_path(home), "GP_BRANCH": "v0.4.0", "TEST_LOG": bash_path(log)}
             invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / "bootstrap-linux.sh")]
-            first = subprocess.run(invoke, env={**env, "SUDO_RESULT": "73"}, capture_output=True, text=True)
+            first = subprocess.run(invoke, env={**env, "SUDO_RESULT": "73"}, capture_output=True, text=True, check=False)
             self.assertEqual(first.returncode, 73, first.stderr)
-            second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True)
+            second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True, check=False)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["VERIFY", "SUDO", "VERIFY", "SUDO"])
 
@@ -199,7 +199,7 @@ class CleanInstallerTests(unittest.TestCase):
                             command = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / script)]
                         else:
                             command = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), candidate]
-                        completed = subprocess.run(command, env=env, capture_output=True, text=True)
+                        completed = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
                         self.assertNotEqual(completed.returncode, 0)
                         self.assertIn("canonical legacy", completed.stderr)
                         self.assertFalse(log.exists(), "invalid legacy state must stop before Python or sudo")
@@ -225,13 +225,13 @@ class CleanInstallerTests(unittest.TestCase):
             candidate = "a" * 40
             invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / "hardware-candidate-bootstrap.sh")]
             env = {**os.environ, "HOME": bash_path(home), "TEST_LOG": bash_path(log), "GP_TEST_CANDIDATE_SHA": candidate}
-            rejected = subprocess.run([*invoke, "deadbeef"], env=env, capture_output=True, text=True)
+            rejected = subprocess.run([*invoke, "deadbeef"], env=env, capture_output=True, text=True, check=False)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertFalse(log.exists())
-            not_frozen = subprocess.run([*invoke, "b" * 40], env=env, capture_output=True, text=True)
+            not_frozen = subprocess.run([*invoke, "b" * 40], env=env, capture_output=True, text=True, check=False)
             self.assertNotEqual(not_frozen.returncode, 0)
             self.assertFalse(log.exists())
-            accepted = subprocess.run([*invoke, candidate], env=env, capture_output=True, text=True)
+            accepted = subprocess.run([*invoke, candidate], env=env, capture_output=True, text=True, check=False)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
             self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["SUDO"])
 

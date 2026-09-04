@@ -54,7 +54,11 @@ async function readRealtimeStream(response, signal){
       }
     }
   } finally {
-    reader.cancel().catch(() => {});
+    reader.cancel().catch((cancelError) => {
+      if (cancelError && cancelError.name !== 'AbortError') {
+        console.warn('Realtime stream cancel failed', cancelError);
+      }
+    });
   }
 }
 function scheduleRealtimeReconnect(){

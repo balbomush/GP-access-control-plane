@@ -29,7 +29,7 @@ import hashlib
 import sys
 from pathlib import Path
 
-GOLDEN_SHA256 = "66f612987b2c21d3e14d0c1621897d4e9688caa37a40140b9f3a4ba8860fb50b"
+GOLDEN_SHA256 = "60bcbdabd902e4765a64358bef00815486bb3415518543bf1ae17ec04d806249"
 
 # CSS part labels in assembly order (boundaries kept at rule ends).
 CSS_LABELS = [

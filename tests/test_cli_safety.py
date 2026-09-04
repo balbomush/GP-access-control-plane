@@ -185,6 +185,70 @@ class CliSafetyTests(unittest.TestCase):
             ["line 2: rci apply"],
         )
 
+    def test_subprocess_calls_are_list_based_without_shell(self) -> None:
+        """S603-intent guard: no subprocess call may use shell=True or a bare
+        string command anywhere in src (commands must be explicit arg lists)."""
+        import ast
+
+        source_root = Path(__file__).resolve().parents[1] / "src" / "gp_control_plane"
+        subprocess_attrs = {
+            "Popen", "run", "call", "check_call", "check_output",
+        }
+        bad: list[str] = []
+
+        def _walk(path: Path, tree: ast.AST) -> None:
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if not isinstance(func, ast.Attribute):
+                    continue
+                if not (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
+                    continue
+                if func.attr not in subprocess_attrs:
+                    continue
+                for kw in node.keywords:
+                    if kw.arg == "shell":
+                        if isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                            bad.append(f"{path.relative_to(source_root)}:{node.lineno} shell=True")
+                args = node.args
+                if not args:
+                    continue
+                first = args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    bad.append(f"{path.relative_to(source_root)}:{node.lineno} string command")
+
+        for path in source_root.rglob("*.py"):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            _walk(path, tree)
+
+        self.assertEqual(bad, [])
+        self.assertEqual(
+            _subprocess_flags(ast.parse("import subprocess\nsubprocess.run('x', shell=True)\n")),
+            {"string command", "shell=True"},
+        )
+
+
+def _subprocess_flags(tree: ast.AST) -> set[str]:
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        func = node.func
+        if not (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
+            continue
+        if func.attr not in {"Popen", "run", "call", "check_call", "check_output"}:
+            continue
+        for kw in node.keywords:
+            if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                flags.add("shell=True")
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            flags.add("string command")
+    return flags
+
 
 if __name__ == "__main__":
     unittest.main()

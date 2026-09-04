@@ -50,7 +50,7 @@ extend-exclude = ["dev", "scripts", "coverage"]
 # Gate rule set — deliberately avoids mass churn on low-signal legacy style
 # rules (ARG/RET/SIM and pycodestyle E7 'multiple statements' / E741 which
 # this codebase uses intentionally) — see testing.md for the rationale.
-select = ["E4", "E9", "F", "I", "UP", "B"]
+select = ["E4", "E9", "F", "I", "UP", "B", "PLW1510"]
 ignore = [
     "E501",   # line length — long CLI/string literals
     "B008",   # function calls in defaults (argparse)
