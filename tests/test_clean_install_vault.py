@@ -65,16 +65,16 @@ class CleanInstallVaultTests(unittest.TestCase):
             vault = clean_install_vault_dir(home)
             self.assertEqual(clean_install_handoff_path(home).parent, vault)
             self.assertEqual({item.name for item in vault.iterdir()}, {"archive.zip", "entry.json", "handoff.json"})
-            source_text = (Path(__file__).resolve().parents[1] / "src" / "gp_control_plane" / "backups.py").read_text(encoding="utf-8")
+            source_text = (Path(__file__).resolve().parents[1] / "src" / "gp_control_plane" / "backups" / "_vault.py").read_text(encoding="utf-8")
             self.assertIn("stage.replace(vault)", source_text)
             self.assertNotIn("handoff_stage", source_text)
 
     def test_cross_device_vault_is_rejected_without_touching_sources(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"; self.seed(source)
-            with mock.patch("gp_control_plane.backups._local_device_binding", return_value="a" * 64):
+            with mock.patch("gp_control_plane.backups._vault._local_device_binding", return_value="a" * 64):
                 created = create_clean_install_vault(source, target_home=home)
-            with mock.patch("gp_control_plane.backups._local_device_binding", return_value="b" * 64):
+            with mock.patch("gp_control_plane.backups._vault._local_device_binding", return_value="b" * 64):
                 with self.assertRaisesRegex(ValueError, "another device"):
                     restore_clean_install_vault(root / "fresh", target_home=home, vault_id=created["vault_id"])
             self.assertTrue((clean_install_vault_dir(home) / "archive.zip").exists())
@@ -111,13 +111,13 @@ class CleanInstallVaultTests(unittest.TestCase):
     def test_failed_atomic_publish_leaves_no_pending_path_and_retry_succeeds(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"; self.seed(source)
-            from gp_control_plane import backups
-            original = backups._write_private_json_atomic
+            from gp_control_plane.backups import _vault as _backups_vault
+            original = _backups_vault._write_private_json_atomic
             def fail_entry(path: Path, payload: dict[str, object]) -> None:
                 if path.name == "entry.json":
                     raise OSError("injected publish failure")
                 original(path, payload)
-            with mock.patch.object(backups, "_write_private_json_atomic", side_effect=fail_entry):
+            with mock.patch.object(_backups_vault, "_write_private_json_atomic", side_effect=fail_entry):
                 with self.assertRaisesRegex(OSError, "injected publish failure"):
                     create_clean_install_vault(source, target_home=home)
             self.assertFalse(clean_install_vault_dir(home).exists())
@@ -153,7 +153,7 @@ class CleanInstallVaultTests(unittest.TestCase):
             self.assertRegex(str(info["vault_id"]), r"^[0-9a-f-]+$")
 
     def test_module_has_one_active_public_vault_contract(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "src" / "gp_control_plane" / "backups.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "src" / "gp_control_plane" / "backups" / "_vault.py").read_text(encoding="utf-8")
         for name in ("create_clean_install_vault", "clean_install_vault_info", "restore_clean_install_vault"):
             self.assertEqual(source.count(f"def {name}("), 1, name)
         self.assertNotIn("def validate_clean_install_handoff(", source)

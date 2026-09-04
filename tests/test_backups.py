@@ -54,7 +54,7 @@ class BackupTests(unittest.TestCase):
                 clean_install_vault_info(target_home=home)
             archive.chmod(0o600)
 
-            with mock.patch("gp_control_plane.backups.os.getuid", return_value=os.getuid() + 1):
+            with mock.patch("gp_control_plane.backups._vault.os.getuid", return_value=os.getuid() + 1):
                 with self.assertRaisesRegex(PermissionError, "vault ownership or permissions are unsafe"):
                     clean_install_vault_info(target_home=home)
 
@@ -97,9 +97,9 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
                 finally:
                     write_finished.set()
 
-            from gp_control_plane import backups as backup_module
+            from gp_control_plane.backups import _export as _backups_export
 
-            original_export_domains = backup_module._export_domains
+            original_export_domains = _backups_export._export_domains
 
             def export_domains_then_write(conn: object, root: Path) -> int:
                 count = original_export_domains(conn, root)
@@ -109,7 +109,7 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
 
             write_thread = threading.Thread(target=writer)
             write_thread.start()
-            with mock.patch.object(backup_module, "_export_domains", side_effect=export_domains_then_write):
+            with mock.patch.object(_backups_export, "_export_domains", side_effect=export_domains_then_write):
                 snapshot_id = create_snapshot(state_dir)["snapshot"]["id"]
             write_thread.join(timeout=2)
             self.assertFalse(write_thread.is_alive())
@@ -146,8 +146,8 @@ curl_test_https_tls12 ipv4 discord.com : nfqws2 --payload=tls_client_hello --lua
             self.assertEqual(success["snapshot_id"], success["snapshot"]["id"])
             self.assertIsInstance(success["snapshot"], dict)
             with (
-                mock.patch("gp_control_plane.backups.create_snapshot", side_effect=RuntimeError("x" * 600)),
-                mock.patch("gp_control_plane.backups.now_iso", return_value="2026-08-12T00:00:00Z"),
+                mock.patch("gp_control_plane.backups._snapshots.create_snapshot", side_effect=RuntimeError("x" * 600)),
+                mock.patch("gp_control_plane.backups._snapshots.now_iso", return_value="2026-08-12T00:00:00Z"),
             ):
                 failure = create_post_run_snapshot(state_dir)
             self.assertEqual(

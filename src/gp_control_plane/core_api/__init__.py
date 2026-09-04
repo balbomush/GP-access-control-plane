@@ -1,19 +1,21 @@
+"""gp_control_plane.core_api — payload builders (package split)."""
+
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from .backups import (
+from ..backups import (
     clean_install_vault_info,
     create_clean_install_vault,
     list_snapshots,
     restore_clean_install_vault,
     validate_clean_install_vault_id,
 )
-from .config import AppConfig
-from .domain_sources import fetch_v2fly_category_local, list_v2fly_categories_local, parse_v2fly_domains
-from .state import now_iso, read_state
-from .storage import (
+from ..config import AppConfig
+from ..domain_sources import fetch_v2fly_category_local, list_v2fly_categories_local, parse_v2fly_domains
+from ..state import now_iso, read_state
+from ..storage import (
     delete_user_presets,
     read_custom_preset_index,
     read_custom_presets,
@@ -24,11 +26,23 @@ from .storage import (
     save_system_preset,
     storage_runtime_status,
 )
-from .engine_common import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_runs_page, read_strategy_candidates_filtered
-from .v2fly_payloads import v2fly_storage_status_payload
-from .discovery_engine import discovery_job_name, normalize_engine
-from .zapret2 import check_install_cached
+from ..engine_common import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_runs_page, read_strategy_candidates_filtered
+from ..v2fly_payloads import v2fly_storage_status_payload
+from ..discovery_engine import discovery_job_name, normalize_engine
+from ..zapret2 import check_install_cached
 
+from gp_control_plane.core_api._payloads import (
+    payload_snapshot_id,
+    _domain_list_payload,
+    query_str,
+    query_int,
+    query_domains,
+    query_one,
+    strategy_candidate_filters_from_query,
+    query_list,
+    payload_string_list,
+    payload_domains,
+)
 
 STRATEGY_DISCOVERY_START_RUN_KEYS = {
     "mode",
@@ -61,7 +75,6 @@ STRATEGY_DISCOVERY_START_RUN_SETTINGS_KEYS = {
     "bs_pair_mode",
 }
 
-
 def status_payload(config: AppConfig) -> dict[str, Any]:
     state = read_state(config.output.state_dir)
     storage = storage_runtime_status(config.output.state_dir)
@@ -86,7 +99,6 @@ def status_payload(config: AppConfig) -> dict[str, Any]:
     if isinstance(state.get("last_snapshot"), dict):
         payload["last_snapshot"] = state["last_snapshot"]
     return payload
-
 
 def current_progress_payload(config: AppConfig) -> dict[str, Any]:
     state = read_state(config.output.state_dir)
@@ -120,7 +132,6 @@ def current_progress_payload(config: AppConfig) -> dict[str, Any]:
                 break
     return result
 
-
 def preflight_payload(config: AppConfig) -> dict[str, Any]:
     zapret = check_install_cached()
     checks = []
@@ -141,7 +152,6 @@ def preflight_payload(config: AppConfig) -> dict[str, Any]:
         checks.append({"name": "zapret2", "status": "ok" if ready else "error", "message": str(zapret.get("message") or "")})
     return {"ready": all(item["status"] == "ok" for item in checks), "checks": checks}
 
-
 def run_settings_payload(settings: dict[str, Any]) -> dict[str, Any]:
     return {
         "curl_parallelism_default": settings.get("curl_parallelism_default"),
@@ -153,7 +163,6 @@ def run_settings_payload(settings: dict[str, Any]) -> dict[str, Any]:
         "debug_stdout": settings.get("debug_stdout"),
         "discovery_engine": settings.get("discovery_engine"),
     }
-
 
 def domain_lists_payload(config: AppConfig) -> dict[str, Any]:
     state_dir = config.output.state_dir
@@ -169,7 +178,6 @@ def domain_lists_payload(config: AppConfig) -> dict[str, Any]:
         lists.append(_domain_list_payload(f"user:{name}", "user", name, domains, custom_meta.get(name) or {}))
     return {"lists": lists}
 
-
 def save_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
     kind = str(payload.get("kind") or "").strip()
     name = str(payload.get("name") or kind).strip()
@@ -184,7 +192,6 @@ def save_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -> dict
         meta = read_custom_preset_index(config.output.state_dir).get("finder", {}).get(name) or {}
         return _domain_list_payload(f"user:{name}", "user", name, domains, meta)
     raise ValueError("kind must be required, desired or user")
-
 
 def delete_user_domain_list_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, int]:
     list_ids = payload_string_list(payload, "list_ids")
@@ -203,7 +210,6 @@ def delete_user_domain_list_payload(config: AppConfig, payload: dict[str, Any]) 
     delete_user_presets(config.output.state_dir, scope="finder", names=unique_names)
     return {"deleted": len([name for name in unique_names if name in existing_names])}
 
-
 def v2fly_categories_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     raw = list_v2fly_categories_local(
         config.output.state_dir,
@@ -214,7 +220,6 @@ def v2fly_categories_payload(config: AppConfig, query: dict[str, list[str]]) -> 
         "categories": [{"name": str(category)} for category in raw.get("categories") or []],
         "storage": v2fly_storage_status_payload(config, raw),
     }
-
 
 def v2fly_category_domains_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     category = query_one(query, "category")
@@ -227,31 +232,25 @@ def v2fly_category_domains_payload(config: AppConfig, query: dict[str, list[str]
         "storage": v2fly_storage_status_payload(config),
     }
 
-
 def strategy_pairs_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     domain = query_str(query, "domain", "")
     pairs = read_strategy_pairs(config.output.state_dir, domain=domain or None)
     return {"pairs": pairs, "domain": domain}
 
-
 def strategy_candidates_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     filters = strategy_candidate_filters_from_query(query, require_filter=True)
     return read_strategy_candidates_filtered(config.output.state_dir, **filters)
-
 
 def iter_strategy_candidates_export_lines(config: AppConfig, query: dict[str, list[str]]) -> Any:
     filters = strategy_candidate_filters_from_query(query, require_filter=False)
     return _iter_strategy_candidates_export_lines(config, filters)
 
-
 def _iter_strategy_candidates_export_lines(config: AppConfig, filters: dict[str, Any]) -> Any:
     for candidate in iter_strategy_candidates_filtered(config.output.state_dir, **filters):
         yield json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
 
-
 def backups_list_payload(config: AppConfig) -> dict[str, Any]:
     return {"backups": [backup_snapshot_payload(item) for item in list_snapshots(config.output.state_dir).get("snapshots") or []]}
-
 
 def clean_install_vault_create_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
     if payload:
@@ -265,14 +264,12 @@ def clean_install_vault_create_payload(config: AppConfig, payload: dict[str, Any
         "semantic_manifest": created.get("semantic_manifest") or {},
     }
 
-
 def clean_install_vault_list_payload(config: AppConfig) -> dict[str, Any]:
     del config
     info = clean_install_vault_info()
     if not info.get("exists") or not info.get("pending") or not str(info.get("vault_id") or ""):
         return {"vaults": []}
     return {"vaults": [clean_install_vault_public_payload(info)]}
-
 
 def clean_install_vault_status_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     del config
@@ -286,7 +283,6 @@ def clean_install_vault_status_payload(config: AppConfig, query: dict[str, list[
     if not info.get("exists") or not info.get("pending") or str(info.get("vault_id") or "") != vault_id:
         raise FileNotFoundError(vault_id)
     return clean_install_vault_public_payload(info)
-
 
 def clean_install_vault_restore_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {"vault_id", "confirm_restore"}
@@ -316,7 +312,6 @@ def clean_install_vault_restore_payload(config: AppConfig, payload: dict[str, An
         "cleanup": cleanup,
     }
 
-
 def clean_install_vault_public_payload(info: dict[str, Any]) -> dict[str, Any]:
     """Return vault metadata without confirmation credentials."""
     return {
@@ -328,7 +323,6 @@ def clean_install_vault_public_payload(info: dict[str, Any]) -> dict[str, Any]:
         "verification": str(info.get("verification") or ""),
         "pending": bool(info.get("pending")),
     }
-
 
 def backup_snapshot_payload(item: dict[str, Any]) -> dict[str, Any]:
     snapshot_id = str(item.get("snapshot_id") or item.get("id") or "")
@@ -344,7 +338,6 @@ def backup_snapshot_payload(item: dict[str, Any]) -> dict[str, Any]:
             "domain_lists": int(item.get("preset_count") or 0),
         },
     }
-
 
 def runs_history_payload(config: AppConfig, query: dict[str, list[str]]) -> dict[str, Any]:
     return {
@@ -365,12 +358,8 @@ def runs_history_page_payload(config: AppConfig, query: dict[str, list[str]]) ->
     )
     return page | {"runs": [run_history_item_payload(run) for run in page["runs"]]}
 
-
 def run_history_item_payload(run: dict[str, Any]) -> dict[str, Any]:
     return {"run_id": str(run.get("id") or "")} | {key: value for key, value in run.items() if key != "id"}
-
-
-
 
 def run_accepted_payload(run: Any) -> dict[str, Any]:
     return {
@@ -378,7 +367,6 @@ def run_accepted_payload(run: Any) -> dict[str, Any]:
         "run_id": str(getattr(run, "run_id", "")),
         "status": str(getattr(run, "status", "")),
     }
-
 
 def action_accepted_payload(run: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -431,85 +419,3 @@ def strategy_discovery_job_payload(payload: dict[str, Any]) -> tuple[str, dict[s
     return discovery_job_name(engine, mode), job_payload
 
 
-def payload_snapshot_id(payload: dict[str, Any]) -> str:
-    snapshot_id = str(payload.get("snapshot_id") or payload.get("snapshot") or "").strip()
-    if not snapshot_id:
-        raise ValueError("snapshot_id is required")
-    return snapshot_id
-
-
-def _domain_list_payload(list_id: str, kind: str, name: str, domains: list[str], meta: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "list_id": list_id,
-        "kind": kind,
-        "name": name,
-        "domains": list(domains or []),
-        "updated_at": str(meta.get("updated_at") or ""),
-    }
-
-
-def query_str(query: dict[str, list[str]], key: str, default: str) -> str:
-    values = query.get(key) or []
-    return values[0] if values else default
-
-
-def query_int(query: dict[str, list[str]], key: str, default: int) -> int:
-    raw = query_str(query, key, str(default))
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def query_domains(query: dict[str, list[str]], key: str) -> list[str]:
-    values = query.get(key) or []
-    domains: list[str] = []
-    for value in values:
-        domains.extend(item.strip() for item in value.split(",") if item.strip())
-    return domains
-
-
-def query_one(query: dict[str, list[str]], key: str) -> str:
-    values = query.get(key) or []
-    return str(values[0]).strip() if values else ""
-
-
-def strategy_candidate_filters_from_query(query: dict[str, list[str]], *, require_filter: bool) -> dict[str, Any]:
-    filters = {
-        "domains": [*query_domains(query, "domain"), *query_domains(query, "domains")],
-        "strategy_ids": [*query_list(query, "strategy_id"), *query_list(query, "strategy_ids")],
-        "protocols": [*query_list(query, "protocol"), *query_list(query, "protocols")],
-        "source_modes": [*query_list(query, "source_mode"), *query_list(query, "source_modes")],
-        "families": [*query_list(query, "family"), *query_list(query, "families")],
-        "query": query_str(query, "query", "").strip(),
-    }
-    has_filter = any(value for value in filters.values())
-    if require_filter and not has_filter:
-        raise ValueError("strategy candidate filter is required; use /api/core/strategy-candidates/export for full stream")
-    return filters
-
-
-def query_list(query: dict[str, list[str]], key: str) -> list[str]:
-    values = query.get(key) or []
-    result: list[str] = []
-    for value in values:
-        result.extend(item.strip() for item in str(value).replace(",", " ").split() if item.strip())
-    return result
-
-
-def payload_string_list(payload: dict[str, Any], key: str) -> list[str]:
-    raw = payload.get(key) or []
-    if isinstance(raw, str):
-        raw = raw.replace(",", " ").split()
-    if not isinstance(raw, list):
-        return []
-    return [str(item).strip() for item in raw if str(item).strip()]
-
-
-def payload_domains(payload: dict[str, Any]) -> list[str]:
-    raw = payload.get("domains") or []
-    if isinstance(raw, str):
-        raw = raw.replace(",", " ").split()
-    if not isinstance(raw, list):
-        raw = []
-    return [str(domain).strip() for domain in raw if str(domain).strip()]

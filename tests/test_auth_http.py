@@ -102,8 +102,8 @@ class BearerAuthHttpTests(unittest.TestCase):
             handoff = vault / "handoff.json"
             valid_vault_id = "a" * 32
             with (
-                mock.patch("gp_control_plane.backups.clean_install_vault_dir", return_value=vault),
-                mock.patch("gp_control_plane.backups.clean_install_handoff_path", return_value=handoff),
+                mock.patch("gp_control_plane.backups._vault.clean_install_vault_dir", return_value=vault),
+                mock.patch("gp_control_plane.backups._vault.clean_install_handoff_path", return_value=handoff),
                 mock.patch("gp_control_plane.core_api.restore_clean_install_vault") as restore_payload,
             ):
                 port = _start_server(serve, config, ui_enabled=False)
@@ -185,8 +185,8 @@ class BearerAuthHttpTests(unittest.TestCase):
             vault.parents[3].mkdir()
             handoff = vault / "handoff.json"
             with (
-                mock.patch("gp_control_plane.backups.clean_install_vault_dir", return_value=vault),
-                mock.patch("gp_control_plane.backups.clean_install_handoff_path", return_value=handoff),
+                mock.patch("gp_control_plane.backups._vault.clean_install_vault_dir", return_value=vault),
+                mock.patch("gp_control_plane.backups._vault.clean_install_handoff_path", return_value=handoff),
             ):
                 port = _start_server(serve, config, ui_enabled=False)
                 login_status, _headers, login_body = _request(
