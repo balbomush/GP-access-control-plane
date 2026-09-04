@@ -12,12 +12,13 @@ def bs_providers_root() -> Path:
     base = Path(override).expanduser() if override else Path(data_home) / "blockcheckS"
     return base.resolve() / "data_block" / "providers"
 
-def list_bs_dns_pins(*, max_lines: int = 600) -> dict[str, Any]:
+def list_bs_dns_pins(*, domain: str = "", max_lines: int = 600) -> dict[str, Any]:
     """Read-only DNS-pin hosts files written by blockcheckS (anti-hijack)."""
     root = bs_providers_root()
     providers: list[dict[str, Any]] = []
+    target_domain = str(domain or "").strip().lower()
     if not root.is_dir():
-        return {"providers": providers, "root": str(root)}
+        return {"providers": providers, "root": str(root), "filter_domain": target_domain}
     for provider_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         hosts = provider_dir / "hosts"
         if not hosts.is_file():
@@ -26,6 +27,8 @@ def list_bs_dns_pins(*, max_lines: int = 600) -> dict[str, Any]:
             lines = hosts.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
+        if target_domain:
+            lines = [line for line in lines if target_domain in line.lower()]
         providers.append(
             {
                 "provider": provider_dir.name,
@@ -34,4 +37,4 @@ def list_bs_dns_pins(*, max_lines: int = 600) -> dict[str, Any]:
                 "mtime": int(hosts.stat().st_mtime),
             }
         )
-    return {"providers": providers, "root": str(root)}
+    return {"providers": providers, "root": str(root), "filter_domain": target_domain}

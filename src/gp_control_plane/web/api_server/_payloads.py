@@ -14,7 +14,7 @@ from gp_control_plane.storage import (
     save_system_preset,
 )
 from gp_control_plane.web.api_server._events import _events_response_payload
-from gp_control_plane.web.api_server._helpers import _payload_string_list
+from gp_control_plane.web.api_server._helpers import _payload_string_list, _query_one
 from gp_control_plane.web.api_server._pages import (
     _candidate_domain_index_payload,
     _candidate_page_payload,
@@ -36,7 +36,7 @@ def web_json_get_payload(config: AppConfig, path: str, query: dict[str, list[str
         "/api/web/strategy-candidates-page": lambda: _candidate_page_payload(config, query),
         "/api/web/presets": lambda: _web_presets_payload(config, query),
         "/api/web/presets/domains": lambda: _preset_domains_payload(config, query),
-        "/api/web/bs-dns-pins": lambda: list_bs_dns_pins(),
+        "/api/web/bs-dns-pins": lambda: list_bs_dns_pins(domain=_query_one(query, "domain")),
         "/api/web/events": lambda: _events_response_payload(config, query, stream="web"),
     }
     if path not in routes:

@@ -326,6 +326,56 @@ class DnsPinsTests(unittest.TestCase):
             self.assertEqual(hosts.as_posix(), prov["path"])
             self.assertIn("# 8.8.8.8  youtube.com", prov["lines"])
 
+    def test_list_bs_dns_pins_filters_by_domain(self) -> None:
+        from gp_control_plane.bs_engine._dns_pins import list_bs_dns_pins
+
+        with tempfile.TemporaryDirectory() as raw:
+            data = Path(raw) / "blockcheckS" / "data_block" / "providers" / "isp_x"
+            data.mkdir(parents=True)
+            hosts = data / "hosts"
+            hosts.write_text("# 8.8.8.8  youtube.com\n# 1.1.1.1  discord.com\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": raw}, clear=False):
+                payload = list_bs_dns_pins(domain="youtube")
+            self.assertEqual(1, len(payload["providers"]))
+            prov = payload["providers"][0]
+            self.assertEqual(1, len(prov["lines"]))
+            self.assertIn("youtube.com", prov["lines"][0])
+
+
+class TriageAndQuarantineTests(unittest.TestCase):
+    def test_bs_triage_domain_handles_empty_domain(self) -> None:
+        from gp_control_plane.bs_engine._triage import bs_triage_domain
+
+        res = bs_triage_domain("")
+        self.assertEqual("error", res["status"])
+        self.assertIn("required", res["message"])
+
+    def test_bs_triage_domain_executes_bs_preflight(self) -> None:
+        from gp_control_plane.bs_engine._triage import bs_triage_domain
+
+        fake = Path(tempfile.mkdtemp()) / "bs"
+        fake.write_text('#!/bin/sh\necho \'{"dns_status":"ok","quarantine":false}\'\nexit 0\n', encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        with mock.patch("gp_control_plane.bs_engine._triage.resolve_bs_binary", return_value=str(fake)):
+            res = bs_triage_domain("youtube.com")
+        self.assertEqual("youtube.com", res["domain"])
+        self.assertEqual("ok", res["status"])
+        self.assertEqual("ok", res.get("dns_status"))
+
+    def test_bs_quarantine_status(self) -> None:
+        from gp_control_plane.bs_engine._triage import bs_quarantine_status
+
+        with mock.patch("gp_control_plane.bs_engine._triage.campaign_lock_info", return_value=None):
+            st = bs_quarantine_status()
+            self.assertFalse(st["quarantined"])
+            self.assertEqual("idle", st["status"])
+
+        lock = {"command": "bs scan", "pid": 1234}
+        with mock.patch("gp_control_plane.bs_engine._triage.campaign_lock_info", return_value=lock):
+            st = bs_quarantine_status()
+            self.assertTrue(st["quarantined"])
+            self.assertEqual("busy", st["status"])
+
 
 class PairUdpTests(unittest.TestCase):
     def test_build_pair_argv_uses_pair_command_without_preset(self) -> None:

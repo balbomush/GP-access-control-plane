@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 from gp_control_plane import __version__, core_api, service_api
 from gp_control_plane.auth import health_payload
+from gp_control_plane.bs_engine import bs_triage_domain
 from gp_control_plane.discovery_engine import (
     check_blockchecks_install,
     normalize_engine,
@@ -77,6 +78,7 @@ class GetMixin:
                 if normalize_engine(read_run_settings(self.config).get("discovery_engine")) == "blockchecks"
                 else core_api.preflight_payload(self.config)
             ),
+            "/api/core/strategy-discovery/triage": lambda: bs_triage_domain(_query_one(query, "domain")),
             "/api/core/presets/domain-lists": lambda: core_api.domain_lists_payload(self.config),
             "/api/core/presets/v2fly/categories": lambda: core_api.v2fly_categories_payload(self.config, query),
             "/api/core/presets/v2fly/category-domains": lambda: core_api.v2fly_category_domains_payload(self.config, query),

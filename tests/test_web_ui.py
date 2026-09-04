@@ -2079,6 +2079,7 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/core/strategy-discovery/current-run-progress", None, {}),
                     ("GET", "/api/core/strategy-discovery/current-run-latest-log", None, {}),
                     ("GET", "/api/core/strategy-discovery/preflight", None, {}),
+                    ("GET", "/api/core/strategy-discovery/triage?domain=youtube.com", None, {}),
                     ("GET", "/api/core/presets/domain-lists", None, {}),
                     ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "work", "domains": ["youtube.com"]}, {}),
                     ("POST", "/api/core/presets/save-domain-list", {"kind": "user", "name": "games", "domains": ["discord.com"]}, {}),
@@ -2135,6 +2136,7 @@ class WebUiTests(unittest.TestCase):
                     ("GET", "/api/core/strategy-discovery/current-run-progress"): {"run_id", "status", "stage", "current_file"},
                     ("GET", "/api/core/strategy-discovery/current-run-latest-log"): {"stdout_tail", "stderr_tail", "progress"},
                     ("GET", "/api/core/strategy-discovery/preflight"): {"ready", "checks"},
+                    ("GET", "/api/core/strategy-discovery/triage"): {"domain", "status"},
                     ("GET", "/api/core/presets/domain-lists"): {"lists"},
                     ("POST", "/api/core/presets/save-domain-list"): {"list_id", "kind", "name", "domains", "updated_at"},
                     ("POST", "/api/core/presets/delete-user-domain-list"): {"deleted"},
@@ -5233,7 +5235,7 @@ def _openapi_test_request(
         return request_path, b'{"unexpected":true}', {"Content-Type": "application/json"}
     elif path == "/api/core/presets/v2fly/category-domains":
         request_path = f"{path}?category=missing"
-    elif path == "/api/core/strategy-candidates":
+    elif path in {"/api/core/strategy-candidates", "/api/core/strategy-discovery/triage"}:
         request_path = f"{path}?domain=youtube.com"
     elif path == "/api/web/presets/domains":
         request_path = f"{path}?scope=finder&name=required&kind=system&limit=2"

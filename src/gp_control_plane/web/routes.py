@@ -80,6 +80,7 @@ ROUTES = (
     _route("/api/core/strategy-discovery/current-run-progress", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-discovery/current-run-latest-log", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/strategy-discovery/preflight", {"GET"}, "core", "json-get", openapi=True),
+    _route("/api/core/strategy-discovery/triage", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/presets/domain-lists", {"GET"}, "core", "json-get", openapi=True),
     _route("/api/core/presets/save-domain-list", {"POST"}, "core", "json-post", openapi=True),
     _route("/api/core/presets/delete-user-domain-list", {"POST"}, "core", "json-post", openapi=True),

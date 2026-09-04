@@ -81,7 +81,21 @@ def export_nfconf(
 
         shutil.rmtree(temp_dir, ignore_errors=True)
     confs = sorted(str(path) for path in target.glob("*.conf"))
-    return {"engine": "blockchecks", "out_dir": str(target), "paths": confs, "db": str(target_db)}
+    files: list[dict[str, str]] = []
+    for conf_path_str in confs:
+        p = Path(conf_path_str)
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            content = ""
+        files.append({"filename": p.name, "path": conf_path_str, "content": content})
+    return {
+        "engine": "blockchecks",
+        "out_dir": str(target),
+        "paths": confs,
+        "files": files,
+        "db": str(target_db),
+    }
 
 def _distinct_run_domains(db: Path) -> list[str]:
     try:

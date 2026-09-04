@@ -53,6 +53,13 @@
           </section>
         </div>
         <div id="candidates-table"></div>
+        <details class="preset-panel" id="export-nfconf-block">
+          <summary class="domain-header"><span class="domain-title">Предпросмотр файлов стратегий bc-nfconf</span></summary>
+          <div class="button-row" style="margin-top: 8px;">
+            <button class="secondary" data-action="export-nfconf" type="button">Сгенерировать / обновить файлы bc-nfconf</button>
+          </div>
+          <div id="export-nfconf-preview" class="helper-text" style="margin-top: 8px;">Файлы ещё не сгенерированы. Нажмите «Сгенерировать».</div>
+        </details>
         <details class="preset-panel" id="bs-dns-pins-block">
           <summary class="domain-header"><span class="domain-title">DNS-pins / hosts (blockcheckS)</span></summary>
           <div class="helper-text">Рабочие domain→IP, которые blockcheckS записал против DNS-hijack

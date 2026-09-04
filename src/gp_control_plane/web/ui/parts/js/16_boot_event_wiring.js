@@ -85,6 +85,10 @@ const button = event.target.closest('button');
     copyCandidateResult();
     return;
   }
+  if (button.dataset.action === 'run-triage') {
+    runTriageNow();
+    return;
+  }
   if (button.dataset.action === 'export-nfconf') {
     exportNfconfNow();
     return;

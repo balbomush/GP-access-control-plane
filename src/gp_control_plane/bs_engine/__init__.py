@@ -7,8 +7,11 @@ Public API is re-exported for clean consumer imports; internal helpers live in
 from gp_control_plane.bs_engine._backend import run_blockchecks_discovery, stop_blockchecks
 from gp_control_plane.bs_engine._dns_pins import list_bs_dns_pins
 from gp_control_plane.bs_engine._export import export_nfconf
+from gp_control_plane.bs_engine._triage import bs_quarantine_status, bs_triage_domain
 
 __all__ = [
+    "bs_quarantine_status",
+    "bs_triage_domain",
     "export_nfconf",
     "list_bs_dns_pins",
     "run_blockchecks_discovery",

@@ -94,6 +94,42 @@
         }
       }
     },
+    "/api/core/strategy-discovery/triage": {
+      "get": {
+        "tags": [
+          "Core Strategy Discovery"
+        ],
+        "operationId": "getStrategyDiscoveryTriage",
+        "summary": "Domain preflight/triage check (blockcheckS)",
+        "description": "Runs blockcheckS preflight/triage on a given domain to inspect network block status (HTTP/TLS/QUIC/UDP).",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Domain to analyze"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Triage results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/auth/login": {
       "post": {
         "tags": [

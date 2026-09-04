@@ -363,9 +363,40 @@ async function exportNfconfNow(){
   try {
     const result = await postJson(apiEndpoint('core', 'exportNfconf'), { limit: 5 });
     const paths = (result.paths || []).join(', ');
+    const previewEl = el('export-nfconf-preview');
+    if (previewEl && Array.isArray(result.files) && result.files.length) {
+      previewEl.innerHTML = result.files.map((file) => `
+        <div class="nfconf-file-block" style="margin-bottom: 12px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; padding: 8px;">
+          <strong>${esc(file.filename)}</strong> <span class="helper-text">(${esc(file.path)})</span>
+          <pre class="strategy-code" style="max-height: 200px; overflow-y: auto; background: var(--bg-alt, #f5f5f5); padding: 8px; margin-top: 4px;"><code>${esc(file.content)}</code></pre>
+        </div>
+      `).join('');
+      const block = el('export-nfconf-block');
+      if (block) block.open = true;
+    }
     setMessage(paths ? `nfconf: ${paths}` : `nfconf записан в ${result.out_dir || '-'}`, 'good');
   } catch (error) {
     setMessage(error.message, 'bad');
+  }
+}
+async function runTriageNow(){
+  const domains = finderDomains();
+  if (!domains.length) {
+    setMessage('Укажите хотя бы один домен для проверки Triage', 'bad');
+    return;
+  }
+  const target = domains[0];
+  setMessage(`Запуск triage для домена ${target}…`, 'good');
+  try {
+    const data = await getJson(`${apiEndpoint('core', 'triage')}?domain=${encodeURIComponent(target)}`);
+    if (data && data.status === 'ok') {
+      const info = JSON.stringify(data.checks || data.output || data);
+      setMessage(`Triage ${target}: ${info}`, 'good');
+    } else {
+      setMessage(`Triage ${target} ошибка: ${(data && data.message) || 'неизвестный сбой'}`, 'bad');
+    }
+  } catch (error) {
+    setMessage(`Triage ошибка: ${error.message}`, 'bad');
   }
 }
 function coreStrategyDiscoveryPayload(mode, domains, options, timeout){
