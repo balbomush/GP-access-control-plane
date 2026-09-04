@@ -1,19 +1,36 @@
 """gp_control_plane.backups._snapshots — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.state import has_active_runtime, now_iso, read_state, update_state
-from gp_control_plane.storage import connect, db_path, storage_runtime_status, storage_status
-from pathlib import Path
-from typing import Any
 import shutil
 import uuid
 import zipfile
+from pathlib import Path
+from typing import Any
+
 from gp_control_plane.backups._constants import POST_RUN_SNAPSHOT_ERROR_MESSAGE_MAX_LENGTH
 from gp_control_plane.backups._export import _write_snapshot_files
 from gp_control_plane.backups._info import _verify_snapshot_path, snapshot_info, verify_snapshot
 from gp_control_plane.backups._io import archives_dir, backups_dir, snapshots_dir
-from gp_control_plane.backups._manifest import _ensure_snapshot_compatible, _int_value, _is_supported_snapshot_manifest, _linked_domain_count, _read_manifest, _safe_extract_target, _safe_zip_top, _snapshot_replaces_app_settings, _snapshot_replaces_presets, _table_count
-from gp_control_plane.backups._paths import _prune_snapshots, _snapshot_path, _snapshot_paths, _write_latest_marker
+from gp_control_plane.backups._manifest import (
+    _ensure_snapshot_compatible,
+    _int_value,
+    _is_supported_snapshot_manifest,
+    _linked_domain_count,
+    _read_manifest,
+    _safe_extract_target,
+    _safe_zip_top,
+    _snapshot_replaces_app_settings,
+    _snapshot_replaces_presets,
+    _table_count,
+)
+from gp_control_plane.backups._paths import (
+    _prune_snapshots,
+    _snapshot_path,
+    _snapshot_paths,
+    _write_latest_marker,
+)
+from gp_control_plane.state import has_active_runtime, now_iso
+from gp_control_plane.storage import connect
 
 
 def create_snapshot_if_idle(state_dir: Path) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+
 def _placeholders(values: list[Any]) -> str:
     return ", ".join("?" for _item in values)
 

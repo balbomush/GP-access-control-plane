@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import sys
-import tempfile
 import io
+import sys
 import tarfile
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,9 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.domain_sources import (
     builtin_preset_sources,
+    fetch_v2fly_category_index_from_archive,
     fetch_v2fly_category_local,
     import_v2fly_preset,
-    fetch_v2fly_category_index_from_archive,
     list_v2fly_categories_local,
     parse_v2fly_category_index,
     parse_v2fly_domains,
@@ -112,7 +112,7 @@ domain:youtube.com
         archive = _v2fly_archive({"google": "domain:example.com\n", "youtube": "domain:example.com\n"})
 
         class Response:
-            def __enter__(self) -> "Response":
+            def __enter__(self) -> Response:
                 return self
 
             def __exit__(self, *_: object) -> None:

@@ -1,10 +1,11 @@
 """gp_control_plane.backups._paths — moved from storage.py (split)."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
 import shutil
 import zipfile
+from pathlib import Path
+from typing import Any
+
 from gp_control_plane.backups._constants import SNAPSHOT_DOWNLOAD_FILES, SNAPSHOT_KEEP
 from gp_control_plane.backups._io import archives_dir, backups_dir, snapshots_dir
 

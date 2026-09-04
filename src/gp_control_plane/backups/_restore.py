@@ -1,19 +1,31 @@
 """gp_control_plane.backups._restore — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.settings import RUN_SETTINGS_KEY, SERVICE_SETTINGS_KEY
-from gp_control_plane.state import has_active_runtime, now_iso, read_state, update_state
-from gp_control_plane.storage import connect, db_path, storage_runtime_status, storage_status
-from gp_control_plane.strategy_safety import analyze_strategy
+import json
 from pathlib import Path
 from typing import Any
-import json
+
 from gp_control_plane.backups._constants import HISTORY_BACKUP_SCHEMA_VERSION
 from gp_control_plane.backups._info import snapshot_info, verify_snapshot
 from gp_control_plane.backups._io import _sha256_text
-from gp_control_plane.backups._manifest import _bool_value, _ensure_snapshot_compatible, _int_value, _read_manifest, _read_ndjson, _read_required_ndjson, _snapshot_replaces_app_settings, _snapshot_replaces_history, _snapshot_replaces_presets, _unique_nonempty
+from gp_control_plane.backups._manifest import (
+    _bool_value,
+    _ensure_snapshot_compatible,
+    _int_value,
+    _read_manifest,
+    _read_ndjson,
+    _read_required_ndjson,
+    _snapshot_replaces_app_settings,
+    _snapshot_replaces_history,
+    _snapshot_replaces_presets,
+    _unique_nonempty,
+)
 from gp_control_plane.backups._paths import _snapshot_path
 from gp_control_plane.backups._snapshots import create_snapshot
+from gp_control_plane.settings import RUN_SETTINGS_KEY, SERVICE_SETTINGS_KEY
+from gp_control_plane.state import has_active_runtime, now_iso, update_state
+from gp_control_plane.storage import connect
+from gp_control_plane.strategy_safety import analyze_strategy
 
 
 def restore_snapshot_if_idle(state_dir: Path, snapshot_id: str) -> dict[str, Any]:

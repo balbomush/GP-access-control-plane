@@ -11,6 +11,8 @@ import importlib.util
 import unittest
 from pathlib import Path
 
+import pytest
+
 from gp_control_plane.web.ui import index_html
 from gp_control_plane.web.ui.parts import PART_ORDER
 
@@ -18,6 +20,7 @@ _UI_DIR = Path(__file__).resolve().parents[1] / "src" / "gp_control_plane" / "we
 _PART_LIMIT = 500
 
 
+pytestmark = pytest.mark.quality
 def _physical_lines(text: str) -> int:
     if text == "":
         return 0
@@ -104,3 +107,4 @@ class UiPartsStructureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

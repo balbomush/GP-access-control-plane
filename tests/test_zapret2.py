@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import signal
 import shlex
 import shutil
 import subprocess
@@ -13,36 +12,38 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from gp_control_plane.core_api import preflight_payload
 from gp_control_plane.zapret2 import (
     BLOCKCHECK_ENV_KEYS,
+    MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS,
+    ROOT_HELPER_ATTESTATION_PENDING_MESSAGE,
     ROOT_HELPER_RECORD_RETRY_SECONDS,
     ROOT_HELPER_RECORD_WAIT_SECONDS,
     ROOT_HELPER_SUPERVISOR_READY_WAIT_SECONDS,
-    ROOT_HELPER_ATTESTATION_PENDING_MESSAGE,
-    MANAGED_ROOT_LAUNCHER_EXIT_WAIT_SECONDS,
     _blockcheck_nft_tables,
     _cleanup_nft_blockcheck_tables,
-    acknowledge_registered_process_run_terminal,
     _signal_process_group,
-    cleanup_nft_blockcheck_tables,
-    signal_registered_process_run,
     _stop_process_group,
+    acknowledge_registered_process_run_terminal,
     check_install,
     check_install_cached,
+    cleanup_nft_blockcheck_tables,
     clear_install_check_cache,
-    root_command,
-    root_helper_status,
     recover_quarantined_process_run,
     recover_registered_process_runs,
+    root_command,
+    root_helper_status,
+    signal_registered_process_run,
 )
-from gp_control_plane.core_api import preflight_payload
-
 
 _ROOT_HELPER_TRUSTED_PATH_SETUP = "PATH='/usr/sbin:/usr/bin:/sbin:/bin'\nexport PATH\nreadonly PATH\n"
 
 
+pytestmark = pytest.mark.integration
 def _root_helper_test_source(helper: Path) -> str:
     """Return a fixture copy whose explicit command shims remain reachable."""
     return helper.read_text(encoding="utf-8").replace(_ROOT_HELPER_TRUSTED_PATH_SETUP, "", 1)
@@ -3283,3 +3284,4 @@ def _native_shell_path(value: str) -> Path:
 
 if __name__ == "__main__":
     unittest.main()
+

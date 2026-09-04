@@ -1,26 +1,45 @@
 """bc2_engine._process — moved from strategy_finder.py / blockchecks_backend.py."""
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
-from gp_control_plane.jobs import ManagedRuntimeQuarantinedError
 from pathlib import Path
-from gp_control_plane.state import active_runtime_payload
-from typing import Any, Iterator
-from gp_control_plane.zapret2 import _cleanup_nft_blockcheck_tables, _stop_process_group, acknowledge_registered_process_run_terminal, root_command, signal_registered_process_run
-from gp_control_plane.bc2_engine._recorder import _LiveStdoutRecorder
-from gp_control_plane.bc2_engine._writers import _CompactStdoutWriter, _RotatingTextWriter, _stdout_log_mode
-from gp_control_plane.engine_common._constants import DEBUG_STDOUT_LOG_MAX_BYTES, PHASE_SAVING, STDOUT_LOG_MAX_BYTES
+from typing import Any
 
+from gp_control_plane.bc2_engine._recorder import _LiveStdoutRecorder
+from gp_control_plane.bc2_engine._writers import (
+    _CompactStdoutWriter,
+    _RotatingTextWriter,
+    _stdout_log_mode,
+)
+from gp_control_plane.engine_common._constants import (
+    DEBUG_STDOUT_LOG_MAX_BYTES,
+    PHASE_SAVING,
+    STDOUT_LOG_MAX_BYTES,
+)
+from gp_control_plane.jobs import ManagedRuntimeQuarantinedError
+from gp_control_plane.state import active_runtime_payload
+from gp_control_plane.zapret2 import (
+    _cleanup_nft_blockcheck_tables,
+    _stop_process_group,
+    acknowledge_registered_process_run_terminal,
+    root_command,
+    signal_registered_process_run,
+)
+
+log = logging.getLogger(__name__)
 def stop_active_blockcheck_runtime(state_dir: Path | None = None) -> None:
     run_id = str(active_runtime_payload(state_dir).get("run_id") or "").strip() if state_dir else ""
     if run_id:
         try:
             signal_registered_process_run(run_id, "TERM")
         except RuntimeError:
+            log.debug("runtime stop contention during startup handshake")
             pass
     _cleanup_nft_blockcheck_tables()
 
@@ -210,4 +229,5 @@ def _wait_process_after_stop(
         try:
             return process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            raise RuntimeError("managed process did not terminate after stop")
+            raise RuntimeError("managed process did not terminate after stop") from None
+

@@ -4,11 +4,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+
 from gp_control_plane.bc2_engine._progress import _script_name_from_line
 from gp_control_plane.engine_common._constants import METRICS_MAX_BYTES
 from gp_control_plane.engine_common._options import _truthy
 from gp_control_plane.engine_common._retention import _finder_dir
-from gp_control_plane.engine_common._stdout_parse import _candidate_from_live_success_line, _live_attempt_line
+from gp_control_plane.engine_common._stdout_parse import (
+    _candidate_from_live_success_line,
+    _live_attempt_line,
+)
+
 
 def _rotate_metrics_file(path: Path) -> None:
     if not path.exists() or path.stat().st_size <= METRICS_MAX_BYTES:
@@ -44,12 +49,12 @@ class _RotatingTextWriter:
         self._max_bytes = max(1024, int(max_bytes))
         self._handle: Any | None = None
 
-    def __enter__(self) -> "_RotatingTextWriter":
+    def __enter__(self) -> _RotatingTextWriter:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self._path.open("w", encoding="utf-8")
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc: Any, _tb: Any) -> None:
         self.close()
 
     def write(self, text: str) -> None:

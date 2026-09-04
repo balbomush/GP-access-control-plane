@@ -8,13 +8,25 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.backups import clean_install_handoff_path, clean_install_vault_dir, clean_install_vault_info, create_clean_install_vault, restore_clean_install_vault
-from gp_control_plane.storage import connect, read_app_setting, save_app_setting
-from gp_control_plane.engine_common import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
+from gp_control_plane.backups import (
+    clean_install_handoff_path,
+    clean_install_vault_dir,
+    clean_install_vault_info,
+    create_clean_install_vault,
+    restore_clean_install_vault,
+)
+from gp_control_plane.engine_common import (
+    parse_blockcheck_stdout,
+    read_candidate_page,
+    upsert_candidates,
+)
+from gp_control_plane.storage import read_app_setting, save_app_setting
 
-
+pytestmark = pytest.mark.integration
 class CleanInstallVaultTests(unittest.TestCase):
     def seed(self, state_dir: Path) -> None:
         parsed = parse_blockcheck_stdout("* SUMMARY\ncurl_test_https_tls12 ipv4 legacy.example.test : nfqws2 --payload=tls_client_hello --lua-desync=fake\n")
@@ -174,3 +186,4 @@ class CleanInstallVaultTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

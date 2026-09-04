@@ -1,14 +1,15 @@
 """gp_control_plane.backups._export — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane import __version__
-from gp_control_plane.state import has_active_runtime, now_iso, read_state, update_state
-from gp_control_plane.storage import connect, db_path, storage_runtime_status, storage_status
+import json
 from pathlib import Path
 from typing import Any
-import json
+
+from gp_control_plane import __version__
 from gp_control_plane.backups._constants import BACKUP_SCHEMA_VERSION
 from gp_control_plane.backups._io import _sha256_file, _write_json, _write_text
+from gp_control_plane.state import now_iso
+from gp_control_plane.storage import connect, db_path
 
 
 def _write_snapshot_files(state_dir: Path, root: Path, snapshot_id: str) -> None:

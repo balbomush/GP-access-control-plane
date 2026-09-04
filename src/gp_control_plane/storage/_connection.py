@@ -1,13 +1,18 @@
 """gp_control_plane.storage._connection — moved from storage.py (split)."""
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-import sqlite3
+
 from gp_control_plane.storage._compact import _cleanup_runtime_state, _run_deferred_vacuum
-from gp_control_plane.storage._constants import AUTH_BUSY_TIMEOUT_MS, _MIGRATED_DB_PATHS, _MIGRATION_LOCK
+from gp_control_plane.storage._constants import (
+    _MIGRATED_DB_PATHS,
+    _MIGRATION_LOCK,
+    AUTH_BUSY_TIMEOUT_MS,
+)
 from gp_control_plane.storage._errors import _raise_storage_unavailable
 from gp_control_plane.storage._paths import _secure_sqlite_files, db_path
 from gp_control_plane.storage._schema import _migrate_schema

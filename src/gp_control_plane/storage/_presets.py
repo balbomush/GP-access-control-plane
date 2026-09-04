@@ -1,13 +1,17 @@
 """gp_control_plane.storage._presets — moved from storage.py (split)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
-import json
+
 from gp_control_plane.storage._connection import connect
-from gp_control_plane.storage._constants import SYSTEM_DOMAIN_PRESETS, SYSTEM_DOMAIN_PRESET_NAMES
+from gp_control_plane.storage._constants import SYSTEM_DOMAIN_PRESET_NAMES, SYSTEM_DOMAIN_PRESETS
 from gp_control_plane.storage._helpers import _unique_nonempty
-from gp_control_plane.storage._writes import _ensure_system_domain_presets_conn, _save_domain_preset_conn
+from gp_control_plane.storage._writes import (
+    _ensure_system_domain_presets_conn,
+    _save_domain_preset_conn,
+)
 
 
 def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:

@@ -1,15 +1,27 @@
 """gp_control_plane.storage._compact — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.state import has_active_runtime
+import json
+import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
-import json
-import sqlite3
-from gp_control_plane.storage._constants import _LEGACY_RUNTIME_FILES, _OMITTED, _RUN_PAYLOAD_COMPACT_BATCH_SIZE, _RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS, _RUN_PAYLOAD_DROP_KEYS, _RUN_PAYLOAD_MAX_OBJECT_LIST, _RUN_PAYLOAD_MAX_SCALAR_LIST, _RUN_PAYLOAD_MAX_STRING, _RUN_PAYLOAD_STRUCTURED_LIST_KEYS
+
+from gp_control_plane.state import has_active_runtime
+from gp_control_plane.storage._constants import (
+    _LEGACY_RUNTIME_FILES,
+    _OMITTED,
+    _RUN_PAYLOAD_COMPACT_BATCH_SIZE,
+    _RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS,
+    _RUN_PAYLOAD_DROP_KEYS,
+    _RUN_PAYLOAD_MAX_OBJECT_LIST,
+    _RUN_PAYLOAD_MAX_SCALAR_LIST,
+    _RUN_PAYLOAD_MAX_STRING,
+    _RUN_PAYLOAD_STRUCTURED_LIST_KEYS,
+)
 from gp_control_plane.storage._helpers import _meta_int, _table_count, get_meta, set_meta
 
-
+log = logging.getLogger(__name__)
 def compact_run_payload(run: dict[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     for key, value in run.items():
@@ -124,6 +136,7 @@ def _cleanup_runtime_state(conn: sqlite3.Connection, root: Path) -> None:
                 try:
                     (root / name).unlink()
                 except FileNotFoundError:
+                    log.debug("source payload file missing during compaction; skipped")
                     pass
                 except OSError:
                     continue
@@ -166,6 +179,7 @@ def _compact_jobs_jsonl(path: Path) -> bool:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
+            log.debug("os error during compaction of payloads; skipped")
             pass
         return False
 
@@ -195,3 +209,4 @@ def _run_deferred_vacuum(conn: sqlite3.Connection, state_dir: Path) -> None:
 
 def _state_has_active_job(state_dir: Path) -> bool:
     return has_active_runtime(state_dir)
+

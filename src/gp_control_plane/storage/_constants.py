@@ -1,10 +1,9 @@
 """gp_control_plane.storage._constants — moved from storage.py (split)."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
-import threading
-
 
 SCHEMA_VERSION = 11
 

@@ -1,9 +1,10 @@
 """gp_control_plane.domain_sources._parse — moved from storage.py (split)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Callable
 import json
+from datetime import UTC, datetime
+from typing import Any
+
 from gp_control_plane.domain_sources._constants import _CATEGORY_RE, _COVERAGE_NOTE, _DOMAIN_RE
 
 
@@ -197,4 +198,4 @@ def _manual_source(key: str) -> dict[str, str]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -1,11 +1,10 @@
 """gp_control_plane.domain_sources._constants — moved from storage.py (split)."""
 from __future__ import annotations
 
-from urllib.error import URLError
 import re
 import subprocess
 import tarfile
-
+from urllib.error import URLError
 
 V2FLY_BASE_URL = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data"
 

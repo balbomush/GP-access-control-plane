@@ -3,15 +3,20 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from gp_control_plane.engine_common._constants import LIVE_CANDIDATE_SAMPLE_LIMIT, _CURL_FAILURE_INFO
+
+from gp_control_plane.engine_common._constants import (
+    _CURL_FAILURE_INFO,
+    LIVE_CANDIDATE_SAMPLE_LIMIT,
+)
 from gp_control_plane.engine_common._options import curl_failure_info
+
 
 def _summary_sections(stdout: str) -> dict[str, list[str]]:
     lines = [line.strip() for line in stdout.splitlines()]
     summary: list[str] = []
     common: list[str] = []
     section = ""
-    for index, line in enumerate(lines):
+    for _index, line in enumerate(lines):
         if line == "* SUMMARY":
             section = "summary"
             continue

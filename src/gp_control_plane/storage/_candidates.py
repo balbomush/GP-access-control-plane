@@ -1,8 +1,9 @@
 """gp_control_plane.storage._candidates — moved from storage.py (split)."""
 from __future__ import annotations
 
-from pathlib import Path
 import sqlite3
+from pathlib import Path
+
 from gp_control_plane.storage._connection import connect
 from gp_control_plane.storage._writes import _upsert_candidate_event_conn
 

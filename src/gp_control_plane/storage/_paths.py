@@ -1,9 +1,14 @@
 """gp_control_plane.storage._paths — moved from storage.py (split)."""
 from __future__ import annotations
 
-from pathlib import Path
 import os
-from gp_control_plane.storage._constants import _PRIVATE_DIRECTORY_MODE, _PRIVATE_FILE_MODE, _SQLITE_SIDECAR_SUFFIXES
+from pathlib import Path
+
+from gp_control_plane.storage._constants import (
+    _PRIVATE_DIRECTORY_MODE,
+    _PRIVATE_FILE_MODE,
+    _SQLITE_SIDECAR_SUFFIXES,
+)
 
 
 def _set_private_mode(path: Path, mode: int) -> None:

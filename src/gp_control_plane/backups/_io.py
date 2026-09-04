@@ -1,14 +1,15 @@
 """gp_control_plane.backups._io — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.resource_budget import BACKUP_STREAM_CHUNK_BYTES
-from pathlib import Path
-from typing import Any
 import hashlib
 import json
 import os
 import secrets
+from pathlib import Path
+from typing import Any
+
 from gp_control_plane.backups._constants import _VAULT_FILE_MODE
+from gp_control_plane.resource_budget import BACKUP_STREAM_CHUNK_BYTES
 
 
 def backups_dir(state_dir: Path) -> Path:

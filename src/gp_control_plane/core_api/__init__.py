@@ -5,6 +5,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from gp_control_plane.core_api._payloads import (
+    _domain_list_payload,
+    payload_domains,
+    payload_snapshot_id,  # noqa: F401
+    payload_string_list,
+    query_domains,  # noqa: F401
+    query_int,
+    query_list,  # noqa: F401
+    query_one,
+    query_str,
+    strategy_candidate_filters_from_query,
+)
+
 from ..backups import (
     clean_install_vault_info,
     create_clean_install_vault,
@@ -13,36 +26,33 @@ from ..backups import (
     validate_clean_install_vault_id,
 )
 from ..config import AppConfig
-from ..domain_sources import fetch_v2fly_category_local, list_v2fly_categories_local, parse_v2fly_domains
+from ..discovery_engine import discovery_job_name, normalize_engine
+from ..domain_sources import (
+    fetch_v2fly_category_local,
+    list_v2fly_categories_local,
+    parse_v2fly_domains,
+)
+from ..engine_common import (
+    iter_strategy_candidates_filtered,
+    latest_log_tail,
+    read_runs,
+    read_runs_page,
+    read_strategy_candidates_filtered,
+)
 from ..state import now_iso, read_state
 from ..storage import (
     delete_user_presets,
     read_custom_preset_index,
     read_custom_presets,
+    read_strategy_pairs,
     read_system_preset_index,
     read_system_presets,
-    read_strategy_pairs,
     save_custom_preset,
     save_system_preset,
     storage_runtime_status,
 )
-from ..engine_common import iter_strategy_candidates_filtered, latest_log_tail, read_runs, read_runs_page, read_strategy_candidates_filtered
 from ..v2fly_payloads import v2fly_storage_status_payload
-from ..discovery_engine import discovery_job_name, normalize_engine
 from ..zapret2 import check_install_cached
-
-from gp_control_plane.core_api._payloads import (
-    payload_snapshot_id,
-    _domain_list_payload,
-    query_str,
-    query_int,
-    query_domains,
-    query_one,
-    strategy_candidate_filters_from_query,
-    query_list,
-    payload_string_list,
-    payload_domains,
-)
 
 STRATEGY_DISCOVERY_START_RUN_KEYS = {
     "mode",

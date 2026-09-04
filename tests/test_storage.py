@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import sqlite3
@@ -8,6 +7,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -17,14 +17,14 @@ from gp_control_plane.storage import (
     append_run,
     auth_transaction,
     connect,
+    db_path,
     delete_custom_preset,
     delete_user_presets,
-    db_path,
     get_meta,
     is_storage_unavailable_error,
+    read_app_setting,
     read_custom_preset_index,
     read_custom_presets,
-    read_app_setting,
     read_preset_domains_page,
     read_run_payloads,
     read_system_preset_index,

@@ -1,12 +1,19 @@
 """gp_control_plane.domain_sources._presets — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.storage import read_custom_presets, save_custom_preset
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
-from gp_control_plane.domain_sources._constants import V2FLY_BASE_URL, _COVERAGE_NOTE
+from typing import Any
+
+from gp_control_plane.domain_sources._constants import _COVERAGE_NOTE, V2FLY_BASE_URL
 from gp_control_plane.domain_sources._network import collect_v2fly_domains
-from gp_control_plane.domain_sources._parse import _clean_name, _clean_scope, _manual_v2fly_domains, _utc_now
+from gp_control_plane.domain_sources._parse import (
+    _clean_name,
+    _clean_scope,
+    _manual_v2fly_domains,
+    _utc_now,
+)
+from gp_control_plane.storage import read_custom_presets, save_custom_preset
 
 
 def preview_v2fly_preset(

@@ -3,7 +3,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from gp_control_plane.engine_common._constants import AMAZON_AWS_DOMAINS, CLOUDFLARE_DOMAINS, COVERAGE_DOMAINS, CRITICAL_DOMAINS, DIAGNOSTIC_DOMAINS, DISCORD_DOMAINS, GOOGLE_YOUTUBE_DOMAINS, _CURL_FAILURE_INFO, _DOMAIN_LIST_PREFIXES, _HOSTNAME_RE, _SERVICE_DOMAIN_SUFFIXES
+
+from gp_control_plane.engine_common._constants import (
+    _CURL_FAILURE_INFO,
+    _DOMAIN_LIST_PREFIXES,
+    _HOSTNAME_RE,
+    _SERVICE_DOMAIN_SUFFIXES,
+    AMAZON_AWS_DOMAINS,
+    CLOUDFLARE_DOMAINS,
+    COVERAGE_DOMAINS,
+    CRITICAL_DOMAINS,
+    DIAGNOSTIC_DOMAINS,
+    DISCORD_DOMAINS,
+    GOOGLE_YOUTUBE_DOMAINS,
+)
+
 
 @dataclass(frozen=True)
 class DiscoveryOptions:
@@ -21,7 +35,7 @@ class DiscoveryOptions:
     curl_max_time_quic: int = 2
     curl_max_time_doh: int = 2
 
-    def normalized(self) -> "DiscoveryOptions":
+    def normalized(self) -> DiscoveryOptions:
         scan_level = self.scan_level if self.scan_level in {"quick", "standard", "force"} else "standard"
         repeats = _bounded_int(self.repeats, default=1, minimum=1, maximum=10)
         curl_max_time = _minimum_int(self.curl_max_time, default=2, minimum=1)

@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.state import update_state, read_state, write_state
+from gp_control_plane.state import read_state, update_state, write_state
 
 
 class StateTests(unittest.TestCase):

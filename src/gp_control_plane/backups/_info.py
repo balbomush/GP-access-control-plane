@@ -1,15 +1,21 @@
 """gp_control_plane.backups._info — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.storage import connect, db_path, storage_runtime_status, storage_status
-from pathlib import Path
-from typing import Any
 import json
 import re
+from pathlib import Path
+from typing import Any
+
 from gp_control_plane.backups._constants import SNAPSHOT_KEEP
 from gp_control_plane.backups._io import _dir_size, _sha256_file
-from gp_control_plane.backups._manifest import _int_value, _is_supported_snapshot_manifest, _read_manifest, _safe_extract_target
+from gp_control_plane.backups._manifest import (
+    _int_value,
+    _is_supported_snapshot_manifest,
+    _read_manifest,
+    _safe_extract_target,
+)
 from gp_control_plane.backups._paths import _snapshot_files, _snapshot_path, _snapshot_paths
+from gp_control_plane.storage import connect, storage_runtime_status, storage_status
 
 
 def _snapshot_info_from_path(path: Path, snapshot_id: str) -> dict[str, Any]:

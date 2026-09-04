@@ -1,9 +1,10 @@
 """gp_control_plane.storage._settings — moved from storage.py (split)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
-import json
+
 from gp_control_plane.storage._connection import connect
 
 

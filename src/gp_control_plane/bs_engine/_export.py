@@ -5,9 +5,11 @@ import os
 import sqlite3
 import subprocess
 import tempfile
-from gp_control_plane.discovery_engine import blockchecks_state_dir, resolve_bc_nfconf
 from pathlib import Path
 from typing import Any
+
+from gp_control_plane.discovery_engine import blockchecks_state_dir, resolve_bc_nfconf
+
 
 def _default_export_out_dir() -> Path:
     data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")

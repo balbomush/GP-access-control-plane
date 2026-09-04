@@ -3,11 +3,38 @@ from __future__ import annotations
 
 from collections import deque
 from typing import Any
-from gp_control_plane.bc2_engine._plan import _elapsed_average_ms_per_attempt, _elapsed_seconds, _empty_attempt_plan, _eta_from_remaining_attempts, _eta_parallelism_for_run, _eta_recalculation_step, _standard_attempt_plan, _standard_script_index, _standard_script_total
-from gp_control_plane.engine_common._constants import ETA_SAMPLE_MAX_POINTS, ETA_SAMPLE_MIN_ATTEMPTS, ETA_SAMPLE_WINSORIZE_MIN_INTERVALS, ETA_SAMPLE_WINSORIZE_RATIO, PHASE_CHECK_DOMAIN, PHASE_CHECK_VPN, PHASE_CHECK_ZAPRET, PHASE_COMPLETE, PHASE_DISCOVERY, PHASE_LABELS, PHASE_SAVING, PHASE_SUMMARY, _ATTEMPT_RE, _SCRIPT_RE
+
+from gp_control_plane.bc2_engine._plan import (
+    _elapsed_average_ms_per_attempt,
+    _elapsed_seconds,
+    _empty_attempt_plan,
+    _eta_from_remaining_attempts,
+    _eta_parallelism_for_run,
+    _eta_recalculation_step,
+    _standard_attempt_plan,
+    _standard_script_index,
+    _standard_script_total,
+)
+from gp_control_plane.engine_common._constants import (
+    _ATTEMPT_RE,
+    _SCRIPT_RE,
+    ETA_SAMPLE_MAX_POINTS,
+    ETA_SAMPLE_MIN_ATTEMPTS,
+    ETA_SAMPLE_WINSORIZE_MIN_INTERVALS,
+    ETA_SAMPLE_WINSORIZE_RATIO,
+    PHASE_CHECK_DOMAIN,
+    PHASE_CHECK_VPN,
+    PHASE_CHECK_ZAPRET,
+    PHASE_COMPLETE,
+    PHASE_DISCOVERY,
+    PHASE_LABELS,
+    PHASE_SAVING,
+    PHASE_SUMMARY,
+)
 from gp_control_plane.engine_common._logtail import parse_blockcheck_stdout
 from gp_control_plane.engine_common._options import _bounded_int, _truthy
 from gp_control_plane.engine_common._stdout_parse import _live_attempt_line
+
 
 def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
     lines = stdout.splitlines()
@@ -40,7 +67,7 @@ def _progress_from_counts(
     successful: int,
     current_script: str,
     phase: str = PHASE_CHECK_VPN,
-    runtime_ms_per_attempt: int | None = None,
+    _runtime_ms_per_attempt: int | None = None,  # legacy override, currently unused
     runtime_sample_count: int | None = None,
     summary_verified: int = 0,
     summary_fallbacks: int = 0,

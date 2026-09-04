@@ -11,10 +11,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+import pytest
+
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 _LIMIT = 500
 
 
+pytestmark = pytest.mark.quality
 class SrcLineLimitTests(unittest.TestCase):
     def _iter_py(self):
         return sorted(p for p in _SRC_DIR.rglob("*.py") if p.is_file())
@@ -33,3 +36,4 @@ class SrcLineLimitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

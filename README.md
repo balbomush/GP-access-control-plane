@@ -274,6 +274,12 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 Прочие пакеты: `storage/`, `backups/`, `domain_sources/`, `core_api/`,
 `web/api_server/` (Handler из Http/Events/Get/Post-миксинов), `web/ui/`.
 
+### Тестирование
+
+Тестовые слои, тулинг (pytest/ruff/vulture/pyright/coverage/biome), правила
+аудита и команды — в [`testing.md`](testing.md). Единый гейт:
+`bash dev/gate_all.sh`; dev-установка: `bash scripts/dev-install.sh`.
+
 ## Обновление
 
 Повторно запустите bootstrap:

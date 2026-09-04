@@ -22,8 +22,12 @@ from gp_control_plane.auth import (
     login,
     require_bearer_token,
 )
-from gp_control_plane.storage import AUTH_BUSY_TIMEOUT_MS, StorageUnavailableError, db_path, read_app_setting
-
+from gp_control_plane.storage import (
+    AUTH_BUSY_TIMEOUT_MS,
+    StorageUnavailableError,
+    db_path,
+    read_app_setting,
+)
 
 _PROCESS_TIMEOUT_SECONDS = 15
 

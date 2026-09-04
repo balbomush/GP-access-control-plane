@@ -7,7 +7,6 @@ from .resource_budget import RASPBERRY_PI2_CURL_PARALLELISM_SAFE_MAX
 from .state import now_iso, read_state, update_state
 from .storage import read_app_setting, save_app_setting
 
-
 RUN_SETTINGS_KEY = "run_settings"
 SERVICE_SETTINGS_KEY = "service_settings"
 

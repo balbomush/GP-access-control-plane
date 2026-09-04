@@ -26,3 +26,10 @@ __pycache__/
 
 # Local/internal notes.
 /TESTS.md
+
+# Audit/dev artifacts.
+coverage/
+node_modules/
+biome-results/
+.coverage
+htmlcov/

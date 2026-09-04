@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from ..config import AppConfig
 from ..auth import AuthenticationError, require_bearer_token
-from ..resource_budget import BACKUP_UPLOAD_MAX_BYTES, JSON_REQUEST_MAX_BYTES, PROXY_STREAM_CHUNK_BYTES
+from ..config import AppConfig
+from ..resource_budget import (
+    BACKUP_UPLOAD_MAX_BYTES,
+    JSON_REQUEST_MAX_BYTES,
+    PROXY_STREAM_CHUNK_BYTES,
+)
 from ..storage import is_storage_unavailable_error
-from .errors import error_payload, normalize_error_payload
+from . import api_server as api_runtime
 from .docs import (
     OPENAPI_JSON_CONTENT_TYPE,
     SWAGGER_HTML_CONTENT_TYPE,
@@ -20,10 +25,9 @@ from .docs import (
     openapi_json_bytes,
     swagger_ui_html,
 )
+from .errors import error_payload, normalize_error_payload
 from .routes import UPLOAD_ROUTE_PATHS, route_for
 from .ui import index_html
-from . import api_server as api_runtime
-
 
 PROXY_SKIP_HEADERS = {
     "connection",
@@ -39,6 +43,8 @@ PROXY_SKIP_HEADERS = {
 
 PROXY_CORE_NAMESPACES = frozenset({"auth", "core", "service"})
 
+
+log = logging.getLogger(__name__)
 def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -> None:
     core = urlparse(core_url)
     if core.scheme not in {"http", "https"} or not core.hostname:
@@ -229,7 +235,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
             finally:
                 connection.close()
 
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        def log_message(self, _format: str, *args: Any) -> None:  # noqa: A002
             return
 
         def _html(self, data: bytes) -> None:
@@ -367,6 +373,7 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
                                 },
                             )
                         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                            log.debug("client disconnected during event stream")
                             pass
                         self.close_connection = True
                         return
@@ -383,8 +390,8 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
 
         def _event(self, event_name: str, payload: dict[str, Any]) -> None:
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            self.wfile.write(f"event: {event_name}\n".encode("utf-8"))
-            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+            self.wfile.write(f"event: {event_name}\n".encode())
+            self.wfile.write(f"data: {data}\n\n".encode())
             self.wfile.flush()
 
         @staticmethod
@@ -417,4 +424,5 @@ def serve_web_proxy(config: AppConfig, host: str, port: int, *, core_url: str) -
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"GP control plane web UI proxy listening on http://{host}:{port}; core={core_url}")
     server.serve_forever()
+
 

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
-import os
 from pathlib import Path
 
 

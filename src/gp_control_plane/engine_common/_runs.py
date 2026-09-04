@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+
+from gp_control_plane.engine_common._options import _bounded_int
 from gp_control_plane.state import now_iso
 from gp_control_plane.storage import append_run, count_latest_run_payloads, read_latest_run_payloads
-from typing import Any
-from gp_control_plane.engine_common._options import _bounded_int
-from gp_control_plane.engine_common._retention import _finder_dir
+
 
 def read_runs(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     return [_compact_run(run) for run in read_latest_run_payloads(state_dir, limit=limit, offset=offset)]
@@ -42,7 +43,6 @@ def _compact_run(run: dict[str, Any]) -> dict[str, Any]:
 
 def close_stale_running_runs(state_dir: Path) -> int:
     from gp_control_plane.engine_common._logtail import _read_progress_log
-    root = _finder_dir(state_dir)
     runs = read_runs(state_dir, limit=200)
     latest_by_id: dict[str, dict[str, Any]] = {}
     for run in runs:

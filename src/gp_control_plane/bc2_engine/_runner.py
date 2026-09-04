@@ -5,20 +5,31 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from gp_control_plane.state import now_iso
-from gp_control_plane.storage import append_run
 from typing import Any
-from gp_control_plane.zapret2 import BLOCKCHECK_ENV_KEYS
+
 from gp_control_plane.bc2_engine._multidomain import _resolve_blockcheck_script
 from gp_control_plane.bc2_engine._plan import _standard_attempt_plan
-from gp_control_plane.bc2_engine._process import _root_command_unless_stopped, _run_process_with_live_stdout, _stopped_process_result
+from gp_control_plane.bc2_engine._process import (
+    _root_command_unless_stopped,
+    _run_process_with_live_stdout,
+    _stopped_process_result,
+)
 from gp_control_plane.bc2_engine._recorder import _LiveStdoutRecorder
 from gp_control_plane.bc2_engine._writers import _set_debug_stdout_env, _stdout_log_mode
 from gp_control_plane.engine_common._constants import PHASE_CHECK_VPN, PHASE_COMPLETE
-from gp_control_plane.engine_common._options import DiscoveryOptions, _domain_validation_run_fields, _minimum_int, validate_domain_inputs
+from gp_control_plane.engine_common._options import (
+    DiscoveryOptions,
+    _domain_validation_run_fields,
+    _minimum_int,
+    validate_domain_inputs,
+)
 from gp_control_plane.engine_common._retention import _cleanup_old_strategy_logs, _finder_dir
 from gp_control_plane.engine_common._runmeta import _discovery_run_id, _ipvs_value
 from gp_control_plane.engine_common._upsert import candidate_total, upsert_candidates
+from gp_control_plane.state import now_iso
+from gp_control_plane.storage import append_run
+from gp_control_plane.zapret2 import BLOCKCHECK_ENV_KEYS
+
 
 def _run_blockcheck_live(
     state_dir: Path,

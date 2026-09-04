@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from gp_control_plane.engine_common._constants import CRITICAL_DOMAINS, LOG_RETENTION_MAX_FILES, LOG_RETENTION_MAX_TOTAL_BYTES, LOG_RETENTION_SUFFIXES
+
+from gp_control_plane.engine_common._constants import (
+    CRITICAL_DOMAINS,
+    LOG_RETENTION_MAX_FILES,
+    LOG_RETENTION_MAX_TOTAL_BYTES,
+    LOG_RETENTION_SUFFIXES,
+)
 from gp_control_plane.engine_common._options import validate_domain_inputs
+
 
 def _clean_domains(domains: list[str]) -> list[str]:
     return _clean_domain_list(domains) or list(CRITICAL_DOMAINS)

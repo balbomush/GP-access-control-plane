@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import uuid
-from gp_control_plane.state import now_iso
+
 from gp_control_plane.engine_common._options import DiscoveryOptions
+from gp_control_plane.state import now_iso
+
 
 def allocate_discovery_run_id() -> str:
     return f"{now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"

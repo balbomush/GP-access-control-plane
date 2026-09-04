@@ -3,12 +3,6 @@
 from __future__ import annotations
 
 from gp_control_plane.domain_sources._constants import (
-    V2FLY_ARCHIVE_URL,
-    V2FLY_BASE_URL,
-    V2FLY_CONTENTS_URL,
-    V2FLY_GIT_URL,
-    V2FLY_LOCAL_SOURCE,
-    V2FLY_REVISION_URL,
     _CATEGORY_RE,
     _COVERAGE_NOTE,
     _DOMAIN_RE,
@@ -16,6 +10,12 @@ from gp_control_plane.domain_sources._constants import (
     _EXPECTED_V2FLY_REVISION_FALLBACK_ERRORS,
     _EXPECTED_V2FLY_SOURCE_ERRORS,
     _FALLBACK_V2FLY_CATEGORIES,
+    V2FLY_ARCHIVE_URL,
+    V2FLY_BASE_URL,
+    V2FLY_CONTENTS_URL,
+    V2FLY_GIT_URL,
+    V2FLY_LOCAL_SOURCE,
+    V2FLY_REVISION_URL,
 )
 from gp_control_plane.domain_sources._local import (
     _categories_from_group_dir,

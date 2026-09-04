@@ -1,9 +1,8 @@
 """gp_control_plane.backups._constants — moved from storage.py (split)."""
 from __future__ import annotations
 
-from pathlib import Path
 import re
-
+from pathlib import Path
 
 SNAPSHOT_KEEP = 5
 

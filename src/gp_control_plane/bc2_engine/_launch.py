@@ -4,8 +4,13 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import Any
-from gp_control_plane.bc2_engine._runner import _run_blockcheck_live, _run_multidomain_blockcheck_live
+
+from gp_control_plane.bc2_engine._runner import (
+    _run_blockcheck_live,
+    _run_multidomain_blockcheck_live,
+)
 from gp_control_plane.engine_common._options import DiscoveryOptions, validate_domain_inputs
+
 
 def run_standard_discovery(
     domains: list[str],

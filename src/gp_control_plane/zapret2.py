@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import threading
 import time
 from pathlib import Path
 
 from .process_registry import validate_run_id
-
 
 DEFAULT_ROOT_HELPER = "/usr/local/libexec/gp-control-plane/gp-root-helper"
 BLOCKCHECK_ENV_KEYS = (
@@ -51,6 +51,8 @@ _INSTALL_CHECK_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 _INSTALL_CHECK_LOCK = threading.Lock()
 
 
+
+log = logging.getLogger(__name__)
 def check_install() -> dict[str, object]:
     nfqws2 = shutil.which("nfqws2")
     blockcheck = shutil.which("blockcheck2.sh") or shutil.which("blockcheck.sh")
@@ -163,7 +165,7 @@ def _stop_process_group(process: subprocess.Popen[str], run_id: str | None = Non
             acknowledge_registered_process_run_terminal(run_id)
     except subprocess.TimeoutExpired:
         if run_id:
-            raise RuntimeError("managed root process did not terminate after registered signal")
+            raise RuntimeError("managed root process did not terminate after registered signal") from None
         # The managed root helper receives TERM once above.  A local KILL is
         # only valid for an unmanaged local Popen instance. A managed run
         # shares its process group with root-owned wrappers, so killing it
@@ -361,6 +363,7 @@ def _signal_local_process_group(signal_name: str, process: subprocess.Popen[str]
         except ProcessLookupError:
             return
         except PermissionError:
+            log.debug("permission denied signalling managed process group (likely already reaped)")
             pass
         return
     if signal_name == "TERM":
@@ -402,3 +405,4 @@ def _root_helper_path() -> str:
 def _is_root() -> bool:
     geteuid = getattr(os, "geteuid", None)
     return bool(geteuid and geteuid() == 0)
+

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
+
 from gp_control_plane.state import now_iso
 from gp_control_plane.storage import connect, upsert_candidate_event
-from typing import Any
+
 
 def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, Any]) -> int:
     now = now_iso()
@@ -52,5 +54,5 @@ def candidate_total(state_dir: Path) -> int:
         return int(conn.execute("SELECT COUNT(*) AS count FROM strategies").fetchone()["count"])
 
 def candidate_id_for(protocol: str, args: str) -> str:
-    digest = hashlib.sha256(f"{protocol}\n{args}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(f"{protocol}\n{args}".encode()).hexdigest()[:12]
     return f"{protocol}-{digest}"

@@ -7,13 +7,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.backups import _validate_vault_id
 from gp_control_plane.web import docs as web_docs
 from gp_control_plane.web import routes as web_routes
-
 
 OPENAPI_PATH = Path(__file__).resolve().parents[1] / "openapi.json"
 HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "trace"})

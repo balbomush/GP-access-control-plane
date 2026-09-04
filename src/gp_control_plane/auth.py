@@ -13,7 +13,6 @@ from typing import Any
 from .state import now_iso
 from .storage import auth_read_snapshot, auth_transaction
 
-
 AUTH_SETTINGS_KEY = "auth"
 DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "admin"

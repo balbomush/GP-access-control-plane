@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .state import (
     JOB_RUNNER_LOCK_FILE_NAME,
@@ -21,11 +22,12 @@ from .state import (
 )
 from .storage import append_run, compact_run_payload, connect
 
-
 FINAL_JOB_STATUSES = {"success", "failed", "timeout", "stopped"}
 FINALIZATION_ERROR_MESSAGE_MAX_LENGTH = 512
 
 
+
+log = logging.getLogger(__name__)
 class ManagedRuntimeQuarantinedError(RuntimeError):
     """A root-owned runtime could not be proven stopped and must stay blocked."""
 
@@ -177,6 +179,7 @@ class JobRunner:
                 try:
                     self._mark_run_finalizing(run_id, name, last_run_status, last_error)
                 except Exception:
+                    log.warning("run finalization marker failed during quarantine finalize; ignored")
                     pass
                 if self._on_idle:
                     last_snapshot = self._run_post_run_finalizer()
@@ -404,7 +407,7 @@ class _StateDirJobLock:
         self._released = False
 
     @classmethod
-    def acquire(cls, state_dir: Path, run_id: str, run_name: str) -> "_StateDirJobLock":
+    def acquire(cls, state_dir: Path, run_id: str, run_name: str) -> _StateDirJobLock:
         state_dir.mkdir(parents=True, exist_ok=True)
         path = state_dir / cls._LOCK_FILE_NAME
         payload = {
@@ -426,7 +429,7 @@ class _StateDirJobLock:
                     except OSError as exc:
                         raise RuntimeError(cls._busy_message(existing)) from exc
                     continue
-                raise RuntimeError(cls._busy_message(existing))
+                raise RuntimeError(cls._busy_message(existing)) from None
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=True)
             return cls(path)
@@ -486,3 +489,4 @@ def _latest_run_payload_by_id(state_dir: Path, run_id: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return compact_run_payload(payload) if isinstance(payload, dict) else {}
+

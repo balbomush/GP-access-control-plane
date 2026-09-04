@@ -1,24 +1,41 @@
 """gp_control_plane.backups._vault — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.resource_budget import BACKUP_STREAM_CHUNK_BYTES
-from gp_control_plane.state import has_active_runtime, now_iso, read_state, update_state
-from gp_control_plane.storage import connect, db_path, storage_runtime_status, storage_status
-from pathlib import Path
-from typing import Any
 import hashlib
 import json
 import os
 import secrets
 import shutil
 import zipfile
-from gp_control_plane.backups._constants import BACKUP_SCHEMA_VERSION, CLEAN_INSTALL_HANDOFF_RELATIVE_PATH, CLEAN_INSTALL_VAULT_RELATIVE_PATH, _VAULT_ARCHIVE_NAME, _VAULT_DIRECTORY_MODE, _VAULT_ENTRY_NAME, _VAULT_FILE_MODE, _VAULT_ID_RE
-from gp_control_plane.backups._info import _snapshot_info_from_path, _verify_restore_semantics, _verify_snapshot_path
+from pathlib import Path
+from typing import Any
+
+from gp_control_plane.backups._constants import (
+    _VAULT_ARCHIVE_NAME,
+    _VAULT_DIRECTORY_MODE,
+    _VAULT_ENTRY_NAME,
+    _VAULT_FILE_MODE,
+    _VAULT_ID_RE,
+    BACKUP_SCHEMA_VERSION,
+    CLEAN_INSTALL_HANDOFF_RELATIVE_PATH,
+    CLEAN_INSTALL_VAULT_RELATIVE_PATH,
+)
+from gp_control_plane.backups._info import (
+    _snapshot_info_from_path,
+    _verify_restore_semantics,
+    _verify_snapshot_path,
+)
 from gp_control_plane.backups._io import _set_vault_mode, _sha256_file, _write_private_json_atomic
-from gp_control_plane.backups._manifest import _safe_extract_target, _semantic_manifest_from_snapshot
+from gp_control_plane.backups._manifest import (
+    _safe_extract_target,
+    _semantic_manifest_from_snapshot,
+)
 from gp_control_plane.backups._paths import snapshot_archive_path
 from gp_control_plane.backups._restore import _load_restore_plan, _restore_snapshot_plan
 from gp_control_plane.backups._snapshots import create_snapshot
+from gp_control_plane.resource_budget import BACKUP_STREAM_CHUNK_BYTES
+from gp_control_plane.state import has_active_runtime, now_iso
+from gp_control_plane.storage import storage_status
 
 
 def clean_install_vault_dir(target_home: Path | None = None) -> Path:

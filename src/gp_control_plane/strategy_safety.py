@@ -4,7 +4,6 @@ import re
 import shlex
 from dataclasses import dataclass
 
-
 FRAGMENTATION_POSITION_FREE = "position_free"
 FRAGMENTATION_POSITION_SAFE = "position_safe"
 FRAGMENTATION_POSITION_RISKY = "position_risky"

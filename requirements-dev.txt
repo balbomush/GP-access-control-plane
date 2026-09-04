@@ -1,0 +1,18 @@
+# GP dev extras — test & static-analysis tooling.
+#
+# Everything needed to run the audit gates in testing.md / dev/gate_all.sh.
+# The runtime package itself has zero third-party dependencies
+# (see pyproject.toml [project].dependencies), so there is no requirements.txt:
+# dev-install.sh installs this repo editable (-e .) plus this file into .venv.
+#
+#   bash scripts/dev-install.sh      # create .venv + install everything below
+#   .venv/bin/python -m pytest ...   # run tests (see testing.md)
+#
+# Version floor mirrors the tool versions exercised in CI/CI-less gate runs.
+pytest>=8.0.0
+pytest-timeout>=2.3.0
+pytest-cov>=5.0.0
+coverage>=7.4.0
+ruff>=0.9.0
+vulture>=2.14
+pyright>=1.1.370

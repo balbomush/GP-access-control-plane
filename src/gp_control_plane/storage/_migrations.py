@@ -1,10 +1,18 @@
 """gp_control_plane.storage._migrations — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.strategy_safety import analyze_strategy
 import sqlite3
+
 from gp_control_plane.storage._constants import _LEGACY_STORAGE_TABLES
-from gp_control_plane.storage._helpers import _args_hash, _table_columns, _table_count, _table_exists, get_meta, set_meta
+from gp_control_plane.storage._helpers import (
+    _args_hash,
+    _table_columns,
+    _table_count,
+    _table_exists,
+    get_meta,
+    set_meta,
+)
+from gp_control_plane.strategy_safety import analyze_strategy
 
 
 def _migrate_minimal_working_model_schema(conn: sqlite3.Connection) -> bool:

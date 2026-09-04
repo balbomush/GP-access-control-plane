@@ -4,11 +4,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+
 from gp_control_plane.engine_common._constants import NFQUEUE_MAXLEN_MISSING_RE
 from gp_control_plane.engine_common._models import _file_version, _log_delta, _tail_lines
 from gp_control_plane.engine_common._options import _bounded_int, _minimum_int
 from gp_control_plane.engine_common._runs import read_runs
-from gp_control_plane.engine_common._stdout_parse import _candidate_lines, _curl_summary, _dedupe_candidate_lines, _diagnostic_counts_from_stdout, _domain_diagnostics_from_counts, _dominant_failure_from_counts, _live_available_lines, _parse_result_line, _summary_sections
+from gp_control_plane.engine_common._stdout_parse import (
+    _candidate_lines,
+    _curl_summary,
+    _dedupe_candidate_lines,
+    _diagnostic_counts_from_stdout,
+    _domain_diagnostics_from_counts,
+    _dominant_failure_from_counts,
+    _live_available_lines,
+    _parse_result_line,
+    _summary_sections,
+)
+
 
 def latest_log_tail(
     state_dir: Path,

@@ -10,8 +10,8 @@ import socket
 import struct
 import subprocess
 import sys
-import threading
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -19,13 +19,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.state import read_state, update_state
-from gp_control_plane.web.api_server import serve
 from gp_control_plane.web import api_server
+from gp_control_plane.web.api_server import serve
 from gp_control_plane.web.ui import index_html
 
 
@@ -167,6 +168,7 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn('stopRealtimeEvents();', logout)
         self.assertIn('stopRealtimeFallback();', logout)
 
+@pytest.mark.integration
 class EdgeBearerAuthBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1013,7 +1015,7 @@ class _TestServer:
         self._startup_cancelled = threading.Event()
         self._serving = threading.Event()
 
-    def __enter__(self) -> "_TestServer":
+    def __enter__(self) -> _TestServer:
         ready = threading.Event()
         original_server = self._server_type or api_server.ThreadingHTTPServer
         self._startup_cancelled.clear()
@@ -1148,7 +1150,7 @@ class _EdgeCdp:
         self._stderr: Any | None = None
         self._job: _WindowsJob | None = None
 
-    def __enter__(self) -> "_EdgeCdp":
+    def __enter__(self) -> _EdgeCdp:
         self._debug_port = _free_port()
         self._profile = tempfile.TemporaryDirectory()
         self._stdout = tempfile.TemporaryFile()
@@ -1502,3 +1504,4 @@ class _CdpClient:
 
 if __name__ == '__main__':
     unittest.main()
+

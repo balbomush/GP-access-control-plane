@@ -17,3 +17,51 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "gp_control_plane.web.ui.parts" = ["*.html", "css/*.css", "js/*.js", "html/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: headless tests that run without root or external services",
+    "integration: needs root/sudo, privileged subprocess or a real service (nfqws2/Edge)",
+    "quality: static/AST/structure guard tests (line limits, split-runtime, ui parts)",
+]
+# Default run = unit + everything not explicitly tiered. Run integration
+# explicitly under sudo: `pytest -m integration --timeout=600`.
+addopts = "-m \"not integration and not quality\""
+
+[tool.coverage.run]
+branch = true
+source = ["gp_control_plane"]
+omit = ["*/web/ui/parts/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Measured baseline: 75% on the default (unit) suite, 2026-09-04.
+fail_under = 70
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["dev", "scripts", "coverage"]
+
+[tool.ruff.lint]
+# Gate rule set — deliberately avoids mass churn on low-signal legacy style
+# rules (ARG/RET/SIM and pycodestyle E7 'multiple statements' / E741 which
+# this codebase uses intentionally) — see testing.md for the rationale.
+select = ["E4", "E9", "F", "I", "UP", "B"]
+ignore = [
+    "E501",   # line length — long CLI/string literals
+    "B008",   # function calls in defaults (argparse)
+    "B905",   # zip(strict=)
+    "B012",   # return inside finally — used intentionally in jobs quarantine
+    "B023",   # function-in-loop closures — tests bind loop vars by design
+]
+
+[tool.vulture]
+paths = ["src"]
+exclude = ["__pycache__"]
+min_confidence = 80
+sort_by_size = true
+

@@ -2,22 +2,36 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
 import subprocess
 import threading
 import time
-from gp_control_plane.discovery_engine import DEFAULT_BS_JOB_CAP, DOMAIN_ARGV_THRESHOLD, PROGRESS_LINE, blockchecks_state_dir, bs_run_env, build_bs_scan_argv, campaign_lock_busy_message, resolve_bs_binary
 from pathlib import Path
-from gp_control_plane.state import now_iso
-from gp_control_plane.storage import append_run
+from typing import Any
+
+from gp_control_plane.bs_engine._harvest import _harvest_pairs, _harvest_passes, _harvest_udp
+from gp_control_plane.discovery_engine import (
+    DEFAULT_BS_JOB_CAP,
+    DOMAIN_ARGV_THRESHOLD,
+    PROGRESS_LINE,
+    blockchecks_state_dir,
+    bs_run_env,
+    build_bs_scan_argv,
+    campaign_lock_busy_message,
+    resolve_bs_binary,
+)
 from gp_control_plane.engine_common._constants import PHASE_COMPLETE, PHASE_DISCOVERY
-from gp_control_plane.engine_common._options import _domain_validation_run_fields, validate_domain_inputs
+from gp_control_plane.engine_common._options import (
+    _domain_validation_run_fields,
+    validate_domain_inputs,
+)
 from gp_control_plane.engine_common._retention import _cleanup_old_strategy_logs, _finder_dir
 from gp_control_plane.engine_common._runmeta import _discovery_run_id
-from typing import Any
-from gp_control_plane.bs_engine._harvest import _harvest_pairs, _harvest_passes, _harvest_udp
+from gp_control_plane.state import now_iso
+from gp_control_plane.storage import append_run
 
 _PROGRESS_RE = re.compile(PROGRESS_LINE)
 
@@ -25,6 +39,8 @@ AQ_JOBS_RE = re.compile(r"AQ pending jobs:\s+(\d+)")
 
 GEN_TCP_RE = re.compile(r"Generated:\s+(\d+)\s+TCP")
 
+
+log = logging.getLogger(__name__)
 def stop_blockchecks() -> None:
     try:
         bs = resolve_bs_binary()
@@ -224,6 +240,7 @@ def run_blockchecks_discovery(
                 try:
                     os.killpg(process.pid, 9)
                 except (OSError, ProcessLookupError):
+                    log.debug("failed terminating blockchecks process during stop cleanup")
                     pass
                 process.wait(timeout=5)
         if process.stdout is not None:
@@ -336,7 +353,9 @@ def _bs_progress_db_counts(db: Path) -> dict[str, int]:
             conn.execute("SELECT COUNT(DISTINCT strategy_id) FROM tcp_results").fetchone()[0]
         )
     except sqlite3.Error:
+        log.debug("could not open blockchecks run db read-only for metrics")
         pass
     finally:
         conn.close()
     return counts
+

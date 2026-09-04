@@ -1,0 +1,9 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "files": {
+    "include": ["src/gp_control_plane/web/ui/parts"]
+  },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
+  "linter": { "enabled": true, "rules": { "recommended": false } },
+  "javascript": { "formatter": { "quoteStyle": "single", "semicolons": "always" } }
+}

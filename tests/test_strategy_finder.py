@@ -12,15 +12,71 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.bc2_engine import (
     _launch as bc2_launch,
+)
+from gp_control_plane.bc2_engine import (
     _process as bc2_process,
+)
+from gp_control_plane.bc2_engine import (
     _runner as bc2_runner,
+)
+from gp_control_plane.bc2_engine._launch import run_multi_domain_discovery, run_standard_discovery
+from gp_control_plane.bc2_engine._multidomain import (
+    _resolve_blockcheck_script,
+    _write_multidomain_runner,
+)
+from gp_control_plane.bc2_engine._plan import (
+    _eta_recalculation_attempts,
+    _eta_recalculation_step,
+    _standard_attempt_plan,
+)
+from gp_control_plane.bc2_engine._process import (
+    _run_process_with_live_stdout,
+    _wait_process_after_stop,
+)
+from gp_control_plane.bc2_engine._progress import (
+    _average_attempt_ms,
+    _progress_from_counts,
+    progress_from_stdout,
+)
+from gp_control_plane.bc2_engine._recorder import _LiveStdoutRecorder
+from gp_control_plane.bc2_engine._runner import _run_multidomain_blockcheck_live
+from gp_control_plane.bc2_engine._writers import (
+    _CompactStdoutWriter,
+    _RotatingTextWriter,
+    _stdout_log_mode,
 )
 from gp_control_plane.engine_common import (
     _store as common_store,
+)
+from gp_control_plane.engine_common._constants import LOG_RETENTION_MAX_FILES
+from gp_control_plane.engine_common._logtail import (
+    classify_stderr_diagnostics,
+    latest_log_tail,
+    parse_blockcheck_stdout,
+)
+from gp_control_plane.engine_common._options import (
+    DiscoveryOptions,
+    classify_domain_input,
+    curl_failure_info,
+    validate_domain_inputs,
+)
+from gp_control_plane.engine_common._retention import _cleanup_old_strategy_logs
+from gp_control_plane.engine_common._runs import close_stale_running_runs, read_runs, read_runs_page
+from gp_control_plane.engine_common._store import (
+    read_candidate_domain_index,
+    read_candidate_page,
+    read_candidates,
+)
+from gp_control_plane.engine_common._upsert import (
+    candidate_id_for,
+    candidate_total,
+    upsert_candidates,
 )
 from gp_control_plane.jobs import ManagedRuntimeQuarantinedError
 from gp_control_plane.state import read_state
@@ -28,23 +84,10 @@ from gp_control_plane.storage import (
     append_run,
     connect,
     storage_status,
+)
+from gp_control_plane.storage import (
     upsert_candidate_event_conn as storage_upsert_candidate_event_conn,
 )
-from gp_control_plane.bc2_engine._launch import run_multi_domain_discovery, run_standard_discovery
-from gp_control_plane.bc2_engine._multidomain import _resolve_blockcheck_script, _write_multidomain_runner
-from gp_control_plane.bc2_engine._plan import _eta_recalculation_attempts, _eta_recalculation_step, _standard_attempt_plan
-from gp_control_plane.bc2_engine._process import _run_process_with_live_stdout, _wait_process_after_stop
-from gp_control_plane.bc2_engine._progress import _average_attempt_ms, _progress_from_counts, progress_from_stdout
-from gp_control_plane.bc2_engine._recorder import _LiveStdoutRecorder
-from gp_control_plane.bc2_engine._runner import _run_multidomain_blockcheck_live
-from gp_control_plane.bc2_engine._writers import _CompactStdoutWriter, _RotatingTextWriter, _stdout_log_mode
-from gp_control_plane.engine_common._constants import LOG_RETENTION_MAX_FILES
-from gp_control_plane.engine_common._logtail import classify_stderr_diagnostics, latest_log_tail, parse_blockcheck_stdout
-from gp_control_plane.engine_common._options import DiscoveryOptions, classify_domain_input, curl_failure_info, validate_domain_inputs
-from gp_control_plane.engine_common._retention import _cleanup_old_strategy_logs
-from gp_control_plane.engine_common._runs import close_stale_running_runs, read_runs, read_runs_page
-from gp_control_plane.engine_common._store import read_candidate_domain_index, read_candidate_page, read_candidates
-from gp_control_plane.engine_common._upsert import candidate_id_for, candidate_total, upsert_candidates
 
 
 class StrategyFinderTests(unittest.TestCase):
@@ -267,6 +310,7 @@ class StrategyFinderTests(unittest.TestCase):
         self.assertEqual(result["id"], "run-public")
         self.assertEqual(live.call_args.kwargs["run_id"], "run-public")
 
+    @pytest.mark.integration
     def test_standard_discovery_pre_cancelled_does_not_start_privileged_child(self) -> None:
         stop_event = threading.Event()
         stop_event.set()
@@ -301,6 +345,7 @@ class StrategyFinderTests(unittest.TestCase):
         popen.assert_not_called()
         root_signal.assert_not_called()
 
+    @pytest.mark.integration
     def test_multi_domain_discovery_pre_cancelled_does_not_start_privileged_child(self) -> None:
         stop_event = threading.Event()
         stop_event.set()
@@ -341,6 +386,7 @@ class StrategyFinderTests(unittest.TestCase):
         popen.assert_not_called()
         root_signal.assert_not_called()
 
+    @pytest.mark.integration
     def test_discovery_cancellation_during_root_command_wins_over_root_result(self) -> None:
         for mode in ("standard", "multi_domain"):
             for root_outcome in ("returns", "raises"):
@@ -1236,7 +1282,7 @@ pktws_check_https_tls12()
                     self.conn = conn
                     self.relation_selects = 0
 
-                def __enter__(self) -> "CountingConnection":
+                def __enter__(self) -> CountingConnection:
                     self.conn.__enter__()
                     return self
 
@@ -1939,7 +1985,7 @@ pktws_check_https_tls12()
             attempts_by_script={"standard/10-test.sh": 20},
             successful=0,
             current_script="standard/10-test.sh",
-            runtime_ms_per_attempt=500,
+            _runtime_ms_per_attempt=500,
             runtime_sample_count=50,
             elapsed_seconds_override=20,
         )
@@ -2228,3 +2274,6 @@ def _store_candidate_rows(state_dir: Path, candidates: list[dict[str, object]]) 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

@@ -4,7 +4,6 @@ import http.client
 import json
 import multiprocessing
 import queue
-import re
 import socket
 import sqlite3
 import sys
@@ -28,7 +27,6 @@ from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.storage import StorageUnavailableError, append_run, db_path
 from gp_control_plane.web.api_server import serve
 from gp_control_plane.web.proxy import serve_web_proxy
-
 
 _PROCESS_TIMEOUT_SECONDS = 15
 
@@ -1025,7 +1023,7 @@ class _ManagedServer:
 def _start_managed_server(function: Any, config: AppConfig, **kwargs: Any) -> _ManagedServer:
     port = _free_port()
     module = sys.modules[function.__module__]
-    server_type = getattr(module, "ThreadingHTTPServer")
+    server_type = module.ThreadingHTTPServer
     server_created = threading.Event()
     server_holder: dict[str, Any] = {}
     startup_errors: list[BaseException] = []

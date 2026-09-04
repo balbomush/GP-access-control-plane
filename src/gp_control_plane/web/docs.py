@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 OPENAPI_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 SWAGGER_HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 SWAGGER_PATHS = {"/swagger", "/swagger/"}

@@ -1,16 +1,31 @@
 """gp_control_plane.domain_sources._network — moved from storage.py (split)."""
 from __future__ import annotations
 
-from typing import Any, Callable
-from urllib.request import urlopen
 import io
 import json
+import logging
 import subprocess
 import tarfile
-from gp_control_plane.domain_sources._constants import V2FLY_ARCHIVE_URL, V2FLY_BASE_URL, V2FLY_CONTENTS_URL, V2FLY_GIT_URL, V2FLY_REVISION_URL, _EXPECTED_V2FLY_ARCHIVE_FALLBACK_ERRORS, _EXPECTED_V2FLY_REVISION_FALLBACK_ERRORS
-from gp_control_plane.domain_sources._parse import _clean_categories, _clean_category, parse_v2fly_rules
+from collections.abc import Callable
+from typing import Any
+from urllib.request import urlopen
 
+from gp_control_plane.domain_sources._constants import (
+    _EXPECTED_V2FLY_ARCHIVE_FALLBACK_ERRORS,
+    _EXPECTED_V2FLY_REVISION_FALLBACK_ERRORS,
+    V2FLY_ARCHIVE_URL,
+    V2FLY_BASE_URL,
+    V2FLY_CONTENTS_URL,
+    V2FLY_GIT_URL,
+    V2FLY_REVISION_URL,
+)
+from gp_control_plane.domain_sources._parse import (
+    _clean_categories,
+    _clean_category,
+    parse_v2fly_rules,
+)
 
+log = logging.getLogger(__name__)
 def fetch_v2fly_archive() -> bytes:
     with urlopen(V2FLY_ARCHIVE_URL, timeout=60) as response:  # noqa: S310
         return response.read()
@@ -30,6 +45,7 @@ def fetch_v2fly_revision() -> str:
         if revision:
             return revision
     except _EXPECTED_V2FLY_REVISION_FALLBACK_ERRORS:
+        log.warning("v2fly revision fetch failed; falling back")
         pass
     with urlopen(V2FLY_REVISION_URL, timeout=15) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
@@ -39,6 +55,7 @@ def fetch_v2fly_category_index() -> str:
     try:
         return fetch_v2fly_category_index_from_archive()
     except _EXPECTED_V2FLY_ARCHIVE_FALLBACK_ERRORS:
+        log.warning("v2fly archive fetch failed; returning empty")
         pass
     with urlopen(V2FLY_CONTENTS_URL, timeout=30) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
@@ -123,3 +140,4 @@ def fetch_v2fly_category(category: str) -> str:
     clean = _clean_category(category)
     with urlopen(f"{V2FLY_BASE_URL}/{clean}", timeout=30) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
+

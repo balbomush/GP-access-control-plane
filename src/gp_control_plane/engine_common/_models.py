@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from gp_control_plane.strategy_safety import analyze_strategy
-from typing import Any, Iterator
+from typing import Any
+
 from gp_control_plane.engine_common._candidate_sql import _placeholders, _unique_nonempty_strings
 from gp_control_plane.engine_common._constants import CANDIDATE_RELATION_BATCH_SIZE
+from gp_control_plane.strategy_safety import analyze_strategy
+
 
 def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
     rows = conn.execute(

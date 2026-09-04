@@ -4,6 +4,11 @@ Public re-exports keep consumer imports clean. Internal cross-module imports
 target the concrete submodules (``_store``, ``_models``, ...) directly.
 """
 
+from gp_control_plane.engine_common._logtail import (
+    classify_stderr_diagnostics,
+    latest_log_tail,
+    parse_blockcheck_stdout,
+)
 from gp_control_plane.engine_common._options import (
     classify_domain_input,
     curl_failure_info,
@@ -11,6 +16,7 @@ from gp_control_plane.engine_common._options import (
     validate_domain_inputs,
 )
 from gp_control_plane.engine_common._runmeta import allocate_discovery_run_id
+from gp_control_plane.engine_common._runs import close_stale_running_runs, read_runs, read_runs_page
 from gp_control_plane.engine_common._store import (
     candidate_storage_version,
     iter_strategy_candidates_filtered,
@@ -19,13 +25,11 @@ from gp_control_plane.engine_common._store import (
     read_candidates,
     read_strategy_candidates_filtered,
 )
-from gp_control_plane.engine_common._runs import close_stale_running_runs, read_runs, read_runs_page
-from gp_control_plane.engine_common._logtail import (
-    classify_stderr_diagnostics,
-    latest_log_tail,
-    parse_blockcheck_stdout,
+from gp_control_plane.engine_common._upsert import (
+    candidate_id_for,
+    candidate_total,
+    upsert_candidates,
 )
-from gp_control_plane.engine_common._upsert import candidate_id_for, candidate_total, upsert_candidates
 
 __all__ = [
     "allocate_discovery_run_id",

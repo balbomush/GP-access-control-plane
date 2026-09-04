@@ -9,9 +9,17 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from gp_control_plane.engine_common._constants import ATTEMPT_TIMEOUT_ESTIMATE_MS, ETA_RECALC_LARGE_AFTER, ETA_RECALC_LARGE_STEP, ETA_RECALC_SMALL_STEP, _ATTEMPT_PLAN_CACHE
+
+from gp_control_plane.engine_common._constants import (
+    _ATTEMPT_PLAN_CACHE,
+    ATTEMPT_TIMEOUT_ESTIMATE_MS,
+    ETA_RECALC_LARGE_AFTER,
+    ETA_RECALC_LARGE_STEP,
+    ETA_RECALC_SMALL_STEP,
+)
 from gp_control_plane.engine_common._options import _bounded_int, _minimum_int, _truthy
 from gp_control_plane.engine_common._retention import _clean_domains
+
 
 def _standard_attempt_plan(
     domains: list[str],

@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 REMOVED_STATE_KEYS = {
     "last_sync_at",
     "last_validate_at",
@@ -148,7 +147,7 @@ class _StateUpdateLock:
         self._released = False
 
     @classmethod
-    def acquire(cls, state_dir: Path) -> "_StateUpdateLock":
+    def acquire(cls, state_dir: Path) -> _StateUpdateLock:
         state_dir.mkdir(parents=True, exist_ok=True)
         path = state_dir / STATE_UPDATE_LOCK_FILE_NAME
         payload = {"pid": os.getpid(), "created_at": now_iso()}
@@ -160,7 +159,7 @@ class _StateUpdateLock:
             except OSError:
                 if time.monotonic() >= deadline:
                     handle.close()
-                    raise TimeoutError("state update lock is busy")
+                    raise TimeoutError("state update lock is busy") from None
                 time.sleep(0.01)
                 continue
             handle.seek(0)
@@ -169,7 +168,7 @@ class _StateUpdateLock:
             handle.flush()
             return cls(path, handle)
 
-    def __enter__(self) -> "_StateUpdateLock":
+    def __enter__(self) -> _StateUpdateLock:
         return self
 
     def __exit__(self, *_args: object) -> None:

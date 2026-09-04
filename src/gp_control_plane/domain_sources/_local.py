@@ -1,12 +1,14 @@
 """gp_control_plane.domain_sources._local — moved from storage.py (split)."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable
-from urllib.error import URLError
 import json
 import subprocess
 import tarfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+from urllib.error import URLError
+
 from gp_control_plane.domain_sources._constants import V2FLY_LOCAL_SOURCE
 from gp_control_plane.domain_sources._network import _extract_v2fly_data_files, fetch_v2fly_archive
 from gp_control_plane.domain_sources._parse import _clean_category, _utc_now, parse_v2fly_revision

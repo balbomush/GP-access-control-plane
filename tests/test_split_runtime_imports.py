@@ -7,10 +7,12 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+pytestmark = pytest.mark.quality
 class SplitRuntimeImportTests(unittest.TestCase):
     def test_importing_core_server_does_not_load_web_app(self) -> None:
         code = """
@@ -93,3 +95,4 @@ if "gp_control_plane.web.api_server" not in sys.modules:
 
 if __name__ == "__main__":
     unittest.main()
+

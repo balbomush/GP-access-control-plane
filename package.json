@@ -1,0 +1,14 @@
+{
+  "name": "gp-access-control-plane",
+  "private": true,
+  "version": "0.4.0",
+  "description": "Lint/format tooling for the inline web UI assets (web/ui/parts). Python gates live in requirements-dev.txt + dev/gate_all.sh.",
+  "scripts": {
+    "lint": "biome check --formatter-enabled=false --linter-enabled=true src/gp_control_plane/web/ui/parts",
+    "lint:js": "biome check --formatter-enabled=false --linter-enabled=true \"src/gp_control_plane/web/ui/parts/js/**\"",
+    "format": "biome format --write src/gp_control_plane/web/ui/parts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4"
+  }
+}

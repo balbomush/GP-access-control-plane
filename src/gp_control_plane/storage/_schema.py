@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import sqlite3
+
 from gp_control_plane.storage._compact import _compact_run_payloads
 from gp_control_plane.storage._constants import SCHEMA_MIGRATIONS, SCHEMA_VERSION
-from gp_control_plane.storage._migrations import _backfill_strategy_analysis, _drop_legacy_storage, _drop_strategy_attempts, _migrate_minimal_working_model_schema
+from gp_control_plane.storage._migrations import (
+    _backfill_strategy_analysis,
+    _drop_legacy_storage,
+    _drop_strategy_attempts,
+    _migrate_minimal_working_model_schema,
+)
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:

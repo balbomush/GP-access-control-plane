@@ -3,7 +3,6 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import Any
 
-
 _DEFAULTS: dict[int, tuple[str, str]] = {
     HTTPStatus.BAD_REQUEST: ("invalid_request", "The request is invalid."),
     HTTPStatus.UNAUTHORIZED: ("authentication_required", "A Bearer token is required."),

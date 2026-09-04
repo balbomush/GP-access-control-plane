@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.backups import (
+    _write_checksums,
     clean_install_vault_info,
     create_clean_install_vault,
     create_post_run_snapshot,
@@ -27,11 +28,19 @@ from gp_control_plane.backups import (
     restore_snapshot_preview,
     snapshot_archive_path,
     snapshot_file_path,
-    _write_checksums,
+)
+from gp_control_plane.engine_common import (
+    parse_blockcheck_stdout,
+    read_candidate_page,
+    upsert_candidates,
 )
 from gp_control_plane.state import read_state, write_state
-from gp_control_plane.storage import read_app_setting, read_custom_presets, save_app_setting, save_custom_presets
-from gp_control_plane.engine_common import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
+from gp_control_plane.storage import (
+    read_app_setting,
+    read_custom_presets,
+    save_app_setting,
+    save_custom_presets,
+)
 
 
 class BackupTests(unittest.TestCase):

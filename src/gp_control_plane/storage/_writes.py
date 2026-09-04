@@ -1,11 +1,12 @@
 """gp_control_plane.storage._writes — moved from storage.py (split)."""
 from __future__ import annotations
 
-from gp_control_plane.strategy_safety import analyze_strategy
 import json
 import sqlite3
+
 from gp_control_plane.storage._constants import SYSTEM_DOMAIN_PRESETS
 from gp_control_plane.storage._helpers import _args_hash, _unique_nonempty
+from gp_control_plane.strategy_safety import analyze_strategy
 
 
 def _upsert_strategy_conn(

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+
 def bs_providers_root() -> Path:
     data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     override = os.environ.get("BLOCKCHECKS_DATA_BLOCK") or ""

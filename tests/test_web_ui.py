@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import http.client
 import ast
 import contextlib
 import errno
+import http.client
 import importlib
 import json
 import os
+import re
 import socket
 import socketserver
 import struct
@@ -19,16 +20,18 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
 import gp_control_plane.jobs as jobs
-from gp_control_plane.state import read_state, write_state
-from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
 from gp_control_plane.bc2_engine import _process as strategy_finder_process
 from gp_control_plane.bc2_engine import _runner as strategy_finder_runner
 from gp_control_plane.bc2_engine import _writers as strategy_finder_writers
+from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.engine_common import upsert_candidates
+from gp_control_plane.state import read_state, write_state
+from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
 from gp_control_plane.web import app as web_app
 from gp_control_plane.web import docs as web_docs
 from gp_control_plane.web import routes as web_routes
@@ -3918,6 +3921,7 @@ class WebUiTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 run_cancel_hook_regression(mode)
 
+    @pytest.mark.integration
     def test_strategy_discovery_immediate_stop_finishes_without_privileged_child(self) -> None:
         def run_immediate_stop(mode: str) -> None:
             with tempfile.TemporaryDirectory() as raw:
@@ -4025,6 +4029,7 @@ class WebUiTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 run_immediate_stop(mode)
 
+    @pytest.mark.integration
     def test_strategy_discovery_stop_during_root_command_finishes_without_privileged_child(self) -> None:
         def run_stop_during_root_command(mode: str) -> None:
             with tempfile.TemporaryDirectory() as raw:
@@ -4131,6 +4136,7 @@ class WebUiTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 run_stop_during_root_command(mode)
 
+    @pytest.mark.integration
     def test_strategy_discovery_stop_after_precheck_before_popen_finishes_stopped(self) -> None:
         def run_stop_after_precheck_before_popen(mode: str) -> None:
             with tempfile.TemporaryDirectory() as raw:
@@ -4602,7 +4608,7 @@ class _CleanupActions:
             for description, error in cleanup_failures:
                 primary_error.add_note(f"Cleanup also failed during {description}: {error!r}")
             return
-        raise _CleanupFailureRecords(cleanup_failures)
+        raise _CleanupFailureRecords(cleanup_failures) from None
 
 
 @contextlib.contextmanager
@@ -4692,7 +4698,7 @@ class _CapturedTestServer:
                     )
                 else:
                     self._release_listener_after_close(listener)
-                raise _CleanupFailureRecords(cleanup_failures)
+                raise _CleanupFailureRecords(cleanup_failures) from None
             try:
                 listener.server_close()
             except BaseException:
@@ -4960,7 +4966,7 @@ def _start_captured_server(
     **kwargs: Any,
 ) -> _CapturedTestServer:
     module = sys.modules[function.__module__]
-    server_type = _server_type or getattr(module, "ThreadingHTTPServer")
+    server_type = _server_type or module.ThreadingHTTPServer
     server_modules = (
         module,
         importlib.import_module("gp_control_plane.web.api_server"),
@@ -5074,7 +5080,7 @@ def _start_captured_server(
                             )
                         )
             if cleanup_failures:
-                raise _CleanupFailureRecords(cleanup_failures)
+                raise _CleanupFailureRecords(cleanup_failures) from None
 
     def run() -> None:
         nonlocal startup_finished
@@ -5515,3 +5521,6 @@ def _bearer_authorization(port: int, *, timeout: float = 5) -> str:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

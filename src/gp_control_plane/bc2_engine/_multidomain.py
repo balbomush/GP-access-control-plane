@@ -4,6 +4,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+
 def _write_multidomain_runner(root: Path, blockcheck: Path) -> Path:
     source = blockcheck.read_text(encoding="utf-8", errors="replace")
     marker = "\nfsleep_setup\n"

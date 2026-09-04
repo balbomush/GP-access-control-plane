@@ -1,10 +1,15 @@
 """gp_control_plane.backups._manifest — moved from storage.py (split)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
-import json
-from gp_control_plane.backups._constants import BACKUP_SCHEMA_VERSION, HISTORY_BACKUP_SCHEMA_VERSION, SUPPORTED_BACKUP_SCHEMA_VERSIONS
+
+from gp_control_plane.backups._constants import (
+    BACKUP_SCHEMA_VERSION,
+    HISTORY_BACKUP_SCHEMA_VERSION,
+    SUPPORTED_BACKUP_SCHEMA_VERSIONS,
+)
 from gp_control_plane.backups._paths import _snapshot_path
 
 

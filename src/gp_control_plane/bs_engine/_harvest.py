@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+
+from gp_control_plane.bs_engine._export import _expand_config_candidate_args
+from gp_control_plane.engine_common._upsert import candidate_id_for
 from gp_control_plane.state import now_iso
 from gp_control_plane.storage import upsert_candidate_event, upsert_strategy_pair
-from gp_control_plane.engine_common._upsert import candidate_id_for
-from gp_control_plane.bs_engine._export import _expand_config_candidate_args
+
 
 def _harvest_udp(
     state_dir: Path,

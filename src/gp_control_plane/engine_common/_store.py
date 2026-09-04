@@ -1,14 +1,33 @@
 """engine_common._store — moved from strategy_finder.py / blockchecks_backend.py."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from gp_control_plane.storage import connect
-from typing import Any, Iterator
-from gp_control_plane.engine_common._candidate_sql import _clean_fragmentation_classes, _fragmentation_query_clause, _placeholders, _read_candidate_domain_index_sql, _strategy_query_clause, _unique_nonempty_strings
-from gp_control_plane.engine_common._constants import CORE_CANDIDATE_JSON_MAX_RESULTS, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
-from gp_control_plane.engine_common._models import _candidates_from_db_rows, _compact_candidate, _iter_candidates_from_db_rows, _tested_domains_from_db
+from typing import Any
+
+from gp_control_plane.engine_common._candidate_sql import (
+    _clean_fragmentation_classes,
+    _fragmentation_query_clause,
+    _placeholders,
+    _read_candidate_domain_index_sql,
+    _strategy_query_clause,
+    _unique_nonempty_strings,
+)
+from gp_control_plane.engine_common._constants import (
+    CORE_CANDIDATE_JSON_MAX_RESULTS,
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+)
+from gp_control_plane.engine_common._models import (
+    _candidates_from_db_rows,
+    _compact_candidate,
+    _iter_candidates_from_db_rows,
+    _tested_domains_from_db,
+)
 from gp_control_plane.engine_common._options import _bounded_int
 from gp_control_plane.engine_common._retention import _clean_domain_list
+from gp_control_plane.storage import connect
+
 
 def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
     with connect(state_dir) as conn:

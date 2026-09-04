@@ -3,13 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .bc2_engine import run_multi_domain_discovery, run_standard_discovery
 from .config import build_config
 from .domain_sources import prepare_v2fly_local_storage
-from .bc2_engine import run_multi_domain_discovery, run_standard_discovery
 from .engine_common import domain_sets, read_candidates
 from .storage import storage_status
 from .zapret2 import check_install

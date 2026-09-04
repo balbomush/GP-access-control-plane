@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-
 
 REPO_URL = "https://github.com/balbomush/GP-access-control-plane.git"
 RELEASES_API_URL = "https://api.github.com/repos/balbomush/GP-access-control-plane/releases"

@@ -7,10 +7,11 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.cli import build_parser
-
 
 _COMMAND_RUNNERS = {
     "subprocess.run",
@@ -27,6 +28,7 @@ _ROUTER_EXECUTABLES = {"ssh", "rci", "keenetic"}
 _ROUTER_MUTATIONS = {"apply", "restart"}
 
 
+pytestmark = pytest.mark.quality
 def _call_name(call: ast.Call) -> str:
     parts: list[str] = []
     node: ast.AST = call.func
@@ -186,3 +188,4 @@ class CliSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
