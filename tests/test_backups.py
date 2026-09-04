@@ -31,7 +31,7 @@ from gp_control_plane.backups import (
 )
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.storage import read_app_setting, read_custom_presets, save_app_setting, save_custom_presets
-from gp_control_plane.strategy_finder import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
+from gp_control_plane.engine_common import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
 
 
 class BackupTests(unittest.TestCase):

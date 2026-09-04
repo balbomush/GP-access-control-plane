@@ -705,7 +705,7 @@ def _manual_source(key: str) -> dict[str, str]:
         "source": "gp-control-plane built-in preset",
         "coverage_note": _COVERAGE_NOTE,
         "key": key,
-        "url": "src/gp_control_plane/strategy_finder.py",
+        "url": "src/gp_control_plane/engine_common/_constants.py",
     }
 
 

@@ -18,7 +18,7 @@ from gp_control_plane.core_api import runs_history_payload, status_payload
 from gp_control_plane.jobs import JobRunner, ManagedRuntimeQuarantinedError, _CancellationToken
 from gp_control_plane.state import read_state, update_state
 from gp_control_plane.storage import append_run, connect, read_latest_run_payloads
-from gp_control_plane.strategy_finder import latest_log_tail
+from gp_control_plane.engine_common import latest_log_tail
 
 
 class _JobRunnerWorkerCapture:

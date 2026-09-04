@@ -25,8 +25,10 @@ from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
 import gp_control_plane.jobs as jobs
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
-import gp_control_plane.strategy_finder as strategy_finder
-from gp_control_plane.strategy_finder import upsert_candidates
+from gp_control_plane.bc2_engine import _process as strategy_finder_process
+from gp_control_plane.bc2_engine import _runner as strategy_finder_runner
+from gp_control_plane.bc2_engine import _writers as strategy_finder_writers
+from gp_control_plane.engine_common import upsert_candidates
 from gp_control_plane.web import app as web_app
 from gp_control_plane.web import docs as web_docs
 from gp_control_plane.web import routes as web_routes
@@ -3834,7 +3836,7 @@ class WebUiTests(unittest.TestCase):
                     worker_started.set()
                     try:
                         self.assertTrue(stop_event.wait(timeout=2))
-                        strategy_finder.signal_registered_process_run(run_id, "TERM")
+                        strategy_finder_process.signal_registered_process_run(run_id, "TERM")
                         worker_cancelled.set()
                         self.assertTrue(release_worker.wait(timeout=2))
                         return {"status": "stopped"}
@@ -3857,7 +3859,7 @@ class WebUiTests(unittest.TestCase):
                     mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
                     mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=worker_run),
                     mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_when_idle),
-                    mock.patch.object(strategy_finder, "signal_registered_process_run") as root_signal,
+                    mock.patch.object(strategy_finder_process, "signal_registered_process_run") as root_signal,
                     mock.patch.object(
                         web_app,
                         "cleanup_nft_blockcheck_tables",
@@ -3952,17 +3954,17 @@ class WebUiTests(unittest.TestCase):
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder_runner.shutil, "which", return_value="/test/blockcheck2.sh"),
                     mock.patch.object(
-                        strategy_finder,
+                        strategy_finder_process,
                         "root_command",
                         side_effect=AssertionError("root_command must not run after immediate stop"),
                     ) as root_command,
                     mock.patch.object(
-                        strategy_finder.subprocess, "Popen", side_effect=AssertionError("privileged child must not start")
+                        strategy_finder_process.subprocess, "Popen", side_effect=AssertionError("privileged child must not start")
                     ) as popen,
                     mock.patch.object(
-                        strategy_finder,
+                        strategy_finder_process,
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run after immediate stop"),
                     ) as root_signal,
@@ -4063,19 +4065,19 @@ class WebUiTests(unittest.TestCase):
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder_runner.shutil, "which", return_value="/test/blockcheck2.sh"),
                     mock.patch.object(
-                        strategy_finder,
+                        strategy_finder_process,
                         "root_command",
                         side_effect=root_command_that_waits,
                     ) as root_command,
                     mock.patch.object(
-                        strategy_finder.subprocess,
+                        strategy_finder_process.subprocess,
                         "Popen",
                         side_effect=AssertionError("privileged child must not start after stop during root_command"),
                     ) as popen,
                     mock.patch.object(
-                        strategy_finder,
+                        strategy_finder_process,
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run after stop during root_command"),
                     ) as root_signal,
@@ -4140,7 +4142,7 @@ class WebUiTests(unittest.TestCase):
                 tmp = Path(raw)
                 config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
                 original_runner = web_app.JobRunner
-                original_stdout_log_enter = strategy_finder._RotatingTextWriter.__enter__
+                original_stdout_log_enter = strategy_finder_writers._RotatingTextWriter.__enter__
                 stdout_log_opened = threading.Event()
                 release_stdout_log = threading.Event()
                 worker_finished = threading.Event()
@@ -4153,7 +4155,7 @@ class WebUiTests(unittest.TestCase):
                         finally:
                             worker_finished.set()
 
-                def open_stdout_log_at_barrier(writer: strategy_finder._RotatingTextWriter) -> strategy_finder._RotatingTextWriter:
+                def open_stdout_log_at_barrier(writer: strategy_finder_writers._RotatingTextWriter) -> strategy_finder_writers._RotatingTextWriter:
                     result = original_stdout_log_enter(writer)
                     if writer._path.name.endswith(".stdout.log"):
                         stdout_log_opened.set()
@@ -4173,20 +4175,20 @@ class WebUiTests(unittest.TestCase):
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
-                    mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
+                    mock.patch.object(strategy_finder_runner.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder_process, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(
-                        strategy_finder._RotatingTextWriter,
+                        strategy_finder_writers._RotatingTextWriter,
                         "__enter__",
                         new=open_stdout_log_at_barrier,
                     ),
                     mock.patch.object(
-                        strategy_finder.subprocess,
+                        strategy_finder_process.subprocess,
                         "Popen",
                         side_effect=AssertionError("privileged child must not start after stop before Popen"),
                     ) as popen,
                     mock.patch.object(
-                        strategy_finder,
+                        strategy_finder_process,
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run before a child is launched"),
                     ) as root_signal,

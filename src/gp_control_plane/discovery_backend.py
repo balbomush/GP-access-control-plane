@@ -8,8 +8,8 @@ blockcheck2 ``!!!!! AVAILABLE !!!!!`` markers.
 
 from __future__ import annotations
 
-from .blockchecks_backend import export_nfconf, run_blockchecks_discovery, stop_blockchecks
-from .strategy_finder import run_multi_domain_discovery, run_standard_discovery
+from .bc2_engine import run_multi_domain_discovery, run_standard_discovery
+from .bs_engine import export_nfconf, run_blockchecks_discovery, stop_blockchecks
 
 __all__ = [
     "export_nfconf",

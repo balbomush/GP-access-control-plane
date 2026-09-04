@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.backups import clean_install_handoff_path, clean_install_vault_dir, clean_install_vault_info, create_clean_install_vault, restore_clean_install_vault
 from gp_control_plane.storage import connect, read_app_setting, save_app_setting
-from gp_control_plane.strategy_finder import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
+from gp_control_plane.engine_common import parse_blockcheck_stdout, read_candidate_page, upsert_candidates
 
 
 class CleanInstallVaultTests(unittest.TestCase):

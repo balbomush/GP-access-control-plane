@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane import core_api
-from gp_control_plane.blockchecks_backend import run_blockchecks_discovery
+from gp_control_plane.bs_engine import run_blockchecks_discovery
 from gp_control_plane.discovery_engine import (
     blockchecks_state_dir,
     bs_run_env,
@@ -184,11 +184,11 @@ class DiscoveryEngineFlagMapTests(unittest.TestCase):
             fake_bs.chmod(fake_bs.stat().st_mode | stat.S_IEXEC)
             with (
                 mock.patch("gp_control_plane.discovery_engine.resolve_bs_binary", return_value=str(fake_bs)),
-                mock.patch("gp_control_plane.blockchecks_backend.resolve_bs_binary", return_value=str(fake_bs)),
-                mock.patch("gp_control_plane.blockchecks_backend.blockchecks_state_dir", return_value=bs_state),
-                mock.patch("gp_control_plane.blockchecks_backend._discovery_run_id", return_value=fixed_run_id),
+                mock.patch("gp_control_plane.bs_engine._backend.resolve_bs_binary", return_value=str(fake_bs)),
+                mock.patch("gp_control_plane.bs_engine._backend.blockchecks_state_dir", return_value=bs_state),
+                mock.patch("gp_control_plane.bs_engine._backend._discovery_run_id", return_value=fixed_run_id),
                 mock.patch("gp_control_plane.discovery_engine.campaign_lock_busy_message", return_value=None),
-                mock.patch("gp_control_plane.blockchecks_backend.campaign_lock_busy_message", return_value=None),
+                mock.patch("gp_control_plane.bs_engine._backend.campaign_lock_busy_message", return_value=None),
             ):
                 run = run_blockchecks_discovery(
                     ["youtube.com", "reddit.com"],
@@ -263,7 +263,8 @@ if __name__ == "__main__":
 
 class ConfigHarvestTests(unittest.TestCase):
     def test_expand_config_candidate_args_splits_desync_cores(self) -> None:
-        from gp_control_plane.blockchecks_backend import _expand_config_candidate_args, _harvest_passes
+        from gp_control_plane.bs_engine._export import _expand_config_candidate_args
+        from gp_control_plane.bs_engine._harvest import _harvest_passes
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -310,7 +311,7 @@ class ConfigHarvestTests(unittest.TestCase):
 
 class DnsPinsTests(unittest.TestCase):
     def test_list_bs_dns_pins_reads_provider_hosts(self) -> None:
-        from gp_control_plane.blockchecks_backend import list_bs_dns_pins
+        from gp_control_plane.bs_engine._dns_pins import list_bs_dns_pins
 
         with tempfile.TemporaryDirectory() as raw:
             data = Path(raw) / "blockcheckS" / "data_block" / "providers" / "isp_x"
@@ -349,7 +350,7 @@ class PairUdpTests(unittest.TestCase):
         self.assertIn("--tcp-sources", argv)
 
     def test_harvest_udp_maps_strategies_to_domain(self) -> None:
-        from gp_control_plane.blockchecks_backend import _harvest_udp
+        from gp_control_plane.bs_engine._harvest import _harvest_udp
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -383,7 +384,7 @@ class PairUdpTests(unittest.TestCase):
 
 class PairHarvestTests(unittest.TestCase):
     def test_harvest_pairs_maps_labels_to_args(self) -> None:
-        from gp_control_plane.blockchecks_backend import _harvest_pairs
+        from gp_control_plane.bs_engine._harvest import _harvest_pairs
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

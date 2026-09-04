@@ -36,7 +36,7 @@ from ..domain_sources import (
     read_v2fly_group_manifest,
     write_v2fly_catalog_cache,
 )
-from ..blockchecks_backend import export_nfconf, list_bs_dns_pins, run_blockchecks_discovery, stop_blockchecks
+from ..bs_engine import export_nfconf, list_bs_dns_pins, run_blockchecks_discovery, stop_blockchecks
 from ..discovery_engine import campaign_lock_busy_message, check_blockchecks_install, is_blockchecks_job, normalize_engine
 from ..jobs import JobRunner
 from ..releases import release_channel_info
@@ -68,7 +68,8 @@ from ..storage import (
     set_preset_domain_enabled,
     is_storage_unavailable_error as _is_storage_unavailable_error,
 )
-from ..strategy_finder import (
+from ..bc2_engine import run_multi_domain_discovery, run_standard_discovery
+from ..engine_common import (
     candidate_storage_version,
     close_stale_running_runs,
     domain_sets,
@@ -76,8 +77,6 @@ from ..strategy_finder import (
     read_candidate_domain_index,
     read_candidate_page,
     read_runs,
-    run_multi_domain_discovery,
-    run_standard_discovery,
 )
 from ..zapret2 import (
     check_install_cached,

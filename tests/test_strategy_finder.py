@@ -14,7 +14,14 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gp_control_plane import strategy_finder as strategy_finder_module
+from gp_control_plane.bc2_engine import (
+    _launch as bc2_launch,
+    _process as bc2_process,
+    _runner as bc2_runner,
+)
+from gp_control_plane.engine_common import (
+    _store as common_store,
+)
 from gp_control_plane.jobs import ManagedRuntimeQuarantinedError
 from gp_control_plane.state import read_state
 from gp_control_plane.storage import (
@@ -23,43 +30,21 @@ from gp_control_plane.storage import (
     storage_status,
     upsert_candidate_event_conn as storage_upsert_candidate_event_conn,
 )
-from gp_control_plane.strategy_finder import (
-    DiscoveryOptions,
-    LOG_RETENTION_MAX_FILES,
-    _CompactStdoutWriter,
-    _LiveStdoutRecorder,
-    _RotatingTextWriter,
-    _average_attempt_ms,
-    _cleanup_old_strategy_logs,
-    _eta_recalculation_attempts,
-    _eta_recalculation_step,
-    _progress_from_counts,
-    _resolve_blockcheck_script,
-    _run_multidomain_blockcheck_live,
-    _run_process_with_live_stdout,
-    _wait_process_after_stop,
-    _standard_attempt_plan,
-    _stdout_log_mode,
-    _write_multidomain_runner,
-    candidate_id_for,
-    candidate_total,
-    classify_domain_input,
-    classify_stderr_diagnostics,
-    close_stale_running_runs,
-    curl_failure_info,
-    latest_log_tail,
-    parse_blockcheck_stdout,
-    progress_from_stdout,
-    read_candidate_domain_index,
-    read_candidate_page,
-    read_candidates,
-    read_runs,
-    read_runs_page,
-    run_multi_domain_discovery,
-    run_standard_discovery,
-    upsert_candidates,
-    validate_domain_inputs,
-)
+from gp_control_plane.bc2_engine._launch import run_multi_domain_discovery, run_standard_discovery
+from gp_control_plane.bc2_engine._multidomain import _resolve_blockcheck_script, _write_multidomain_runner
+from gp_control_plane.bc2_engine._plan import _eta_recalculation_attempts, _eta_recalculation_step, _standard_attempt_plan
+from gp_control_plane.bc2_engine._process import _run_process_with_live_stdout, _wait_process_after_stop
+from gp_control_plane.bc2_engine._progress import _average_attempt_ms, _progress_from_counts, progress_from_stdout
+from gp_control_plane.bc2_engine._recorder import _LiveStdoutRecorder
+from gp_control_plane.bc2_engine._runner import _run_multidomain_blockcheck_live
+from gp_control_plane.bc2_engine._writers import _CompactStdoutWriter, _RotatingTextWriter, _stdout_log_mode
+from gp_control_plane.engine_common._constants import LOG_RETENTION_MAX_FILES
+from gp_control_plane.engine_common._logtail import classify_stderr_diagnostics, latest_log_tail, parse_blockcheck_stdout
+from gp_control_plane.engine_common._options import DiscoveryOptions, classify_domain_input, curl_failure_info, validate_domain_inputs
+from gp_control_plane.engine_common._retention import _cleanup_old_strategy_logs
+from gp_control_plane.engine_common._runs import close_stale_running_runs, read_runs, read_runs_page
+from gp_control_plane.engine_common._store import read_candidate_domain_index, read_candidate_page, read_candidates
+from gp_control_plane.engine_common._upsert import candidate_id_for, candidate_total, upsert_candidates
 
 
 class StrategyFinderTests(unittest.TestCase):
@@ -68,7 +53,7 @@ class StrategyFinderTests(unittest.TestCase):
         process.returncode = None
         process.wait.side_effect = [subprocess.TimeoutExpired(["sudo", "gp-root-helper"], 5), 143]
 
-        with patch.object(strategy_finder_module, "_stop_process_group") as stop:
+        with patch.object(bc2_process, "_stop_process_group") as stop:
             result = _wait_process_after_stop(process, "helper-owned-launcher")
 
         self.assertEqual(result, 143)
@@ -84,7 +69,7 @@ class StrategyFinderTests(unittest.TestCase):
         ]
 
         with (
-            patch.object(strategy_finder_module, "_stop_process_group") as stop,
+            patch.object(bc2_process, "_stop_process_group") as stop,
             patch("gp_control_plane.zapret2._signal_local_process_group") as local_signal,
         ):
             with self.assertRaisesRegex(RuntimeError, "did not terminate after stop"):
@@ -99,7 +84,7 @@ class StrategyFinderTests(unittest.TestCase):
         timeout = subprocess.TimeoutExpired(["blockcheck2.sh"], 5)
         process.wait.side_effect = [timeout, timeout]
 
-        with patch.object(strategy_finder_module, "_stop_process_group") as stop:
+        with patch.object(bc2_process, "_stop_process_group") as stop:
             with self.assertRaisesRegex(RuntimeError, "did not terminate after stop"):
                 _wait_process_after_stop(process, None)
 
@@ -134,7 +119,7 @@ class StrategyFinderTests(unittest.TestCase):
             stopper = threading.Thread(target=request_stop)
             stopper.start()
             try:
-                with patch.object(strategy_finder_module, "_stop_process_group", side_effect=root_signal_failure):
+                with patch.object(bc2_process, "_stop_process_group", side_effect=root_signal_failure):
                     with self.assertRaisesRegex(ManagedRuntimeQuarantinedError, "root run record does not match"):
                         _run_process_with_live_stdout(
                             command=[sys.executable, "-c", "import time; time.sleep(5)"],
@@ -182,13 +167,13 @@ class StrategyFinderTests(unittest.TestCase):
             recorder = _LiveStdoutRecorder(state_dir, run)
 
             with (
-                patch.object(strategy_finder_module.subprocess, "Popen", return_value=process),
+                patch.object(bc2_process.subprocess, "Popen", return_value=process),
                 patch.object(
-                    strategy_finder_module,
+                    bc2_process,
                     "acknowledge_registered_process_run_terminal",
                     side_effect=acknowledge_terminal,
                 ),
-                patch.object(strategy_finder_module, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
+                patch.object(bc2_process, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
             ):
                 result = _run_process_with_live_stdout(
                     command=["gp-root-helper", "run-owned", run["id"]],
@@ -233,13 +218,13 @@ class StrategyFinderTests(unittest.TestCase):
             recorder = _LiveStdoutRecorder(state_dir, run)
 
             with (
-                patch.object(strategy_finder_module.subprocess, "Popen", return_value=process),
+                patch.object(bc2_process.subprocess, "Popen", return_value=process),
                 patch.object(
-                    strategy_finder_module,
+                    bc2_process,
                     "acknowledge_registered_process_run_terminal",
                     side_effect=RuntimeError("gp-root-helper: run terminal is unsafe"),
                 ),
-                patch.object(strategy_finder_module, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
+                patch.object(bc2_process, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
             ):
                 with self.assertRaisesRegex(ManagedRuntimeQuarantinedError, "run terminal is unsafe"):
                     _run_process_with_live_stdout(
@@ -260,18 +245,18 @@ class StrategyFinderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
             with (
-                patch.object(strategy_finder_module, "active_runtime_payload", return_value={}),
-                patch.object(strategy_finder_module, "signal_registered_process_run") as signal_run,
-                patch.object(strategy_finder_module, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
+                patch.object(bc2_process, "active_runtime_payload", return_value={}),
+                patch.object(bc2_process, "signal_registered_process_run") as signal_run,
+                patch.object(bc2_process, "_cleanup_nft_blockcheck_tables") as cleanup_tables,
             ):
-                strategy_finder_module.stop_active_blockcheck_runtime(state_dir)
+                bc2_process.stop_active_blockcheck_runtime(state_dir)
 
         signal_run.assert_not_called()
         cleanup_tables.assert_called_once_with()
 
     def test_standard_discovery_forwards_the_assigned_public_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            with patch.object(strategy_finder_module, "_run_blockcheck_live", return_value={"id": "run-public"}) as live:
+            with patch.object(bc2_launch, "_run_blockcheck_live", return_value={"id": "run-public"}) as live:
                 result = run_standard_discovery(
                     ["youtube.com"],
                     Path(raw),
@@ -288,15 +273,15 @@ class StrategyFinderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             with (
-                patch.object(strategy_finder_module.shutil, "which", return_value="/test/blockcheck2.sh"),
+                patch.object(bc2_runner.shutil, "which", return_value="/test/blockcheck2.sh"),
                 patch.object(
-                    strategy_finder_module,
+                    bc2_process,
                     "root_command",
                     side_effect=AssertionError("root_command must not run after pre-cancel"),
                 ) as root_command,
-                patch.object(strategy_finder_module.subprocess, "Popen", side_effect=AssertionError("Popen must not run")) as popen,
+                patch.object(bc2_process.subprocess, "Popen", side_effect=AssertionError("Popen must not run")) as popen,
                 patch.object(
-                    strategy_finder_module,
+                    bc2_process,
                     "signal_registered_process_run",
                     side_effect=AssertionError("root signal must not run after pre-cancel"),
                 ) as root_signal,
@@ -323,17 +308,17 @@ class StrategyFinderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
             with (
-                patch.object(strategy_finder_module.shutil, "which", return_value="/test/blockcheck2.sh"),
+                patch.object(bc2_runner.shutil, "which", return_value="/test/blockcheck2.sh"),
                 patch.object(
-                    strategy_finder_module,
+                    bc2_process,
                     "root_command",
                     side_effect=AssertionError("root_command must not run after pre-cancel"),
                 ) as root_command,
                 patch.object(
-                    strategy_finder_module.subprocess, "Popen", side_effect=AssertionError("Popen must not run")
+                    bc2_process.subprocess, "Popen", side_effect=AssertionError("Popen must not run")
                 ) as popen,
                 patch.object(
-                    strategy_finder_module,
+                    bc2_process,
                     "signal_registered_process_run",
                     side_effect=AssertionError("root signal must not run after pre-cancel"),
                 ) as root_signal,
@@ -371,19 +356,19 @@ class StrategyFinderTests(unittest.TestCase):
                     with tempfile.TemporaryDirectory() as raw:
                         state_dir = Path(raw)
                         with (
-                            patch.object(strategy_finder_module.shutil, "which", return_value="/test/blockcheck2.sh"),
+                            patch.object(bc2_runner.shutil, "which", return_value="/test/blockcheck2.sh"),
                             patch.object(
-                                strategy_finder_module,
+                                bc2_process,
                                 "root_command",
                                 side_effect=root_command_that_cancels,
                             ) as root_command,
                             patch.object(
-                                strategy_finder_module.subprocess,
+                                bc2_process.subprocess,
                                 "Popen",
                                 side_effect=AssertionError("Popen must not run after root-command cancellation"),
                             ) as popen,
                             patch.object(
-                                strategy_finder_module,
+                                bc2_process,
                                 "signal_registered_process_run",
                                 side_effect=AssertionError("root signal must not run after root-command cancellation"),
                             ) as root_signal,
@@ -1243,7 +1228,7 @@ pktws_check_https_tls12()
                 for index in range(20)
             ]
             _store_candidate_rows(state_dir, candidates)
-            original_connect = strategy_finder_module.connect
+            original_connect = common_store.connect
             wrappers: list[object] = []
 
             class CountingConnection:
@@ -1272,8 +1257,8 @@ pktws_check_https_tls12()
                 wrappers.append(wrapper)
                 return wrapper
 
-            with patch.object(strategy_finder_module, "connect", counting_connect):
-                exported = list(strategy_finder_module.iter_strategy_candidates_filtered(state_dir, protocols=["tcp"]))
+            with patch.object(common_store, "connect", counting_connect):
+                exported = list(common_store.iter_strategy_candidates_filtered(state_dir, protocols=["tcp"]))
 
             self.assertEqual(20, len(exported))
             self.assertIn("seen", exported[0])
@@ -1314,7 +1299,7 @@ pktws_check_https_tls12()
             self.assertEqual({item["args"] for item in page["candidates"]}, {"--strategy youtube", "--strategy common-quic"})
 
     def test_core_candidate_filter_rejects_overwide_json_result(self) -> None:
-        from gp_control_plane.strategy_finder import read_strategy_candidates_filtered
+        from gp_control_plane.engine_common import read_strategy_candidates_filtered
 
         with tempfile.TemporaryDirectory() as raw:
             state_dir = Path(raw)
@@ -1704,7 +1689,7 @@ pktws_check_https_tls12()
 
             stopper = threading.Thread(target=request_stop)
             stopper.start()
-            with patch("gp_control_plane.strategy_finder._cleanup_nft_blockcheck_tables"):
+            with patch("gp_control_plane.bc2_engine._process._cleanup_nft_blockcheck_tables"):
                 result = _run_process_with_live_stdout(
                     command=command,
                     env=os.environ.copy(),
@@ -1745,7 +1730,7 @@ pktws_check_https_tls12()
             with (
                 patch.object(_RotatingTextWriter, "__enter__", new=fail_stdout_log_open),
                 patch.object(
-                    strategy_finder_module.subprocess,
+                    bc2_process.subprocess,
                     "Popen",
                     side_effect=AssertionError("Popen must not run after cancelled log-open failure"),
                 ) as popen,
@@ -1873,10 +1858,10 @@ pktws_check_https_tls12()
                 return command
 
             with (
-                patch("gp_control_plane.strategy_finder.shutil.which", return_value=str(blockcheck)),
-                patch("gp_control_plane.strategy_finder.root_command", side_effect=fake_root_command),
+                patch("gp_control_plane.bc2_engine._runner.shutil.which", return_value=str(blockcheck)),
+                patch("gp_control_plane.bc2_engine._process.root_command", side_effect=fake_root_command),
                 patch(
-                    "gp_control_plane.strategy_finder._run_blockcheck_command_live",
+                    "gp_control_plane.bc2_engine._runner._run_blockcheck_command_live",
                     side_effect=fake_run_blockcheck_command_live,
                 ),
             ):
@@ -2123,7 +2108,7 @@ pktws_check_https_tls12()
             self.assertEqual(candidate_total(state_dir), 1)
 
     def test_live_recorder_flushes_candidate_buffer_by_size(self) -> None:
-        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_FLUSH_SIZE", 2):
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.bc2_engine._recorder.LIVE_CANDIDATE_FLUSH_SIZE", 2):
             state_dir = Path(raw)
             recorder = _LiveStdoutRecorder(
                 state_dir,
@@ -2148,7 +2133,7 @@ pktws_check_https_tls12()
             self.assertEqual(candidate_total(state_dir), 2)
 
     def test_live_recorder_writes_candidates_on_background_thread(self) -> None:
-        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_FLUSH_SIZE", 1):
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.bc2_engine._recorder.LIVE_CANDIDATE_FLUSH_SIZE", 1):
             state_dir = Path(raw)
             caller_thread = threading.get_ident()
             writer_threads: list[int] = []
@@ -2167,7 +2152,7 @@ pktws_check_https_tls12()
                 },
             )
 
-            with patch("gp_control_plane.strategy_finder.upsert_candidate_event_conn", side_effect=capture_write):
+            with patch("gp_control_plane.bc2_engine._recorder.upsert_candidate_event_conn", side_effect=capture_write):
                 recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=thread")
                 recorder.record_line("!!!!! AVAILABLE !!!!!")
                 recorder.close()
@@ -2177,7 +2162,7 @@ pktws_check_https_tls12()
             self.assertNotIn(caller_thread, writer_threads)
 
     def test_live_recorder_keeps_only_candidate_sample_in_memory(self) -> None:
-        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_SAMPLE_LIMIT", 2):
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.bc2_engine._recorder.LIVE_CANDIDATE_SAMPLE_LIMIT", 2):
             state_dir = Path(raw)
             recorder = _LiveStdoutRecorder(
                 state_dir,
