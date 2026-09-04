@@ -254,6 +254,26 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 Части **не отдаются как статические файлы** (единая инлайн-страница как
 раньше, байт-в-байт). Нарезка/перегенерация: `python dev/split_ui.py`.
 
+### Структура кода и лимит размера
+
+Правило: **ни один `.py` в `src/` не превышает 500 физических строк**
+(guard: `tests/test_src_line_limit.py`). Большие файлы разбиваются в
+одноимённые пакеты, чей `__init__.py` ре-экспортирует публичную поверхность,
+поэтому импорты `from gp_control_plane.storage import …` не меняются.
+
+Движки discovery вынесены в подпакеты:
+- `engine_common/` — общий data-слой (чтение/запись кандидатов и ранов в GP,
+  валидация доменов, константы фаз/run-id, log-tail и парсер stdout);
+- `bc2_engine/` — движок blockcheck2 (`run_standard/multi_domain_discovery`,
+  live-stdout/process, прогресс/ETA, multidomain-shell);
+- `bs_engine/` — движок blockcheckS (`run_blockchecks_discovery`, harvest,
+  export nfconf, dns-pins);
+- `discovery_engine.py` — общий словарь имён движков (`normalize_engine`,
+  `is_blockchecks_job`, …).
+
+Прочие пакеты: `storage/`, `backups/`, `domain_sources/`, `core_api/`,
+`web/api_server/` (Handler из Http/Events/Get/Post-миксинов), `web/ui/`.
+
 ## Обновление
 
 Повторно запустите bootstrap:
