@@ -520,10 +520,10 @@ class BearerAuthHttpTests(unittest.TestCase):
                 return {"status": "stopped"}
 
             with mock.patch(
-                "gp_control_plane.web.api_server._job_zapret_multi_domain_discovery",
+                "gp_control_plane.web.api_server._jobs._job_zapret_multi_domain_discovery",
                 side_effect=controlled_discovery,
             ), mock.patch(
-                "gp_control_plane.web.api_server.cleanup_nft_blockcheck_tables",
+                "gp_control_plane.web.api_server._post.cleanup_nft_blockcheck_tables",
                 side_effect=cancel_hook_called.set,
             ):
                 core = _start_managed_server(serve, config, ui_enabled=False)
@@ -788,7 +788,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                 headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
 
                 with mock.patch(
-                    "gp_control_plane.web.api_server._event_payloads",
+                    "gp_control_plane.web.api_server._events._event_payloads",
                     side_effect=[{"status": {"state": "ready"}}, sqlite3.OperationalError("disk i/o error")],
                 ), mock.patch("gp_control_plane.web.api_server.time.sleep", return_value=None):
                     connection, response = _open_sse(core.port, headers)
@@ -817,7 +817,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                 core = _start_managed_server(serve, config, ui_enabled=False)
                 try:
                     with mock.patch(
-                        "gp_control_plane.web.api_server.require_bearer_token",
+                        "gp_control_plane.web.api_server._http.require_bearer_token",
                         side_effect=error,
                     ):
                         status, _headers, body = _request(core.port, "/api/core/runs/history")

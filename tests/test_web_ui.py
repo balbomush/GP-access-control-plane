@@ -240,7 +240,7 @@ class WebUiTests(unittest.TestCase):
                     snapshot_finished.set()
 
             with (
-                mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run),
+                mock.patch("gp_control_plane.web.api_server._jobs._job_zapret_standard_discovery", side_effect=active_run),
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=snapshot_after_run),
             ):
                 server = _start_captured_server(serve, config)
@@ -320,7 +320,7 @@ class WebUiTests(unittest.TestCase):
                     snapshot_completed.set()
 
             with (
-                mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=active_run),
+                mock.patch("gp_control_plane.web.api_server._jobs._job_zapret_standard_discovery", side_effect=active_run),
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
             ):
                 server = _start_captured_server(serve, config)
@@ -414,7 +414,7 @@ class WebUiTests(unittest.TestCase):
                     snapshot_finished.set()
 
             with (
-                mock.patch.object(web_app, "_job_zapret_standard_discovery", side_effect=queued_run),
+                mock.patch("gp_control_plane.web.api_server._jobs._job_zapret_standard_discovery", side_effect=queued_run),
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
             ):
                 server = start_server(serve, config)
@@ -1951,7 +1951,7 @@ class WebUiTests(unittest.TestCase):
         with _captured_server_temporary_directory() as (raw, start_server):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
-            with mock.patch.object(web_app, "MAX_JSON_REQUEST_BYTES", 10):
+            with mock.patch("gp_control_plane.web.api_server._http.MAX_JSON_REQUEST_BYTES", 10):
                 monolith_port = start_server(serve, config).port
                 core_port = start_server(serve_core, config).port
                 proxy_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
@@ -2053,9 +2053,8 @@ class WebUiTests(unittest.TestCase):
                         "cleanup": {"source_deleted": True},
                     },
                 ),
-                mock.patch.object(
-                    web_app,
-                    "export_nfconf",
+                mock.patch(
+                    "gp_control_plane.web.api_server._post.export_nfconf",
                     return_value={
                         "engine": "blockchecks",
                         "out_dir": "/tmp/nfconf-out",
@@ -2277,11 +2276,10 @@ class WebUiTests(unittest.TestCase):
                 }
 
             with (
-                mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}),
-                mock.patch.object(web_app, "run_standard_discovery", return_value={"status": "success"}),
-                mock.patch.object(
-                    web_app,
-                    "export_nfconf",
+                mock.patch("gp_control_plane.web.api_server._jobs.run_multi_domain_discovery", return_value={"status": "success"}),
+                mock.patch("gp_control_plane.web.api_server._jobs.run_standard_discovery", return_value={"status": "success"}),
+                mock.patch(
+                    "gp_control_plane.web.api_server._post.export_nfconf",
                     return_value={
                         "engine": "blockchecks",
                         "out_dir": "/tmp/nfconf-out",
@@ -2610,7 +2608,7 @@ class WebUiTests(unittest.TestCase):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             authorization = _bearer_authorization_for_state(config.output.state_dir)
-            with mock.patch.object(web_app, "MAX_JSON_REQUEST_BYTES", 10):
+            with mock.patch("gp_control_plane.web.api_server._http.MAX_JSON_REQUEST_BYTES", 10):
                 port = start_server(serve, config).port
 
                 status, headers, body = _http_request(
@@ -2631,8 +2629,8 @@ class WebUiTests(unittest.TestCase):
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             with (
-                mock.patch.object(web_app, "MAX_BACKUP_UPLOAD_BYTES", 10),
-                mock.patch.object(web_app, "import_snapshot_archive") as import_mock,
+                mock.patch("gp_control_plane.web.api_server._http.MAX_BACKUP_UPLOAD_BYTES", 10),
+                mock.patch("gp_control_plane.web.api_server._post.import_snapshot_archive") as import_mock,
             ):
                 port = start_server(serve, config).port
 
@@ -3705,7 +3703,7 @@ class WebUiTests(unittest.TestCase):
                 "curl_max_time_doh": 9,
             }
 
-            with mock.patch.object(web_app, "run_standard_discovery", return_value={"status": "success"}) as runner:
+            with mock.patch("gp_control_plane.web.api_server._jobs.run_standard_discovery", return_value={"status": "success"}) as runner:
                 result = web_app._job_zapret_standard_discovery(config, payload, object())
 
             self.assertEqual({"status": "success"}, result)
@@ -3725,7 +3723,7 @@ class WebUiTests(unittest.TestCase):
                 "curl_max_time_doh": 13,
             }
 
-            with mock.patch.object(web_app, "run_multi_domain_discovery", return_value={"status": "success"}) as runner:
+            with mock.patch("gp_control_plane.web.api_server._jobs.run_multi_domain_discovery", return_value={"status": "success"}) as runner:
                 result = web_app._job_zapret_multi_domain_discovery(config, payload, object())
 
             self.assertEqual({"status": "success"}, result)
@@ -3761,7 +3759,7 @@ class WebUiTests(unittest.TestCase):
                     snapshot_finished.set()
 
             with (
-                mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=fake_run) as runner,
+                mock.patch("gp_control_plane.web.api_server._jobs.run_multi_domain_discovery", side_effect=fake_run) as runner,
                 mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_after_run),
             ):
                 with _JobRunnerThreadTracker() as runner_threads:
@@ -3856,13 +3854,12 @@ class WebUiTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(web_app, "JobRunner", CapturingJobRunner),
-                    mock.patch.object(web_app, "run_standard_discovery", side_effect=worker_run),
-                    mock.patch.object(web_app, "run_multi_domain_discovery", side_effect=worker_run),
+                    mock.patch("gp_control_plane.web.api_server._jobs.run_standard_discovery", side_effect=worker_run),
+                    mock.patch("gp_control_plane.web.api_server._jobs.run_multi_domain_discovery", side_effect=worker_run),
                     mock.patch.object(web_app, "create_post_run_snapshot", side_effect=create_snapshot_when_idle),
                     mock.patch.object(strategy_finder_process, "signal_registered_process_run") as root_signal,
-                    mock.patch.object(
-                        web_app,
-                        "cleanup_nft_blockcheck_tables",
+                    mock.patch(
+                        "gp_control_plane.web.api_server._post.cleanup_nft_blockcheck_tables",
                         side_effect=cleanup_started.set,
                     ) as cleanup,
                 ):
@@ -3968,9 +3965,8 @@ class WebUiTests(unittest.TestCase):
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run after immediate stop"),
                     ) as root_signal,
-                    mock.patch.object(
-                        web_app,
-                        "cleanup_nft_blockcheck_tables",
+                    mock.patch(
+                        "gp_control_plane.web.api_server._post.cleanup_nft_blockcheck_tables",
                         side_effect=cleanup_completed.set,
                     ) as cleanup,
                 ):
@@ -4081,9 +4077,8 @@ class WebUiTests(unittest.TestCase):
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run after stop during root_command"),
                     ) as root_signal,
-                    mock.patch.object(
-                        web_app,
-                        "cleanup_nft_blockcheck_tables",
+                    mock.patch(
+                        "gp_control_plane.web.api_server._post.cleanup_nft_blockcheck_tables",
                         side_effect=cleanup_completed.set,
                     ) as cleanup,
                 ):
@@ -4192,9 +4187,8 @@ class WebUiTests(unittest.TestCase):
                         "signal_registered_process_run",
                         side_effect=AssertionError("root signal must not run before a child is launched"),
                     ) as root_signal,
-                    mock.patch.object(
-                        web_app,
-                        "cleanup_nft_blockcheck_tables",
+                    mock.patch(
+                        "gp_control_plane.web.api_server._post.cleanup_nft_blockcheck_tables",
                         side_effect=cleanup_completed.set,
                     ) as cleanup,
                 ):

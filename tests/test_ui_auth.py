@@ -413,7 +413,7 @@ class TestServerLifecycleTests(unittest.TestCase):
                 },
             )
 
-            with patch.object(api_server, "recover_registered_process_runs", return_value=False):
+            with patch("gp_control_plane.web.api_server._server.recover_registered_process_runs", return_value=False):
                 with self.assertRaisesRegex(RuntimeError, "managed runtime recovery could not be verified"):
                     api_server._recover_runtime_before_serve(config)
 
@@ -421,7 +421,7 @@ class TestServerLifecycleTests(unittest.TestCase):
             self.assertEqual(blocked["current_run_id"], run_id)
             self.assertEqual(blocked["current_run_status"], "running")
 
-            with patch.object(api_server, "recover_registered_process_runs", return_value=True):
+            with patch("gp_control_plane.web.api_server._server.recover_registered_process_runs", return_value=True):
                 api_server._recover_runtime_before_serve(config)
 
             released = read_state(config.output.state_dir)
@@ -441,14 +441,14 @@ class TestServerLifecycleTests(unittest.TestCase):
                     "current_run_status": "quarantined",
                 },
             )
-            with patch.object(api_server, "recover_quarantined_process_run", side_effect=RuntimeError("root artifacts missing")):
+            with patch("gp_control_plane.web.api_server._server.recover_quarantined_process_run", side_effect=RuntimeError("root artifacts missing")):
                 with self.assertRaisesRegex(RuntimeError, "root artifacts missing"):
                     api_server._recover_runtime_before_serve(config)
             blocked = read_state(config.output.state_dir)
             self.assertEqual(blocked["current_run_id"], run_id)
             self.assertEqual(blocked["current_run_status"], "quarantined")
 
-            with patch.object(api_server, "recover_quarantined_process_run") as recovered:
+            with patch("gp_control_plane.web.api_server._server.recover_quarantined_process_run") as recovered:
                 api_server._recover_runtime_before_serve(config)
 
             recovered.assert_called_once_with(run_id)
