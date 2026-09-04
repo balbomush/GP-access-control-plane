@@ -5087,6 +5087,7 @@ window.addEventListener('load', async () => {
 
     def test_strategy_discovery_without_stop_reaches_actual_privileged_child(self) -> None:
         def run_without_stop(mode: str) -> None:
+            blockcheck_path = str(Path("/test/blockcheck2.sh").resolve())
             with tempfile.TemporaryDirectory() as raw:
                 tmp = Path(raw)
                 config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
@@ -5133,7 +5134,7 @@ window.addEventListener('load', async () => {
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value=blockcheck_path),
                     mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(strategy_finder.subprocess, "Popen", side_effect=launch_child),
@@ -5159,9 +5160,9 @@ window.addEventListener('load', async () => {
                         history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
                         self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
                         history = json.loads(history_body.decode("utf-8"))
-                        self.assertEqual([["/test/blockcheck2.sh"]], child_commands)
+                        self.assertEqual([[blockcheck_path]], child_commands)
                         self.assertEqual(1, len(child_kwargs))
-                        self.assertTrue(child_kwargs[0]["start_new_session"])
+                        self.assertEqual(os.name != "nt", child_kwargs[0]["start_new_session"])
                         self.assertEqual(0, child.returncode)
                         self.assertIsNone(state["current_run_id"])
                         self.assertIsNone(state["last_error"])
@@ -5177,6 +5178,7 @@ window.addEventListener('load', async () => {
 
     def test_strategy_discovery_stop_after_actual_child_launch_terminates_and_cleans_up(self) -> None:
         def run_stop_after_launch(mode: str) -> None:
+            blockcheck_path = str(Path("/test/blockcheck2.sh").resolve())
             with tempfile.TemporaryDirectory() as raw:
                 tmp = Path(raw)
                 config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
@@ -5195,7 +5197,7 @@ window.addEventListener('load', async () => {
 
                     def wait(self, timeout: float | None = None) -> int:
                         if not self.terminated.is_set():
-                            raise subprocess.TimeoutExpired("/test/blockcheck2.sh", timeout)
+                            raise subprocess.TimeoutExpired(blockcheck_path, timeout)
                         assert self.returncode is not None
                         return self.returncode
 
@@ -5210,7 +5212,7 @@ window.addEventListener('load', async () => {
                             worker_finished.set()
 
                 def launch_child(command: list[str], *args: object, **_kwargs: object) -> ControlledChild:
-                    if command == ["/test/blockcheck2.sh"]:
+                    if command == [blockcheck_path]:
                         child_commands.append(command)
                         child_started.set()
                         return child
@@ -5239,7 +5241,7 @@ window.addEventListener('load', async () => {
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value=blockcheck_path),
                     mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(strategy_finder.subprocess, "Popen", side_effect=launch_child),
@@ -5281,7 +5283,7 @@ window.addEventListener('load', async () => {
                         history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
                         self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
                         history = json.loads(history_body.decode("utf-8"))
-                        self.assertEqual([["/test/blockcheck2.sh"]], child_commands)
+                        self.assertEqual([[blockcheck_path]], child_commands)
                         self.assertTrue(
                             child.terminated.is_set(),
                             f"termination_calls={termination_calls!r}, state={state!r}, history={history!r}",

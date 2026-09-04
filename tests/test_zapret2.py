@@ -49,6 +49,82 @@ def _root_helper_test_source(helper: Path) -> str:
 
 
 class Zapret2Tests(unittest.TestCase):
+    def _bounded_owned_cleanup(
+        self,
+        managed: subprocess.Popen[str],
+        helper: Path,
+        run_id: str,
+        env: dict[str, str],
+        registry: Path,
+        root: Path,
+        extra_pids: tuple[int, ...] = (),
+    ) -> None:
+        """Leave no fixture process if a bounded owned-run test times out.
+
+        signal-run is attempted first, but before the root record exists it
+        cannot attest any process.  In that narrow case TERMing the outer
+        helper is safe: its own trap owns the unattested supervisor and reaps
+        it before the TemporaryDirectory can disappear.
+        """
+        if managed.poll() is None:
+            try:
+                subprocess.run(["sh", str(helper), "signal-run", run_id, "TERM"], env=env, check=False, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        if managed.poll() is None and not (registry / run_id).exists():
+            managed.terminate()
+        if managed.poll() is None:
+            try:
+                managed.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+                if managed.poll() is None:
+                    managed.terminate()
+                try:
+                    managed.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    managed.kill()
+                    managed.wait(timeout=3)
+        self.assertIsNotNone(managed.returncode)
+        # Close both pipes after every timeout/error route as well as normal
+        # completion; wait() alone leaves Popen's text wrappers open.
+        managed.communicate(timeout=1)
+        self.assertFalse(Path(f"/proc/{managed.pid}").exists())
+        trap_reap_failure: AssertionError | None = None
+        for pid in extra_pids:
+            # This assertion intentionally happens before any voluntary
+            # TERM/KILL.  The pre-record test proves that the outer helper's
+            # trap reaped its own supervisor; fixture cleanup must not turn a
+            # failed trap into a passing result.
+            try:
+                _wait_for_proc_path_to_disappear(pid, timeout=3)
+            except AssertionError as error:
+                trap_reap_failure = error
+                # Safe teardown still targets only the test's recorded,
+                # unattested PID.  It is cleanup after a failed assertion,
+                # never evidence of successful root-helper reaping.
+                if Path(f"/proc/{pid}").exists():
+                    os.kill(pid, signal.SIGTERM)
+                    try:
+                        _wait_for_proc_path_to_disappear(pid, timeout=3)
+                    except AssertionError:
+                        os.kill(pid, signal.SIGKILL)
+                        _wait_for_proc_path_to_disappear(pid, timeout=3)
+        self.assertFalse((registry / run_id).exists())
+        lock_dir = registry / f".{run_id}.lock"
+        self.assertFalse(
+            lock_dir.exists(),
+            f"pre-record lock remained after outer-helper cleanup: "
+            f"{[(path.name, path.is_dir(), path.is_symlink()) for path in lock_dir.iterdir()] if lock_dir.exists() else []}",
+        )
+        self.assertFalse((registry / f".{run_id}.terminal").exists())
+        self.assertEqual([path for path in root.glob("gp-root-helper.*") if path.is_dir()], [])
+        if trap_reap_failure is not None:
+            self.fail(f"outer helper exited without reaping its pre-record supervisor: {trap_reap_failure}")
+
     def test_root_helper_accepts_only_blockcheck_digits_table_names(self) -> None:
         shell = _posix_shell()
         if shell is None:
@@ -115,6 +191,172 @@ class Zapret2Tests(unittest.TestCase):
         helper_keys = set(match.group(1).strip().split("|"))
 
         self.assertEqual(helper_keys, set(BLOCKCHECK_ENV_KEYS))
+
+    def test_root_owned_target_exit_126_is_returned_not_reclassified_as_invalid_status(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires a root Linux test environment with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "blockcheck2.sh"
+            target.write_text("#!/bin/sh\nexit 126\n", encoding="utf-8")
+            target.chmod(0o700)
+            registry = root / "runs"
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
+            run_id = "target-exit-126"
+            env = {**os.environ, "GP_ROOT_HELPER_CONFIG": str(config), "GP_ROOT_HELPER_RUN_DIR": str(registry)}
+            managed = subprocess.Popen(
+                ["sh", str(helper), "run-owned", "target-exit-126", str(target)],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                try:
+                    _, stderr = managed.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    self.fail("run-owned valid-126 did not terminate within 8 seconds")
+                self.assertEqual(managed.returncode, 126, stderr)
+                self.assertNotIn("managed target status is invalid", stderr)
+            finally:
+                self._bounded_owned_cleanup(managed, helper, run_id, env, registry, root)
+
+    def test_root_owned_multidomain_target_exit_126_is_bounded_and_cleans_runner(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires root Linux with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "blockcheck2.sh"
+            # write_multidomain_runner retains only the pre-fsleep_setup prologue.
+            # Supply its harmless bootstrap functions and make its terminal
+            # cleanup preserve the target's exact nonzero result.
+            source.write_text(
+                "#!/bin/sh\nUNAME=CYGWIN\nSKIP_PKTWS=1\nIPVS=\n"
+                "fsleep_setup() { :; }\nfix_sbin_path() { :; }\n"
+                "check_system() { :; }\ncheck_already() { :; }\n"
+                "check_prerequisites() { :; }\ncheck_dns() { :; }\n"
+                "check_virt() { :; }\nask_params() { :; }\n"
+                "cleanup() { return 126; }\nfsleep_setup\n",
+                encoding="utf-8",
+            )
+            source.chmod(0o700)
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
+            run_id = "multi-target-126"
+            registry = root / "runs"
+            env = {**os.environ, "GP_ROOT_HELPER_CONFIG": str(config), "GP_ROOT_HELPER_RUN_DIR": str(registry), "TMPDIR": str(root)}
+            managed = subprocess.Popen(
+                ["sh", str(helper), "run-multidomain-owned", run_id, str(source)],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                try:
+                    _, stderr = managed.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    self.fail("run-multidomain-owned valid-126 did not terminate within 8 seconds")
+                self.assertEqual(managed.returncode, 126, stderr)
+                self.assertNotIn("managed target status is invalid", stderr)
+            finally:
+                self._bounded_owned_cleanup(managed, helper, run_id, env, registry, root)
+
+    def test_root_owned_pre_record_ready_hang_terminates_outer_helper_and_supervisor(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0 or not shutil.which("setsid"):
+            self.skipTest("requires root Linux with setsid")
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            gates = root / "gates"
+            gates.mkdir(mode=0o700)
+            helper_copy = root / "helper.sh"
+            helper_copy.write_text(
+                _root_helper_test_source(helper).replace(
+                    "DISCOVERY_GATE_DIR='/run/gp-control-plane/gates'", f"DISCOVERY_GATE_DIR='{_posix_shell_path(gates)}'", 1
+                ),
+                encoding="utf-8",
+            )
+            helper_copy.chmod(0o700)
+            supervisor_pid = root / "supervisor.pid"
+            fake_setsid = fake_bin / "setsid"
+            fake_setsid.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$GP_TEST_SUPERVISOR_PID\"\n"
+                # Deliberately do not start the real supervisor command: this
+                # is an absent-ready, pre-record fixture.  exec avoids a
+                # shell-child/zombie ambiguity, so termination of the outer
+                # Popen must make the helper's existing trap TERM and reap
+                # this recorded fixture supervisor.
+                "exec /bin/sleep 2147483647\n",
+                encoding="utf-8",
+            )
+            fake_setsid.chmod(0o700)
+            target = root / "blockcheck2.sh"
+            target.write_text("#!/bin/sh\nexit 126\n", encoding="utf-8")
+            target.chmod(0o700)
+            config = root / "gp-root-helper.conf"
+            config.write_text(f"ZAPRET_DIR='{_posix_shell_path(root)}'\n", encoding="utf-8")
+            run_id = "pre-record-ready-hang"
+            registry = root / "runs"
+            env = {
+                **os.environ,
+                "PATH": f"{_posix_shell_path(fake_bin)}:{os.environ.get('PATH', '')}",
+                "GP_TEST_SUPERVISOR_PID": str(supervisor_pid),
+                "GP_ROOT_HELPER_CONFIG": str(config),
+                "GP_ROOT_HELPER_RUN_DIR": str(registry),
+            }
+            managed = subprocess.Popen(
+                ["sh", str(helper_copy), "run-owned", run_id, str(target)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            observed_supervisor_pid: int | None = None
+            cleanup_evidence = os.environ.get("GP_TEST_PRE_RECORD_CLEANUP_EVIDENCE")
+            try:
+                _wait_for_path(supervisor_pid)
+                observed_supervisor_pid = int(supervisor_pid.read_text(encoding="utf-8").strip())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    managed.communicate(timeout=1)
+                self.assertFalse((registry / run_id).exists())
+            finally:
+                self._bounded_owned_cleanup(
+                    managed,
+                    helper_copy,
+                    run_id,
+                    env,
+                    registry,
+                    root,
+                    (() if observed_supervisor_pid is None else (observed_supervisor_pid,)),
+                )
+                if cleanup_evidence is not None and observed_supervisor_pid is not None:
+                    evidence_path = Path(cleanup_evidence)
+                    evidence_path.write_text(
+                        "pre-record-cleanup-v1\n"
+                        f"outer-pid={managed.pid} proc=absent\n"
+                        f"supervisor-pid={observed_supervisor_pid} proc=absent\n"
+                        f"record={registry / run_id} absent\n"
+                        f"lock={registry / f'.{run_id}.lock'} absent\n"
+                        f"terminal={registry / f'.{run_id}.terminal'} absent\n"
+                        "runner-dirs=0\n"
+                        "supervisor-fallback=not-needed\n",
+                        encoding="utf-8",
+                    )
+
+    def test_target_status_metadata_contract_is_fail_closed(self) -> None:
+        helper = Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh"
+        text = helper.read_text(encoding="utf-8")
+        reader = text.split("read_owned_run_status() {", 1)[1].split("wait_for_owned_run_status()", 1)[0]
+        self.assertIn("[ ! -L \"$status_file\" ] || return 2", reader)
+        self.assertLess(reader.index("[ ! -L \"$status_file\" ] || return 2"), reader.index("[ -e \"$status_file\" ] || return 1"))
+        self.assertIn("[ -f \"$status_file\" ] || return 2", reader)
+        self.assertIn("stat -c '%u:%g:%a' \"$status_file\"", reader)
+        self.assertIn("= '0:0:600'", reader)
+        owned = text.split("run_owned_process() {", 1)[1].split("run_owned_target() {", 1)[0]
+        self.assertIn("quarantine_invalid_owned_lifecycle", owned)
+        self.assertIn('fail "managed target status is invalid"', owned)
 
     def test_root_helper_pins_trusted_path_for_generic_command_lookup(self) -> None:
         shell = _posix_shell()
@@ -714,6 +956,42 @@ table inet blockcheck42
         self.assertIn('read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null', lifecycle_validation)
         self.assertIn('[ "$gate_present" = 1 ] || return 1', lifecycle_validation)
         self.assertIn('[ "$status_present" = 0 ] && [ "$signal_present" = 0 ] || return 1', lifecycle_validation)
+
+    def test_root_helper_keeps_signal_terminal_and_invalid_status_quarantine_shapes_separate(self) -> None:
+        """A signal receipt belongs to a terminal transition, never a recordless quarantine lock."""
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "gp-root-helper.sh").read_text(encoding="utf-8")
+        signal_locked = helper.split("signal_registered_process_run_locked() {", 1)[1].split(
+            "signal_registered_terminal_is_complete() {", 1
+        )[0]
+        terminal_recovery = helper.split("recover_terminal_run() {", 1)[1].split(
+            "remove_recovery_run_artifacts() {", 1
+        )[0]
+        invalid_recovery = helper.split("recover_invalid_status_quarantine_locked() {", 1)[1].split(
+            "recover_invalid_status_quarantine() {", 1
+        )[0]
+        run_owned = helper.split("run_owned_process() {", 1)[1].split("run_owned_target() {", 1)[0]
+        supervisor_body = run_owned.split("setsid /bin/sh -c '", 1)[1].split("' gp-owned-supervisor", 1)[0]
+
+        self.assertLess(
+            signal_locked.index('write_owned_run_signal_delivery "$signal_file" "$signal" "$pid" "$pgid" "$marker"'),
+            signal_locked.index('rm -f -- "$record"'),
+        )
+        self.assertIn('signal_registered_terminal_is_complete "$run_id"', terminal_recovery)
+        self.assertIn('recovery_validate_record "$run_id" || return 2', invalid_recovery)
+        self.assertNotIn('read_owned_run_signal_delivery', invalid_recovery)
+        self.assertNotIn('signal-delivery', invalid_recovery)
+        self.assertIn('revalidate_signal_run_lifecycle_after_gate "$run_id" || return 2', signal_locked)
+        self.assertLess(
+            signal_locked.index('revalidate_signal_run_lifecycle_after_gate "$run_id" || return 2'),
+            signal_locked.index('terminate_known_process_group "$pid" "$pgid" "$marker" "$signal"'),
+        )
+        self.assertIn('exec 8<>"$lifecycle_gate" || exit 125', supervisor_body)
+        self.assertIn('flock -x 8 || exit 125', supervisor_body)
+        self.assertIn('[ "$(cat "$record")" = "helper-v1 $$ $$ $ready_marker" ] || exit 125', supervisor_body)
+        self.assertIn('[ ! -e "$lock_dir/signal-delivery" ] && [ ! -L "$lock_dir/signal-delivery" ] || exit 125', supervisor_body)
+        self.assertLess(supervisor_body.index('flock -x 8 || exit 125'), supervisor_body.index('mv -f "$tmp_status" "$status_file"'))
+        self.assertLess(supervisor_body.index('mv -f "$tmp_status" "$status_file"'), supervisor_body.index('flock -u 8 || exit 125'))
+        self.assertLess(supervisor_body.index('flock -u 8 || exit 125'), supervisor_body.index('trap "" HUP INT TERM'))
 
     def test_immediate_stop_waits_through_the_root_helper_supervisor_handshake(self) -> None:
         run_id = "late-root-record"
@@ -2233,6 +2511,8 @@ esac
         The shims model only host process inspection and group delivery.  The production
         supervisor, target-status protocol, record writing, and cleanup paths run unchanged.
         """
+        if sys.platform != "linux":
+            self.skipTest("requires Linux procfs and process-group semantics; Git Bash is not a compatible substitute")
         shell = _posix_shell()
         if shell is None:
             self.skipTest("requires a POSIX sh interpreter")
@@ -2589,7 +2869,7 @@ run_owned_multidomain_target "$2" "$3"
         )
         (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "stat").write_text(
-            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*|*signal-gate*|*signal-delivery*) printf '0:0:600\\n' ;; */runs) printf '0:0:750\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
+            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*|*signal-gate*|*signal-delivery*|*/runs/*) printf '0:0:600\\n' ;; */runs) printf '0:0:750\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
             encoding="utf-8",
         )
         (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -2783,6 +3063,8 @@ set -- run-owned "${13}" "${14}" "$4"
         self.assertIn("trap 'abort_owned_run 143' TERM", run_owned)
 
     def test_root_helper_kills_snapshot_child_after_term_when_leader_is_gone(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("requires Linux procfs and process-group semantics; Git Bash is not a compatible substitute")
         shell = _posix_shell()
         if shell is None:
             self.skipTest("requires a POSIX sh interpreter to execute the root-helper")
@@ -2817,6 +3099,8 @@ set -- run-owned "${13}" "${14}" "$4"
             self.assertFalse((registry / "snapshot-child-leader-gone").exists())
 
     def test_root_helper_refuses_kill_when_leader_marker_changes_after_term(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("requires Linux procfs and process-group semantics; Git Bash is not a compatible substitute")
         shell = _posix_shell()
         if shell is None:
             self.skipTest("requires a POSIX sh interpreter to execute the root-helper")
@@ -2890,6 +3174,10 @@ set -- run-owned "${13}" "${14}" "$4"
             "case \"$*\" in\n"
             "  *'$2 == pgid'*) printf '%s\\n%s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_CHILD_PID\" ;;\n"
             "  *'$1 == pgid'*) [ \"$(cat \"$FAKE_PHASE\")\" = killed ] && exit 1; exit 0 ;;\n"
+            "  *stat_tail*\"/proc/$FAKE_LEADER_PID/stat\"*)\n"
+            "    if [ \"$(cat \"$FAKE_PHASE\")\" = killed ]; then printf 'Z\\n'; else printf 'S\\n'; fi\n"
+            "    ;;\n"
+            "  *stat_tail*\"/proc/$FAKE_CHILD_PID/stat\"*) printf 'S\\n' ;;\n"
             "  *\"/proc/$FAKE_LEADER_PID/stat\"*)\n"
             "    if [ \"$(cat \"$FAKE_PHASE\")\" = after-term ]; then\n"
             "      [ -n \"$FAKE_LEADER_AFTER_TERM_MARKER\" ] && printf '%s\\n' \"$FAKE_LEADER_AFTER_TERM_MARKER\"\n"
@@ -3338,6 +3626,16 @@ def _wait_for_pid_to_exit(pid: int, timeout: float = 2.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError(f"PID {pid} remained live after the managed group was killed")
+
+
+def _wait_for_proc_path_to_disappear(pid: int, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    proc_path = Path(f"/proc/{pid}")
+    while time.monotonic() < deadline:
+        if not proc_path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"PID {pid} remained present in /proc after bounded cleanup")
 
 
 def _pid_is_live(pid: int) -> bool:
