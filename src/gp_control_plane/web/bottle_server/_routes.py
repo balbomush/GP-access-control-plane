@@ -101,7 +101,7 @@ def create_bottle_app(
                 )
                 raise HTTPResponse(
                     body=err_data,
-                    status=530,
+                    status=503,
                     headers={"Content-Type": "application/json; charset=utf-8"},
                 ) from None
             raise

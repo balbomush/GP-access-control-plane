@@ -20,6 +20,14 @@ _KNOWN_ERRORS: dict[str, tuple[str, str]] = {
 }
 
 
+def raise_storage_unavailable(exc: BaseException) -> None:
+    """Re-raise a transient storage error so the web layer maps it to 503."""
+    from gp_control_plane.storage import is_storage_unavailable_error
+
+    if is_storage_unavailable_error(exc):
+        raise exc
+
+
 def error_payload(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the sole JSON error shape exposed by Core and Web APIs."""
     return {

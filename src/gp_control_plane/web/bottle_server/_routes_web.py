@@ -22,7 +22,7 @@ from gp_control_plane.web.docs import (
     openapi_json_bytes,
     swagger_ui_html,
 )
-from gp_control_plane.web.errors import error_payload
+from gp_control_plane.web.errors import error_payload, raise_storage_unavailable
 from gp_control_plane.web.ui_bottle import bottle_index_html
 from gp_control_plane.web.vendor.bottle import Bottle, HTTPResponse, request, response
 
@@ -100,17 +100,31 @@ def register_web_routes(
         if not ui_enabled:
             return _json({"error": "not found"}, 404)
         if request.method == "GET":
-            return _json({"run_preferences": read_run_preferences(config)})
+            try:
+                return _json({"run_preferences": read_run_preferences(config)})
+            except Exception as exc:  # noqa: BLE001
+                raise_storage_unavailable(exc)
+                return _json({"error": str(exc)}, 400)
         try:
             payload = _request_json()
             return _json({"run_preferences": save_run_preferences(config, payload.get("run_preferences") or payload)})
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
+        except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
+            return _json({"error": str(exc)}, 400)
 
     @app.route("/api/web/events/stream", method="GET")
+    @app.route("/api/web/events/stream", method="HEAD")
     def web_events_stream() -> Any:
         if not ui_enabled:
             return _json({"error": "not found"}, 404)
+        if request.method == "HEAD":
+            return HTTPResponse(
+                body=b"",
+                status=200,
+                headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "Content-Length": "0"},
+            )
         auth_header = request.get_header("Authorization")
         try:
             require_bearer_token(config.output.state_dir, auth_header)
@@ -132,6 +146,7 @@ def register_web_routes(
             except KeyError:
                 return _json({"error": "not found"}, 404)
             except Exception as exc:  # noqa: BLE001
+                raise_storage_unavailable(exc)
                 return _json({"error": str(exc)}, 400)
         try:
             payload = _request_json()
@@ -142,4 +157,5 @@ def register_web_routes(
         except KeyError:
             return _json({"error": "not found"}, 404)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)

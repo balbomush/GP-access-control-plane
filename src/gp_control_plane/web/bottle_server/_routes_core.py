@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from http import HTTPStatus
 from typing import Any
 
 from gp_control_plane import __version__, core_api, service_api
@@ -33,7 +32,8 @@ from gp_control_plane.resource_budget import (
 )
 from gp_control_plane.settings import read_run_settings, read_service_settings, save_run_settings
 from gp_control_plane.state import has_active_runtime
-from gp_control_plane.web.api_server import _http as _api_http, _post as _api_post
+from gp_control_plane.web.api_server import _http as _api_http
+from gp_control_plane.web.api_server import _post as _api_post
 from gp_control_plane.web.api_server._errors import RequestBodyTooLarge
 from gp_control_plane.web.api_server._events import (
     _current_run_latest_log_payload,
@@ -41,14 +41,14 @@ from gp_control_plane.web.api_server._events import (
     _latest_log_payload,
 )
 from gp_control_plane.web.api_server._helpers import _query_one
+from gp_control_plane.web.api_server._http import NDJSON_CONTENT_TYPE
 from gp_control_plane.web.api_server._jobs import (
     _clean_install_vault_create_response,
     _clean_install_vault_public_metadata,
     _clean_install_vault_restore_response,
     _job_discovery,
 )
-from gp_control_plane.web.api_server._http import NDJSON_CONTENT_TYPE
-from gp_control_plane.web.errors import error_payload
+from gp_control_plane.web.errors import error_payload, raise_storage_unavailable
 from gp_control_plane.web.vendor.bottle import Bottle, HTTPResponse, request
 
 
@@ -81,6 +81,7 @@ def register_core_routes(
             res = login(config.output.state_dir, payload)
             return _json(res, 200)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/auth/change-password", method="POST")
@@ -93,6 +94,7 @@ def register_core_routes(
         except PasswordValidationError as exc:
             return _json(error_payload("invalid_request", str(exc)), 400)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/strategy-discovery/start-run", method="POST")
@@ -116,6 +118,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             if "already running" in str(exc) or "lock" in str(exc) or "quarantined" in str(exc):
                 return _json(error_payload("conflict", str(exc)), 409)
             return _json({"error": str(exc)}, 400)
@@ -140,6 +143,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 409)
 
     @app.route("/api/core/strategy-discovery/export-nfconf", method="POST")
@@ -153,6 +157,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/status", method="GET")
@@ -190,6 +195,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/presets/delete-user-domain-list", method="POST")
@@ -200,6 +206,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/presets/v2fly/categories", method="GET")
@@ -211,6 +218,7 @@ def register_core_routes(
         try:
             return _json(core_api.v2fly_category_domains_payload(config, _get_query_dict()))
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/backups/list", method="GET")
@@ -227,6 +235,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json(error_payload("runtime_busy", str(exc)), 409)
 
     @app.route("/api/core/backups/restore", method="POST")
@@ -241,6 +250,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json(error_payload("runtime_busy", str(exc)), 409)
 
     @app.route("/api/core/backups/delete", method="POST")
@@ -255,6 +265,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json(error_payload("runtime_busy", str(exc)), 409)
 
     @app.route("/api/core/backups/download-archive", method="GET")
@@ -275,7 +286,8 @@ def register_core_routes(
                     "Content-Length": str(len(data)),
                 },
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json(error_payload("not_found", "Snapshot archive was not found."), 404)
 
     @app.route("/api/core/backups/upload", method="POST")
@@ -293,6 +305,7 @@ def register_core_routes(
             imported = import_snapshot_archive(config.output.state_dir, body)
             return _json(core_api.backup_snapshot_payload(imported.get("snapshot") or {}), 201)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/clean-install-vaults/list", method="GET")
@@ -315,6 +328,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/clean-install-vaults/status", method="GET")
@@ -325,6 +339,7 @@ def register_core_routes(
         except FileNotFoundError:
             return _json(error_payload("not_found", "Clean-install vault was not found."), 404)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json(error_payload("invalid_request", str(exc)), 400)
 
     @app.route("/api/core/clean-install-vaults/restore", method="POST")
@@ -337,6 +352,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json(error_payload("invalid_request", str(exc)), 400)
 
     @app.route("/api/core/run-settings", method="GET")
@@ -353,6 +369,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/runs/history", method="GET")
@@ -368,6 +385,7 @@ def register_core_routes(
         try:
             return _json(core_api.strategy_candidates_payload(config, _get_query_dict()))
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             return _json({"error": str(exc)}, 400)
 
     @app.route("/api/core/strategy-candidates/export", method=["GET", "HEAD"])
@@ -433,6 +451,7 @@ def register_core_routes(
             _ensure_idle()
             return _json(service_api.v2fly_check_updates_payload(config), 200)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             if isinstance(exc, RuntimeError) and "blocked" in str(exc):
                 return _json(error_payload("conflict", str(exc)), 409)
             return _json({"error": str(exc)}, 400)
@@ -447,6 +466,7 @@ def register_core_routes(
         except RequestBodyTooLarge as exc:
             return _json(error_payload("request_too_large", str(exc)), 413)
         except Exception as exc:  # noqa: BLE001
+            raise_storage_unavailable(exc)
             if isinstance(exc, RuntimeError) and "blocked" in str(exc):
                 return _json(error_payload("conflict", str(exc)), 409)
             return _json({"error": str(exc)}, 400)
