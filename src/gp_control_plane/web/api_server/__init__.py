@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 import threading
 import time
 from http import HTTPStatus
@@ -237,6 +238,13 @@ _core_strategy_discovery_job_payload = core_api.strategy_discovery_job_payload
 
 
 def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -> None:
+    engine = os.environ.get("GP_WEB_ENGINE", "legacy").strip().lower()
+    if engine != "legacy":
+        from gp_control_plane.web.bottle_server import serve_web_bottle
+
+        serve_web_bottle(config, host, port, ui_enabled=ui_enabled)
+        return
+
     _recover_runtime_before_serve(config)
     close_stale_running_runs(config.output.state_dir)
     runner = JobRunner(config.output.state_dir, on_idle=lambda: create_post_run_snapshot(config.output.state_dir))

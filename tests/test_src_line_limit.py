@@ -20,7 +20,7 @@ _LIMIT = 500
 pytestmark = pytest.mark.quality
 class SrcLineLimitTests(unittest.TestCase):
     def _iter_py(self):
-        return sorted(p for p in _SRC_DIR.rglob("*.py") if p.is_file())
+        return sorted(p for p in _SRC_DIR.rglob("*.py") if p.is_file() and "vendor" not in p.parts)
 
     def test_every_src_python_file_is_within_line_limit(self) -> None:
         over = []

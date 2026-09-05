@@ -1,0 +1,42 @@
+/* GP Control Plane — Bottle Responsive Mobile & Desktop UI Styles */
+
+button, input[type="button"], input[type="submit"], select, .segment-option {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.tab-navigation, [role="tablist"], .candidate-tabs, .segmented-control {
+  display: flex !important;
+  overflow-x: auto !important;
+  white-space: nowrap !important;
+  -webkit-overflow-scrolling: touch !important;
+  scrollbar-width: thin;
+  padding-bottom: 4px;
+}
+
+textarea, .line-numbered-textarea {
+  width: 100% !important;
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace !important;
+  font-size: 13px !important;
+  line-height: 1.4 !important;
+  box-sizing: border-box;
+}
+
+@media (max-width: 768px) {
+  .layout, .finder-layout, .form-grid, .preset-grid, .protocol-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+  }
+
+  .table-container, #candidates-table, #history-table {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    width: 100% !important;
+  }
+
+  .run-actions button, .button-row button {
+    width: 100% !important;
+    margin-bottom: 8px;
+  }
+}
