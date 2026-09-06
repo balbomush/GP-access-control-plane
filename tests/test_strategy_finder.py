@@ -18,6 +18,7 @@ from gp_control_plane import strategy_finder as strategy_finder_module
 from gp_control_plane.jobs import ManagedRuntimeQuarantinedError
 from gp_control_plane.state import read_state
 from gp_control_plane.storage import (
+    ClosingConnection,
     append_run,
     connect,
     storage_status,
@@ -2199,6 +2200,36 @@ pktws_check_https_tls12()
             self.assertEqual(candidate_total(state_dir), 1)
             self.assertTrue(writer_threads)
             self.assertNotIn(caller_thread, writer_threads)
+
+    def test_live_recorder_closes_each_batch_connection_before_waiting_for_next_item(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_FLUSH_SIZE", 1):
+            state_dir = Path(raw)
+            closed = threading.Event()
+            original_close = ClosingConnection.close
+
+            def track_close(connection: ClosingConnection) -> None:
+                original_close(connection)
+                closed.set()
+
+            recorder = _LiveStdoutRecorder(
+                state_dir,
+                {
+                    "id": "run-writer-close",
+                    "kind": "standard-discovery",
+                    "status": "running",
+                    "domains": ["youtube.com"],
+                },
+            )
+            with patch.object(ClosingConnection, "close", new=track_close):
+                recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=close")
+                recorder.record_line("!!!!! AVAILABLE !!!!!")
+                self.assertTrue(closed.wait(timeout=5))
+                writer = recorder._candidate_writer
+                self.assertIsNotNone(writer)
+                self.assertTrue(writer.is_alive())
+                recorder.close()
+
+            self.assertEqual(candidate_total(state_dir), 1)
 
     def test_live_recorder_keeps_only_candidate_sample_in_memory(self) -> None:
         with tempfile.TemporaryDirectory() as raw, patch("gp_control_plane.strategy_finder.LIVE_CANDIDATE_SAMPLE_LIMIT", 2):

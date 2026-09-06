@@ -1799,17 +1799,28 @@ class _LiveStdoutRecorder:
 
     def _candidate_writer_loop(self) -> None:
         try:
-            with connect(self._state_dir) as conn:
-                while True:
-                    item = self._candidate_writer_queue.get()
-                    if item is _CANDIDATE_WRITER_STOP:
-                        return
-                    events = item
-                    if not isinstance(events, list):
-                        continue
-                    for event in events:
-                        upsert_candidate_event_conn(conn, **event)
-                    conn.commit()
+            while True:
+                item = self._candidate_writer_queue.get()
+                if item is _CANDIDATE_WRITER_STOP:
+                    return
+                events = item
+                if not isinstance(events, list):
+                    continue
+                # A live run can last for hours.  Keep each candidate batch in
+                # its own connection/transaction so the background writer does
+                # not retain SQLite state between batches and authentication
+                # readers remain independent of the discovery lifecycle.
+                conn = connect(self._state_dir)
+                try:
+                    with conn:
+                        for event in events:
+                            upsert_candidate_event_conn(conn, **event)
+                finally:
+                    # sqlite3.Connection.__exit__ commits or rolls back but
+                    # does not close a standard connection.  Closing here is
+                    # deliberate: the writer must release its exact batch
+                    # handle before waiting for the next queue item.
+                    conn.close()
         except BaseException as exc:  # pragma: no cover - covered through close()
             self._candidate_writer_error = exc
 

@@ -26,11 +26,21 @@ from gp_control_plane.backups import (  # noqa: E402
 )
 from gp_control_plane.config import AppConfig, OutputConfig
 from gp_control_plane.storage import StorageUnavailableError, append_run, db_path
+from gp_control_plane.strategy_finder import _LiveStdoutRecorder, upsert_candidate_event_conn as storage_upsert_candidate_event_conn
 from gp_control_plane.web.api_server import serve
 from gp_control_plane.web.proxy import serve_web_proxy
 
 
 _PROCESS_TIMEOUT_SECONDS = 15
+
+
+def _chained_storage_unavailable_517() -> StorageUnavailableError:
+    cause = sqlite3.OperationalError("database is locked: /private/path SELECT secret")
+    cause.sqlite_errorcode = 517
+    cause.sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
+    error = StorageUnavailableError("storage is temporarily unavailable")
+    error.__cause__ = cause
+    return error
 
 
 def _serve_core_in_process(
@@ -609,6 +619,150 @@ class BearerAuthHttpTests(unittest.TestCase):
                     proxy.close()
                     core.close()
 
+    def test_live_candidate_writer_does_not_block_core_or_web_authorization(self) -> None:
+        """A real candidate batch may be open while both API roles stay usable."""
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            job_started = threading.Event()
+            writer_entered = threading.Event()
+            release_writer = threading.Event()
+            discovery_finished = threading.Event()
+            recorder_holder: list[_LiveStdoutRecorder] = []
+
+            def controlled_discovery(_config: AppConfig, payload: dict[str, Any], stop: Any, run_id: str) -> dict[str, str]:
+                logs = _config.output.state_dir / "strategy-finder" / "logs"
+                logs.mkdir(parents=True, exist_ok=True)
+                stdout_log = logs / f"{run_id}.stdout.log"
+                stdout_log.write_text("candidate writer is live\n", encoding="utf-8")
+                append_run(
+                    _config.output.state_dir,
+                    {
+                        "id": run_id,
+                        "kind": "multi-domain-discovery",
+                        "status": "running",
+                        "timestamp": "test-running",
+                        "started_at": "test-started",
+                        "domains": list(payload.get("domains") or []),
+                        "stdout_log": str(stdout_log),
+                    },
+                )
+                recorder = _LiveStdoutRecorder(
+                    _config.output.state_dir,
+                    {"id": run_id, "kind": "standard-discovery", "status": "running", "domains": list(payload.get("domains") or [])},
+                )
+                recorder_holder.append(recorder)
+                recorder.record_line("* script : standard/10-test.sh")
+                recorder.record_line("- curl_test_https_tls12 ipv4 youtube.com : nfqws2 --payload=live")
+                recorder.record_line("!!!!! AVAILABLE !!!!!")
+                job_started.set()
+                if not stop.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+                    raise TimeoutError("test stop endpoint did not cancel the active job")
+                if not release_writer.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+                    raise TimeoutError("test did not release the candidate writer")
+                recorder.close()
+                append_run(
+                    _config.output.state_dir,
+                    {
+                        "id": run_id,
+                        "kind": "multi-domain-discovery",
+                        "status": "stopped",
+                        "timestamp": "test-stopped",
+                        "started_at": "test-started",
+                        "completed_at": "test-stopped",
+                        "domains": list(payload.get("domains") or []),
+                        "stdout_log": str(stdout_log),
+                    },
+                )
+                discovery_finished.set()
+                return {"status": "stopped"}
+
+            def hold_real_candidate_write(conn: Any, **event: Any) -> None:
+                storage_upsert_candidate_event_conn(conn, **event)
+                writer_entered.set()
+                if not release_writer.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+                    raise TimeoutError("test did not release the candidate writer")
+
+            with mock.patch(
+                "gp_control_plane.web.api_server._job_zapret_multi_domain_discovery",
+                side_effect=controlled_discovery,
+            ), mock.patch(
+                "gp_control_plane.strategy_finder.upsert_candidate_event_conn",
+                side_effect=hold_real_candidate_write,
+            ), mock.patch(
+                "gp_control_plane.strategy_finder.LIVE_CANDIDATE_FLUSH_SIZE",
+                1,
+            ), mock.patch(
+                "gp_control_plane.web.api_server.create_post_run_snapshot",
+                return_value={"kind": "snapshot", "status": "success", "snapshot_id": "test-snapshot", "completed_at": "test-stopped"},
+            ):
+                core = _start_managed_server(serve, config, ui_enabled=False)
+                proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
+                try:
+                    status, _headers, body = _request(
+                        core.port,
+                        "/api/auth/login",
+                        method="POST",
+                        body=_json_bytes({"username": "admin", "password": "admin"}),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 200, body)
+                    headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}", "Content-Type": "application/json"}
+                    status, _headers, body = _request(
+                        core.port,
+                        "/api/core/strategy-discovery/start-run",
+                        method="POST",
+                        body=_json_bytes({"mode": "multi_domain", "domains": ["youtube.com"], "protocols": ["tcp"]}),
+                        headers=headers,
+                    )
+                    self.assertEqual(status, 202, body)
+                    run_id = str(json.loads(body)["run_id"])
+                    self.assertTrue(job_started.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                    self.assertTrue(writer_entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+
+                    for port in (core.port, proxy.port):
+                        status, _headers, body = _request(
+                            port,
+                            "/api/auth/login",
+                            method="POST",
+                            body=_json_bytes({"username": "admin", "password": "admin"}),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        self.assertEqual(status, 200, body)
+                        bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
+                        status, _headers, body = _request(port, "/api/core/status", headers=bearer)
+                        self.assertEqual(status, 200, body)
+                        self.assertEqual(json.loads(body)["current_run"], {"run_id": run_id, "status": "running"})
+                        status, _headers, body = _request(port, "/api/core/runs/history", headers=bearer)
+                        self.assertEqual(status, 200, body)
+                        self.assertTrue(any(item.get("run_id") == run_id for item in json.loads(body)["runs"]))
+                        status, _headers, body = _request(
+                            port, "/api/core/strategy-discovery/current-run-latest-log", headers=bearer
+                        )
+                        self.assertEqual(status, 200, body)
+                        log = json.loads(body)
+                        self.assertEqual(log["run_id"], run_id)
+                        self.assertTrue(log["stdout_tail"])
+
+                    release_writer.set()
+                    status, _headers, body = _request(
+                        proxy.port,
+                        "/api/core/strategy-discovery/stop-current-run",
+                        method="POST",
+                        body=_json_bytes({}),
+                        headers=headers,
+                    )
+                    self.assertEqual(status, 202, body)
+                    self.assertEqual(json.loads(body), {"accepted": True, "run_id": run_id, "status": "stopping"})
+                    release_writer.set()
+                    self.assertTrue(discovery_finished.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+                    _wait_for_stopped_run(self, core.port, headers, run_id)
+                finally:
+                    release_writer.set()
+                    for recorder in recorder_holder:
+                        recorder.close()
+                    proxy.close()
+                    core.close()
+
     def test_password_rotation_revokes_open_sse_streams(self) -> None:
         for topology in ("core", "proxy"):
             with self.subTest(topology=topology), tempfile.TemporaryDirectory() as raw:
@@ -689,6 +843,47 @@ class BearerAuthHttpTests(unittest.TestCase):
                     proxy.close()
                     core.close()
 
+    def test_core_and_proxy_auth_storage_diagnostics_keep_public_503_generic(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            core = _start_managed_server(serve, config, ui_enabled=False)
+            proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
+            try:
+                status, _headers, body = _request(
+                    core.port,
+                    "/api/auth/login",
+                    method="POST",
+                    body=_json_bytes({"username": "admin", "password": "admin"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200, body)
+                headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}?must-not-log"}
+                expected = {"error": {"code": "storage_unavailable", "message": "Storage is temporarily unavailable.", "details": {}}}
+                for port, patch_target, logger_name in (
+                    (core.port, "gp_control_plane.web.api_server.require_bearer_token", "gp_control_plane.web.api_server"),
+                    (proxy.port, "gp_control_plane.web.proxy.require_bearer_token", "gp_control_plane.web.proxy"),
+                ):
+                    error = sqlite3.OperationalError("database is locked: /private/path SELECT secret")
+                    error.sqlite_errorcode = 517
+                    error.sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
+                    with mock.patch(patch_target, side_effect=error), self.assertLogs(logger_name, level="WARNING") as logged:
+                        status, _response_headers, response_body = _request(port, "/api/core/status?secret=query", headers=headers)
+                    self.assertEqual(status, 503, response_body)
+                    self.assertEqual(json.loads(response_body), expected)
+                    record = "\n".join(logged.output)
+                    self.assertIn("operation=GET", record)
+                    self.assertIn("route=/api/core/status", record)
+                    self.assertIn("sqlite_primary_code=5", record)
+                    self.assertIn("sqlite_extended_code=517", record)
+                    self.assertIn("sqlite_errorname=SQLITE_BUSY_SNAPSHOT", record)
+                    self.assertIn("exception_type=OperationalError", record)
+                    self.assertNotIn("secret=query", record)
+                    self.assertNotIn("must-not-log", record)
+                    self.assertNotIn("/private/path", record)
+            finally:
+                proxy.close()
+                core.close()
+
     def test_non_transient_sqlite_operational_error_is_not_a_storage_unavailable_success(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
@@ -754,12 +949,12 @@ class BearerAuthHttpTests(unittest.TestCase):
 
                 def unavailable_after_first_line(*_args: object, **_kwargs: object) -> object:
                     yield b'{"id":"first"}\n'
-                    raise sqlite3.OperationalError("disk i/o error")
+                    raise _chained_storage_unavailable_517()
 
                 with mock.patch(
                     "gp_control_plane.core_api.iter_strategy_candidates_export_lines",
                     side_effect=unavailable_after_first_line,
-                ):
+                ), self.assertLogs("gp_control_plane.web.api_server", level="WARNING") as logged:
                     status, response_headers, body = _request(
                         core.port, "/api/core/strategy-candidates/export", headers=headers
                     )
@@ -768,6 +963,13 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertEqual(body, b'{"id":"first"}\n')
                 self.assertNotIn(b"HTTP/", body)
                 self.assertNotIn(b"disk i/o error", body)
+                record = "\n".join(logged.output)
+                self.assertIn("operation=GET", record)
+                self.assertIn("route=/api/core/strategy-candidates/export", record)
+                self.assertIn("sqlite_primary_code=5", record)
+                self.assertIn("sqlite_extended_code=517", record)
+                self.assertIn("sqlite_errorname=SQLITE_BUSY_SNAPSHOT", record)
+                self.assertNotIn("/private/path", record)
             finally:
                 core.close()
 
@@ -789,8 +991,10 @@ class BearerAuthHttpTests(unittest.TestCase):
 
                 with mock.patch(
                     "gp_control_plane.web.api_server._event_payloads",
-                    side_effect=[{"status": {"state": "ready"}}, sqlite3.OperationalError("disk i/o error")],
-                ), mock.patch("gp_control_plane.web.api_server.time.sleep", return_value=None):
+                    side_effect=[{"status": {"state": "ready"}}, _chained_storage_unavailable_517()],
+                ), mock.patch("gp_control_plane.web.api_server.time.sleep", return_value=None), self.assertLogs(
+                    "gp_control_plane.web.api_server", level="WARNING"
+                ) as logged:
                     connection, response = _open_sse(core.port, headers)
                     stream = response.read()
 
@@ -803,6 +1007,13 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertEqual(error_data["error"], "storage_unavailable")
                 self.assertNotIn("disk i/o error", stream.decode("utf-8"))
                 self.assertNotIn("HTTP/", stream.decode("utf-8"))
+                record = "\n".join(logged.output)
+                self.assertIn("operation=GET", record)
+                self.assertIn("route=/api/web/events/stream", record)
+                self.assertIn("sqlite_primary_code=5", record)
+                self.assertIn("sqlite_extended_code=517", record)
+                self.assertIn("sqlite_errorname=SQLITE_BUSY_SNAPSHOT", record)
+                self.assertNotIn("/private/path", record)
             finally:
                 _close_sse(connection, response)
                 core.close()
@@ -989,8 +1200,10 @@ class BearerAuthHttpTests(unittest.TestCase):
 
                 with mock.patch(
                     "gp_control_plane.web.proxy.api_runtime.web_event_changes",
-                    side_effect=[iter((("status", {"state": "ready"}),)), sqlite3.OperationalError("disk i/o error")],
-                ), mock.patch("gp_control_plane.web.proxy.time.sleep", return_value=None):
+                    side_effect=[iter((("status", {"state": "ready"}),)), _chained_storage_unavailable_517()],
+                ), mock.patch("gp_control_plane.web.proxy.time.sleep", return_value=None), self.assertLogs(
+                    "gp_control_plane.web.proxy", level="WARNING"
+                ) as logged:
                     connection, response = _open_sse(proxy.port, headers)
                     stream = response.read()
 
@@ -1002,6 +1215,13 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertEqual(error_data["error"], "storage_unavailable")
                 self.assertNotIn("disk i/o error", stream.decode("utf-8"))
                 self.assertNotIn("HTTP/", stream.decode("utf-8"))
+                record = "\n".join(logged.output)
+                self.assertIn("operation=GET", record)
+                self.assertIn("route=/api/web/events/stream", record)
+                self.assertIn("sqlite_primary_code=5", record)
+                self.assertIn("sqlite_extended_code=517", record)
+                self.assertIn("sqlite_errorname=SQLITE_BUSY_SNAPSHOT", record)
+                self.assertNotIn("/private/path", record)
             finally:
                 _close_sse(connection, response)
                 proxy.close()

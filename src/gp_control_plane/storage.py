@@ -122,6 +122,24 @@ def is_storage_unavailable_error(error: BaseException) -> bool:
     return any(message in str(error).lower() for message in _TRANSIENT_SQLITE_MESSAGES)
 
 
+def storage_unavailable_diagnostic(error: BaseException | None) -> dict[str, Any]:
+    """Return safe, transport-independent details for an unavailable store.
+
+    This intentionally excludes exception text because SQLite messages may
+    include SQL or paths.  API adapters add their own method and path only.
+    """
+    root = error
+    while root is not None and root.__cause__ is not None:
+        root = root.__cause__
+    extended = getattr(root, "sqlite_errorcode", None)
+    return {
+        "sqlite_primary_code": (extended & 0xFF) if isinstance(extended, int) else None,
+        "sqlite_extended_code": extended if isinstance(extended, int) else None,
+        "sqlite_errorname": getattr(root, "sqlite_errorname", None),
+        "exception_type": type(root).__name__ if root is not None else "unknown",
+    }
+
+
 def _raise_storage_unavailable(error: sqlite3.OperationalError) -> None:
     """Map only known temporary SQLite availability failures to a stable error."""
     if is_storage_unavailable_error(error):
@@ -309,28 +327,23 @@ def auth_read_snapshot(
     conn: sqlite3.Connection | None = None
     try:
         # ``mode=ro`` and ``query_only`` guarantee this path cannot create,
-        # migrate, or modify the database.  BEGIN is deferred: the SELECT made
-        # by the caller obtains a WAL reader snapshot without competing for the
-        # live writer's RESERVED lock.
+        # migrate, or modify the database.  Autocommit keeps the one SELECT
+        # performed by an auth caller as a short WAL reader instead of retaining
+        # an explicit transaction until the caller exits the context.
         conn = sqlite3.connect(
             f"{path.resolve().as_uri()}?mode=ro",
             uri=True,
             timeout=timeout_ms / 1000,
+            isolation_level=None,
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
-        conn.execute("BEGIN")
         yield conn
     except sqlite3.OperationalError as error:
         _raise_storage_unavailable(error)
     finally:
         if conn is not None:
-            try:
-                conn.rollback()
-            except sqlite3.OperationalError as error:
-                _raise_storage_unavailable(error)
-            finally:
-                conn.close()
+            conn.close()
 
 
 def storage_runtime_status(state_dir: Path) -> dict[str, Any]:

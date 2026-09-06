@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import threading
 import time
@@ -65,6 +66,7 @@ from ..storage import (
     save_system_preset,
     set_preset_domain_enabled,
     is_storage_unavailable_error as _is_storage_unavailable_error,
+    storage_unavailable_diagnostic,
 )
 from ..strategy_finder import (
     candidate_storage_version,
@@ -99,6 +101,7 @@ MAX_JSON_REQUEST_BYTES = JSON_REQUEST_MAX_BYTES
 NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8"
 
 _core_strategy_discovery_job_payload = core_api.strategy_discovery_job_payload
+_LOGGER = logging.getLogger(__name__)
 _EVENT_CURSOR_LOCK = threading.Lock()
 _EVENT_CURSOR_STATE: dict[str, dict[str, Any]] = {}
 _ROOT_MANAGED_DISCOVERY_NAMES = frozenset(
@@ -177,7 +180,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
-                    self._storage_unavailable()
+                    self._storage_unavailable(exc)
                     return
                 raise
 
@@ -262,7 +265,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self._json(web_json_get_payload(config, path, query))
                 except Exception as exc:  # noqa: BLE001
                     if _is_storage_unavailable_error(exc):
-                        self._storage_unavailable()
+                        self._storage_unavailable(exc)
                         return
                     self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -270,7 +273,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 self._json(self._json_get_routes(query)[path]())
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
-                    self._storage_unavailable()
+                    self._storage_unavailable(exc)
                     return
                 if path == "/api/core/clean-install-vaults/status" and isinstance(exc, FileNotFoundError):
                     self._json(error_payload("not_found", "Clean-install vault was not found."), status=HTTPStatus.NOT_FOUND)
@@ -322,7 +325,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     self._json(core_api.backup_snapshot_payload(imported.get("snapshot") or {}), status=HTTPStatus.CREATED)
                 except Exception as exc:  # noqa: BLE001
                     if _is_storage_unavailable_error(exc):
-                        self._storage_unavailable()
+                        self._storage_unavailable(exc)
                         return
                     if isinstance(exc, RuntimeBusyError):
                         self._json({"error": "runtime_busy"}, status=HTTPStatus.CONFLICT)
@@ -520,7 +523,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 payload, status = handler()
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
-                    self._storage_unavailable()
+                    self._storage_unavailable(exc)
                     return
                 if isinstance(exc, AuthenticationError):
                     self._auth_error(exc)
@@ -605,6 +608,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                     return
                 except Exception as exc:  # noqa: BLE001
                     if _is_storage_unavailable_error(exc):
+                        self._log_storage_unavailable(exc)
                         self._event(
                             "event-error",
                             {
@@ -654,7 +658,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 require_bearer_token(config.output.state_dir, self.headers.get("Authorization"))
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
-                    self._storage_unavailable()
+                    self._storage_unavailable(exc)
                     return False
                 if isinstance(exc, AuthenticationError):
                     self._auth_error(exc)
@@ -662,9 +666,21 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 raise
             return True
 
-        def _storage_unavailable(self) -> None:
+        def _storage_unavailable(self, error: BaseException | None = None) -> None:
+            self._log_storage_unavailable(error)
             self._json(error_payload("storage_unavailable", "Storage is temporarily unavailable."), HTTPStatus.SERVICE_UNAVAILABLE)
 
+        def _log_storage_unavailable(self, error: BaseException | None = None) -> None:
+            details = storage_unavailable_diagnostic(error)
+            _LOGGER.warning(
+                "storage unavailable operation=%s route=%s sqlite_primary_code=%s sqlite_extended_code=%s sqlite_errorname=%s exception_type=%s",
+                self.command,
+                urlparse(self.path).path,
+                details["sqlite_primary_code"],
+                details["sqlite_extended_code"],
+                details["sqlite_errorname"],
+                details["exception_type"],
+            )
         def _auth_error(self, error: AuthenticationError) -> None:
             del error
             data = json.dumps(
@@ -710,7 +726,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 path = snapshot_file_path(config.output.state_dir, snapshot_id, file_name)
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
-                    self._storage_unavailable()
+                    self._storage_unavailable(exc)
                     return
                 self._not_found()
                 return
@@ -738,7 +754,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 first_line = None
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
-                    self._storage_unavailable()
+                    self._storage_unavailable(exc)
                     return
                 raise
             self.send_response(HTTPStatus.OK)
@@ -756,6 +772,7 @@ def serve(config: AppConfig, host: str, port: int, *, ui_enabled: bool = True) -
                 return
             except Exception as exc:  # noqa: BLE001
                 if _is_storage_unavailable_error(exc):
+                    self._log_storage_unavailable(exc)
                     self.close_connection = True
                     return
                 raise

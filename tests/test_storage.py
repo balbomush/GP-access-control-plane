@@ -34,6 +34,7 @@ from gp_control_plane.storage import (
     save_system_preset,
     set_preset_domain_enabled,
     storage_status,
+    storage_unavailable_diagnostic,
 )
 
 
@@ -59,6 +60,21 @@ class StorageTests(unittest.TestCase):
 
         self.assertFalse(is_storage_unavailable_error(sqlite3.OperationalError("no such table: runs")))
         self.assertFalse(is_storage_unavailable_error(sqlite3.OperationalError("near \"FROM\": syntax error")))
+
+    def test_storage_unavailable_diagnostic_decomposes_extended_sqlite_code_without_error_text(self) -> None:
+        error = sqlite3.OperationalError("database is locked: /private/path SELECT secret")
+        error.sqlite_errorcode = 517  # SQLITE_BUSY_SNAPSHOT
+        error.sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
+
+        self.assertEqual(
+            storage_unavailable_diagnostic(error),
+            {
+                "sqlite_primary_code": 5,
+                "sqlite_extended_code": 517,
+                "sqlite_errorname": "SQLITE_BUSY_SNAPSHOT",
+                "exception_type": "OperationalError",
+            },
+        )
 
     def test_auth_transaction_rolls_back_partial_settings_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
