@@ -24,13 +24,15 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('python3 "$source_dir/scripts/clean-install-vault.py"', self.bootstrap)
         self.assertEqual(self.bootstrap.count("sudo --"), 1)
         self.assertIn('git -C "$source_dir" status --porcelain', self.bootstrap)
-        self.assertIn('[ -e "$legacy_state" ] || [ -L "$legacy_state" ]', self.bootstrap)
-        self.assertIn('canonical legacy state is not a non-symlink directory', self.bootstrap)
-        self.assertIn('canonical legacy state has an invalid layout', self.bootstrap)
-        self.assertIn('canonical legacy strategy-finder is not a non-symlink directory', self.bootstrap)
-        self.assertIn('canonical legacy strategy-finder path escapes state', self.bootstrap)
-        self.assertIn('--verify --state-dir "$legacy_state"', self.bootstrap)
-        self.assertLess(self.bootstrap.index('--verify --state-dir "$legacy_state"'), self.bootstrap.index('python3 "$source_dir/scripts/clean-install-vault.py" --state-dir'))
+        self.assertIn('v040_state="$HOME/gp/.GP-access-control-plane.data/state"', self.bootstrap)
+        self.assertIn('[ -e "$v040_state" ] || [ -L "$v040_state" ]', self.bootstrap)
+        self.assertIn('canonical v0.4 state is not a non-symlink directory', self.bootstrap)
+        self.assertIn('canonical v0.4 state has an invalid layout', self.bootstrap)
+        self.assertIn('canonical v0.4 strategy-finder is not a non-symlink directory', self.bootstrap)
+        self.assertIn('canonical v0.4 strategy-finder path escapes state', self.bootstrap)
+        self.assertIn('--verify --home "$HOME"', self.bootstrap)
+        self.assertNotIn('--verify --state-dir', self.bootstrap)
+        self.assertLess(self.bootstrap.index('--verify --home "$HOME"'), self.bootstrap.index('python3 "$source_dir/scripts/clean-install-vault.py" --state-dir'))
         self.assertIn('initial_install=on', self.bootstrap)
         self.assertIn('--initial-install "$initial_install"', self.bootstrap)
         for forbidden in ("latest-stable", "refs/heads", "GP_EXPECTED_SHA", "candidate", "rollback", "clean-remove"):
@@ -97,6 +99,13 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertNotIn("GP_REPO_URL", self.hardware_bootstrap)
         self.assertNotIn("hardware-candidate-bootstrap", (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8"))
 
+    def test_both_bootstraps_use_only_the_canonical_v040_state_source(self) -> None:
+        for bootstrap in (self.bootstrap, self.hardware_bootstrap):
+            self.assertIn('v040_state="$HOME/gp/.GP-access-control-plane.data/state"', bootstrap)
+            self.assertIn('--state-dir "$v040_state" --home "$HOME"', bootstrap)
+            self.assertNotIn('GP-access-control-plane/build/state', bootstrap)
+            self.assertNotIn('--verify --state-dir', bootstrap)
+
     def test_root_process_verifies_vault_before_fixed_removal_and_installs_both_topologies(self) -> None:
         verify = self.installer.index('runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify')
         removal = self.installer.index('rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane')
@@ -119,6 +128,8 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('gp-control-plane-root-helper', self.installer)
         self.assertIn('case "$INITIAL_INSTALL" in on|off)', self.installer)
         self.assertIn('if [ "$INITIAL_INSTALL" = off ]; then', self.installer)
+        self.assertIn('python3 "$vault_tool" --verify --home "$target_home"', self.installer)
+        self.assertNotIn('--verify --state-dir', self.installer)
         self.assertEqual(self.installer.count('--restore --target-state-dir "$state_dir"'), 1)
         self.assertIn('visudo -cf /etc/sudoers.d/gp-control-plane-root-helper', self.installer)
         self.assertIn('scripts/install-zapret2.sh', self.installer)
@@ -266,36 +277,53 @@ class CleanInstallerTests(unittest.TestCase):
             self.assertIn(str(wrapper), result.stdout)
             self.assertIn("ready:probe", result.stdout)
 
-    def test_bootstrap_reuses_pending_vault_across_preclean_failure_then_retry(self) -> None:
+    def test_bootstrap_rejects_stale_pending_vault_while_v040_source_remains_live(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
         bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
         if not bash:
             self.skipTest("bash is required")
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as raw:
-            sandbox = Path(raw); fake_bin = sandbox / "bin"; home = sandbox / "home"; log = sandbox / "calls.log"
+            sandbox = Path(raw); fake_bin = sandbox / "bin"; home = sandbox / "home"; log = sandbox / "calls.log"; vault_marker = sandbox / "vault-ready"
             fake_bin.mkdir()
-            legacy_state = home / "gp" / "GP-access-control-plane" / "build" / "state"
-            (legacy_state / "strategy-finder").mkdir(parents=True)
-            (legacy_state / "strategy-finder" / "state.sqlite3").write_bytes(b"sqlite")
+            v040_state = home / "gp" / ".GP-access-control-plane.data" / "state"
+            (v040_state / "strategy-finder").mkdir(parents=True)
+            (v040_state / "strategy-finder" / "state.sqlite3").write_bytes(b"sqlite")
             def bash_path(path: Path) -> str:
                 raw_path = path.resolve().as_posix()
                 return f"/{raw_path[0].lower()}{raw_path[2:]}" if len(raw_path) > 2 and raw_path[1] == ":" else raw_path
             def fake(name: str, body: str) -> None:
                 path = fake_bin / name; path.write_text("#!/usr/bin/env bash\nset -eu\n" + body, encoding="utf-8"); path.chmod(0o755)
             fake("id", 'case "$1" in -u) echo 1000;; -un) echo gpuser;; *) exit 64;; esac\n')
-            fake("git", 'case "$1" in clone) dest="${!#}"; mkdir -p "$dest/scripts";; -C) shift 2; case "$1" in cat-file) echo tag;; rev-parse) echo deadbeef;; checkout) :;; status) :;; *) exit 64;; esac;; *) exit 64;; esac\n')
-            fake("python3", 'case " $* " in *" --verify "*) echo VERIFY >> "$TEST_LOG"; exit 0;; *) echo CREATE >> "$TEST_LOG"; exit 99;; esac\n')
-            fake("sudo", 'echo SUDO >> "$TEST_LOG"; exit "${SUDO_RESULT:-73}"\n')
-            env = {**os.environ, "HOME": bash_path(home), "GP_BRANCH": "v0.4.0", "TEST_LOG": bash_path(log)}
-            invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / "bootstrap-linux.sh")]
-            first = subprocess.run(invoke, env={**env, "SUDO_RESULT": "73"}, capture_output=True, text=True)
-            self.assertEqual(first.returncode, 73, first.stderr)
-            second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True)
-            self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["VERIFY", "SUDO", "VERIFY", "SUDO"])
+            fake("git", 'case "$1" in clone) dest="${!#}"; mkdir -p "$dest/scripts";; -C) shift 2; case "$1" in cat-file) echo tag;; rev-parse) printf "%s\\n" "${GP_TEST_CANDIDATE_SHA:-deadbeef}";; checkout) :;; status) :;; *) exit 64;; esac;; *) exit 64;; esac\n')
+            fake("python3", 'case " $* " in *" --verify "*) printf "VERIFY:%s\\n" "$*" >> "$TEST_LOG"; [ -e "$VAULT_MARKER" ];; *) printf "CREATE:%s\\n" "$*" >> "$TEST_LOG"; : > "$VAULT_MARKER";; esac\n')
+            fake("sudo", 'printf "SUDO:%s\\n" "$*" >> "$TEST_LOG"; exit "${SUDO_RESULT:-73}"\n')
+            for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh"):
+                with self.subTest(script=script):
+                    if log.exists():
+                        log.unlink()
+                    if vault_marker.exists():
+                        vault_marker.unlink()
+                    env = {**os.environ, "HOME": bash_path(home), "TEST_LOG": bash_path(log), "VAULT_MARKER": bash_path(vault_marker), "GP_TEST_CANDIDATE_SHA": "a" * 40}
+                    if script == "bootstrap-linux.sh":
+                        env["GP_BRANCH"] = "v0.4.0"
+                        invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / script)]
+                    else:
+                        invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), "a" * 40]
+                    first = subprocess.run(invoke, env={**env, "SUDO_RESULT": "73"}, capture_output=True, text=True)
+                    self.assertEqual(first.returncode, 73, first.stderr)
+                    (v040_state / "strategy-finder" / "state.sqlite3").write_bytes(b"newer source data")
+                    second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True)
+                    self.assertNotEqual(second.returncode, 0)
+                    self.assertIn("pending clean-install vault exists while canonical v0.4 state is still live", second.stderr)
+                    calls = log.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(len(calls), 5, calls)
+                    self.assertEqual(sum(call.startswith("CREATE:") for call in calls), 1, calls)
+                    self.assertEqual(sum(call.startswith("SUDO:") for call in calls), 1, calls)
+                    self.assertTrue(all("--state-dir" not in call for call in calls if call.startswith("VERIFY:")), calls)
+                    self.assertTrue(all("--initial-install off" in call for call in calls if call.startswith("SUDO:")), calls)
 
-    def test_present_invalid_legacy_state_stops_before_sudo_for_both_bootstraps(self) -> None:
+    def test_present_invalid_v040_state_stops_before_sudo_for_both_bootstraps(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
         bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
         if not bash:
@@ -321,30 +349,40 @@ class CleanInstallerTests(unittest.TestCase):
             fake("python3", 'echo PYTHON >> "$TEST_LOG"; exit 99\n')
             fake("sudo", 'echo SUDO >> "$TEST_LOG"; exit 64\n')
 
-            for kind in ("symlink", "file", "invalid-directory", "strategy-finder-symlink"):
+            for kind in ("symlink", "file", "missing-strategy-finder", "missing-database", "strategy-finder-symlink", "database-symlink"):
                 for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh"):
                     with self.subTest(kind=kind, script=script):
                         home = sandbox / f"home-{kind}-{script}"
-                        legacy_state = home / "gp" / "GP-access-control-plane" / "build" / "state"
-                        legacy_state.parent.mkdir(parents=True)
+                        v040_state = home / "gp" / ".GP-access-control-plane.data" / "state"
+                        v040_state.parent.mkdir(parents=True)
                         if kind == "symlink":
                             target = sandbox / f"target-{script}"
                             target.mkdir()
                             try:
-                                legacy_state.symlink_to(target, target_is_directory=True)
+                                v040_state.symlink_to(target, target_is_directory=True)
                             except OSError as exc:
                                 self.skipTest(f"symlink creation is unavailable: {exc}")
                         elif kind == "file":
-                            legacy_state.write_text("not a directory", encoding="utf-8")
-                        elif kind == "invalid-directory":
-                            legacy_state.mkdir()
-                        else:
-                            legacy_state.mkdir()
+                            v040_state.write_text("not a directory", encoding="utf-8")
+                        elif kind == "missing-strategy-finder":
+                            v040_state.mkdir()
+                        elif kind == "missing-database":
+                            (v040_state / "strategy-finder").mkdir(parents=True)
+                        elif kind == "strategy-finder-symlink":
+                            v040_state.mkdir()
                             target = sandbox / f"strategy-target-{script}"
                             target.mkdir()
                             (target / "state.sqlite3").write_bytes(b"sqlite")
                             try:
-                                (legacy_state / "strategy-finder").symlink_to(target, target_is_directory=True)
+                                (v040_state / "strategy-finder").symlink_to(target, target_is_directory=True)
+                            except OSError as exc:
+                                self.skipTest(f"symlink creation is unavailable: {exc}")
+                        else:
+                            (v040_state / "strategy-finder").mkdir(parents=True)
+                            target = sandbox / f"database-target-{script}"
+                            target.write_bytes(b"sqlite")
+                            try:
+                                (v040_state / "strategy-finder" / "state.sqlite3").symlink_to(target)
                             except OSError as exc:
                                 self.skipTest(f"symlink creation is unavailable: {exc}")
                         log = sandbox / f"{kind}-{script}.log"
@@ -356,8 +394,8 @@ class CleanInstallerTests(unittest.TestCase):
                             command = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), candidate]
                         completed = subprocess.run(command, env=env, capture_output=True, text=True)
                         self.assertNotEqual(completed.returncode, 0)
-                        self.assertIn("canonical legacy", completed.stderr)
-                        self.assertFalse(log.exists(), "invalid legacy state must stop before Python or sudo")
+                        self.assertIn("canonical v0.4", completed.stderr)
+                        self.assertFalse(log.exists(), "invalid v0.4 state must stop before Python or sudo")
 
     def test_hardware_bootstrap_rejects_non_frozen_or_short_sha_before_sudo(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")

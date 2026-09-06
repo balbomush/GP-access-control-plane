@@ -35,7 +35,7 @@ fi
 INSTALL_COMMIT="$SOURCE_COMMIT"
 target_home="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
 [ -n "$target_home" ] && [ -d "$target_home" ] || fail 'install-user home is unavailable'
-gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; legacy_state="$install_dir/build/state"; state_parent="$gp_root/.GP-access-control-plane.data"; state_dir="$state_parent/state"
+gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; state_parent="$gp_root/.GP-access-control-plane.data"; state_dir="$state_parent/state"
 [ "$target_home" = "$(readlink -f -- "$target_home")" ] && [ ! -L "$target_home" ] || fail 'install-user home is not canonical'
 if [ -e "$gp_root" ] || [ -L "$gp_root" ]; then
   [ -d "$gp_root" ] && [ ! -L "$gp_root" ] && [ "$gp_root" = "$(readlink -f -- "$gp_root")" ] || fail 'managed GP root is not canonical'
@@ -49,7 +49,7 @@ vault_tool="$SOURCE_DIR/scripts/clean-install-vault.py"
 [ -f "$vault_tool" ] && [ ! -L "$vault_tool" ] || fail 'exact tag lacks the vault tool'
 # This executes as the install user; root neither reads nor deletes the vault/handoff.
 if [ "$INITIAL_INSTALL" = off ]; then
-  runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify --state-dir "$legacy_state" --home "$target_home" >/dev/null || fail 'vault is absent or corrupt; nothing was removed'
+  runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify --home "$target_home" >/dev/null || fail 'vault is absent or corrupt; nothing was removed'
 fi
 stop_unit() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
 stop_unit gp-control-plane-web.service; stop_unit gp-control-plane-core.service

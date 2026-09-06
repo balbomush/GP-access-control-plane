@@ -17,7 +17,9 @@ done
 printf '%s\n' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$' || fail 'candidate SHA must be a full lowercase commit SHA'
 case "$INSTALL_WEB" in on|off) ;; *) fail 'GP_INSTALL_WEB must be on or off' ;; esac
 need git; need python3; need sudo
-legacy_state="$HOME/gp/GP-access-control-plane/build/state"
+# v0.4 keeps its application state outside the replaceable checkout.  This is
+# the only supported source route for the internal candidate handoff.
+v040_state="$HOME/gp/.GP-access-control-plane.data/state"
 source_dir="$(mktemp -d "${TMPDIR:-/tmp}/gp-hardware-candidate.XXXXXX")"
 cleanup() { rm -rf -- "$source_dir"; }
 trap cleanup EXIT
@@ -27,31 +29,32 @@ git -C "$source_dir" checkout --detach "$CANDIDATE_SHA"
 [ "$(git -C "$source_dir" rev-parse refs/remotes/origin/dev)" = "$CANDIDATE_SHA" ] || fail 'candidate SHA is not the frozen origin/dev tip'
 [ -z "$(git -C "$source_dir" status --porcelain)" ] || fail 'exact candidate source tree is not clean'
 initial_install=off
-if [ -e "$legacy_state" ] || [ -L "$legacy_state" ]; then
-  [ -d "$legacy_state" ] && [ ! -L "$legacy_state" ] \
-    || fail "canonical legacy state is not a non-symlink directory: $legacy_state"
-  legacy_state_canonical="$(readlink -f -- "$legacy_state" 2>/dev/null || true)"
-  [ "$legacy_state_canonical" = "$legacy_state" ] \
-    || fail "canonical legacy state path is unsafe: $legacy_state"
-  legacy_strategy_dir="$legacy_state/strategy-finder"
-  [ -d "$legacy_strategy_dir" ] && [ ! -L "$legacy_strategy_dir" ] \
-    || fail "canonical legacy strategy-finder is not a non-symlink directory: $legacy_strategy_dir"
-  legacy_strategy_dir_canonical="$(readlink -f -- "$legacy_strategy_dir" 2>/dev/null || true)"
-  [ "$legacy_strategy_dir_canonical" = "$legacy_state_canonical/strategy-finder" ] \
-    || fail "canonical legacy strategy-finder path escapes state: $legacy_strategy_dir"
-  legacy_sqlite="$legacy_strategy_dir/state.sqlite3"
-  [ -f "$legacy_sqlite" ] && [ ! -L "$legacy_sqlite" ] \
-    || fail "canonical legacy state has an invalid layout: $legacy_state"
-  legacy_sqlite_canonical="$(readlink -f -- "$legacy_sqlite" 2>/dev/null || true)"
-  [ "$legacy_sqlite_canonical" = "$legacy_strategy_dir_canonical/state.sqlite3" ] \
-    || fail "canonical legacy state database path escapes state: $legacy_sqlite"
-  if python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"; then
-    :
-  else
-    python3 "$source_dir/scripts/clean-install-vault.py" --state-dir "$legacy_state" --home "$HOME"
-    python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"
+if [ -e "$v040_state" ] || [ -L "$v040_state" ]; then
+  [ -d "$v040_state" ] && [ ! -L "$v040_state" ] \
+    || fail "canonical v0.4 state is not a non-symlink directory: $v040_state"
+  v040_state_canonical="$(readlink -f -- "$v040_state" 2>/dev/null || true)"
+  [ "$v040_state_canonical" = "$v040_state" ] \
+    || fail "canonical v0.4 state path is unsafe: $v040_state"
+  v040_strategy_dir="$v040_state/strategy-finder"
+  [ -d "$v040_strategy_dir" ] && [ ! -L "$v040_strategy_dir" ] \
+    || fail "canonical v0.4 strategy-finder is not a non-symlink directory: $v040_strategy_dir"
+  v040_strategy_dir_canonical="$(readlink -f -- "$v040_strategy_dir" 2>/dev/null || true)"
+  [ "$v040_strategy_dir_canonical" = "$v040_state_canonical/strategy-finder" ] \
+    || fail "canonical v0.4 strategy-finder path escapes state: $v040_strategy_dir"
+  v040_sqlite="$v040_strategy_dir/state.sqlite3"
+  [ -f "$v040_sqlite" ] && [ ! -L "$v040_sqlite" ] \
+    || fail "canonical v0.4 state has an invalid layout: $v040_state"
+  v040_sqlite_canonical="$(readlink -f -- "$v040_sqlite" 2>/dev/null || true)"
+  [ "$v040_sqlite_canonical" = "$v040_strategy_dir_canonical/state.sqlite3" ] \
+    || fail "canonical v0.4 state database path escapes state: $v040_sqlite"
+  # A pending vault cannot be reused while its source is still live: a failed
+  # pre-sudo attempt may have left newer source changes behind.
+  if python3 "$source_dir/scripts/clean-install-vault.py" --verify --home "$HOME"; then
+    fail 'pending clean-install vault exists while canonical v0.4 state is still live; nothing was removed'
   fi
-elif python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$legacy_state" --home "$HOME"; then
+  python3 "$source_dir/scripts/clean-install-vault.py" --state-dir "$v040_state" --home "$HOME"
+  python3 "$source_dir/scripts/clean-install-vault.py" --verify --home "$HOME"
+elif python3 "$source_dir/scripts/clean-install-vault.py" --verify --home "$HOME"; then
   :
 else
   initial_install=on

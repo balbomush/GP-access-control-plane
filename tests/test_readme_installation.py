@@ -47,13 +47,14 @@ class ReadmeInstallationTests(unittest.TestCase):
         self.assertNotIn('GP_INSTALL_CONFIG', readme)
         self.assertNotIn('GP_STATE_DIR', readme)
         self.assertNotIn('v2fly/domain-list-community', readme)
-        self.assertIn('только стандартный путь `$HOME/gp/GP-access-control-plane/build/state`', readme)
+        self.assertIn('только стандартный путь `$HOME/gp/.GP-access-control-plane.data/state`', readme)
         self.assertIn('не входит в scope этой миграции', readme)
         self.assertNotIn('latest-stable', readme)
         self.assertIn('TAG="${GP_BRANCH:-}"', bootstrap)
         self.assertIn('exact release tag vX.Y.Z or vX.Y.Z-alpha.N', bootstrap)
         self.assertIn('автоматически восстанавливает vault', readme)
         self.assertIn('аварийным путём', readme)
+        self.assertIn('найденный pending vault при всё ещё живом source останавливает путь до `sudo`', readme)
 
     def test_release_documentation_keeps_installation_outside_web_and_api(self) -> None:
         root = Path(__file__).resolve().parents[1]

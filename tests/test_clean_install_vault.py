@@ -161,7 +161,7 @@ class CleanInstallVaultTests(unittest.TestCase):
             failed_install = subprocess.run([sys.executable, "-c", "raise SystemExit(73)"], check=False)
             self.assertEqual(failed_install.returncode, 73)
             tool = Path(__file__).resolve().parents[1] / "scripts" / "clean-install-vault.py"
-            retry = subprocess.run([sys.executable, str(tool), "--verify", "--state-dir", str(source), "--home", str(home)], capture_output=True, text=True, check=False)
+            retry = subprocess.run([sys.executable, str(tool), "--verify", "--home", str(home)], capture_output=True, text=True, check=False)
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertTrue(clean_install_vault_info(target_home=home)["pending"])
             self.assertEqual(clean_install_vault_info(target_home=home)["vault_id"], created["vault_id"])
