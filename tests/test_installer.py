@@ -24,8 +24,9 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('python3 "$source_dir/scripts/clean-install-vault.py"', self.bootstrap)
         self.assertEqual(self.bootstrap.count("sudo --"), 1)
         self.assertIn('git -C "$source_dir" status --porcelain', self.bootstrap)
-        self.assertIn('v040_state="$HOME/gp/.GP-access-control-plane.data/state"', self.bootstrap)
-        self.assertIn('[ -e "$v040_state" ] || [ -L "$v040_state" ]', self.bootstrap)
+        self.assertIn('v040_checkout_state="$HOME/gp/GP-access-control-plane/build/state"', self.bootstrap)
+        self.assertIn('v040_data_state="$HOME/gp/.GP-access-control-plane.data/state"', self.bootstrap)
+        self.assertIn('both supported v0.4 state sources exist', self.bootstrap)
         self.assertIn('canonical v0.4 state is not a non-symlink directory', self.bootstrap)
         self.assertIn('canonical v0.4 state has an invalid layout', self.bootstrap)
         self.assertIn('canonical v0.4 strategy-finder is not a non-symlink directory', self.bootstrap)
@@ -99,11 +100,12 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertNotIn("GP_REPO_URL", self.hardware_bootstrap)
         self.assertNotIn("hardware-candidate-bootstrap", (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8"))
 
-    def test_both_bootstraps_use_only_the_canonical_v040_state_source(self) -> None:
+    def test_both_bootstraps_support_exactly_one_v040_state_source(self) -> None:
         for bootstrap in (self.bootstrap, self.hardware_bootstrap):
-            self.assertIn('v040_state="$HOME/gp/.GP-access-control-plane.data/state"', bootstrap)
+            self.assertIn('v040_checkout_state="$HOME/gp/GP-access-control-plane/build/state"', bootstrap)
+            self.assertIn('v040_data_state="$HOME/gp/.GP-access-control-plane.data/state"', bootstrap)
             self.assertIn('--state-dir "$v040_state" --home "$HOME"', bootstrap)
-            self.assertNotIn('GP-access-control-plane/build/state', bootstrap)
+            self.assertIn('both supported v0.4 state sources exist', bootstrap)
             self.assertNotIn('--verify --state-dir', bootstrap)
 
     def test_root_process_verifies_vault_before_fixed_removal_and_installs_both_topologies(self) -> None:
@@ -277,18 +279,15 @@ class CleanInstallerTests(unittest.TestCase):
             self.assertIn(str(wrapper), result.stdout)
             self.assertIn("ready:probe", result.stdout)
 
-    def test_bootstrap_rejects_stale_pending_vault_while_v040_source_remains_live(self) -> None:
+    def test_each_single_v040_source_creates_its_vault_and_rejects_a_stale_retry(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
         bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
         if not bash:
             self.skipTest("bash is required")
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as raw:
-            sandbox = Path(raw); fake_bin = sandbox / "bin"; home = sandbox / "home"; log = sandbox / "calls.log"; vault_marker = sandbox / "vault-ready"
+            sandbox = Path(raw); fake_bin = sandbox / "bin"
             fake_bin.mkdir()
-            v040_state = home / "gp" / ".GP-access-control-plane.data" / "state"
-            (v040_state / "strategy-finder").mkdir(parents=True)
-            (v040_state / "strategy-finder" / "state.sqlite3").write_bytes(b"sqlite")
             def bash_path(path: Path) -> str:
                 raw_path = path.resolve().as_posix()
                 return f"/{raw_path[0].lower()}{raw_path[2:]}" if len(raw_path) > 2 and raw_path[1] == ":" else raw_path
@@ -298,32 +297,39 @@ class CleanInstallerTests(unittest.TestCase):
             fake("git", 'case "$1" in clone) dest="${!#}"; mkdir -p "$dest/scripts";; -C) shift 2; case "$1" in cat-file) echo tag;; rev-parse) printf "%s\\n" "${GP_TEST_CANDIDATE_SHA:-deadbeef}";; checkout) :;; status) :;; *) exit 64;; esac;; *) exit 64;; esac\n')
             fake("python3", 'case " $* " in *" --verify "*) printf "VERIFY:%s\\n" "$*" >> "$TEST_LOG"; [ -e "$VAULT_MARKER" ];; *) printf "CREATE:%s\\n" "$*" >> "$TEST_LOG"; : > "$VAULT_MARKER";; esac\n')
             fake("sudo", 'printf "SUDO:%s\\n" "$*" >> "$TEST_LOG"; exit "${SUDO_RESULT:-73}"\n')
-            for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh"):
-                with self.subTest(script=script):
-                    if log.exists():
-                        log.unlink()
-                    if vault_marker.exists():
-                        vault_marker.unlink()
-                    env = {**os.environ, "HOME": bash_path(home), "TEST_LOG": bash_path(log), "VAULT_MARKER": bash_path(vault_marker), "GP_TEST_CANDIDATE_SHA": "a" * 40}
-                    if script == "bootstrap-linux.sh":
-                        env["GP_BRANCH"] = "v0.4.0"
-                        invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / script)]
-                    else:
-                        invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), "a" * 40]
-                    first = subprocess.run(invoke, env={**env, "SUDO_RESULT": "73"}, capture_output=True, text=True)
-                    self.assertEqual(first.returncode, 73, first.stderr)
-                    (v040_state / "strategy-finder" / "state.sqlite3").write_bytes(b"newer source data")
-                    second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True)
-                    self.assertNotEqual(second.returncode, 0)
-                    self.assertIn("pending clean-install vault exists while canonical v0.4 state is still live", second.stderr)
-                    calls = log.read_text(encoding="utf-8").splitlines()
-                    self.assertEqual(len(calls), 5, calls)
-                    self.assertEqual(sum(call.startswith("CREATE:") for call in calls), 1, calls)
-                    self.assertEqual(sum(call.startswith("SUDO:") for call in calls), 1, calls)
-                    self.assertTrue(all("--state-dir" not in call for call in calls if call.startswith("VERIFY:")), calls)
-                    self.assertTrue(all("--initial-install off" in call for call in calls if call.startswith("SUDO:")), calls)
+            for source_kind, source_relative in (
+                ("checkout", Path("gp") / "GP-access-control-plane" / "build" / "state"),
+                ("data", Path("gp") / ".GP-access-control-plane.data" / "state"),
+            ):
+                for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh"):
+                    with self.subTest(source_kind=source_kind, script=script):
+                        home = sandbox / f"home-{source_kind}-{script}"
+                        log = sandbox / f"{source_kind}-{script}.log"
+                        vault_marker = sandbox / f"{source_kind}-{script}.vault-ready"
+                        v040_state = home / source_relative
+                        (v040_state / "strategy-finder").mkdir(parents=True)
+                        (v040_state / "strategy-finder" / "state.sqlite3").write_bytes(b"sqlite")
+                        env = {**os.environ, "HOME": bash_path(home), "TEST_LOG": bash_path(log), "VAULT_MARKER": bash_path(vault_marker), "GP_TEST_CANDIDATE_SHA": "a" * 40}
+                        if script == "bootstrap-linux.sh":
+                            env["GP_BRANCH"] = "v0.4.0"
+                            invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / script)]
+                        else:
+                            invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), "a" * 40]
+                        first = subprocess.run(invoke, env={**env, "SUDO_RESULT": "73"}, capture_output=True, text=True)
+                        self.assertEqual(first.returncode, 73, first.stderr)
+                        (v040_state / "strategy-finder" / "state.sqlite3").write_bytes(b"newer source data")
+                        second = subprocess.run(invoke, env={**env, "SUDO_RESULT": "0"}, capture_output=True, text=True)
+                        self.assertNotEqual(second.returncode, 0)
+                        self.assertIn("pending clean-install vault exists while canonical v0.4 state is still live", second.stderr)
+                        calls = log.read_text(encoding="utf-8").splitlines()
+                        self.assertEqual(len(calls), 5, calls)
+                        self.assertEqual(sum(call.startswith("CREATE:") for call in calls), 1, calls)
+                        self.assertEqual(sum(call.startswith("SUDO:") for call in calls), 1, calls)
+                        self.assertIn(f"--state-dir {bash_path(v040_state)}", next(call for call in calls if call.startswith("CREATE:")))
+                        self.assertTrue(all("--state-dir" not in call for call in calls if call.startswith("VERIFY:")), calls)
+                        self.assertTrue(all("--initial-install off" in call for call in calls if call.startswith("SUDO:")), calls)
 
-    def test_present_invalid_v040_state_stops_before_sudo_for_both_bootstraps(self) -> None:
+    def test_unsafe_or_ambiguous_v040_state_stops_before_sudo_for_both_bootstraps(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
         bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
         if not bash:
@@ -349,7 +355,7 @@ class CleanInstallerTests(unittest.TestCase):
             fake("python3", 'echo PYTHON >> "$TEST_LOG"; exit 99\n')
             fake("sudo", 'echo SUDO >> "$TEST_LOG"; exit 64\n')
 
-            for kind in ("symlink", "file", "missing-strategy-finder", "missing-database", "strategy-finder-symlink", "database-symlink"):
+            for kind in ("symlink", "file", "missing-strategy-finder", "missing-database", "strategy-finder-symlink", "database-symlink", "both-sources"):
                 for script in ("bootstrap-linux.sh", "hardware-candidate-bootstrap.sh"):
                     with self.subTest(kind=kind, script=script):
                         home = sandbox / f"home-{kind}-{script}"
@@ -378,13 +384,19 @@ class CleanInstallerTests(unittest.TestCase):
                             except OSError as exc:
                                 self.skipTest(f"symlink creation is unavailable: {exc}")
                         else:
-                            (v040_state / "strategy-finder").mkdir(parents=True)
-                            target = sandbox / f"database-target-{script}"
-                            target.write_bytes(b"sqlite")
-                            try:
-                                (v040_state / "strategy-finder" / "state.sqlite3").symlink_to(target)
-                            except OSError as exc:
-                                self.skipTest(f"symlink creation is unavailable: {exc}")
+                            if kind == "database-symlink":
+                                (v040_state / "strategy-finder").mkdir(parents=True)
+                                target = sandbox / f"database-target-{script}"
+                                target.write_bytes(b"sqlite")
+                                try:
+                                    (v040_state / "strategy-finder" / "state.sqlite3").symlink_to(target)
+                                except OSError as exc:
+                                    self.skipTest(f"symlink creation is unavailable: {exc}")
+                            else:
+                                checkout_state = home / "gp" / "GP-access-control-plane" / "build" / "state"
+                                for state in (checkout_state, v040_state):
+                                    (state / "strategy-finder").mkdir(parents=True)
+                                    (state / "strategy-finder" / "state.sqlite3").write_bytes(b"sqlite")
                         log = sandbox / f"{kind}-{script}.log"
                         env = {**os.environ, "HOME": bash_path(home), "TEST_LOG": bash_path(log), "GP_TEST_CANDIDATE_SHA": candidate}
                         if script == "bootstrap-linux.sh":
@@ -394,8 +406,9 @@ class CleanInstallerTests(unittest.TestCase):
                             command = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2" --candidate-sha "$3"', "bash", bash_path(fake_bin), str(root / "scripts" / script), candidate]
                         completed = subprocess.run(command, env=env, capture_output=True, text=True)
                         self.assertNotEqual(completed.returncode, 0)
-                        self.assertIn("canonical v0.4", completed.stderr)
-                        self.assertFalse(log.exists(), "invalid v0.4 state must stop before Python or sudo")
+                        expected_error = "both supported v0.4 state sources exist" if kind == "both-sources" else "canonical v0.4"
+                        self.assertIn(expected_error, completed.stderr)
+                        self.assertFalse(log.exists(), "unsafe or ambiguous v0.4 state must stop before Python or sudo")
 
     def test_hardware_bootstrap_rejects_non_frozen_or_short_sha_before_sudo(self) -> None:
         git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")

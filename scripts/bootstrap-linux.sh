@@ -11,9 +11,11 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailabl
 printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[1-9][0-9]*)?$' || fail 'GP_BRANCH must be an exact release tag vX.Y.Z or vX.Y.Z-alpha.N'
 case "$INSTALL_WEB" in on|off) ;; *) fail 'GP_INSTALL_WEB must be on or off' ;; esac
 need git; need python3; need sudo
-# v0.4 keeps its application state outside the replaceable checkout.  This is
-# the only supported source route for a v0.4 -> newer clean-install handoff.
-v040_state="$HOME/gp/.GP-access-control-plane.data/state"
+# v0.4 devices may have used either supported state location.  A clean-install
+# handoff is safe only when exactly one of them is present.
+v040_checkout_state="$HOME/gp/GP-access-control-plane/build/state"
+v040_data_state="$HOME/gp/.GP-access-control-plane.data/state"
+v040_state=
 source_dir="$(mktemp -d "${TMPDIR:-/tmp}/gp-clean-install.XXXXXX")"
 cleanup() { rm -rf -- "$source_dir"; }
 trap cleanup EXIT
@@ -25,7 +27,15 @@ git -C "$source_dir" checkout --detach "$TAG"
 # A present canonical v0.4 path is never an initial install. Reject unsafe
 # objects before the only sudo call, so the destructive phase cannot erase them.
 initial_install=off
-if [ -e "$v040_state" ] || [ -L "$v040_state" ]; then
+if { [ -e "$v040_checkout_state" ] || [ -L "$v040_checkout_state" ]; } \
+  && { [ -e "$v040_data_state" ] || [ -L "$v040_data_state" ]; }; then
+  fail "both supported v0.4 state sources exist; remove neither source before resolving: $v040_checkout_state and $v040_data_state"
+elif [ -e "$v040_checkout_state" ] || [ -L "$v040_checkout_state" ]; then
+  v040_state="$v040_checkout_state"
+elif [ -e "$v040_data_state" ] || [ -L "$v040_data_state" ]; then
+  v040_state="$v040_data_state"
+fi
+if [ -n "$v040_state" ]; then
   [ -d "$v040_state" ] && [ ! -L "$v040_state" ] \
     || fail "canonical v0.4 state is not a non-symlink directory: $v040_state"
   v040_state_canonical="$(readlink -f -- "$v040_state" 2>/dev/null || true)"
