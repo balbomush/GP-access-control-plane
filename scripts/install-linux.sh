@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER (--tag vX.Y.Z | --candidate-sha SHA) --web on|off --initial-install on|off' >&2; exit 64; }
+usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER (--tag vX.Y.Z|vX.Y.Z-alpha.N | --candidate-sha SHA) --web on|off --initial-install on|off' >&2; exit 64; }
 [ "$(id -u)" -eq 0 ] || fail 'must be run by the bootstrap sudo process'
 SOURCE_DIR= INSTALL_USER= TAG= CANDIDATE_SHA= INSTALL_WEB= INITIAL_INSTALL=
 while [ "$#" -gt 0 ]; do
@@ -22,7 +22,7 @@ case "$INITIAL_INSTALL" in on|off) ;; *) fail 'initial-install must be on or off
 SOURCE_COMMIT="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || fail 'source checkout has an invalid HEAD commit'
 if [ -n "$TAG" ]; then
-  printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'tag must be an exact release tag'
+  printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[1-9][0-9]*)?$' || fail 'tag must be an exact stable or alpha release tag'
   [ "$(git -C "$SOURCE_DIR" cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ] || fail 'source tag must be annotated'
   [ "$SOURCE_COMMIT" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
   INSTALL_REF="$TAG"
@@ -79,6 +79,12 @@ install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$state_parent" "$state_dir"
 runuser -u "$INSTALL_USER" -- python3 -m venv "$install_dir/.venv"
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"
+# The application validates the pending vault ID and performs the semantic and
+# SQLite checks itself. Root only invokes that user-owned operation.
+if [ "$INITIAL_INSTALL" = off ]; then
+  runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" "$vault_tool" --restore --target-state-dir "$state_dir" --home "$target_home" \
+    || fail 'clean-install vault restore failed; vault was preserved and services were not started'
+fi
 # The v2fly cache is disposable service data.  A network failure must not undo a
 # successful clean install: the authenticated Web action can retry it later.
 if ! runuser -u "$INSTALL_USER" -- env GP_STATE_DIR="$state_dir" "$install_dir/.venv/bin/gp-control-plane" domain-sources prepare-v2fly; then

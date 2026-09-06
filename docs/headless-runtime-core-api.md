@@ -332,12 +332,15 @@ Compatibility-mode:
 `vault → fresh install → verified restore`.
 
 Legacy-приложение создаёт vault на той же плате. Затем fresh install удаляет
-только фиксированную GP-поверхность и ставит выбранный exact annotated release
-tag. После явного подтверждения
-restore продукт проверяет импорт и SQLite; источник удаляется только при
+только фиксированную GP-поверхность и ставит выбранный exact annotated stable
+или alpha release tag. Для existing installation installer сначала завершает
+`apt`/zapret2/wrapper preparation, кладёт fresh files и создаёт venv. Только
+после этого он автоматически запускает user-side restore; restore выполняется
+до `domain-sources prepare-v2fly` и до любого `systemctl enable --now` запуска
+сервиса. Продукт проверяет импорт и SQLite. Источник удаляется только при
 `completed=true`, `verification.verified=true`, `storage_status.ready=true` и
 `cleanup.source_deleted=true`. При сбое vault/handoff остаются на этой же
-плате для повторного fresh install или restore. Vault, handoff, raw SQLite и
+плате для повторного fresh install или аварийного HTTP/API restore. Vault, handoff, raw SQLite и
 ZIP не переносятся между платами. Root не читает, не копирует и не удаляет эти
 user-owned private материалы.
 
