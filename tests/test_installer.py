@@ -31,9 +31,9 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('canonical v0.4 state has an invalid layout', self.bootstrap)
         self.assertIn('canonical v0.4 strategy-finder is not a non-symlink directory', self.bootstrap)
         self.assertIn('canonical v0.4 strategy-finder path escapes state', self.bootstrap)
-        self.assertIn('--verify --home "$HOME"', self.bootstrap)
-        self.assertNotIn('--verify --state-dir', self.bootstrap)
-        self.assertLess(self.bootstrap.index('--verify --home "$HOME"'), self.bootstrap.index('python3 "$source_dir/scripts/clean-install-vault.py" --state-dir'))
+        self.assertIn('verify_vault() {', self.bootstrap)
+        self.assertIn('--verify --state-dir "$1" --home "$HOME"', self.bootstrap)
+        self.assertIn('elif verify_vault "$v040_data_state"; then', self.bootstrap)
         self.assertIn('initial_install=on', self.bootstrap)
         self.assertIn('--initial-install "$initial_install"', self.bootstrap)
         for forbidden in ("latest-stable", "refs/heads", "GP_EXPECTED_SHA", "candidate", "rollback", "clean-remove"):
@@ -59,7 +59,7 @@ class CleanInstallerTests(unittest.TestCase):
 
             fake("id", 'case "$1" in -u) echo 1000;; -un) echo gpuser;; *) exit 64;; esac\n')
             fake("git", 'echo GIT >> "$TEST_LOG"\ncase "$1" in clone) dest="${!#}"; mkdir -p "$dest/scripts";; -C) shift 2; case "$1" in cat-file) echo "${GP_TEST_TAG_TYPE:-tag}";; checkout|status) :;; rev-parse) echo deadbeef;; *) exit 64;; esac;; *) exit 64;; esac\n')
-            fake("python3", 'echo PYTHON >> "$TEST_LOG"\nexit 42\n')
+            fake("python3", 'printf "PYTHON:%s\\n" "$*" >> "$TEST_LOG"\nexit 42\n')
             fake("sudo", 'echo SUDO >> "$TEST_LOG"\nexit 42\n')
             invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / "bootstrap-linux.sh")]
             for tag in ("v0.4.1", "v0.4.1-alpha.1", "v12.34.56-alpha.999"):
@@ -69,7 +69,13 @@ class CleanInstallerTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     calls = log.read_text(encoding="utf-8").splitlines()
                     self.assertIn("GIT", calls)
-                    self.assertIn("PYTHON", calls)
+                    python_calls = [call for call in calls if call.startswith("PYTHON:")]
+                    self.assertEqual(len(python_calls), 1, calls)
+                    self.assertIn("--verify --state-dir", python_calls[0])
+                    self.assertIn(
+                        f"--state-dir {bash_path(sandbox / 'home' / 'gp' / '.GP-access-control-plane.data' / 'state')}",
+                        python_calls[0],
+                    )
                     self.assertEqual(calls[-1], "SUDO")
             for tag in ("v0.4.1-alpha.0", "v0.4.1-alpha.-1", "v0.4.1-alpha.01", "v0.4.1-beta.1", "v0.4.1-rc.1", "main", "v0.4.1^{commit}"):
                 with self.subTest(rejected=tag):
@@ -105,8 +111,9 @@ class CleanInstallerTests(unittest.TestCase):
             self.assertIn('v040_checkout_state="$HOME/gp/GP-access-control-plane/build/state"', bootstrap)
             self.assertIn('v040_data_state="$HOME/gp/.GP-access-control-plane.data/state"', bootstrap)
             self.assertIn('--state-dir "$v040_state" --home "$HOME"', bootstrap)
+            self.assertIn('--verify --state-dir "$1" --home "$HOME"', bootstrap)
+            self.assertIn('elif verify_vault "$v040_data_state"; then', bootstrap)
             self.assertIn('both supported v0.4 state sources exist', bootstrap)
-            self.assertNotIn('--verify --state-dir', bootstrap)
 
     def test_root_process_verifies_vault_before_fixed_removal_and_installs_both_topologies(self) -> None:
         verify = self.installer.index('runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify')
@@ -131,7 +138,6 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('case "$INITIAL_INSTALL" in on|off)', self.installer)
         self.assertIn('if [ "$INITIAL_INSTALL" = off ]; then', self.installer)
         self.assertIn('python3 "$vault_tool" --verify --home "$target_home"', self.installer)
-        self.assertNotIn('--verify --state-dir', self.installer)
         self.assertEqual(self.installer.count('--restore --target-state-dir "$state_dir"'), 1)
         self.assertIn('visudo -cf /etc/sudoers.d/gp-control-plane-root-helper', self.installer)
         self.assertIn('scripts/install-zapret2.sh', self.installer)
@@ -326,7 +332,7 @@ class CleanInstallerTests(unittest.TestCase):
                         self.assertEqual(sum(call.startswith("CREATE:") for call in calls), 1, calls)
                         self.assertEqual(sum(call.startswith("SUDO:") for call in calls), 1, calls)
                         self.assertIn(f"--state-dir {bash_path(v040_state)}", next(call for call in calls if call.startswith("CREATE:")))
-                        self.assertTrue(all("--state-dir" not in call for call in calls if call.startswith("VERIFY:")), calls)
+                        self.assertTrue(all(f"--state-dir {bash_path(v040_state)}" in call for call in calls if call.startswith("VERIFY:")), calls)
                         self.assertTrue(all("--initial-install off" in call for call in calls if call.startswith("SUDO:")), calls)
 
     def test_unsafe_or_ambiguous_v040_state_stops_before_sudo_for_both_bootstraps(self) -> None:

@@ -16,6 +16,9 @@ need git; need python3; need sudo
 v040_checkout_state="$HOME/gp/GP-access-control-plane/build/state"
 v040_data_state="$HOME/gp/.GP-access-control-plane.data/state"
 v040_state=
+verify_vault() {
+  python3 "$source_dir/scripts/clean-install-vault.py" --verify --state-dir "$1" --home "$HOME"
+}
 source_dir="$(mktemp -d "${TMPDIR:-/tmp}/gp-clean-install.XXXXXX")"
 cleanup() { rm -rf -- "$source_dir"; }
 trap cleanup EXIT
@@ -55,13 +58,16 @@ if [ -n "$v040_state" ]; then
     || fail "canonical v0.4 state database path escapes state: $v040_sqlite"
   # A pending vault cannot be reused while its source is still live: a failed
   # pre-sudo attempt may have left newer source changes behind.
-  if python3 "$source_dir/scripts/clean-install-vault.py" --verify --home "$HOME"; then
+  if verify_vault "$v040_state"; then
     fail 'pending clean-install vault exists while canonical v0.4 state is still live; nothing was removed'
   fi
   # The exact v0.4 tag creates the vault because immutable legacy tags cannot grow this API.
   python3 "$source_dir/scripts/clean-install-vault.py" --state-dir "$v040_state" --home "$HOME"
-  python3 "$source_dir/scripts/clean-install-vault.py" --verify --home "$HOME"
-elif python3 "$source_dir/scripts/clean-install-vault.py" --verify --home "$HOME"; then
+  verify_vault "$v040_state"
+# v0.4.0 requires --state-dir even for --verify.  Both supported source paths
+# are absent here, so this is only an argparse-compatible placeholder; vault
+# identity and verification remain device-local under --home.
+elif verify_vault "$v040_data_state"; then
   :
 else
   initial_install=on

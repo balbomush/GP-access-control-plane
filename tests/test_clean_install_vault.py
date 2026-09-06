@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import io
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -161,10 +163,37 @@ class CleanInstallVaultTests(unittest.TestCase):
             failed_install = subprocess.run([sys.executable, "-c", "raise SystemExit(73)"], check=False)
             self.assertEqual(failed_install.returncode, 73)
             tool = Path(__file__).resolve().parents[1] / "scripts" / "clean-install-vault.py"
-            retry = subprocess.run([sys.executable, str(tool), "--verify", "--home", str(home)], capture_output=True, text=True, check=False)
+            retry = subprocess.run([sys.executable, str(tool), "--verify", "--state-dir", str(source), "--home", str(home)], capture_output=True, text=True, check=False)
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertTrue(clean_install_vault_info(target_home=home)["pending"])
             self.assertEqual(clean_install_vault_info(target_home=home)["vault_id"], created["vault_id"])
+
+    def test_v040_cli_requires_state_dir_for_verify_but_accepts_a_missing_resume_placeholder(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        if not (repo / ".git").exists():
+            self.skipTest("v0.4.0 CLI history is unavailable in an exported source tree")
+        archived = subprocess.run(["git", "archive", "--format=tar", "v0.4.0"], cwd=repo, capture_output=True, check=False)
+        self.assertEqual(archived.returncode, 0, archived.stderr.decode("utf-8", errors="replace"))
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            with tarfile.open(fileobj=io.BytesIO(archived.stdout), mode="r:") as bundle:
+                bundle.extractall(root, filter="data")
+            tool = root / "scripts" / "clean-install-vault.py"
+            home = root / "home"; home.mkdir()
+            placeholder = root / "missing-v040-state"
+            missing_argument = subprocess.run(
+                [sys.executable, str(tool), "--verify", "--home", str(home)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(missing_argument.returncode, 0)
+            self.assertIn("the following arguments are required: --state-dir", missing_argument.stderr)
+            compatible_resume = subprocess.run(
+                [sys.executable, str(tool), "--verify", "--state-dir", str(placeholder), "--home", str(home)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(compatible_resume.returncode, 0)
+            self.assertNotIn("the following arguments are required: --state-dir", compatible_resume.stderr)
+            self.assertIn("clean-install vault is not ready", compatible_resume.stderr)
 
     def test_cli_create_reports_ready_and_publishes_a_pending_vault(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
