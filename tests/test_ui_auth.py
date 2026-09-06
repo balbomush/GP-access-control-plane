@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import base64
-import ctypes
 import http.client
 import json
 import os
-import re
+import errno
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -27,6 +24,7 @@ from gp_control_plane.state import read_state, update_state
 from gp_control_plane.web.api_server import serve
 from gp_control_plane.web import api_server
 from gp_control_plane.web.ui import index_html
+from tests.browser.runner import PlaywrightPage
 
 
 class UiBearerAuthSourceContractTests(unittest.TestCase):
@@ -167,20 +165,12 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn('stopRealtimeEvents();', logout)
         self.assertIn('stopRealtimeFallback();', logout)
 
-class _EdgeBrowserTestSupport:
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.edge_executable = _edge_executable()
-        if cls.edge_executable is None:
-            raise unittest.SkipTest("Microsoft Edge headless is not installed")
-
-
-class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
+class PlaywrightBearerAuthBrowserTests(unittest.TestCase):
 
     def test_login_auth_fetch_blob_download_and_password_change_logs_out(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 snapshot_id = _create_backup(server.port)
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 page.wait_for(
@@ -203,13 +193,9 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     """
                 )
                 self.assertEqual(login_values, {"username": "", "password": ""})
-                page.evaluate(
-                    """
-                    document.getElementById('login-username').value = 'admin';
-                    document.getElementById('login-password').value = 'admin';
-                    document.getElementById('login-form').requestSubmit();
-                    """
-                )
+                page.fill("#login-username", "admin")
+                page.fill("#login-password", "admin")
+                page.click('#login-form button[type="submit"]')
                 page.wait_for(
                     "localStorage.getItem('gp-control-plane-auth-token') && document.getElementById('login-screen').hidden && !document.getElementById('app-shell').hidden",
                     "authenticated application shell",
@@ -308,15 +294,15 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     })();
                     """
                 )
-                page.evaluate("refreshBackups();")
+                page.click("#tab-settings")
+                page.wait_for("document.getElementById('tab-panel-settings').classList.contains('active')", "visible settings tab")
+                page.click('[data-action="refresh-backups"]')
                 snapshot = json.dumps(snapshot_id)
                 page.wait_for(
                     f"Array.from(document.querySelectorAll('[data-backup-download]')).some((button) => button.dataset.backupDownload === {snapshot})",
                     "backup download action",
                 )
-                page.evaluate(
-                    f"Array.from(document.querySelectorAll('[data-backup-download]')).find((button) => button.dataset.backupDownload === {snapshot}).click();"
-                )
+                page.click(f'[data-backup-download="{snapshot_id}"]')
                 page.wait_for(
                     "window.__bearerAuthE2E.downloads.length === 1 && window.__bearerAuthE2E.blob && window.__bearerAuthE2E.anchor",
                     "authenticated Blob download",
@@ -333,13 +319,9 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     """
                 )
                 old_token = page.evaluate("localStorage.getItem('gp-control-plane-auth-token')")
-                page.evaluate(
-                    """
-                    document.getElementById('settings-current-password').value = 'wrongpass';
-                    document.getElementById('settings-new-password').value = 'another8';
-                    document.getElementById('change-password-form').requestSubmit();
-                    """
-                )
+                page.fill("#settings-current-password", "wrongpass")
+                page.fill("#settings-new-password", "another8")
+                page.click('#change-password-form [type="submit"]')
                 page.wait_for(
                     f"""
                     window.__bearerAuthE2E.passwordChange.requests === 1
@@ -354,13 +336,9 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     """,
                     "password change failure leaves the authenticated session intact",
                 )
-                page.evaluate(
-                    """
-                    document.getElementById('settings-current-password').value = 'admin';
-                    document.getElementById('settings-new-password').value = 'newpass8';
-                    document.getElementById('change-password-form').requestSubmit();
-                    """
-                )
+                page.fill("#settings-current-password", "admin")
+                page.fill("#settings-new-password", "newpass8")
+                page.click('#change-password-form [type="submit"]')
                 page.wait_for(
                     """
                     window.__bearerAuthE2E.passwordChange.held
@@ -376,16 +354,14 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     window.__bearerAuthE2E.passwordChange.requests === 2
                       && localStorage.getItem('gp-control-plane-auth-token') === null
                       && !document.getElementById('login-screen').hidden
-                      && document.getElementById('app-shell').hidden
-                      && !document.getElementById('change-password-form').hasAttribute('aria-busy')
-                      && !document.querySelector('#change-password-form [type="submit"]').disabled
-                      && document.getElementById('settings-current-password').value === ''
-                      && document.getElementById('settings-new-password').value === ''
+                      && document.getElementById('app-shell') === null
+                      && document.getElementById('change-password-form') === null
                       && window.__bearerAuthE2E.sse.length === 1
                       && window.__bearerAuthE2E.sse[0].aborted
                       && window.__bearerAuthE2E.clearedFallbackTimers.includes(window.__bearerAuthE2E.fallbackTimer)
                     """,
                     "successful password change clears the session and stops realtime activity",
+                    diagnostics="JSON.parse(JSON.stringify({ auth: window.__bearerAuthE2E, loginHidden: document.getElementById('login-screen')?.hidden, appShell: document.getElementById('app-shell')?.hidden, form: Boolean(document.getElementById('change-password-form')), token: localStorage.getItem('gp-control-plane-auth-token') }))",
                 )
                 result = page.evaluate("JSON.parse(JSON.stringify(window.__bearerAuthE2E))")
 
@@ -403,19 +379,15 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
     def test_web_layout_matrix_keeps_metrics_summary_disclosure_and_password_fields_usable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 page.wait_for(
                     "document.readyState === 'complete' && document.getElementById('login-form')",
                     "initialized login form",
                 )
-                page.evaluate(
-                    """
-                    document.getElementById('login-username').value = 'admin';
-                    document.getElementById('login-password').value = 'admin';
-                    document.getElementById('login-form').requestSubmit();
-                    """
-                )
+                page.fill("#login-username", "admin")
+                page.fill("#login-password", "admin")
+                page.click('#login-form button[type="submit"]')
                 page.wait_for(
                     "document.getElementById('login-screen').hidden && !document.getElementById('app-shell').hidden",
                     "authenticated application shell",
@@ -474,7 +446,7 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     if layout["summary"]["width"] - row_span > 2:
                         self.assertLess(abs(first_row[0]["left"] - layout["summary"]["left"]), 2)
 
-                page.evaluate("document.getElementById('tab-settings').click()")
+                page.click("#tab-settings")
                 page.wait_for(
                     "document.getElementById('tab-settings').getAttribute('aria-selected') === 'true' && !document.getElementById('change-password-form').closest('[hidden]')",
                     "visible settings access panel",
@@ -534,7 +506,7 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                 )
                 self.assertNotEqual("none", marker["closed"])
                 self.assertEqual(0, marker["focusable"])
-                page.evaluate("document.querySelector('details.domain-group:last-of-type > summary').click()")
+                page.click("details.domain-group:last-of-type > summary")
                 page.wait_for(
                     "document.querySelector('details.domain-group:last-of-type').open",
                     "domain disclosure opens by click",
@@ -557,7 +529,7 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
     def test_login_outer_inset_uses_responsive_tokens_without_overflow(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 page.wait_for(
                     "document.readyState === 'complete' && document.getElementById('login-screen')",
@@ -587,24 +559,21 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
     def test_mobile_candidate_header_and_protocol_controls_follow_responsive_grid(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 page.wait_for(
                     "document.readyState === 'complete' && document.getElementById('login-form')",
                     "initialized login form",
                 )
-                page.evaluate(
-                    """
-                    document.getElementById('login-username').value = 'admin';
-                    document.getElementById('login-password').value = 'admin';
-                    document.getElementById('login-form').requestSubmit();
-                    """
-                )
+                page.fill("#login-username", "admin")
+                page.fill("#login-password", "admin")
+                page.click('#login-form button[type="submit"]')
                 page.wait_for(
                     "document.getElementById('login-screen').hidden && !document.getElementById('app-shell').hidden",
                     "authenticated application shell",
                 )
-                page.evaluate("document.getElementById('tab-candidates').click(); document.getElementById('candidate-view-common').click()")
+                page.click("#tab-candidates")
+                page.click("#candidate-view-common")
                 page.wait_for(
                     "document.getElementById('tab-candidates').getAttribute('aria-selected') === 'true' && document.getElementById('candidate-view-common').getAttribute('aria-selected') === 'true'",
                     "visible common candidates",
@@ -642,7 +611,7 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     self.assertTrue(header["targetable"], f"{width}px {header}")
                     self.assertLessEqual(header["scrollWidth"], header["clientWidth"], f"{width}px {header}")
 
-                page.evaluate("document.getElementById('tab-finder').click()")
+                page.click("#tab-finder")
                 page.wait_for(
                     "document.getElementById('tab-finder').getAttribute('aria-selected') === 'true'",
                     "visible finder controls",
@@ -677,6 +646,15 @@ class EdgeBearerAuthBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
 
 
 class TestServerLifecycleTests(unittest.TestCase):
+    def test_primary_body_failure_is_preserved_when_server_cleanup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            server = _TestServer(AppConfig(output=OutputConfig(state_dir=Path(raw) / "state")))
+            primary = AssertionError("primary browser assertion")
+            with patch.object(server, "_stop", side_effect=AssertionError("forced server cleanup failure")):
+                self.assertFalse(server.__exit__(AssertionError, primary, None))
+            self.assertIn("primary browser assertion", str(primary))
+            self.assertIn("forced server cleanup failure", "\n".join(getattr(primary, "__notes__", ())))
+
     def test_active_root_managed_startup_keeps_state_when_generic_recovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
@@ -782,18 +760,18 @@ class TestServerLifecycleTests(unittest.TestCase):
                 probe.bind(("127.0.0.1", server.port))
 
 
-class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
+class ResponsiveLayoutBrowserTests(unittest.TestCase):
     """WEBL browser matrix: read-only rendering and navigation at each target width."""
 
-    VIEWPORTS = (320, 375, 768, 1024, 1440)
+    VIEWPORTS = (320, 375, 768, 960, 1024, 1440)
 
-    def assert_document_fits_viewport(self, page: "_EdgeCdp", width: int, state: str) -> None:
+    def assert_document_fits_viewport(self, page: PlaywrightPage, width: int, state: str) -> None:
         metrics = page.evaluate(
             "({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth })"
         )
         self.assertLessEqual(metrics["scrollWidth"], metrics["clientWidth"], f"{width}px {state}: {metrics}")
 
-    def assert_click_targetable(self, page: "_EdgeCdp", selector: str, width: int) -> None:
+    def assert_click_targetable(self, page: PlaywrightPage, selector: str, width: int) -> None:
         result = page.evaluate(
             f"""
             (() => {{
@@ -814,7 +792,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         )
         self.assertEqual(result, {"found": True, "visible": True, "inViewport": True, "targetable": True}, f"{width}px {selector}")
 
-    def assert_horizontal_scroll_is_local(self, page: "_EdgeCdp", width: int, state: str) -> None:
+    def assert_horizontal_scroll_is_local(self, page: PlaywrightPage, width: int, state: str) -> None:
         unexpected = page.evaluate(
             """
             Array.from(document.querySelectorAll('*')).filter((node) => {
@@ -826,7 +804,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         )
         self.assertEqual(unexpected, [], f"{width}px {state}: unexpected horizontal scrollers {unexpected}")
 
-    def assert_finder_stack_spans_layout(self, page: "_EdgeCdp", width: int) -> None:
+    def assert_finder_stack_spans_layout(self, page: PlaywrightPage, width: int) -> None:
         geometry = page.evaluate(
             """
             (() => {
@@ -850,7 +828,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         self.assertLessEqual(abs(geometry["leftInset"]), 2, f"{width}px {geometry}")
         self.assertLessEqual(abs(geometry["rightInset"]), 2, f"{width}px {geometry}")
 
-    def assert_raw_log_is_visible_and_locally_scrollable(self, page: "_EdgeCdp", width: int) -> None:
+    def assert_raw_log_is_visible_and_locally_scrollable(self, page: PlaywrightPage, width: int) -> None:
         geometry = page.evaluate(
             """
             (() => {
@@ -888,7 +866,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         )
 
     @staticmethod
-    def render_safe_dynamic_fixtures(page: "_EdgeCdp") -> None:
+    def render_safe_dynamic_fixtures(page: PlaywrightPage) -> None:
         page.evaluate(
             """
             (() => {
@@ -938,18 +916,14 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         )
 
     @staticmethod
-    def login(page: "_EdgeCdp") -> None:
+    def login(page: PlaywrightPage) -> None:
         page.wait_for(
             "document.readyState === 'complete' && document.getElementById('login-form') && !document.getElementById('login-screen').hidden",
             "unauthenticated login form",
         )
-        page.evaluate(
-            """
-            document.getElementById('login-username').value = 'admin';
-            document.getElementById('login-password').value = 'admin';
-            document.getElementById('login-form').requestSubmit();
-            """
-        )
+        page.fill("#login-username", "admin")
+        page.fill("#login-password", "admin")
+        page.click('#login-form button[type="submit"]')
         page.wait_for(
             "localStorage.getItem('gp-control-plane-auth-token') && !document.getElementById('app-shell').hidden",
             "authenticated shell",
@@ -959,7 +933,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         """WEBL-017/T09: Settings owns everyday backups, never clean-install vault operations."""
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 _create_backup(server.port)
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 self.login(page)
@@ -977,15 +951,15 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                         window.__settingsFetches.push(String(args[0] instanceof Request ? args[0].url : args[0]));
                         return originalFetch(...args);
                       };
-                      document.getElementById('tab-settings').click();
                     })()
                     """
                 )
+                page.click("#tab-settings")
                 page.wait_for(
                     "document.getElementById('tab-settings').getAttribute('aria-selected') === 'true' && document.getElementById('tab-panel-settings').classList.contains('active')",
                     "Settings tab",
                 )
-                page.evaluate("document.querySelector('#tab-panel-settings [data-action=\"refresh-backups\"]').click()")
+                page.click('#tab-panel-settings [data-action="refresh-backups"]')
                 page.wait_for(
                     "document.querySelector('#backups-table [data-backup-download]')",
                     "backup rendered after Settings refresh",
@@ -1013,7 +987,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         """WEBL-016/019: title, metadata, chevron and debug explanation stay coherent at target widths."""
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 self.login(page)
                 page.evaluate(
@@ -1058,7 +1032,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     )
                     self.assert_document_fits_viewport(page, width, "domain header")
 
-                page.evaluate("document.getElementById('tab-settings').click()")
+                page.click("#tab-settings")
                 page.wait_for("document.getElementById('tab-panel-settings').classList.contains('active')", "Settings tab")
                 for width in (320, 375, 1024):
                     page.set_viewport(width)
@@ -1091,7 +1065,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         """WEBC browser matrix: roles stay distinct and status text is never color-only."""
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 self.login(page)
                 page.evaluate(
@@ -1119,7 +1093,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                           const restore = document.querySelector('[data-backup-restore]');
                           const remove = document.querySelector('[data-backup-delete]');
                           const beforeFocus = { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth };
-                          primary.focus({ preventScroll: true });
+                          primary.focus({ preventScroll: true, focusVisible: true });
                           const role = (node) => { const style = getComputedStyle(node); return { background: style.backgroundColor, color: style.color, border: style.borderColor }; };
                           const tokenColor = (token) => {
                             const probe = document.createElement('span');
@@ -1169,7 +1143,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
     def test_initial_missing_system_status_stays_neutral_and_blocks_actions(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 self.login(page)
                 page.wait_for(
@@ -1220,7 +1194,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         def contrast(style: dict[str, object], key: str, minimum: float, context: str) -> None:
             self.assertGreaterEqual(float(style[key]), minimum, f"{context}: {style}")
 
-        def tab_round_trip(page: "_EdgeCdp", selector: str, width: int) -> None:
+        def tab_round_trip(page: PlaywrightPage, selector: str, width: int) -> None:
             if selector == '[data-action="stop-current"]':
                 page.evaluate("document.querySelector('[data-action=\"stop-current\"]').disabled = false;")
             page.evaluate(f"document.querySelector({json.dumps(selector)}).focus({{ preventScroll: true, focusVisible: true }});")
@@ -1231,7 +1205,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
             page.press_key("Tab")
             self.assertFalse(page.evaluate(f"document.activeElement === document.querySelector({json.dumps(selector)})"), f"{width}px Tab did not traverse from {selector}")
 
-        def computed_states(page: "_EdgeCdp", selector: str) -> dict[str, dict[str, object]]:
+        def computed_states(page: PlaywrightPage, selector: str) -> dict[str, dict[str, object]]:
             geometry = page.evaluate(
                 f"""
                 (() => {{
@@ -1258,10 +1232,10 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 self.login(page)
-                page.evaluate("new Promise((resolve) => setTimeout(resolve, 300)).then(() => { stopRealtimeEvents(); stopRealtimeFallback(); })")
+                page.evaluate("stopRealtimeEvents(); stopRealtimeFallback();")
                 page.evaluate(
                     """
                     window.contrastStyle = (style) => {
@@ -1287,7 +1261,8 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                 )
                 for width in self.VIEWPORTS:
                     page.set_viewport(width)
-                    page.evaluate("document.getElementById('tab-finder').click(); document.querySelector('details.preset-panel').open = true; document.querySelector('[data-action=\"stop-current\"]').disabled = false;")
+                    page.click("#tab-finder")
+                    page.evaluate("document.querySelector('details.preset-panel').open = true; document.querySelector('[data-action=\"stop-current\"]').disabled = false;")
                     for selector in ('#tab-finder', 'details.preset-panel > summary', '[data-action="run-selected-discovery"]', '[data-action="stop-current"]'):
                         tab_round_trip(page, selector, width)
                     disclosure = page.evaluate(
@@ -1335,7 +1310,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
         """WEBL-020/021: one chevron; one action fills its original action row."""
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 self.login(page)
 
@@ -1366,7 +1341,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     self.assertEqual(disclosure["afterContent"], "none", f"{width}px text disclosure leaked: {disclosure}")
                     self.assert_document_fits_viewport(page, width, "advanced disclosure")
 
-                page.evaluate("document.getElementById('tab-settings').click()")
+                page.click("#tab-settings")
                 page.wait_for("document.getElementById('tab-panel-settings').classList.contains('active')", "Settings tab")
                 for width in (320, 600, 960, 1440):
                     page.set_viewport(width)
@@ -1388,7 +1363,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     if width == 320:
                         self.assertAlmostEqual(action["button"]["width"], action["row"]["width"], delta=2, msg=f"{width}px {action}")
                     else:
-                        self.assertAlmostEqual(action["button"]["width"], action["row"]["width"], delta=2, msg=f"{width}px {action}")
+                        self.assertLessEqual(action["button"]["width"], min(520, action["row"]["width"]) + 2, msg=f"{width}px {action}")
                         self.assertAlmostEqual(
                             action["button"]["left"],
                             action["row"]["left"],
@@ -1397,10 +1372,121 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                         )
                     self.assert_document_fits_viewport(page, width, "single settings action")
 
+    def test_history_and_explicit_action_patterns_keep_geometry_and_targets(self) -> None:
+        """WEBL-UX-001/002: named responsive patterns must not depend on child order or count."""
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            with _TestServer(config) as server, PlaywrightPage() as page:
+                page.navigate(f"http://127.0.0.1:{server.port}/")
+                self.login(page)
+                page.wait_for(
+                    "!document.querySelector('[data-action=\"run-selected-discovery\"]').disabled",
+                    "initial system status",
+                    timeout=15,
+                )
+                self.render_safe_dynamic_fixtures(page)
+
+                for width in self.VIEWPORTS:
+                    page.set_viewport(width)
+                    self.render_safe_dynamic_fixtures(page)
+                    page.click("#tab-history")
+                    page.wait_for("document.getElementById('tab-panel-history').classList.contains('active')", "History tab")
+                    page.evaluate(
+                        """
+                        state.finderRuns = [{
+                          kind: 'standard-discovery', run_id: 'layout-history-fixture', timestamp: '2026-08-31T12:00:00Z',
+                          status: 'failed', domains: ['layout.example.test'],
+                          progress: { phase: 'strategy_summary', completed: 1, total: 2 },
+                          settings: { enable_http: true, enable_tls12: true, domain_count: 1, scan_level: 'standard' },
+                          diagnostics: { message: 'layout fixture' }
+                        }];
+                        state.finderRunTotal = 1;
+                        renderRuns();
+                        """
+                    )
+                    history = page.evaluate(
+                        """
+                        (() => {
+                          const card = document.querySelector('.run-card');
+                          const status = card?.querySelector('.run-field-status .badge');
+                          const phase = card?.querySelector('.run-field-phase .run-field-value');
+                          if (!card || !status || !phase) return { missing: { card: Boolean(card), status: Boolean(status), phase: Boolean(phase) } };
+                          const rect = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+                          return { status: rect(status), phase: rect(phase) };
+                        })()
+                        """
+                    )
+                    self.assertIsNotNone(history, f"{width}px history fields missing")
+                    assert history is not None
+                    self.assertNotIn("missing", history, f"{width}px history fields missing: {history}")
+                    vertical_overlap = history["status"]["top"] < history["phase"]["bottom"] and history["phase"]["top"] < history["status"]["bottom"]
+                    horizontal_overlap = history["status"]["left"] < history["phase"]["right"] and history["phase"]["left"] < history["status"]["right"]
+                    self.assertFalse(vertical_overlap and horizontal_overlap, f"{width}px status overlaps phase: {history}")
+                    self.assert_document_fits_viewport(page, width, "history status and phase")
+
+                    page.click("#tab-finder")
+                    page.wait_for("document.getElementById('tab-panel-finder').classList.contains('active')", "Finder tab")
+                    page.evaluate("state.acknowledgedRun = null; state.status = { version: '0.4.1', current_run: null }; renderMetrics();")
+                    finder = page.evaluate(
+                        """
+                        (() => {
+                          const start = document.querySelector('.run-action-start');
+                          const stop = document.querySelector('.run-action-stop');
+                          const note = document.querySelector('.run-actions .action-consequence');
+                          if (!start || !stop || !note) return null;
+                          const rect = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
+                          return { start: rect(start), stop: rect(stop), note: rect(note), stopDisabled: stop.disabled };
+                        })()
+                        """
+                    )
+                    self.assertIsNotNone(finder, f"{width}px finder actions missing")
+                    assert finder is not None
+                    self.assertTrue(finder["stopDisabled"], f"{width}px inactive stop must retain its slot")
+                    self.assertAlmostEqual(finder["start"]["top"], finder["stop"]["top"], delta=2, msg=f"{width}px {finder}")
+                    self.assertGreaterEqual(finder["note"]["top"], max(finder["start"]["bottom"], finder["stop"]["bottom"]) - 1, f"{width}px {finder}")
+                    self.assert_click_targetable(page, ".run-action-start", width)
+                    self.assert_click_targetable(page, ".run-action-stop", width)
+                    self.assert_document_fits_viewport(page, width, "finder stable action pair")
+
+                    page.click("#tab-lists")
+                    page.wait_for("document.getElementById('tab-panel-lists').classList.contains('active')", "Lists tab")
+                    geometry = page.evaluate(
+                        """
+                        (() => {
+                          document.querySelector('.preset-create-panel').open = true;
+                          const selectors = {
+                            search: '#v2fly-category-search', reload: '[data-action="v2fly-load-categories"]', update: '[data-action="v2fly-update-local-storage"]',
+                            preview: '[data-action="v2fly-preview"]', import: '[data-action="v2fly-import"]',
+                            save: '[data-action="preset-editor-save"]', download: '[data-action="preset-editor-export"]', remove: '[data-action="preset-editor-delete"]',
+                            primary: '[data-action="preset-new-save"]'
+                          };
+                          const rect = (node) => { const r = node?.getBoundingClientRect(); return r ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width } : null; };
+                          return Object.fromEntries(Object.entries(selectors).map(([key, selector]) => [key, rect(document.querySelector(selector))]));
+                        })()
+                        """
+                    )
+                    self.assertTrue(all(geometry.values()), f"{width}px list controls missing: {geometry}")
+                    if width < 960:
+                        self.assertGreaterEqual(geometry["reload"]["top"], geometry["search"]["bottom"] - 1, f"{width}px v2fly tablet field must own its row: {geometry}")
+                        if width >= 600:
+                            self.assertAlmostEqual(geometry["reload"]["top"], geometry["update"]["top"], delta=2, msg=f"{width}px {geometry}")
+                    else:
+                        self.assertAlmostEqual(geometry["search"]["top"], geometry["reload"]["top"], delta=2, msg=f"{width}px {geometry}")
+                        self.assertAlmostEqual(geometry["reload"]["top"], geometry["update"]["top"], delta=2, msg=f"{width}px {geometry}")
+                        self.assertAlmostEqual(geometry["preview"]["top"], geometry["import"]["top"], delta=2, msg=f"{width}px {geometry}")
+                    self.assertGreaterEqual(geometry["remove"]["top"], max(geometry["save"]["bottom"], geometry["download"]["bottom"]) - 1, f"{width}px destructive action needs its own zone: {geometry}")
+                    if width < 960:
+                        self.assertGreater(geometry["primary"]["width"], 0, f"{width}px primary action must remain actionable: {geometry}")
+                    else:
+                        self.assertLessEqual(geometry["primary"]["width"], 522, f"{width}px desktop primary action must stay readable: {geometry}")
+                    for selector in ('[data-action="preset-editor-save"]', '[data-action="preset-editor-export"]', '[data-action="v2fly-preview"]', '[data-action="v2fly-import"]'):
+                        self.assert_click_targetable(page, selector, width)
+                    self.assert_document_fits_viewport(page, width, "lists explicit action patterns")
+
     def test_login_shell_tabs_candidates_and_dynamic_layouts_fit_all_target_viewports(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            with _TestServer(config) as server, _EdgeCdp(self.edge_executable) as page:
+            with _TestServer(config) as server, PlaywrightPage() as page:
                 page.set_viewport(self.VIEWPORTS[0])
                 page.navigate(f"http://127.0.0.1:{server.port}/")
                 page.wait_for(
@@ -1416,13 +1502,9 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     self.assert_document_fits_viewport(page, width, "login with long error")
                     self.assert_horizontal_scroll_is_local(page, width, "login with long error")
 
-                page.evaluate(
-                    """
-                    document.getElementById('login-username').value = 'admin';
-                    document.getElementById('login-password').value = 'admin';
-                    document.getElementById('login-form').requestSubmit();
-                    """
-                )
+                page.fill("#login-username", "admin")
+                page.fill("#login-password", "admin")
+                page.click('#login-form button[type="submit"]')
                 page.wait_for(
                     "localStorage.getItem('gp-control-plane-auth-token') && !document.getElementById('app-shell').hidden",
                     "authenticated shell",
@@ -1456,7 +1538,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                 for width in self.VIEWPORTS:
                     page.set_viewport(width)
                     for tab in primary_tabs:
-                        page.evaluate(f"document.getElementById('tab-{tab}').click()")
+                        page.click(f"#tab-{tab}")
                         page.wait_for(
                             f"document.getElementById('tab-{tab}').getAttribute('aria-selected') === 'true' && document.getElementById('tab-panel-{tab}').classList.contains('active')",
                             f"active {tab} tab",
@@ -1501,14 +1583,14 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                     self.assert_document_fits_viewport(page, width, "long candidate and error state")
                     self.assert_horizontal_scroll_is_local(page, width, "long candidate and error state")
 
-                    page.evaluate("document.getElementById('candidate-view-common').click()")
+                    page.click("#candidate-view-common")
                     page.wait_for(
                         "document.getElementById('candidate-view-common').getAttribute('aria-selected') === 'true'",
                         "common candidate subtab",
                     )
                     self.assert_click_targetable(page, "#tab-panel-candidates button[data-action='build-candidate-result']", width)
                     for mode in ("coverage", "minimal", "balance"):
-                        page.evaluate(f"document.getElementById('candidate-result-mode-{mode}').click()")
+                        page.click(f"#candidate-result-mode-{mode}")
                         page.wait_for(
                             f"document.getElementById('candidate-result-mode-{mode}').getAttribute('aria-selected') === 'true'",
                             f"candidate result {mode} mode",
@@ -1530,7 +1612,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
                         ("lists", "#preset-editor-preview"),
                         ("settings", "#backups-table [data-backup-download]"),
                     ):
-                        page.evaluate(f"document.getElementById('tab-{tab}').click()")
+                        page.click(f"#tab-{tab}")
                         page.wait_for(f"!document.querySelector({json.dumps(fixture_selector)}).closest('[hidden]')", f"visible {tab} fixture")
                         self.assert_click_targetable(page, fixture_selector, width)
                         self.assert_document_fits_viewport(page, width, f"{tab} dynamic fixture")
@@ -1546,7 +1628,7 @@ class ResponsiveLayoutBrowserTests(_EdgeBrowserTestSupport, unittest.TestCase):
 
                 for width in (960, 1024, 1440):
                     page.set_viewport(width)
-                    page.evaluate("document.getElementById('tab-finder').click()")
+                    page.click("#tab-finder")
                     page.wait_for("document.getElementById('tab-finder').getAttribute('aria-selected') === 'true'", "finder tab")
                     self.assert_finder_stack_spans_layout(page, width)
                     self.assert_document_fits_viewport(page, width, "finder full-span layout")
@@ -1556,10 +1638,19 @@ class BrowserTestDiscoveryTests(unittest.TestCase):
     def test_browser_cases_are_discovered_once_per_concrete_suite(self) -> None:
         """WEBL-F09: responsive cases must share setup, not inherit another suite's tests."""
         loader = unittest.TestLoader()
-        auth_names = set(loader.getTestCaseNames(EdgeBearerAuthBrowserTests))
+        auth_names = set(loader.getTestCaseNames(PlaywrightBearerAuthBrowserTests))
         responsive_names = set(loader.getTestCaseNames(ResponsiveLayoutBrowserTests))
 
         self.assertFalse(auth_names & responsive_names)
+        self.assertEqual(
+            auth_names,
+            {
+                "test_login_auth_fetch_blob_download_and_password_change_logs_out",
+                "test_web_layout_matrix_keeps_metrics_summary_disclosure_and_password_fields_usable",
+                "test_login_outer_inset_uses_responsive_tokens_without_overflow",
+                "test_mobile_candidate_header_and_protocol_controls_follow_responsive_grid",
+            },
+        )
         self.assertEqual(
             responsive_names,
             {
@@ -1568,6 +1659,7 @@ class BrowserTestDiscoveryTests(unittest.TestCase):
                 "test_login_shell_tabs_candidates_and_dynamic_layouts_fit_all_target_viewports",
                 "test_settings_omits_vault_controls_and_never_fetches_vaults_while_backups_remain_usable",
                 "test_initial_missing_system_status_stays_neutral_and_blocks_actions",
+                "test_history_and_explicit_action_patterns_keep_geometry_and_targets",
                 "test_web_color_roles_status_markup_focus_and_backup_fixture",
                 "test_web_color_keyboard_contrast_and_disclosure_matrix",
             },
@@ -1575,495 +1667,6 @@ class BrowserTestDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             loader.loadTestsFromTestCase(ResponsiveLayoutBrowserTests).countTestCases(), len(responsive_names)
         )
-
-
-class EdgeCdpLifecycleTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._platform_patch = patch.object(sys, "platform", "linux")
-        self._platform_patch.start()
-
-    def tearDown(self) -> None:
-        self._platform_patch.stop()
-
-    def test_startup_failure_cleans_its_process_profile_and_reports_redacted_diagnostics(self) -> None:
-        class FakeProfile:
-            name = "fake-edge-profile"
-
-            def __init__(self) -> None:
-                self.cleaned = False
-
-            def cleanup(self) -> None:
-                self.cleaned = True
-
-        class FakePopen:
-            def __init__(self, *_args: Any, **kwargs: Any) -> None:
-                self.returncode: int | None = None
-                self.terminate_calls = 0
-                self.wait_calls: list[float] = []
-                kwargs["stderr"].write(b"headless startup failed; token=top-secret\\n")
-
-            def poll(self) -> int | None:
-                return self.returncode
-
-            def terminate(self) -> None:
-                self.terminate_calls += 1
-
-            def wait(self, timeout: float) -> int:
-                self.wait_calls.append(timeout)
-                self.returncode = 17
-                return self.returncode
-
-        profile = FakeProfile()
-        processes: list[FakePopen] = []
-
-        def popen(*args: Any, **kwargs: Any) -> FakePopen:
-            process = FakePopen(*args, **kwargs)
-            processes.append(process)
-            return process
-
-        with (
-            patch.object(tempfile, "TemporaryDirectory", return_value=profile),
-            patch.object(subprocess, "Popen", side_effect=popen) as mock_popen,
-            patch(__name__ + "._free_port", return_value=9222),
-            patch(__name__ + "._wait_for_http", side_effect=AssertionError("connection refused")),
-        ):
-            with self.assertRaisesRegex(
-                AssertionError,
-                r"Edge CDP startup failed: connection refused; process exit code 17; stderr: .*token=\[REDACTED\]",
-            ) as raised:
-                _EdgeCdp(Path("fake-msedge.exe")).__enter__()
-
-        self.assertNotIn("top-secret", str(raised.exception))
-        self.assertEqual(1, mock_popen.call_count)
-        self.assertEqual(
-            [
-                "fake-msedge.exe",
-                "--headless=new",
-                "--remote-debugging-port=9222",
-                "--user-data-dir=fake-edge-profile",
-                "--password-store=basic",
-                "--disable-background-networking",
-                "--disable-sync",
-                "--no-service-autorun",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-            mock_popen.call_args.args[0],
-        )
-        self.assertEqual(1, len(processes))
-        self.assertEqual(1, processes[0].terminate_calls)
-        self.assertEqual([5], processes[0].wait_calls)
-        self.assertTrue(profile.cleaned)
-
-    def test_windows_job_closes_before_profile_cleanup_when_parent_already_exited(self) -> None:
-        events: list[str] = []
-
-        class FakePopen:
-            def __init__(self) -> None:
-                self.returncode = 0
-
-            def poll(self) -> int | None:
-                return self.returncode
-
-        class Profile:
-            def __init__(self) -> None:
-                self.cleanup_calls = 0
-
-            def cleanup(self) -> None:
-                events.append("profile cleanup")
-                self.cleanup_calls += 1
-
-        class FakeWindowsJob:
-            def __init__(self) -> None:
-                events.append("job created")
-
-            def close(self) -> None:
-                events.append("job close")
-
-        process = FakePopen()
-        profile = Profile()
-        edge = _EdgeCdp(Path("fake-msedge.exe"))
-        edge._process = process  # type: ignore[assignment]
-        edge._job = FakeWindowsJob()  # type: ignore[assignment]
-        edge._profile = profile
-
-        with patch.object(sys, "platform", "win32"):
-            edge.__exit__(None, None, None)
-
-        self.assertEqual(1, profile.cleanup_calls)
-        self.assertEqual(["job created", "job close", "profile cleanup"], events)
-        self.assertIsNone(edge._process)
-        self.assertIsNone(edge._job)
-        self.assertIsNone(edge._profile)
-
-    def test_windows_startup_assigns_edge_to_kill_on_close_job(self) -> None:
-        events: list[str] = []
-
-        class FakeProfile:
-            name = "fake-edge-profile"
-
-            def cleanup(self) -> None:
-                events.append("profile cleanup")
-
-        class FakePopen:
-            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-                self.returncode = 0
-
-            def poll(self) -> int:
-                return self.returncode
-
-        class FakeWindowsJob:
-            def __init__(self) -> None:
-                events.append("job created")
-
-            def assign(self, process: FakePopen) -> None:
-                self.process = process
-                events.append("job assigned")
-
-            def close(self) -> None:
-                events.append("job close")
-
-        profile = FakeProfile()
-        with (
-            patch.object(sys, "platform", "win32"),
-            patch.object(tempfile, "TemporaryDirectory", return_value=profile),
-            patch.object(subprocess, "Popen", return_value=FakePopen()),
-            patch(__name__ + "._WindowsJob", FakeWindowsJob),
-            patch(__name__ + "._free_port", return_value=9222),
-            patch(__name__ + "._wait_for_http", side_effect=AssertionError("connection refused")),
-        ):
-            with self.assertRaisesRegex(AssertionError, r"Edge CDP startup failed: connection refused; process exit code 0"):
-                _EdgeCdp(Path("fake-msedge.exe")).__enter__()
-
-        self.assertEqual(["job created", "job assigned", "job close", "profile cleanup"], events)
-
-    def test_cleanup_succeeds_when_process_reaps_after_terminate(self) -> None:
-        class FakePopen:
-            def __init__(self) -> None:
-                self.returncode: int | None = None
-                self.terminate_calls = 0
-                self.kill_calls = 0
-                self.wait_calls: list[float] = []
-
-            def poll(self) -> int | None:
-                return self.returncode
-
-            def terminate(self) -> None:
-                self.terminate_calls += 1
-
-            def kill(self) -> None:
-                self.kill_calls += 1
-
-            def wait(self, timeout: float) -> int:
-                self.wait_calls.append(timeout)
-                self.returncode = 0
-                return self.returncode
-
-        process = FakePopen()
-        edge = _EdgeCdp(Path("fake-msedge.exe"))
-        edge._process = process  # type: ignore[assignment]
-
-        edge.__exit__(None, None, None)
-
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(0, process.kill_calls)
-        self.assertEqual([5], process.wait_calls)
-        self.assertIsNone(edge._process)
-
-    def test_cleanup_failure_after_second_timeout_fails_or_notes_primary_error(self) -> None:
-        class FakePopen:
-            def __init__(self) -> None:
-                self.terminate_calls = 0
-                self.kill_calls = 0
-                self.wait_calls: list[float] = []
-
-            @staticmethod
-            def poll() -> None:
-                return None
-
-            def terminate(self) -> None:
-                self.terminate_calls += 1
-
-            def kill(self) -> None:
-                self.kill_calls += 1
-
-            def wait(self, timeout: float) -> int:
-                self.wait_calls.append(timeout)
-                raise subprocess.TimeoutExpired("fake-msedge.exe", timeout)
-
-        def edge_with_unreaped_process() -> tuple[_EdgeCdp, FakePopen]:
-            process = FakePopen()
-            edge = _EdgeCdp(Path("fake-msedge.exe"))
-            edge._process = process  # type: ignore[assignment]
-            return edge, process
-
-        edge, process = edge_with_unreaped_process()
-        with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: process did not exit after kill"):
-            edge.__exit__(None, None, None)
-
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(1, process.kill_calls)
-        self.assertEqual([5, 5], process.wait_calls)
-        self.assertIsNone(edge._process)
-
-        edge, process = edge_with_unreaped_process()
-        primary_error = AssertionError("primary test failure")
-
-        edge.__exit__(AssertionError, primary_error, None)
-
-        self.assertEqual("primary test failure", str(primary_error))
-        self.assertEqual(
-            ["Edge CDP cleanup failed: process did not exit after kill; process exit code None"],
-            primary_error.__notes__,
-        )
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(1, process.kill_calls)
-        self.assertEqual([5, 5], process.wait_calls)
-        self.assertIsNone(edge._process)
-
-    def test_cleanup_failure_after_terminate_os_error_fails_or_notes_primary_error(self) -> None:
-        class FakePopen:
-            def __init__(self) -> None:
-                self.terminate_calls = 0
-                self.kill_calls = 0
-
-            @staticmethod
-            def poll() -> None:
-                return None
-
-            def terminate(self) -> None:
-                self.terminate_calls += 1
-                raise OSError("terminate unavailable")
-
-            def kill(self) -> None:
-                self.kill_calls += 1
-
-        def edge_with_unterminated_process() -> tuple[_EdgeCdp, FakePopen]:
-            process = FakePopen()
-            edge = _EdgeCdp(Path("fake-msedge.exe"))
-            edge._process = process  # type: ignore[assignment]
-            return edge, process
-
-        edge, process = edge_with_unterminated_process()
-        with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: process cleanup failed: terminate unavailable"):
-            edge.__exit__(None, None, None)
-
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(0, process.kill_calls)
-        self.assertIsNone(edge._process)
-
-        edge, process = edge_with_unterminated_process()
-        primary_error = AssertionError("primary test failure")
-
-        edge.__exit__(AssertionError, primary_error, None)
-
-        self.assertEqual("primary test failure", str(primary_error))
-        self.assertEqual(
-            ["Edge CDP cleanup failed: process cleanup failed: terminate unavailable"],
-            primary_error.__notes__,
-        )
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(0, process.kill_calls)
-        self.assertIsNone(edge._process)
-
-    def test_cleanup_failure_after_kill_os_error_fails_or_notes_primary_error(self) -> None:
-        class FakePopen:
-            def __init__(self) -> None:
-                self.terminate_calls = 0
-                self.kill_calls = 0
-                self.wait_calls: list[float] = []
-
-            @staticmethod
-            def poll() -> None:
-                return None
-
-            def terminate(self) -> None:
-                self.terminate_calls += 1
-
-            def kill(self) -> None:
-                self.kill_calls += 1
-                raise OSError("kill unavailable")
-
-            def wait(self, timeout: float) -> int:
-                self.wait_calls.append(timeout)
-                raise subprocess.TimeoutExpired("fake-msedge.exe", timeout)
-
-        def edge_with_unreaped_process() -> tuple[_EdgeCdp, FakePopen]:
-            process = FakePopen()
-            edge = _EdgeCdp(Path("fake-msedge.exe"))
-            edge._process = process  # type: ignore[assignment]
-            return edge, process
-
-        edge, process = edge_with_unreaped_process()
-        with self.assertRaisesRegex(AssertionError, r"Edge CDP cleanup failed: process cleanup failed: kill unavailable"):
-            edge.__exit__(None, None, None)
-
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(1, process.kill_calls)
-        self.assertEqual([5], process.wait_calls)
-        self.assertIsNone(edge._process)
-
-        edge, process = edge_with_unreaped_process()
-        primary_error = AssertionError("primary test failure")
-
-        edge.__exit__(AssertionError, primary_error, None)
-
-        self.assertEqual("primary test failure", str(primary_error))
-        self.assertEqual(
-            ["Edge CDP cleanup failed: process cleanup failed: kill unavailable"],
-            primary_error.__notes__,
-        )
-        self.assertEqual(1, process.terminate_calls)
-        self.assertEqual(1, process.kill_calls)
-        self.assertEqual([5], process.wait_calls)
-        self.assertIsNone(edge._process)
-
-    def test_profile_cleanup_fails_when_lock_persists_until_deadline(self) -> None:
-        class LockedProfile:
-            def __init__(self) -> None:
-                self.cleanup_calls = 0
-
-            def cleanup(self) -> None:
-                self.cleanup_calls += 1
-                raise PermissionError("profile token=top-secret is locked")
-
-        def edge_with_locked_profile() -> tuple[_EdgeCdp, LockedProfile]:
-            profile = LockedProfile()
-            edge = _EdgeCdp(Path("fake-msedge.exe"))
-            edge._profile = profile
-            return edge, profile
-
-        class FakeClock:
-            value = 0.0
-
-            def monotonic(self) -> float:
-                return self.value
-
-            def sleep(self, delay: float) -> None:
-                self.value += delay
-
-        edge, profile = edge_with_locked_profile()
-        clock = FakeClock()
-        with patch(__name__ + ".time.monotonic", side_effect=clock.monotonic), patch(
-            __name__ + ".time.sleep", side_effect=clock.sleep
-        ) as sleep:
-            with self.assertRaisesRegex(
-                AssertionError,
-                r"Edge CDP cleanup failed: profile cleanup failed: profile token=\[REDACTED\] is locked",
-            ) as raised:
-                edge.__exit__(None, None, None)
-
-        self.assertNotIn("top-secret", str(raised.exception))
-        self.assertEqual(21, profile.cleanup_calls)
-        self.assertEqual(20, sleep.call_count)
-        self.assertAlmostEqual(2.0, clock.value)
-        self.assertIsNone(edge._profile)
-
-        edge, profile = edge_with_locked_profile()
-        primary_error = AssertionError("primary test failure")
-        clock = FakeClock()
-
-        with patch(__name__ + ".time.monotonic", side_effect=clock.monotonic), patch(
-            __name__ + ".time.sleep", side_effect=clock.sleep
-        ) as sleep:
-            edge.__exit__(AssertionError, primary_error, None)
-
-        self.assertEqual("primary test failure", str(primary_error))
-        self.assertEqual(
-            ["Edge CDP cleanup failed: profile cleanup failed: profile token=[REDACTED] is locked"],
-            primary_error.__notes__,
-        )
-        self.assertEqual(21, profile.cleanup_calls)
-        self.assertEqual(20, sleep.call_count)
-        self.assertAlmostEqual(2.0, clock.value)
-        self.assertIsNone(edge._profile)
-
-    def test_profile_cleanup_succeeds_when_lock_releases_before_deadline(self) -> None:
-        class DelayedProfile:
-            def __init__(self) -> None:
-                self.cleanup_calls = 0
-
-            def cleanup(self) -> None:
-                self.cleanup_calls += 1
-                if self.cleanup_calls < 3:
-                    raise PermissionError("profile token=top-secret is locked")
-
-        class FakeClock:
-            value = 0.0
-
-            def monotonic(self) -> float:
-                return self.value
-
-            def sleep(self, delay: float) -> None:
-                self.value += delay
-
-        edge = _EdgeCdp(Path("fake-msedge.exe"))
-        profile = DelayedProfile()
-        clock = FakeClock()
-        edge._profile = profile
-
-        with patch(__name__ + ".time.monotonic", side_effect=clock.monotonic), patch(
-            __name__ + ".time.sleep", side_effect=clock.sleep
-        ) as sleep:
-            diagnostics, cleanup_failed = edge._cleanup()
-
-        self.assertFalse(cleanup_failed)
-        self.assertEqual("no process was created", diagnostics)
-        self.assertEqual(3, profile.cleanup_calls)
-        self.assertEqual(2, sleep.call_count)
-        self.assertAlmostEqual(0.2, clock.value)
-        self.assertIsNone(edge._profile)
-
-    def test_os_error_during_profile_cleanup_fails_or_notes_primary_error(self) -> None:
-        class BrokenProfile:
-            def __init__(self) -> None:
-                self.cleanup_calls = 0
-
-            def cleanup(self) -> None:
-                self.cleanup_calls += 1
-                raise OSError("profile cleanup unavailable")
-
-        def edge_with_broken_profile() -> tuple[_EdgeCdp, BrokenProfile]:
-            profile = BrokenProfile()
-            edge = _EdgeCdp(Path("fake-msedge.exe"))
-            edge._profile = profile
-            return edge, profile
-
-        edge, profile = edge_with_broken_profile()
-        with self.assertRaisesRegex(
-            AssertionError,
-            r"Edge CDP cleanup failed: profile cleanup failed: profile cleanup unavailable",
-        ):
-            edge.__exit__(None, None, None)
-
-        self.assertEqual(1, profile.cleanup_calls)
-        self.assertIsNone(edge._profile)
-
-        edge, profile = edge_with_broken_profile()
-        primary_error = AssertionError("primary test failure")
-
-        edge.__exit__(AssertionError, primary_error, None)
-
-        self.assertEqual("primary test failure", str(primary_error))
-        self.assertEqual(
-            ["Edge CDP cleanup failed: profile cleanup failed: profile cleanup unavailable"],
-            primary_error.__notes__,
-        )
-        self.assertEqual(1, profile.cleanup_calls)
-        self.assertIsNone(edge._profile)
-
-
-def _edge_executable() -> Path | None:
-    program_files_x86 = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
-    program_files = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
-    local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-    candidates = (
-        program_files_x86 / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-        program_files / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-        local_app_data / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-    )
-    return next((path for path in candidates if path.is_file()), None)
 
 
 class _TestServer:
@@ -2084,18 +1687,37 @@ class _TestServer:
         self._thread: threading.Thread | None = None
         self._startup_lock = threading.Lock()
         self._startup_cancelled = threading.Event()
+        self._request_cancelled = threading.Event()
         self._serving = threading.Event()
+        self._sleep_patch: Any | None = None
+
+    def _interruptible_server_sleep(self, seconds: float) -> None:
+        if self._request_cancelled.wait(timeout=seconds):
+            raise _ServerRequestCancelled()
 
     def __enter__(self) -> "_TestServer":
         ready = threading.Event()
         original_server = self._server_type or api_server.ThreadingHTTPServer
         self._startup_cancelled.clear()
+        self._request_cancelled.clear()
         self._serving.clear()
 
         owner = self
 
         class CapturingServer(original_server):
+            # Browser bootstrap opens long-lived SSE/HTTP requests. Track their
+            # sockets so teardown closes the clients before joining handlers and
+            # TemporaryDirectory removes the state database on Windows.
+            daemon_threads = False
+            block_on_close = False
+
             def __init__(self, *args: Any, **kwargs: Any):
+                self._active_requests: set[socket.socket] = set()
+                self._active_requests_lock = threading.Lock()
+                self._request_workers: set[threading.Thread] = set()
+                self._request_workers_lock = threading.Lock()
+                self._worker_requests: dict[threading.Thread, socket.socket] = {}
+                self._request_details: dict[socket.socket, str] = {}
                 super().__init__(*args, **kwargs)
                 with owner._startup_lock:
                     owner._server = self
@@ -2103,6 +1725,81 @@ class _TestServer:
                     if owner._startup_cancelled.is_set():
                         self.server_close()
                         raise _ServerStartupCancelled()
+
+            def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+                worker = threading.current_thread()
+                with self._active_requests_lock:
+                    self._active_requests.add(request)
+                with self._request_workers_lock:
+                    self._request_workers.add(worker)
+                    self._worker_requests[worker] = request
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    with self._active_requests_lock:
+                        self._active_requests.discard(request)
+                        self._request_details.pop(request, None)
+                    with self._request_workers_lock:
+                        self._request_workers.discard(worker)
+                        self._worker_requests.pop(worker, None)
+
+            def finish_request(self, request: socket.socket, client_address: Any) -> None:
+                handler_class = self.RequestHandlerClass
+                server = self
+
+                class TrackingHandler(handler_class):
+                    def do_GET(self) -> None:  # noqa: N802
+                        with server._active_requests_lock:
+                            server._request_details[self.request] = f"{client_address[0]}:{client_address[1]} {self.path}"
+                        try:
+                            super().do_GET()
+                        finally:
+                            if self.path == "/api/web/events/stream":
+                                self.close_connection = True
+
+                TrackingHandler(request, client_address, self)
+
+            def close_active_requests(self) -> list[str]:
+                errors: list[str] = []
+                with self._active_requests_lock:
+                    requests = tuple(self._active_requests)
+                for request in requests:
+                    try:
+                        request.shutdown(socket.SHUT_RDWR)
+                    except OSError as error:
+                        if not _expected_connection_close(error):
+                            errors.append(f"request shutdown: {error}")
+                    try:
+                        request.close()
+                    except OSError as error:
+                        if not _expected_connection_close(error):
+                            errors.append(f"request close: {error}")
+                return errors
+
+            def wake_request_workers(self) -> None:
+                owner._request_cancelled.set()
+
+            def join_request_workers(self, timeout: float = 5) -> None:
+                with self._request_workers_lock:
+                    workers = tuple(self._request_workers)
+                for worker in workers:
+                    worker.join(timeout=timeout)
+                with self._request_workers_lock:
+                    active = [
+                        f"{worker.name} ({self._request_details.get(self._worker_requests.get(worker), 'path unavailable')})"
+                        for worker in workers
+                        if worker.is_alive()
+                    ]
+                if active:
+                    raise AssertionError(f"test server request workers did not stop cleanly: {active}")
+
+            def handle_error(self, request: socket.socket, client_address: Any) -> None:
+                # Closing a keep-alive socket deliberately unblocks its handler
+                # during teardown; it is not a product-server failure.
+                active_error = sys.exc_info()[1]
+                if owner._startup_cancelled.is_set() and isinstance(active_error, OSError) and _expected_connection_close(active_error):
+                    return
+                super().handle_error(request, client_address)
 
             def serve_forever(self, *args: Any, **kwargs: Any) -> None:
                 with owner._startup_lock:
@@ -2119,6 +1816,8 @@ class _TestServer:
 
         with patch.object(api_server, "ThreadingHTTPServer", CapturingServer):
             try:
+                self._sleep_patch = patch.object(api_server.time, "sleep", self._interruptible_server_sleep)
+                self._sleep_patch.start()
                 self._thread = threading.Thread(target=run_server, daemon=True)
                 self._thread.start()
                 if self._startup_timeout_gate is not None and not self._startup_timeout_gate.wait(timeout=5):
@@ -2131,27 +1830,81 @@ class _TestServer:
                 raise
         return self
 
-    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
-        self._stop()
+    def __exit__(self, _type: object, value: BaseException | None, _traceback: object) -> bool:
+        try:
+            self._stop()
+        except BaseException as error:
+            if value is not None:
+                _attach_cleanup_note(value, str(error))
+                return False
+            raise
+        return False
 
     def _stop(self) -> None:
+        errors: list[str] = []
         with self._startup_lock:
             self._startup_cancelled.set()
             server = self._server
             serving = self._serving.is_set()
 
         if server is not None and serving:
-            server.shutdown()
+            try:
+                server.shutdown()
+            except BaseException as error:
+                errors.append(f"server shutdown: {error}")
         if server is not None:
-            server.server_close()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            if self._thread.is_alive():
-                raise AssertionError("test server did not stop cleanly")
+            try:
+                errors.extend(server.close_active_requests())
+            except BaseException as error:
+                errors.append(f"request close: {error}")
+            try:
+                server.wake_request_workers()
+            except BaseException as error:
+                errors.append(f"request worker wakeup: {error}")
+            try:
+                server.server_close()
+            except BaseException as error:
+                errors.append(f"server close: {error}")
+        try:
+            if server is not None:
+                try:
+                    server.join_request_workers()
+                except BaseException as error:
+                    errors.append(f"request worker join: {error}")
+            if self._thread is not None:
+                try:
+                    self._thread.join(timeout=5)
+                except BaseException as error:
+                    errors.append(f"server thread join: {error}")
+                if self._thread.is_alive():
+                    errors.append("test server did not stop cleanly")
+        finally:
+            if self._sleep_patch is not None:
+                try:
+                    self._sleep_patch.stop()
+                except BaseException as error:
+                    errors.append(f"sleep patch stop: {error}")
+                finally:
+                    self._sleep_patch = None
+        if errors:
+            raise AssertionError("BGT-001 test server cleanup failed: " + "; ".join(errors))
 
 
 class _ServerStartupCancelled(Exception):
     pass
+
+
+class _ServerRequestCancelled(Exception):
+    pass
+
+
+def _expected_connection_close(error: OSError) -> bool:
+    return error.errno in {errno.EPIPE, errno.ECONNABORTED, errno.ECONNRESET, errno.ENOTCONN} or getattr(error, "winerror", None) in {10053, 10054, 10058}
+
+
+def _attach_cleanup_note(error: BaseException, cleanup: str) -> None:
+    if hasattr(error, "add_note"):
+        error.add_note("BGT-001 cleanup: " + cleanup)
 
 
 def _create_backup(port: int) -> str:
@@ -2204,411 +1957,6 @@ def _wait_for_http(url: str, timeout: float = 5) -> dict[str, Any]:
             last_error = error
             time.sleep(0.02)
     raise AssertionError(f"server did not become ready: {last_error}")
-
-
-class _EdgeCdp:
-    _PROCESS_EXIT_TIMEOUT = 5
-    _PROFILE_CLEANUP_TIMEOUT = 2
-    _PROFILE_CLEANUP_POLL_INTERVAL = 0.1
-
-    def __init__(self, executable: Path) -> None:
-        self._executable = executable
-        self._process: subprocess.Popen[bytes] | None = None
-        self._client: _CdpClient | None = None
-        self._session_id: str | None = None
-        self._profile: Any | None = None
-        self._stdout: Any | None = None
-        self._stderr: Any | None = None
-        self._job: _WindowsJob | None = None
-
-    def __enter__(self) -> "_EdgeCdp":
-        self._debug_port = _free_port()
-        self._profile = tempfile.TemporaryDirectory()
-        self._stdout = tempfile.TemporaryFile()
-        self._stderr = tempfile.TemporaryFile()
-        try:
-            if sys.platform == "win32":
-                self._job = _WindowsJob()
-            self._process = subprocess.Popen(
-                [
-                    str(self._executable),
-                    "--headless=new",
-                    f"--remote-debugging-port={self._debug_port}",
-                    f"--user-data-dir={self._profile.name}",
-                    "--password-store=basic",
-                    "--disable-background-networking",
-                    "--disable-sync",
-                    "--no-service-autorun",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "about:blank",
-                ],
-                stdout=self._stdout,
-                stderr=self._stderr,
-            )
-            if self._job is not None:
-                self._job.assign(self._process)
-            version = _wait_for_http(f"http://127.0.0.1:{self._debug_port}/json/version")
-            self._client = _CdpClient(str(version["webSocketDebuggerUrl"]))
-            target_id = str(self._client.command("Target.createTarget", {"url": "about:blank"})["targetId"])
-            self._session_id = str(
-                self._client.command("Target.attachToTarget", {"targetId": target_id, "flatten": True})["sessionId"]
-            )
-            self._client.command("Runtime.enable", session_id=self._session_id)
-        except BaseException as error:
-            diagnostics, _ = self._cleanup()
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise
-            raise AssertionError(f"Edge CDP startup failed: {error}; {diagnostics}") from error
-        return self
-
-    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
-        diagnostics, cleanup_failed = self._cleanup()
-        if not cleanup_failed:
-            return
-        message = f"Edge CDP cleanup failed: {diagnostics}"
-        if isinstance(_value, BaseException):
-            _value.add_note(message)
-            return
-        raise AssertionError(message)
-
-    def _cleanup(self) -> tuple[str, bool]:
-        diagnostics: list[str] = []
-        cleanup_failed = False
-        if self._client is not None:
-            try:
-                self._client.close()
-            except OSError as error:
-                diagnostics.append(f"CDP close failed: {error}")
-            self._client = None
-        if self._job is not None:
-            try:
-                self._job.close()
-            except OSError as error:
-                diagnostics.append(f"Windows Edge job cleanup failed: {self._redact_browser_output(str(error))}")
-                cleanup_failed = True
-            self._job = None
-        if self._process is not None:
-            process = self._process
-            try:
-                exit_code = process.poll()
-                if exit_code is None:
-                    if sys.platform == "win32":
-                        try:
-                            exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            try:
-                                exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
-                            except subprocess.TimeoutExpired:
-                                diagnostics.append("process did not exit after Windows job close")
-                                cleanup_failed = True
-                                exit_code = process.poll()
-                    else:
-                        process.terminate()
-                        try:
-                            exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            try:
-                                exit_code = process.wait(timeout=self._PROCESS_EXIT_TIMEOUT)
-                            except subprocess.TimeoutExpired:
-                                diagnostics.append("process did not exit after kill")
-                                cleanup_failed = True
-                                exit_code = process.poll()
-                diagnostics.append(f"process exit code {exit_code}")
-            except OSError as error:
-                diagnostics.append(f"process cleanup failed: {self._redact_browser_output(str(error))}")
-                cleanup_failed = True
-            self._process = None
-        self._close_browser_log(self._stdout, "stdout", diagnostics)
-        self._stdout = None
-        self._close_browser_log(self._stderr, "stderr", diagnostics)
-        self._stderr = None
-        if self._profile is not None:
-            cleanup_failed = self._cleanup_profile(self._profile, diagnostics) or cleanup_failed
-            self._profile = None
-        return "; ".join(diagnostics) or "no process was created", cleanup_failed
-
-    def _cleanup_profile(self, profile: Any, diagnostics: list[str]) -> bool:
-        deadline = time.monotonic() + self._PROFILE_CLEANUP_TIMEOUT
-        while True:
-            try:
-                profile.cleanup()
-                return False
-            except PermissionError as error:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    diagnostics.append(f"profile cleanup failed: {self._redact_browser_output(str(error))}")
-                    return True
-                time.sleep(min(self._PROFILE_CLEANUP_POLL_INTERVAL, remaining))
-            except OSError as error:
-                diagnostics.append(f"profile cleanup failed: {self._redact_browser_output(str(error))}")
-                return True
-
-    @staticmethod
-    def _close_browser_log(stream: Any | None, name: str, diagnostics: list[str]) -> None:
-        if stream is None:
-            return
-        try:
-            stream.seek(0)
-            output = stream.read()
-            if output:
-                diagnostics.append(f"{name}: {_EdgeCdp._redact_browser_output(output)}")
-        except OSError as error:
-            diagnostics.append(f"{name} capture failed: {error}")
-        finally:
-            try:
-                stream.close()
-            except OSError as error:
-                diagnostics.append(f"{name} close failed: {error}")
-
-    @staticmethod
-    def _redact_browser_output(output: bytes | str) -> str:
-        text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
-        text = re.sub(
-            r"(?i)\b(authorization\s*[:=]\s*(?:bearer\s+)?|(?:cookie|password|token|secret)\s*[:=]\s*)[^\s,;]+",
-            r"\1[REDACTED]",
-            text.strip(),
-        )
-        return text[:2000] + ("... [truncated]" if len(text) > 2000 else "")
-
-    def navigate(self, url: str) -> None:
-        self._command("Page.navigate", {"url": url})
-
-    def set_viewport(self, width: int, height: int = 900) -> None:
-        """Use CDP device metrics so the test matrix needs no browser dependency."""
-        self._command(
-            "Emulation.setDeviceMetricsOverride",
-            {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
-        )
-        self._command("Emulation.setVisibleSize", {"width": width, "height": height})
-
-    def press_key(self, key: str, modifiers: int = 0) -> None:
-        key_code = {"Enter": 13, "Tab": 9}.get(key, 0)
-        key_text = "\r" if key == "Enter" else ""
-        self._command(
-            "Input.dispatchKeyEvent",
-            {
-                "type": "keyDown",
-                "key": key,
-                "code": key,
-                "windowsVirtualKeyCode": key_code,
-                "nativeVirtualKeyCode": key_code,
-                "text": key_text,
-                "unmodifiedText": key_text,
-                "modifiers": modifiers,
-            },
-        )
-        self._command(
-            "Input.dispatchKeyEvent",
-            {"type": "keyUp", "key": key, "code": key, "windowsVirtualKeyCode": key_code, "modifiers": modifiers},
-        )
-
-    def move_pointer_to(self, x: float, y: float) -> None:
-        self._command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
-
-    def pointer_down(self, x: float, y: float) -> None:
-        self._command("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
-
-    def pointer_up(self, x: float, y: float) -> None:
-        self._command("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
-
-    def evaluate(self, expression: str) -> Any:
-        response = self._command(
-            "Runtime.evaluate", {"expression": expression, "awaitPromise": True, "returnByValue": True}
-        )
-        if "exceptionDetails" in response:
-            raise AssertionError(f"browser JavaScript failed: {response['exceptionDetails']}")
-        return response["result"].get("value")
-
-    def wait_for(self, expression: str, description: str, timeout: float = 10, diagnostics: str | None = None) -> None:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.evaluate(f"Boolean({expression})"):
-                return
-            time.sleep(0.02)
-        detail = self.evaluate(diagnostics) if diagnostics else None
-        suffix = f"; diagnostics: {detail!r}" if diagnostics else ""
-        raise AssertionError(f"browser condition did not become true: {description}{suffix}")
-
-    def _command(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        assert self._client is not None
-        assert self._session_id is not None
-        return self._client.command(method, params, session_id=self._session_id)
-
-
-class _WindowsJobBasicLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("per_process_user_time_limit", ctypes.c_longlong),
-        ("per_job_user_time_limit", ctypes.c_longlong),
-        ("limit_flags", ctypes.c_uint32),
-        ("minimum_working_set_size", ctypes.c_size_t),
-        ("maximum_working_set_size", ctypes.c_size_t),
-        ("active_process_limit", ctypes.c_uint32),
-        ("affinity", ctypes.c_size_t),
-        ("priority_class", ctypes.c_uint32),
-        ("scheduling_class", ctypes.c_uint32),
-    ]
-
-
-class _WindowsJobIoCounters(ctypes.Structure):
-    _fields_ = [
-        ("read_operation_count", ctypes.c_uint64),
-        ("write_operation_count", ctypes.c_uint64),
-        ("other_operation_count", ctypes.c_uint64),
-        ("read_transfer_count", ctypes.c_uint64),
-        ("write_transfer_count", ctypes.c_uint64),
-        ("other_transfer_count", ctypes.c_uint64),
-    ]
-
-
-class _WindowsJobExtendedLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("basic_limit_information", _WindowsJobBasicLimitInformation),
-        ("io_info", _WindowsJobIoCounters),
-        ("process_memory_limit", ctypes.c_size_t),
-        ("job_memory_limit", ctypes.c_size_t),
-        ("peak_process_memory_used", ctypes.c_size_t),
-        ("peak_job_memory_used", ctypes.c_size_t),
-    ]
-
-
-class _WindowsJob:
-    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-
-    def __init__(self) -> None:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
-        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-        kernel32.SetInformationJobObject.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
-        kernel32.SetInformationJobObject.restype = ctypes.c_int
-        kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-        kernel32.CloseHandle.restype = ctypes.c_int
-        self._kernel32 = kernel32
-        self._handle = kernel32.CreateJobObjectW(None, None)
-        if not self._handle:
-            self._raise_last_error("CreateJobObjectW")
-        limits = _WindowsJobExtendedLimitInformation()
-        limits.basic_limit_information.limit_flags = self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not kernel32.SetInformationJobObject(
-            self._handle,
-            self._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            ctypes.byref(limits),
-            ctypes.sizeof(limits),
-        ):
-            try:
-                self.close()
-            finally:
-                self._raise_last_error("SetInformationJobObject")
-
-    def assign(self, process: subprocess.Popen[bytes]) -> None:
-        if self._handle is None:
-            raise OSError("Windows Edge job is already closed")
-        if not self._kernel32.AssignProcessToJobObject(self._handle, ctypes.c_void_p(process._handle)):  # type: ignore[attr-defined]
-            self._raise_last_error("AssignProcessToJobObject")
-
-    def close(self) -> None:
-        if self._handle is None:
-            return
-        handle, self._handle = self._handle, None
-        if not self._kernel32.CloseHandle(handle):
-            self._raise_last_error("CloseHandle")
-
-    @staticmethod
-    def _raise_last_error(operation: str) -> None:
-        raise OSError(ctypes.get_last_error(), f"{operation} failed")
-
-
-class _CdpClient:
-    def __init__(self, websocket_url: str) -> None:
-        address = websocket_url.removeprefix("ws://")
-        host_port, path = address.split("/", 1)
-        host, raw_port = host_port.rsplit(":", 1)
-        self._socket = socket.create_connection((host, int(raw_port)), timeout=5)
-        self._socket.settimeout(5)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        self._socket.sendall(
-            (
-                f"GET /{path} HTTP/1.1\r\nHost: {host_port}\r\nUpgrade: websocket\r\n"
-                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
-            ).encode("ascii")
-        )
-        response = self._read_http_headers()
-        if not response.startswith(b"HTTP/1.1 101"):
-            raise AssertionError(f"CDP WebSocket handshake failed: {response!r}")
-        self._next_id = 0
-
-    def close(self) -> None:
-        self._socket.close()
-
-    def command(self, method: str, params: dict[str, Any] | None = None, *, session_id: str | None = None) -> dict[str, Any]:
-        self._next_id += 1
-        message: dict[str, Any] = {"id": self._next_id, "method": method}
-        if params:
-            message["params"] = params
-        if session_id:
-            message["sessionId"] = session_id
-        self._send(message)
-        while True:
-            response = self._receive()
-            if response.get("id") != self._next_id:
-                continue
-            if "error" in response:
-                raise AssertionError(f"CDP command {method} failed: {response['error']}")
-            return dict(response.get("result", {}))
-
-    def _read_http_headers(self) -> bytes:
-        response = bytearray()
-        while b"\r\n\r\n" not in response:
-            response.extend(self._socket.recv(1024))
-        return bytes(response)
-
-    def _send(self, message: dict[str, Any]) -> None:
-        payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
-        mask = os.urandom(4)
-        if len(payload) < 126:
-            header = bytes((0x81, 0x80 | len(payload)))
-        elif len(payload) < 65536:
-            header = bytes((0x81, 0x80 | 126)) + struct.pack("!H", len(payload))
-        else:
-            header = bytes((0x81, 0x80 | 127)) + struct.pack("!Q", len(payload))
-        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
-        self._socket.sendall(header + mask + masked)
-
-    def _receive(self) -> dict[str, Any]:
-        while True:
-            first, second = self._read_exact(2)
-            opcode = first & 0x0F
-            length = second & 0x7F
-            if length == 126:
-                length = struct.unpack("!H", self._read_exact(2))[0]
-            elif length == 127:
-                length = struct.unpack("!Q", self._read_exact(8))[0]
-            masked = bool(second & 0x80)
-            mask = self._read_exact(4) if masked else b""
-            payload = self._read_exact(length)
-            if masked:
-                payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
-            if opcode == 0x8:
-                raise AssertionError("CDP WebSocket closed unexpectedly")
-            if opcode == 0x9:
-                self._socket.sendall(bytes((0x8A, len(payload))) + payload)
-                continue
-            if opcode == 0x1:
-                return json.loads(payload)
-
-    def _read_exact(self, size: int) -> bytes:
-        chunks = bytearray()
-        while len(chunks) < size:
-            chunk = self._socket.recv(size - len(chunks))
-            if not chunk:
-                raise AssertionError("CDP WebSocket closed unexpectedly")
-            chunks.extend(chunk)
-        return bytes(chunks)
 
 
 if __name__ == '__main__':

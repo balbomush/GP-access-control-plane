@@ -37,6 +37,21 @@ class CleanInstallVaultTests(unittest.TestCase):
             self.assertFalse(clean_install_vault_dir(home).exists())
             self.assertFalse(clean_install_handoff_path(home).exists())
 
+    def test_cli_restore_uses_pending_vault_and_deletes_only_after_verified_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"; target = root / "fresh"
+            self.seed(source)
+            created = create_clean_install_vault(source, target_home=home)
+            tool = Path(__file__).resolve().parents[1] / "scripts" / "clean-install-vault.py"
+            restored = subprocess.run(
+                [sys.executable, str(tool), "--restore", "--target-state-dir", str(target), "--home", str(home)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stderr)
+            self.assertEqual(restored.stdout, f"status=restored vault_id={created['vault_id']}\n")
+            self.assertFalse(clean_install_vault_dir(home).exists())
+            self.assertFalse(clean_install_handoff_path(home).exists())
+
     def test_corrupt_vault_is_rejected_without_consuming_either_source(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"
@@ -78,6 +93,21 @@ class CleanInstallVaultTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "another device"):
                     restore_clean_install_vault(root / "fresh", target_home=home, vault_id=created["vault_id"])
             self.assertTrue((clean_install_vault_dir(home) / "archive.zip").exists())
+            self.assertTrue(clean_install_handoff_path(home).exists())
+
+    def test_semantic_or_sqlite_restore_failure_preserves_complete_vault_and_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"; self.seed(source)
+            created = create_clean_install_vault(source, target_home=home)
+            from gp_control_plane import backups
+            with mock.patch.object(backups, "_verify_restore_semantics", return_value={"verified": False}), mock.patch.object(
+                backups, "storage_status", return_value={"integrity_check": "not ok", "schema_version": "7", "expected_schema_version": "7"}
+            ):
+                with self.assertRaisesRegex(RuntimeError, "semantic or SQLite"):
+                    restore_clean_install_vault(root / "fresh", target_home=home, vault_id=created["vault_id"])
+            vault = clean_install_vault_dir(home)
+            self.assertTrue((vault / "archive.zip").exists())
+            self.assertTrue((vault / "entry.json").exists())
             self.assertTrue(clean_install_handoff_path(home).exists())
 
     def test_extra_vault_member_rejects_restore_before_cleanup(self) -> None:

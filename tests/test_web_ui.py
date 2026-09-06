@@ -36,6 +36,7 @@ from gp_control_plane.web import app as web_app
 from gp_control_plane.web import docs as web_docs
 from gp_control_plane.web import routes as web_routes
 from gp_control_plane.web.app import index_html, serve, serve_core, serve_web_proxy
+from tests.browser.runner import PlaywrightPage
 
 
 def _json_object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -359,6 +360,9 @@ class WebUiTests(unittest.TestCase):
                         _http_request(server.port, "/api/core/strategy-discovery/current-run-latest-log")[2].decode("utf-8")
                     )
                     history_payload = json.loads(_http_request(server.port, "/api/core/runs/history")[2].decode("utf-8"))
+                    generic_log_payload = json.loads(
+                        _http_request(server.port, "/api/core/runs/latest-log")[2].decode("utf-8")
+                    )
                     log_payload = json.loads(
                         _http_request(server.port, f"/api/core/runs/latest-log?run_id={run_id}")[2].decode("utf-8")
                     )
@@ -374,6 +378,7 @@ class WebUiTests(unittest.TestCase):
                     self.assertEqual(progress_payload["run_id"], run_id)
                     self.assertEqual(current_log_payload["run_id"], run_id)
                     self.assertEqual(history_payload["runs"][0]["run_id"], run_id)
+                    self.assertEqual(generic_log_payload["run_id"], run_id)
                     self.assertEqual(log_payload["run_id"], run_id)
                     self.assertEqual(stop_status, 202)
                     self.assertEqual(json.loads(stop_body.decode("utf-8"))["run_id"], run_id)
@@ -1175,24 +1180,13 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("/api/web/v2fly", html)
 
     def test_v2fly_catalog_update_browser_race_keeps_controls_locked_and_never_reports_false_success(self) -> None:
-        edge_candidates = (
-            shutil.which("msedge"),
-            shutil.which("chrome"),
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        )
-        browser = next((Path(candidate) for candidate in edge_candidates if candidate and Path(candidate).is_file()), None)
-        if browser is None:
-            self.skipTest("a Chromium browser is required for the v2fly UI runtime test")
-
         bootstrap = """
-localStorage.setItem('gp-control-plane.auth-token', 'test-token');
+localStorage.setItem('gp-control-plane-auth-token', 'test-token');
 window.__v2flyUpdateResolve = null;
 window.__failV2flyCategories = false;
 window.__v2flyUpdateWarning = false;
 window.fetch = (input) => {
-  const url = String(input);
+  const url = String(input instanceof Request ? input.url : input);
   const response = (payload, status = 200) => Promise.resolve(new Response(JSON.stringify(payload), {status, headers: {'Content-Type': 'application/json'}}));
   if (url.includes('/api/service/v2fly/update-local-storage')) {
     if (window.__v2flyUpdateWarning) return response({status: 'success', storage: {group_count: 2}, result: {revision_warning: '<img src=x onerror=alert(1)>'}});
@@ -1207,93 +1201,108 @@ window.fetch = (input) => {
   return response({});
 };
 """
-        probe = """
-<output id="v2fly-browser-probe"></output>
-<script>
-window.addEventListener('load', async () => {
-  const probe = document.getElementById('v2fly-browser-probe');
-  mergeStatusPayload({state: 'idle', zapret2: {ready: true}});
-  renderMetrics();
-  updateV2flyLocalStorage();
-  setTimeout(async () => {
-    const reload = document.querySelector('[data-action="v2fly-load-categories"]');
-    const update = document.querySelector('[data-action="v2fly-update-local-storage"]');
-    renderMetrics();
-    probe.dataset.r02 = String(Boolean(reload && reload.disabled && update && update.disabled));
-    window.__failV2flyCategories = true;
-    window.__v2flyUpdateResolve();
-    setTimeout(async () => {
-      probe.dataset.r03 = String(
-        !document.getElementById('message').textContent.includes('Каталог v2fly обновлен') &&
-        Boolean(update && !update.disabled)
-      );
-      mergeStatusPayload({state: 'running', current_run: {run_id: 'run-1', status: 'running'}, zapret2: {ready: true}});
-      await loadV2flyCategories(true);
-      probe.dataset.f02ActiveRun = String(Boolean(reload && reload.disabled && update && update.disabled));
-      mergeStatusPayload({state: 'idle'});
-      await loadV2flyCategories(true);
-      probe.dataset.f02IncompleteStatus = String(Boolean(reload && reload.disabled && update && update.disabled));
-      mergeStatusPayload({state: 'idle', zapret2: {ready: true}});
-      window.__failV2flyCategories = false;
-      window.__v2flyUpdateWarning = true;
-      await updateV2flyLocalStorage();
-      const message = document.getElementById('message');
-      probe.dataset.f01Warning = String(
-        message.textContent.includes('Каталог v2fly готов: 2 групп, но ревизия источника не подтверждена:') &&
-        message.textContent.includes('<img src=x onerror=alert(1)>') &&
-        !message.querySelector('img')
-      );
-    }, 100);
-  }, 25);
-});
-</script>
-"""
+        probe = '<output id="v2fly-browser-probe"></output>'
         with tempfile.TemporaryDirectory() as raw:
             page = Path(raw) / "v2fly-ui-race.html"
-            profile = Path(raw) / "browser-profile"
             html = index_html().replace("<script>", f"<script>{bootstrap}", 1).replace("</body>", f"{probe}</body>")
             page.write_text(html, encoding="utf-8")
-            result = subprocess.run(
-                [
-                    str(browser),
-                    "--headless",
-                    "--disable-gpu",
-                    "--no-first-run",
-                    "--allow-file-access-from-files",
-                    f"--user-data-dir={profile}",
-                    "--virtual-time-budget=2000",
-                    "--dump-dom",
-                    page.as_uri(),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
+            with PlaywrightPage() as browser_page:
+                browser_page.navigate(page.as_uri())
+                browser_page.wait_for(
+                    "bootstrapState === 'ready' && document.querySelector('[data-action=\"v2fly-update-local-storage\"]')",
+                    "bootstrapped v2fly controls",
+                )
+                browser_page.click("#tab-lists")
+                browser_page.click('[data-action="v2fly-update-local-storage"]')
+                browser_page.wait_for("document.querySelector('[data-action=\"v2fly-load-categories\"]').disabled && document.querySelector('[data-action=\"v2fly-update-local-storage\"]').disabled", "locked v2fly controls")
+                browser_page.evaluate("window.__failV2flyCategories = true; window.__v2flyUpdateResolve()")
+                browser_page.wait_for("!document.querySelector('[data-action=\"v2fly-update-local-storage\"]').disabled", "failed category reload clears update lock")
+                r02_r03 = browser_page.evaluate("!document.getElementById('message').textContent.includes('Каталог v2fly обновлен')")
+                active_run = browser_page.evaluate("(async () => { mergeStatusPayload({state: 'running', current_run: {run_id: 'run-1', status: 'running'}, zapret2: {ready: true}}); await loadV2flyCategories(true); return document.querySelector('[data-action=\"v2fly-load-categories\"]').disabled && document.querySelector('[data-action=\"v2fly-update-local-storage\"]').disabled; })()")
+                incomplete_status = browser_page.evaluate("(async () => { mergeStatusPayload({state: 'idle'}); await loadV2flyCategories(true); return document.querySelector('[data-action=\"v2fly-load-categories\"]').disabled && document.querySelector('[data-action=\"v2fly-update-local-storage\"]').disabled; })()")
+                warning = browser_page.evaluate("(async () => { mergeStatusPayload({state: 'idle', zapret2: {ready: true}}); window.__failV2flyCategories = false; window.__v2flyUpdateWarning = true; await updateV2flyLocalStorage(); const message = document.getElementById('message'); return message.textContent.includes('Каталог v2fly готов: 2 групп, но ревизия источника не подтверждена:') && message.textContent.includes('<img src=x onerror=alert(1)>') && !message.querySelector('img'); })()")
+        self.assertTrue(r02_r03)
+        self.assertTrue(active_run)
+        self.assertTrue(incomplete_status)
+        self.assertTrue(warning)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(
-            result.stdout,
-            r'<output[^>]*id="v2fly-browser-probe"[^>]*data-r02="true"[^>]*data-r03="true"[^>]*data-f02-active-run="true"[^>]*data-f02-incomplete-status="true"[^>]*data-f01-warning="true"',
-        )
+    def test_int_browser_acknowledged_start_preserves_live_log_until_matching_terminal_history(self) -> None:
+        """INT-001/002: controlled transport orders log before a stale status response."""
+        bootstrap = """
+localStorage.setItem('gp-control-plane-auth-token', 'test-token');
+window.__int = {posts: 0, accepted: false, startError: false, startPending: true, logNew: false, terminal: false, pending: {}, sse: null, logUrls: []};
+window.__intResponse = (payload, status = 200) => Promise.resolve(new Response(JSON.stringify(payload), {status, headers: {'Content-Type': 'application/json'}}));
+window.__intEmit = (event, payload = {}) => window.__int.sse.enqueue(new TextEncoder().encode(`event: ${event}\\ndata: ${JSON.stringify(payload)}\\n\\n`));
+window.fetch = (input, options = {}) => {
+  const url = String(input instanceof Request ? input.url : input);
+  if (url.includes('/api/web/events/stream')) return Promise.resolve(new Response(new ReadableStream({start(controller) { window.__int.sse = controller; }}), {status: 200, headers: {'Content-Type': 'text/event-stream'}}));
+  if (url.includes('/api/core/strategy-discovery/start-run')) {
+    window.__int.posts += 1;
+    if (window.__int.startError) return window.__intResponse({error: {message: 'server-start-error'}}, 503);
+    const accept = () => {
+      window.__int.accepted = true;
+      return window.__intResponse({accepted: true, run_id: 'new-run'} , 202);
+    };
+    if (window.__int.startPending) return new Promise((resolve) => { window.__int.pending.start = () => resolve(accept()); });
+    return accept();
+  }
+  if (url.includes('/api/web/status')) {
+    if (window.__int.accepted) return new Promise((resolve) => { window.__int.pending.status = resolve; });
+    return window.__intResponse({state: 'idle', zapret2: {ready: true}, settings: {}, run_preferences: {}});
+  }
+  if (url.includes('/api/web/runs/history-page')) {
+    if (window.__int.accepted && !window.__int.terminal) return new Promise((resolve) => { window.__int.pending.history = resolve; });
+    return window.__intResponse({runs: window.__int.terminal ? [{id: 'new-run', run_id: 'new-run', status: 'success', timestamp: '2026-09-05T00:00:00Z'}] : [], total: window.__int.terminal ? 1 : 0, limit: 50, offset: 0, has_more: false});
+  }
+  if (url.includes('/api/core/runs/latest-log')) { window.__int.logUrls.push(url); return window.__intResponse(window.__int.logNew ? {run_id: 'new-run', status: 'running', stdout_log: 'new.out', stdout_size: 11, stdout_tail: 'first live line'} : {run_id: 'old-run', status: 'success', stdout_log: 'old.out', stdout_size: 3, stdout_tail: ''}); }
+  if (url.includes('/api/web/presets')) return window.__intResponse({custom: {}, system: {}, metadata: {}, system_metadata: {}});
+  if (url.includes('/api/core/run-settings')) return window.__intResponse({settings: {}});
+  return window.__intResponse({});
+};
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            page = Path(raw) / "int-acknowledged-start.html"
+            page.write_text(index_html().replace("<script>", f"<script>{bootstrap}", 1), encoding="utf-8")
+            with PlaywrightPage() as browser_page:
+                browser_page.navigate(page.as_uri())
+                browser_page.wait_for("bootstrapState === 'ready' && window.__int.sse", "ready controlled INT transport")
+                browser_page.fill("#finder-domains", "youtube.com")
+                browser_page.click('[data-action="run-selected-discovery"]')
+                browser_page.wait_for("window.__int.posts === 1 && window.__int.pending.start", "pending start request")
+                in_flight = browser_page.evaluate("({startDisabled: document.querySelector('[data-action=\"run-selected-discovery\"]').disabled, stopDisabled: document.querySelector('[data-action=\"stop-current\"]').disabled, message: document.getElementById('message').textContent})")
+                browser_page.evaluate("window.__int.pending.start()")
+                browser_page.wait_for("document.getElementById('message').textContent.includes('Запуск подтверждён: new-run')", "accepted run acknowledgement")
+                browser_page.wait_for("window.__int.logUrls.some((url) => url.includes('run_id=new-run'))", "acknowledged run log request")
+                immediate = browser_page.evaluate("({posts: window.__int.posts, startDisabled: document.querySelector('[data-action=\"run-selected-discovery\"]').disabled, stopEnabled: !document.querySelector('[data-action=\"stop-current\"]').disabled, busy: document.getElementById('metric-job').textContent, queuedLog: document.getElementById('finder-log').textContent, logRunId: state.finderLog?.run_id || null, acknowledgedLogRequest: window.__int.logUrls.some((url) => url.includes('run_id=new-run'))})")
+                browser_page.evaluate("document.querySelector('[data-action=\"run-selected-discovery\"]').click(); window.__int.logNew = true; window.__intEmit('log')")
+                browser_page.wait_for("document.getElementById('finder-log').textContent.includes('first live line')", "log SSE before status")
+                browser_page.evaluate("window.__int.pending.status(new Response(JSON.stringify({state: 'idle', zapret2: {ready: true}}), {status: 200, headers: {'Content-Type': 'application/json'}})); window.__int.pending.history(new Response(JSON.stringify({runs: [], total: 0, limit: 50, offset: 0, has_more: false}), {status: 200, headers: {'Content-Type': 'application/json'}}))")
+                browser_page.wait_for("state.acknowledgedRun && state.acknowledgedRun.run_id === 'new-run' && document.getElementById('finder-log').textContent.includes('first live line')", "stale status and history keep acknowledged run")
+                browser_page.evaluate("window.__int.terminal = true; window.__intEmit('runs')")
+                browser_page.wait_for("!state.acknowledgedRun && !document.querySelector('[data-action=\"run-selected-discovery\"]').disabled", "matching terminal history converges run")
+                final_state = browser_page.evaluate("({posts: window.__int.posts, log: document.getElementById('finder-log').textContent, status: document.getElementById('metric-job').textContent})")
+                browser_page.evaluate("window.__int.startError = true")
+                browser_page.click('[data-action="run-selected-discovery"]')
+                browser_page.wait_for("document.getElementById('message').textContent.includes('server-start-error')", "start error restores controls")
+                error_state = browser_page.evaluate("({posts: window.__int.posts, acknowledged: state.acknowledgedRun, startEnabled: !document.querySelector('[data-action=\"run-selected-discovery\"]').disabled, stopDisabled: document.querySelector('[data-action=\"stop-current\"]').disabled})")
+        self.assertTrue(in_flight["startDisabled"])
+        self.assertTrue(in_flight["stopDisabled"])
+        self.assertIn("Отправляем запрос на запуск: Поиск стратегий", in_flight["message"])
+        self.assertNotIn("Поиск стратегий запущено", in_flight["message"])
+        self.assertEqual(immediate, {"posts": 1, "startDisabled": True, "stopEnabled": True, "busy": "В очереди", "queuedLog": "Запуск подтверждён, ожидаем вывод", "logRunId": None, "acknowledgedLogRequest": True})
+        self.assertEqual(final_state, {"posts": 1, "log": "first live line", "status": "Свободно"})
+        self.assertEqual(error_state, {"posts": 2, "acknowledged": None, "startEnabled": True, "stopDisabled": True})
 
     def test_wbg_browser_bootstrap_gate_is_atomic_generic_and_race_safe(self) -> None:
         """WBG-001..006: run the generated boot UI in Chromium with controlled fetches."""
-        edge_candidates = (
-            shutil.which("msedge"),
-            shutil.which("chrome"),
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        )
-        browser = next((Path(candidate) for candidate in edge_candidates if candidate and Path(candidate).is_file()), None)
-        if browser is None:
-            self.skipTest("a Chromium browser is required for the Web bootstrap runtime test")
-
         bootstrap = """
 localStorage.setItem('gp-control-plane-auth-token', 'test-token');
-window.__wbg = { attempt: 0, pending: {}, signals: {}, events: 0, eventsBeforeReady: null };
+window.__wbg = { attempt: 0, pending: {}, signals: {}, events: 0, eventsBeforeReady: null, retryClicks: 0 };
+document.addEventListener('click', (event) => {
+  if (event.target instanceof Element && event.target.closest('#boot-retry')) window.__wbg.retryClicks += 1;
+});
 window.fetch = (input, options) => {
-  const url = String(input);
+  const url = String(input instanceof Request ? input.url : input);
   const key = url.includes('/api/web/status') ? 'status'
     : url.includes('/api/web/runs/history-page') ? 'runs'
     : url.includes('/api/core/runs/latest-log') ? 'log'
@@ -1328,7 +1337,7 @@ window.__wbgComplete = (attempt, failure) => {
 window.__wbgFailOnly = (attempt, key) => window.__wbg.pending[attempt][key].reject(new Error('transport-rejected-secret'));
 window.__wbgWait = (predicate, timeout = 500) => new Promise((resolve, reject) => {
   const deadline = Date.now() + timeout;
-  const check = () => predicate() ? resolve() : Date.now() >= deadline ? reject(new Error('wbg wait timeout')) : setTimeout(check, 5);
+  const check = () => predicate() ? resolve() : Date.now() >= deadline ? reject(new Error('wbg wait timeout')) : requestAnimationFrame(check);
   check();
 });
 """
@@ -1345,7 +1354,9 @@ window.addEventListener('load', async () => {
     __wbgFailOnly(1, 'status');
     await __wbgWait(() => document.getElementById('boot-retry').hidden === false);
     probe.dataset.regularFailureAbort = String(__wbg.signals[1].aborted && !document.getElementById('app-shell') && Object.keys(__wbg.pending[1]).length === 5);
-    document.getElementById('boot-retry').click();
+    probe.dataset.awaitingRetry = 'regular';
+    await __wbgWait(() => __wbg.retryClicks === 1);
+    delete probe.dataset.awaitingRetry;
     await __wbgWait(() => __wbg.attempt === 2);
     __wbgComplete(2, null);
     await __wbgWait(() => Boolean(document.getElementById('app-shell')) && bootstrapState === 'ready');
@@ -1360,10 +1371,13 @@ window.addEventListener('load', async () => {
       probe.dataset[`failure${failure}`] = String(!document.getElementById('app-shell') && !document.querySelector('.tabs') && !document.getElementById('message') && text.includes('Не удалось загрузить интерфейс') && !text.includes('transport-') && !text.includes('/api/'));
     }
     const duplicateBase = __wbg.attempt;
+    probe.dataset.awaitingRetry = 'duplicate';
+    await __wbgWait(() => __wbg.retryClicks === 2);
+    // The second delivery is an injected duplicate-event ordering fixture;
+    // the first retry click is performed by Playwright outside this fixture.
     document.getElementById('boot-retry').click();
-    document.getElementById('boot-retry').click();
+    delete probe.dataset.awaitingRetry;
     await __wbgWait(() => __wbg.attempt === duplicateBase + 1);
-    await new Promise((resolve) => setTimeout(resolve, 20));
     probe.dataset.duplicateRetry = String(__wbg.attempt === duplicateBase + 1);
     const retryAttempt = __wbg.attempt;
     __wbgComplete(retryAttempt, null);
@@ -1380,7 +1394,7 @@ window.addEventListener('load', async () => {
     await __wbgWait(() => Boolean(document.getElementById('app-shell')) && bootstrapState === 'ready');
     const readyVersion = state.status.version;
     __wbgComplete(staleAttempt, null);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await Promise.resolve();
     probe.dataset.staleIgnored = String(state.status.version === readyVersion && state.status.version === `attempt-${currentAttempt}`);
     probe.dataset.eventsAfterReady = String(__wbg.events > __wbg.eventsBeforeReady);
   } catch (error) {
@@ -1391,52 +1405,28 @@ window.addEventListener('load', async () => {
 """
         with tempfile.TemporaryDirectory() as raw:
             page = Path(raw) / "wbg-bootstrap.html"
-            profile = Path(raw) / "browser-profile"
             html = index_html().replace("<script>", f"<script>{bootstrap}", 1).replace("</body>", f"{probe}</body>")
             page.write_text(html, encoding="utf-8")
-            result = subprocess.run(
-                [
-                    str(browser),
-                    "--headless=new",
-                    "--no-first-run",
-                    "--password-store=basic",
-                    "--allow-file-access-from-files",
-                    f"--user-data-dir={profile}",
-                    "--virtual-time-budget=3000",
-                    "--dump-dom",
-                    page.as_uri(),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-
-        if result.returncode != 0 and "GPU process isn't usable" in result.stderr:
-            self.skipTest("Chromium headless GPU process is unusable in this Windows sandbox")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(
-            result.stdout,
-            r'<output[^>]*id="wbg-browser-probe"[^>]*data-loading="true"[^>]*data-regular-failure-abort="true"[^>]*data-regular-failure-retry-ready="true"[^>]*data-failurestatus="true"[^>]*data-failureruns="true"[^>]*data-failurelog="true"[^>]*data-failurepresets="true"[^>]*data-failuresettings="true"[^>]*data-duplicate-retry="true"[^>]*data-retry-ready="true"[^>]*data-stale-ignored="true"[^>]*data-events-after-ready="true"',
-        )
+            with PlaywrightPage() as browser_page:
+                browser_page.navigate(page.as_uri())
+                browser_page.wait_for("document.getElementById('wbg-browser-probe')?.dataset.awaitingRetry === 'regular'", "visible regular WBG retry")
+                browser_page.click("#boot-retry")
+                browser_page.wait_for("document.getElementById('wbg-browser-probe')?.dataset.awaitingRetry === 'duplicate'", "visible duplicate WBG retry")
+                browser_page.click("#boot-retry")
+                browser_page.wait_for("document.getElementById('wbg-browser-probe')?.dataset.eventsAfterReady === 'true'", "WBG controlled bootstrap race")
+                probe_state = browser_page.evaluate("({ ...document.getElementById('wbg-browser-probe').dataset })")
+        self.assertEqual(probe_state, {"loading": "true", "regularFailureAbort": "true", "regularFailureRetryReady": "true", "failurestatus": "true", "failureruns": "true", "failurelog": "true", "failurepresets": "true", "failuresettings": "true", "duplicateRetry": "true", "retryReady": "true", "staleIgnored": "true", "eventsAfterReady": "true"})
 
     def test_wbg_browser_timeout_fails_current_attempt_then_retry_reaches_ready(self) -> None:
         """WBG-R04: one pending bootstrap request reaches generic failed then a user retry succeeds."""
-        edge_candidates = (
-            shutil.which("msedge"),
-            shutil.which("chrome"),
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        )
-        browser = next((Path(candidate) for candidate in edge_candidates if candidate and Path(candidate).is_file()), None)
-        if browser is None:
-            self.skipTest("a Chromium browser is required for the Web bootstrap timeout runtime test")
-
         bootstrap = """
 localStorage.setItem('gp-control-plane-auth-token', 'test-token');
-window.__wbgTimeout = {attempt: 0, pending: {}, signals: {}, events: 0};
+window.__wbgTimeout = {attempt: 0, pending: {}, signals: {}, events: 0, retryClicks: 0};
+document.addEventListener('click', (event) => {
+  if (event.target instanceof Element && event.target.closest('#boot-retry')) window.__wbgTimeout.retryClicks += 1;
+});
 window.fetch = (input, options) => {
-  const url = String(input);
+  const url = String(input instanceof Request ? input.url : input);
   const key = url.includes('/api/web/status') ? 'status'
     : url.includes('/api/web/runs/history-page') ? 'runs'
     : url.includes('/api/core/runs/latest-log') ? 'log'
@@ -1466,7 +1456,7 @@ window.__wbgTimeoutComplete = (attempt) => {
 };
 window.__wbgTimeoutWait = (predicate, timeout = 500) => new Promise((resolve, reject) => {
   const deadline = Date.now() + timeout;
-  const check = () => predicate() ? resolve() : Date.now() >= deadline ? reject(new Error('timeout probe wait')) : setTimeout(check, 5);
+  const check = () => predicate() ? resolve() : Date.now() >= deadline ? reject(new Error('timeout probe wait')) : requestAnimationFrame(check);
   check();
 });
 """
@@ -1480,7 +1470,9 @@ window.addEventListener('load', async () => {
     await __wbgTimeoutWait(() => document.getElementById('boot-retry').hidden === false);
     const failed = document.getElementById('boot-screen').innerText;
     probe.dataset.timeoutFailed = String(!document.getElementById('app-shell') && __wbgTimeout.signals[1].aborted && failed.includes('Не удалось загрузить интерфейс') && !failed.includes('timeout') && !failed.includes('/api/'));
-    document.getElementById('boot-retry').click();
+    probe.dataset.awaitingRetry = 'timeout';
+    await __wbgTimeoutWait(() => __wbgTimeout.retryClicks === 1);
+    delete probe.dataset.awaitingRetry;
     await __wbgTimeoutWait(() => __wbgTimeout.attempt === 2);
     __wbgTimeoutComplete(2);
     await __wbgTimeoutWait(() => bootstrapState === 'ready' && Boolean(document.getElementById('app-shell')));
@@ -1493,33 +1485,15 @@ window.addEventListener('load', async () => {
 """
         with tempfile.TemporaryDirectory() as raw:
             page = Path(raw) / "wbg-timeout.html"
-            profile = Path(raw) / "browser-profile"
             html = index_html().replace("const BOOTSTRAP_TIMEOUT_MS = 15000;", "const BOOTSTRAP_TIMEOUT_MS = 50;").replace("<script>", f"<script>{bootstrap}", 1).replace("</body>", f"{probe}</body>")
             page.write_text(html, encoding="utf-8")
-            result = subprocess.run(
-                [
-                    str(browser),
-                    "--headless=new",
-                    "--no-first-run",
-                    "--password-store=basic",
-                    "--allow-file-access-from-files",
-                    f"--user-data-dir={profile}",
-                    "--virtual-time-budget=1500",
-                    "--dump-dom",
-                    page.as_uri(),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-
-        if result.returncode != 0 and "GPU process isn't usable" in result.stderr:
-            self.skipTest("Chromium headless GPU process is unusable in this Windows sandbox")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(
-            result.stdout,
-            r'<output[^>]*id="wbg-timeout-browser-probe"[^>]*data-timeout-failed="true"[^>]*data-retry-ready="true"',
-        )
+            with PlaywrightPage() as browser_page:
+                browser_page.navigate(page.as_uri())
+                browser_page.wait_for("document.getElementById('wbg-timeout-browser-probe')?.dataset.awaitingRetry === 'timeout'", "visible timeout WBG retry")
+                browser_page.click("#boot-retry")
+                browser_page.wait_for("document.getElementById('wbg-timeout-browser-probe')?.dataset.retryReady === 'true'", "WBG timeout recovery")
+                probe_state = browser_page.evaluate("({ ...document.getElementById('wbg-timeout-browser-probe').dataset })")
+        self.assertEqual(probe_state, {"timeoutFailed": "true", "retryReady": "true"})
 
     def test_common_tested_preset_waits_for_loaded_tested_domains(self) -> None:
         html = index_html()
@@ -1686,7 +1660,7 @@ window.addEventListener('load', async () => {
         self.assertIn('const bootstrap = !light || !hasCompleteSystemStatus();', refresh_map)
         self.assertIn("status: getJson(apiEndpoint('web', 'status'))", refresh_map)
         self.assertIn("finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0)))", refresh_map)
-        self.assertIn("finderLog: getJson(apiEndpoint('core', 'latestLog'))", refresh_map)
+        self.assertIn("finderLog: getJson(latestLogUrl(false))", refresh_map)
         self.assertIn('if (bootstrap) {', refresh_map)
         self.assertIn("requests.presets = getJson(apiEndpoint('web', 'presets'));", refresh_map)
         self.assertIn('requests.settings = fetchSettingsPayload();', refresh_map)
@@ -1750,12 +1724,13 @@ window.addEventListener('load', async () => {
         self.assertNotIn('<span class="helper-text">глубина, повторы, DNS/IP-check, лимиты и timeout</span>', html)
         self.assertIn("details.preset-panel > summary:focus-visible", html)
 
-    def test_single_action_rows_are_balanced_on_non_mobile_widths(self) -> None:
+    def test_single_action_rows_use_an_explicit_primary_pattern(self) -> None:
         html = index_html()
 
-        self.assertIn(".button-row.l-action-grid > :only-child", html)
-        self.assertIn("grid-column: 1 / -1", html)
+        self.assertIn(".primary-only-action > button", html)
+        self.assertIn('class="button-row l-action-grid primary-only-action"', html)
         self.assertIn("width: 100%", html)
+        self.assertNotIn(".button-row.l-action-grid > :only-child", html)
         self.assertNotIn("action-row-single", html)
 
     def test_domain_group_disclosure_has_a_stateful_css_marker(self) -> None:
@@ -5087,6 +5062,7 @@ window.addEventListener('load', async () => {
 
     def test_strategy_discovery_without_stop_reaches_actual_privileged_child(self) -> None:
         def run_without_stop(mode: str) -> None:
+            blockcheck_path = str(Path("/test/blockcheck2.sh").resolve())
             with tempfile.TemporaryDirectory() as raw:
                 tmp = Path(raw)
                 config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
@@ -5133,7 +5109,7 @@ window.addEventListener('load', async () => {
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value=blockcheck_path),
                     mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(strategy_finder.subprocess, "Popen", side_effect=launch_child),
@@ -5159,9 +5135,9 @@ window.addEventListener('load', async () => {
                         history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
                         self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
                         history = json.loads(history_body.decode("utf-8"))
-                        self.assertEqual([["/test/blockcheck2.sh"]], child_commands)
+                        self.assertEqual([[blockcheck_path]], child_commands)
                         self.assertEqual(1, len(child_kwargs))
-                        self.assertTrue(child_kwargs[0]["start_new_session"])
+                        self.assertEqual(os.name != "nt", child_kwargs[0]["start_new_session"])
                         self.assertEqual(0, child.returncode)
                         self.assertIsNone(state["current_run_id"])
                         self.assertIsNone(state["last_error"])
@@ -5177,6 +5153,7 @@ window.addEventListener('load', async () => {
 
     def test_strategy_discovery_stop_after_actual_child_launch_terminates_and_cleans_up(self) -> None:
         def run_stop_after_launch(mode: str) -> None:
+            blockcheck_path = str(Path("/test/blockcheck2.sh").resolve())
             with tempfile.TemporaryDirectory() as raw:
                 tmp = Path(raw)
                 config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
@@ -5195,7 +5172,7 @@ window.addEventListener('load', async () => {
 
                     def wait(self, timeout: float | None = None) -> int:
                         if not self.terminated.is_set():
-                            raise subprocess.TimeoutExpired("/test/blockcheck2.sh", timeout)
+                            raise subprocess.TimeoutExpired(blockcheck_path, timeout)
                         assert self.returncode is not None
                         return self.returncode
 
@@ -5210,7 +5187,7 @@ window.addEventListener('load', async () => {
                             worker_finished.set()
 
                 def launch_child(command: list[str], *args: object, **_kwargs: object) -> ControlledChild:
-                    if command == ["/test/blockcheck2.sh"]:
+                    if command == [blockcheck_path]:
                         child_commands.append(command)
                         child_started.set()
                         return child
@@ -5239,7 +5216,7 @@ window.addEventListener('load', async () => {
                             "snapshot_id": "post-run-snapshot",
                         },
                     ),
-                    mock.patch.object(strategy_finder.shutil, "which", return_value="/test/blockcheck2.sh"),
+                    mock.patch.object(strategy_finder.shutil, "which", return_value=blockcheck_path),
                     mock.patch.object(strategy_finder, "_count_script_function_attempts", return_value=1),
                     mock.patch.object(strategy_finder, "root_command", side_effect=lambda command, **_kwargs: command) as root_command,
                     mock.patch.object(strategy_finder.subprocess, "Popen", side_effect=launch_child),
@@ -5281,7 +5258,7 @@ window.addEventListener('load', async () => {
                         history_status, _headers, history_body = _http_request(server.port, "/api/core/runs/history")
                         self.assertEqual(history_status, 200, history_body.decode("utf-8", errors="replace"))
                         history = json.loads(history_body.decode("utf-8"))
-                        self.assertEqual([["/test/blockcheck2.sh"]], child_commands)
+                        self.assertEqual([[blockcheck_path]], child_commands)
                         self.assertTrue(
                             child.terminated.is_set(),
                             f"termination_calls={termination_calls!r}, state={state!r}, history={history!r}",

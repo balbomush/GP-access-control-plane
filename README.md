@@ -34,7 +34,20 @@ GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/
 curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 GP_INSTALL_WEB=off bash
 ```
 
-Укажите exact annotated release tag в `GP_BRANCH`. До единственного запроса `sudo` bootstrap сначала проверяет уже существующий device-local vault; при его отсутствии экспортирует legacy-state. На чистом хосте без legacy-state он выполняет non-destructive initial install без vault. Затем один штатный installer-process останавливает сервисы, удаляет только прежнюю GP-поверхность и ставит fresh версию из того же tag. При ошибке vault до удаления ничего не меняется; после удаления разрешён только повтор fresh-install. Откат не поддерживается.
+### Alpha/prerelease (только для тестовой обратной связи)
+
+Основные команды выше устанавливают stable release. Пока stable `v0.4.1` ещё
+не опубликован, для утверждённой alpha-сборки используйте отдельно exact ref:
+
+```bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1-alpha.1/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1-alpha.1 bash
+```
+
+Переход alpha → stable и rollback не поддерживаются: alpha — самостоятельная
+тестовая clean-install сборка, а не этап обновления stable-установки.
+
+Укажите exact annotated stable tag `vX.Y.Z` или alpha tag `vX.Y.Z-alpha.N` в `GP_BRANCH`. До единственного запроса `sudo` bootstrap сначала проверяет уже существующий device-local vault; при его отсутствии экспортирует legacy-state. На чистом хосте без legacy-state он выполняет non-destructive initial install без vault. Затем один штатный installer-process останавливает сервисы, удаляет только прежнюю GP-поверхность и ставит fresh версию из того же tag. При existing installation после fresh-файлов и venv installer автоматически восстанавливает vault как install user и запускает сервисы только после semantic- и SQLite-проверок; исходный vault удаляется только при успешном restore. При сбое vault до удаления ничего не меняется, а после удаления сохранённый vault остаётся для повторной clean-install или аварийного restore. Откат не поддерживается.
 
 Установка проверяется на Debian/Ubuntu-like системах с `apt-get` и `systemd`.
 
@@ -101,7 +114,7 @@ curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
 
 Маршрут миграции legacy-state, введённый в v0.4.0, поддерживает только стандартный путь `$HOME/gp/GP-access-control-plane/build/state`. Настроенный или внешний путь состояния не входит в scope этой миграции.
 
-Топология выбирается только перед запуском: `GP_INSTALL_WEB=on` ставит Core и Web, `off` — только Core. После fresh-install восстановите vault в UI/API, подтвердив `confirm_restore=true`; источник удаляется только после semantic-проверки и готовности/integrity SQLite.
+Топология выбирается только перед запуском: `GP_INSTALL_WEB=on` ставит Core и Web, `off` — только Core. Штатная clean-install для existing installation восстанавливает vault автоматически до запуска сервисов; источник удаляется только после semantic-проверки и готовности/integrity SQLite. Ручной restore через аутентифицированный HTTP/API остаётся аварийным путём для сохранённого pending vault, а не шагом обычной установки.
 
 Что делает установщик:
 
@@ -233,6 +246,6 @@ curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
 ~/gp/.GP-access-control-plane.data/backups/
 ```
 
-При строгом обновлении релиза прежние данные, находившиеся внутри каталога проекта, экспортируются в device-local vault и восстанавливаются только после явного подтверждения.
+При strict clean-install прежние данные, находившиеся внутри каталога проекта, экспортируются в device-local vault и штатно восстанавливаются автоматически до первого запуска сервисов. Ручное подтверждение через HTTP/API относится только к аварийному восстановлению сохранённого pending vault.
 
 Откат кода не откатывает пользовательские данные и не отменяет этот перенос. Для возврата данных используйте созданный ранее бекап. Данные остаются на хосте и никуда не публикуются.

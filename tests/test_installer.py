@@ -18,7 +18,8 @@ class CleanInstallerTests(unittest.TestCase):
 
     def test_user_flow_accepts_only_exact_annotated_tag_and_one_sudo(self) -> None:
         self.assertIn('TAG="${GP_BRANCH:-}"', self.bootstrap)
-        self.assertIn("exact release tag vX.Y.Z", self.bootstrap)
+        self.assertIn("exact annotated stable or alpha release tag", self.bootstrap)
+        self.assertIn("^v[0-9]+\\.[0-9]+\\.[0-9]+(-alpha\\.[1-9][0-9]*)?$", self.bootstrap)
         self.assertIn('cat-file -t "refs/tags/$TAG"', self.bootstrap)
         self.assertIn('python3 "$source_dir/scripts/clean-install-vault.py"', self.bootstrap)
         self.assertEqual(self.bootstrap.count("sudo --"), 1)
@@ -35,6 +36,56 @@ class CleanInstallerTests(unittest.TestCase):
         for forbidden in ("latest-stable", "refs/heads", "GP_EXPECTED_SHA", "candidate", "rollback", "clean-remove"):
             self.assertNotIn(forbidden, self.bootstrap)
 
+    def test_bootstrap_accepts_only_stable_or_positive_alpha_tags_before_python_or_sudo(self) -> None:
+        git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+        bash = shutil.which("bash") or (str(git_bash) if git_bash.is_file() else None)
+        if not bash:
+            self.skipTest("bash is required")
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            sandbox = Path(raw); fake_bin = sandbox / "bin"; fake_bin.mkdir(); log = sandbox / "calls.log"
+
+            def bash_path(path: Path) -> str:
+                value = path.resolve().as_posix()
+                return f"/{value[0].lower()}{value[2:]}" if len(value) > 2 and value[1] == ":" else value
+
+            def fake(name: str, body: str) -> None:
+                path = fake_bin / name
+                path.write_text("#!/usr/bin/env bash\nset -eu\n" + body, encoding="utf-8")
+                path.chmod(0o755)
+
+            fake("id", 'case "$1" in -u) echo 1000;; -un) echo gpuser;; *) exit 64;; esac\n')
+            fake("git", 'echo GIT >> "$TEST_LOG"\ncase "$1" in clone) dest="${!#}"; mkdir -p "$dest/scripts";; -C) shift 2; case "$1" in cat-file) echo "${GP_TEST_TAG_TYPE:-tag}";; checkout|status) :;; rev-parse) echo deadbeef;; *) exit 64;; esac;; *) exit 64;; esac\n')
+            fake("python3", 'echo PYTHON >> "$TEST_LOG"\nexit 42\n')
+            fake("sudo", 'echo SUDO >> "$TEST_LOG"\nexit 42\n')
+            invoke = [bash, "--noprofile", "--norc", "-c", 'PATH="$1:/usr/bin:/bin"; export PATH; exec "$2"', "bash", bash_path(fake_bin), str(root / "scripts" / "bootstrap-linux.sh")]
+            for tag in ("v0.4.1", "v0.4.1-alpha.1", "v12.34.56-alpha.999"):
+                with self.subTest(accepted=tag):
+                    if log.exists(): log.unlink()
+                    result = subprocess.run(invoke, env={**os.environ, "HOME": bash_path(sandbox / "home"), "GP_BRANCH": tag, "TEST_LOG": bash_path(log)}, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    calls = log.read_text(encoding="utf-8").splitlines()
+                    self.assertIn("GIT", calls)
+                    self.assertIn("PYTHON", calls)
+                    self.assertEqual(calls[-1], "SUDO")
+            for tag in ("v0.4.1-alpha.0", "v0.4.1-alpha.-1", "v0.4.1-alpha.01", "v0.4.1-beta.1", "v0.4.1-rc.1", "main", "v0.4.1^{commit}"):
+                with self.subTest(rejected=tag):
+                    if log.exists(): log.unlink()
+                    result = subprocess.run(invoke, env={**os.environ, "HOME": bash_path(sandbox / "home"), "GP_BRANCH": tag, "TEST_LOG": bash_path(log)}, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("exact release tag", result.stderr)
+                    self.assertFalse(log.exists(), "malformed tag must stop before git, Python, sudo, or removal")
+            if log.exists(): log.unlink()
+            lightweight = subprocess.run(
+                invoke,
+                env={**os.environ, "HOME": bash_path(sandbox / "home"), "GP_BRANCH": "v0.4.1-alpha.1", "GP_TEST_TAG_TYPE": "commit", "TEST_LOG": bash_path(log)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(lightweight.returncode, 0)
+            self.assertIn("annotated", lightweight.stderr)
+            self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["GIT", "GIT"])
+
     def test_internal_hardware_transport_accepts_only_frozen_dev_commit(self) -> None:
         self.assertIn("--candidate-sha <40-lowercase-hex>", self.hardware_bootstrap)
         self.assertIn("git clone --no-checkout --depth=1 --branch dev", self.hardware_bootstrap)
@@ -49,7 +100,18 @@ class CleanInstallerTests(unittest.TestCase):
     def test_root_process_verifies_vault_before_fixed_removal_and_installs_both_topologies(self) -> None:
         verify = self.installer.index('runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify')
         removal = self.installer.index('rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane')
+        restore = self.installer.index('"$install_dir/.venv/bin/python" "$vault_tool" --restore --target-state-dir "$state_dir" --home "$target_home"')
+        prepare = self.installer.index('domain-sources prepare-v2fly')
+        first_service_start = self.installer.index('systemctl daemon-reload; systemctl enable --now gp-control-plane-core.service')
         self.assertLess(verify, removal)
+        self.assertLess(removal, restore)
+        self.assertLess(restore, prepare)
+        self.assertLess(restore, first_service_start)
+        restore_guard = self.installer.index('# The application validates the pending vault ID')
+        restore_guard_end = self.installer.index('\nfi\n', restore_guard)
+        self.assertIn('if [ "$INITIAL_INSTALL" = off ]; then', self.installer[restore_guard:restore_guard_end])
+        self.assertIn('--restore --target-state-dir "$state_dir"', self.installer[restore_guard:restore_guard_end])
+        self.assertNotIn('systemctl enable --now', self.installer[restore_guard:restore_guard_end])
         self.assertIn('gp-control-plane-core.service', self.installer)
         self.assertIn('if [ "$INSTALL_WEB" = on ]', self.installer)
         self.assertIn('git -C "$SOURCE_DIR" status --porcelain', self.installer)
@@ -57,6 +119,7 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('gp-control-plane-root-helper', self.installer)
         self.assertIn('case "$INITIAL_INSTALL" in on|off)', self.installer)
         self.assertIn('if [ "$INITIAL_INSTALL" = off ]; then', self.installer)
+        self.assertEqual(self.installer.count('--restore --target-state-dir "$state_dir"'), 1)
         self.assertIn('visudo -cf /etc/sudoers.d/gp-control-plane-root-helper', self.installer)
         self.assertIn('scripts/install-zapret2.sh', self.installer)
         self.assertIn('zapret2 runtime is not ready', self.installer)
@@ -116,6 +179,7 @@ class CleanInstallerTests(unittest.TestCase):
 
         self.assertEqual(self.installer.count(prepare), 1)
         self.assertLess(self.installer.index(pip_install), self.installer.index(prepare))
+        self.assertLess(self.installer.index('--restore --target-state-dir "$state_dir"'), self.installer.index(prepare))
         self.assertLess(self.installer.index(prepare), self.installer.index(first_service_start))
         self.assertIn(f'if ! {prepare}; then', self.installer)
         self.assertIn('WARNING: v2fly catalog was not prepared; start the service and retry from the Web interface.', self.installer)

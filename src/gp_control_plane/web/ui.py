@@ -1312,7 +1312,7 @@ tr:last-child td { border-bottom: 0; }
 .run-card-kind-multi .run-card-main { background: var(--surface); }
 .run-card-main {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-items: start;
   padding: 12px;
@@ -1575,7 +1575,7 @@ body { min-width: 0; }
 .l-form-grid, .l-action-grid { display: grid; grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-space-2); min-width: 0; }
 .l-cluster { display: flex; flex-wrap: wrap; gap: var(--l-space-1); min-width: 0; }
 .l-grid > *, .l-form-grid > *, .l-action-grid > *, .l-cluster > * { min-width: 0; }
-.l-form-grid > *, .l-action-grid > * { grid-column: 1 / -1; }
+.l-form-grid > * { grid-column: 1 / -1; }
 .l-form-grid > .field, .l-form-grid > .preset-panel, .l-form-grid > .run-launch-summary,
 .l-action-grid > button, .l-action-grid > .file-button, .l-action-grid > .button-link { min-width: 0; }
 .l-container.main { max-width: none; padding-top: var(--l-space-3); padding-bottom: var(--l-space-4); gap: var(--l-space-3); }
@@ -1634,8 +1634,22 @@ body { min-width: 0; }
 }
 .form-grid.l-form-grid > .preset-grid > *, .form-grid.l-form-grid > .button-row.run-actions > * { grid-column: 1 / -1; min-width: 0; }
 .button-row.l-action-grid, .domain-picker-row.l-action-grid, .category-toolbar.l-action-grid { grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-space-2); }
-.button-row.l-action-grid > * { grid-column: 1 / -1; }
-.domain-picker-row.l-action-grid > *, .category-toolbar.l-action-grid > * { grid-column: 1 / -1; }
+.primary-only-action > button, .list-load-more > button,
+.paired-actions > button, .v2fly-actions > button,
+.preset-editor-actions > button, .domain-picker-row > .common-domain-picker,
+.domain-picker-row > button[data-action="add-common-domain"],
+.category-toolbar > input, .category-toolbar > button,
+.run-actions > button, .run-actions > .action-consequence { grid-column: 1 / -1; }
+.primary-only-action > button, .list-load-more > button { width: 100%; }
+.run-actions { display: grid; grid-template-columns: repeat(var(--l-columns), minmax(0, 1fr)); gap: var(--l-space-2); }
+.run-actions > .action-consequence { padding-top: 0; }
+.form-grid.l-form-grid > .button-row.run-actions > button { grid-column: span 2; }
+.form-grid.l-form-grid > .button-row.run-actions > .action-consequence { grid-column: 1 / -1; }
+.preset-editor-actions > button[data-action="preset-editor-delete"] {
+  border-top: 1px solid var(--line);
+  padding-top: var(--l-space-2);
+  margin-top: var(--l-space-1);
+}
 .candidate-tabs.l-cluster, .terminal-actions.l-cluster, .candidate-result-toolbar.l-cluster,
 .candidate-result-modes.l-cluster, .backup-card-actions.l-cluster, .live-run-actions.l-cluster,
 .event-actions.l-cluster, .category-match-list.l-cluster { align-items: center; }
@@ -1660,14 +1674,15 @@ body { min-width: 0; }
   .status-grid.l-grid > :last-child { grid-column: span 8; }
   .l-form-grid > .field, .l-form-grid > .preset-panel, .l-form-grid > details { grid-column: span 4; }
   .l-form-grid > .field:first-child, .l-form-grid > .run-launch-summary, .l-form-grid > .button-row, .l-form-grid > .message { grid-column: 1 / -1; }
-  .button-row.l-action-grid > * { grid-column: span 4; }
-  .button-row.l-action-grid > :only-child {
-    grid-column: 1 / -1;
-    width: 100%;
-  }
+  .paired-actions > button, .preset-editor-actions > button[data-action="preset-editor-save"],
+  .preset-editor-actions > button[data-action="preset-editor-export"], .run-actions > button { grid-column: span 4; }
+  .primary-only-action > button, .list-load-more > button { grid-column: 1 / span 6; }
   .form-grid.l-form-grid > .preset-grid > *, .form-grid.l-form-grid > .button-row.run-actions > * { grid-column: span 4; }
-  .domain-picker-row.l-action-grid > :first-child, .category-toolbar.l-action-grid > :first-child { grid-column: span 5; }
-  .domain-picker-row.l-action-grid > :last-child, .category-toolbar.l-action-grid > :last-child { grid-column: span 3; }
+  .form-grid.l-form-grid > .button-row.run-actions > .action-consequence { grid-column: 1 / -1; }
+  .domain-picker-row > .common-domain-picker { grid-column: span 5; }
+  .domain-picker-row > button[data-action="add-common-domain"] { grid-column: span 3; }
+  .category-toolbar > input { grid-column: 1 / -1; }
+  .category-toolbar > button { grid-column: span 4; }
   .preset-grid.l-form-grid > *, .settings-access-grid.l-form-grid > *, .protocol-grid.l-form-grid > * { grid-column: span 4; }
   .settings-access-grid.l-form-grid > .field { grid-column: span 4; }
   .release-grid.l-grid > *, .progress-grid.l-grid > *, .run-launch-summary-grid.l-grid > *,
@@ -1684,10 +1699,16 @@ body { min-width: 0; }
   .status-grid.l-grid > :last-child { grid-column: span 4; }
   .l-form-grid > .field, .l-form-grid > .preset-panel, .l-form-grid > details { grid-column: span 6; }
   .l-form-grid > .field:first-child, .l-form-grid > .run-launch-summary, .l-form-grid > .button-row, .l-form-grid > .message { grid-column: 1 / -1; }
-  .button-row.l-action-grid > * { grid-column: span 6; }
+  .paired-actions > button, .v2fly-actions > button, .run-actions > button { grid-column: span 6; }
+  .primary-only-action > button, .list-load-more > button { grid-column: 1 / span 6; max-width: 520px; }
+  .preset-editor-actions > button[data-action="preset-editor-save"],
+  .preset-editor-actions > button[data-action="preset-editor-export"] { grid-column: span 4; }
   .form-grid.l-form-grid > .preset-grid > *, .form-grid.l-form-grid > .button-row.run-actions > * { grid-column: span 6; }
-  .domain-picker-row.l-action-grid > :first-child, .category-toolbar.l-action-grid > :first-child { grid-column: span 8; }
-  .domain-picker-row.l-action-grid > :last-child, .category-toolbar.l-action-grid > :last-child { grid-column: span 4; }
+  .form-grid.l-form-grid > .button-row.run-actions > .action-consequence { grid-column: 1 / -1; }
+  .domain-picker-row > .common-domain-picker { grid-column: span 8; }
+  .domain-picker-row > button[data-action="add-common-domain"] { grid-column: span 4; }
+  .category-toolbar > input { grid-column: span 6; }
+  .category-toolbar > button { grid-column: span 3; }
   .preset-grid.l-form-grid > *, .settings-access-grid.l-form-grid > *, .protocol-grid.l-form-grid > * { grid-column: span 6; }
   .settings-access-grid.l-form-grid > .field { grid-column: span 6; }
   .release-grid.l-grid > *, .progress-grid.l-grid > *, .run-launch-summary-grid.l-grid > *,
@@ -1698,6 +1719,10 @@ body { min-width: 0; }
     justify-content: start;
   }
   .run-launch-summary-grid.l-grid > * { grid-column: auto; }
+  .run-card-main { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 600px) and (max-width: 959px) {
+  .run-card-main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 960px) {
   .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1920,8 +1945,8 @@ body { min-width: 0; }
               <div class="run-launch-summary-grid l-grid" id="run-launch-summary-grid"></div>
             </section>
             <div class="button-row run-actions">
-              <button class="tooltip-button" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, глубиной проверки и параметрами." type="button">Запустить выбранный режим</button>
-              <button class="secondary danger tooltip-button" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
+              <button class="tooltip-button run-action-start" data-action="run-selected-discovery" data-tooltip="Запускает выбранный выше режим поиска с текущими доменами, глубиной проверки и параметрами." type="button">Запустить выбранный режим</button>
+              <button class="secondary danger tooltip-button run-action-stop" data-action="stop-current" data-tooltip="Останавливает текущий подбор и сохраняет уже найденные успешные стратегии." type="button" disabled>Остановить текущий запуск</button>
               <div class="action-consequence">Найденные стратегии сохранятся; остановка не удаляет результаты.</div>
             </div>
             <div class="message" id="message">Готово</div>
@@ -2078,7 +2103,7 @@ body { min-width: 0; }
               <textarea id="preset-editor-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube.com&#10;discord.com"></textarea>
             </div>
           </div>
-          <div class="button-row l-action-grid">
+          <div class="button-row l-action-grid preset-editor-actions">
             <button data-action="preset-editor-save" type="button">Сохранить список</button>
             <button class="secondary" data-action="preset-editor-export" type="button">Скачать TXT</button>
             <button class="secondary danger" data-action="preset-editor-delete" type="button" disabled>Удалить пользовательский список</button>
@@ -2096,7 +2121,7 @@ body { min-width: 0; }
                 <textarea id="preset-new-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="youtube.com&#10;discord.com"></textarea>
               </div>
             </div>
-            <div class="button-row l-action-grid">
+            <div class="button-row l-action-grid primary-only-action">
               <button data-action="preset-new-save" type="button">Сохранить новый список</button>
             </div>
             <div class="source-preview" id="preset-new-preview">Новый список еще не сохранялся.</div>
@@ -2131,7 +2156,7 @@ body { min-width: 0; }
               <textarea id="v2fly-domains" class="line-numbered-textarea" autocomplete="off" spellcheck="false" placeholder="После проверки здесь появятся домены. Список можно отредактировать перед сохранением."></textarea>
             </div>
           </div>
-          <div class="button-row l-action-grid">
+          <div class="button-row l-action-grid v2fly-actions">
             <button class="secondary" data-action="v2fly-preview" type="button">Проверить и развернуть список</button>
             <button data-action="v2fly-import" type="button">Сохранить пресет</button>
           </div>
@@ -2169,7 +2194,7 @@ body { min-width: 0; }
               <div class="setting-note">Верхняя граница для запуска параллельных проверочных запросов. Можно ставить любое число от 1, если плата и сеть справляются.</div>
             </div>
           </div>
-          <div class="button-row l-action-grid">
+          <div class="button-row l-action-grid primary-only-action">
             <button data-action="save-settings" type="button">Сохранить настройки</button>
           </div>
         </div>
@@ -2189,7 +2214,7 @@ body { min-width: 0; }
               <div class="setting-note" id="settings-new-password-hint">Используйте не менее 8 символов или admin для возврата стандартного доступа.</div>
             </div>
           </div>
-          <div class="button-row l-action-grid">
+          <div class="button-row l-action-grid primary-only-action">
             <button data-action="change-password" type="submit">Изменить пароль</button>
           </div>
           <div class="setting-note" id="change-password-status" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -2216,7 +2241,7 @@ body { min-width: 0; }
               </a>
             </div>
           </div>
-          <div class="button-row l-action-grid">
+          <div class="button-row l-action-grid primary-only-action">
             <button class="secondary" data-action="check-releases" type="button">Проверить обновления</button>
           </div>
           <div class="source-preview" id="settings-release-result" hidden></div>
@@ -2227,7 +2252,7 @@ body { min-width: 0; }
             <h2>Бекапы и восстановление</h2>
             <span class="badge" id="backups-count">0</span>
           </div>
-          <div class="button-row l-action-grid">
+          <div class="button-row l-action-grid paired-actions">
             <button class="secondary" data-action="refresh-backups" type="button">Обновить список</button>
             <button data-action="create-backup" type="button">Создать бекап сейчас</button>
           </div>
@@ -2237,7 +2262,7 @@ body { min-width: 0; }
             <div class="panel-header">
               <h2>Загрузка ZIP-бекапа</h2>
             </div>
-            <div class="button-row l-action-grid">
+            <div class="button-row l-action-grid paired-actions">
               <label class="secondary file-button" for="backup-upload-file">Выбрать ZIP</label>
               <input id="backup-upload-file" type="file" accept=".zip,application/zip" hidden>
               <button class="secondary" data-action="upload-backup" type="button">Загрузить бекап</button>
@@ -2272,7 +2297,7 @@ const DISCOVERY_PROFILES = {
   standard: { name: 'standard', title: 'Стандартный', scan_level: 'standard' },
   force: { name: 'force', title: 'Глубокий', scan_level: 'force' }
 };
-const state = { status: null, statusLoading: false, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', v2flyCatalogUpdateLoading: false, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
+const state = { status: null, statusLoading: false, settings: null, settingsTouched: false, runPreferences: null, runPreferencesApplied: false, savingRunPreferences: false, releaseInfo: null, releaseStable: null, releasePrerelease: null, releaseChecked: false, releaseChecking: false, loadingDiscoveryProfile: false, loadingDomainPreset: false, loadingRunPreferences: false, discoveryProfiles: DISCOVERY_PROFILES, candidates: [], candidateTotal: 0, candidateOffset: 0, candidateHasMore: false, candidateVersion: null, candidateKnownVersion: null, candidateQueryKey: '', commonCandidateCache: {}, commonLoadingMore: false, candidateDomains: [], candidateDomainTotal: 0, candidateDomainStrategyTotal: 0, candidateDomainOffset: 0, candidateDomainHasMore: false, candidateDomainsLoaded: false, lastCandidateDomainTotal: 0, lastCandidateDomainStrategyTotal: 0, testedDomains: [], candidatesLoaded: false, candidateResultMode: 'balance', candidateResultRequested: false, domainStrategies: {}, finderRuns: [], finderRunTotal: 0, finderRunOffset: 0, finderRunHasMore: false, finderRunsLoaded: false, finderRunsLoading: false, finderLog: null, acknowledgedRun: null, startRequestInFlight: false, runGeneration: 0, domainSets: null, domainSources: null, v2flyPreview: null, v2flyCategories: null, v2flyCategorySource: '', v2flyCatalogUpdateLoading: false, backups: [], backupsLoaded: false, activeTab: 'finder', candidateView: 'domain', customPresets: loadCustomPresets(), customPresetMeta: { finder: {}, common: {} }, systemPresets: { finder: {}, common: {} }, systemPresetMeta: { finder: {}, common: {} }, presetManager: { scope: 'finder', name: '', query: '', domains: [], total: 0, hasMore: false, loading: false, loaded: false }, openCandidateDomains: {}, openCommonProtocols: {}, openRunDomains: {}, expandedStrategyLists: {}, strategyEditorScrolls: {}, domainsInitialized: false, domainsTouched: false, formMessage: 'Готово', formMessageTone: '' };
 const jobNames = {
   'zapret-standard-discovery': 'Поиск стратегий',
   'zapret-multi-domain-discovery': 'Все домены на одной стратегии',
@@ -2691,6 +2716,7 @@ function mergeRunPage(payload, reset){
   state.finderRunHasMore = Boolean((payload || {}).has_more);
   state.finderRunsLoaded = true;
   state.finderRunsLoading = false;
+  convergeAcknowledgedRunFromHistory(rows);
 }
 function syncActiveTabUi(){
   document.querySelectorAll('.tab-button[data-tab]').forEach((button) => {
@@ -2767,11 +2793,40 @@ function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
 }
 function currentRun(){
+  if (state.acknowledgedRun) return state.acknowledgedRun;
   const run = (state.status || {}).current_run;
   return run && typeof run === 'object' && run.run_id ? run : null;
 }
 function isBusy(){
   return Boolean(currentRun());
+}
+function isStartRequestInFlight(){
+  return Boolean(state.startRequestInFlight);
+}
+function runIdForRow(row){
+  return String((row || {}).run_id || (row || {}).id || '');
+}
+function isTerminalRunStatus(status){
+  return ['success', 'failed', 'error', 'stopped', 'timeout'].includes(String(status || '').toLowerCase());
+}
+function acknowledgeRun(runId){
+  const generation = ++state.runGeneration;
+  state.acknowledgedRun = { run_id: runId, status: 'queued', generation };
+  state.finderLog = null;
+  return generation;
+}
+function acknowledgedRunIsCurrent(generation){
+  return Boolean(state.acknowledgedRun && state.acknowledgedRun.generation === generation);
+}
+function convergeAcknowledgedRunFromHistory(rows){
+  const acknowledged = state.acknowledgedRun;
+  if (!acknowledged) return;
+  const terminal = (rows || []).find((row) => runIdForRow(row) === acknowledged.run_id && isTerminalRunStatus(row.status));
+  if (!terminal) return;
+  state.acknowledgedRun = null;
+  if ((state.status || {}).current_run && runIdForRow(state.status.current_run) === acknowledged.run_id) {
+    state.status = { ...state.status, current_run: null };
+  }
 }
 function mutatingBlocked(){
   return isBusy();
@@ -3665,8 +3720,10 @@ function renderMetrics(){
   const jobBadge = el('job-badge');
   setBadge(jobBadge, action.text, action.tone);
   const controlsBlocked = busy || !hasSystemStatus;
+  const startControlsBlocked = controlsBlocked || isStartRequestInFlight();
   document.querySelectorAll('button[data-action="run-selected-discovery"]').forEach((button) => {
     button.disabled = controlsBlocked;
+    if (startControlsBlocked) button.disabled = true;
   });
   const mutatingSelectors = [
     'button[data-action="save-settings"]',
@@ -4500,11 +4557,14 @@ function renderRunCard(row){
     <div class="run-card-main">
       ${runField('Время', friendlyDate(row.timestamp))}
       ${runField('Режим', runMode(row))}
-      <div class="run-field">
+      <div class="run-field run-field-status">
         <div class="run-field-label">Статус</div>
         <div class="run-field-value run-status">${statusBadge(runStatusLabel(status), statusTone[status] || '')}</div>
       </div>
-      ${runField('Этап', runPhaseText(row))}
+      <div class="run-field run-field-phase">
+        <div class="run-field-label">Этап</div>
+        <div class="run-field-value">${esc(runPhaseText(row) || '-')}</div>
+      </div>
       <div class="run-field">
         <div class="run-field-label">Стратегии</div>
         <div class="run-field-value">${badge(String(count), count > 0 ? 'good' : '')}</div>
@@ -4825,14 +4885,15 @@ function runProgressText(row){
 }
 function renderLog(){
   const log = state.finderLog || {};
-  const status = log.status || '-';
+  const acknowledged = state.acknowledgedRun;
+  const status = log.status || (acknowledged ? acknowledged.status : '-');
   const badgeNode = el('finder-log-status');
   setBadge(badgeNode, status, statusTone[status] || '');
   const parts = [];
   if (log.stdout_tail) parts.push(log.stdout_tail);
   if (log.stderr_tail) parts.push('--- stderr ---\\n' + log.stderr_tail);
   const logNode = el('finder-log');
-  logNode.textContent = parts.join('\\n\\n') || 'Лога пока нет';
+  logNode.textContent = parts.join('\\n\\n') || (acknowledged ? 'Запуск подтверждён, ожидаем вывод' : 'Лога пока нет');
   renderStderrDiagnostics(log.stderr_diagnostics || []);
   renderProgress(log.progress || {});
   renderRunSettingsSummary(log.run_settings || {});
@@ -6159,10 +6220,12 @@ function appendLogText(base, addition){
   return `${left}\\n${right}`;
 }
 function latestLogUrl(incremental){
-  if (!incremental || !state.finderLog || !state.finderLog.stdout_log) {
-    return apiEndpoint('core', 'latestLog');
-  }
+  const acknowledgedRunId = state.acknowledgedRun ? runIdForRow(state.acknowledgedRun) : '';
   const params = new URLSearchParams();
+  if (acknowledgedRunId) params.set('run_id', acknowledgedRunId);
+  if (!incremental || !state.finderLog || !state.finderLog.stdout_log || (state.acknowledgedRun && runIdForRow(state.finderLog) !== state.acknowledgedRun.run_id)) {
+    return acknowledgedRunId ? apiUrl('core', 'latestLog', params) : apiEndpoint('core', 'latestLog');
+  }
   params.set('stdout_log', state.finderLog.stdout_log || '');
   params.set('stdout_size', String(state.finderLog.stdout_size || 0));
   params.set('stderr_log', state.finderLog.stderr_log || '');
@@ -6188,7 +6251,16 @@ function mergeLogPayload(previous, next){
 function mergeStatusPayload(status){
   if (!status) return false;
   const previousSettings = JSON.stringify(state.settings || {});
-  state.status = status;
+  const acknowledged = state.acknowledgedRun;
+  const reportedRun = status.current_run && typeof status.current_run === 'object' ? status.current_run : null;
+  if (acknowledged) {
+    if (reportedRun && runIdForRow(reportedRun) === acknowledged.run_id) {
+      state.acknowledgedRun = { ...acknowledged, ...reportedRun, run_id: acknowledged.run_id, generation: acknowledged.generation };
+    }
+    state.status = { ...status, current_run: state.acknowledgedRun };
+  } else {
+    state.status = status;
+  }
   if (status.candidate_version) syncCandidateVersion(status.candidate_version);
   if (status.settings) state.settings = status.settings;
   if (status.run_preferences) state.runPreferences = status.run_preferences;
@@ -6218,6 +6290,7 @@ async function refreshLog(incremental = false){
   try {
     const previous = state.finderLog;
     const payload = await getJson(latestLogUrl(incremental));
+    if (state.acknowledgedRun && runIdForRow(payload) !== state.acknowledgedRun.run_id) return;
     if (payload.progress) payload.progress.received_at_ms = Date.now();
     state.finderLog = incremental ? mergeLogPayload(previous, payload) : payload;
     logDirty = false;
@@ -6343,7 +6416,7 @@ function refreshRequestMap(light){
   const requests = {
     status: getJson(apiEndpoint('web', 'status')),
     finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0))),
-    finderLog: getJson(apiEndpoint('core', 'latestLog'))
+    finderLog: getJson(latestLogUrl(false))
   };
   if (bootstrap) {
     requests.presets = getJson(apiEndpoint('web', 'presets'));
@@ -6385,7 +6458,7 @@ async function refresh(options = {}){
     const finderRuns = settledValue(results, 'finderRuns');
     if (finderRuns) mergeRunPage(finderRuns, true);
     const finderLog = settledValue(results, 'finderLog');
-    if (finderLog) {
+    if (finderLog && (!state.acknowledgedRun || runIdForRow(finderLog) === state.acknowledgedRun.run_id)) {
       if (finderLog.progress) finderLog.progress.received_at_ms = Date.now();
       state.finderLog = finderLog;
     }
@@ -6409,6 +6482,31 @@ async function refresh(options = {}){
   } finally {
     refreshInFlight = false;
   }
+}
+async function refreshAcknowledgedRun(generation){
+  const requests = {
+    status: getJson(apiEndpoint('web', 'status')),
+    finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0))),
+    finderLog: getJson(latestLogUrl(false))
+  };
+  const keys = Object.keys(requests);
+  const settled = await Promise.allSettled(keys.map((key) => requests[key]));
+  if (!acknowledgedRunIsCurrent(generation)) return;
+  const results = Object.fromEntries(keys.map((key, index) => [key, settled[index]]));
+  const status = settledValue(results, 'status');
+  if (status) mergeStatusPayload(status);
+  const finderLog = settledValue(results, 'finderLog');
+  if (finderLog && acknowledgedRunIsCurrent(generation) && runIdForRow(finderLog) === state.acknowledgedRun.run_id) {
+    if (finderLog.progress) finderLog.progress.received_at_ms = Date.now();
+    state.finderLog = mergeLogPayload(state.finderLog, finderLog);
+    logDirty = false;
+  }
+  const finderRuns = settledValue(results, 'finderRuns');
+  if (finderRuns && acknowledgedRunIsCurrent(generation)) mergeRunPage(finderRuns, true);
+  renderRuns();
+  renderLog();
+  renderMetrics();
+  renderEvents();
 }
 async function refreshBackups(){
   state.backupsLoading = true;
@@ -6531,16 +6629,27 @@ async function uploadBackup(){
   }
 }
 async function startJob(url, payload, text){
+  if (isBusy() || isStartRequestInFlight()) return null;
+  state.startRequestInFlight = true;
+  renderMetrics();
   try {
-    setMessage(`${text} запущено`, 'warn');
+    setMessage(`Отправляем запрос на запуск: ${text}`, 'warn');
     const response = await postJson(url, payload || {});
     const runId = response?.run_id || '';
-    setMessage(runId ? `Задание ${runId} добавлено` : `${text} принято к выполнению`, 'good');
-    await refresh();
+    if (!runId) throw new Error('Сервер не вернул идентификатор принятого запуска');
+    const generation = acknowledgeRun(runId);
+    state.startRequestInFlight = false;
+    setMessage(`Запуск подтверждён: ${runId}`, 'good');
+    renderAll({ skipCandidates: true });
+    refreshAcknowledgedRun(generation).catch((error) => {
+      if (acknowledgedRunIsCurrent(generation)) setMessage(`Ошибка обновления принятого запуска: ${error.message}`, 'bad');
+    });
     return response;
   } catch (error) {
+    state.acknowledgedRun = null;
+    state.startRequestInFlight = false;
     setMessage(error.message, 'bad');
-    await refresh();
+    renderMetrics();
     return null;
   }
 }
@@ -6562,6 +6671,7 @@ function coreStrategyDiscoveryPayload(mode, domains, options, timeout){
   return payload;
 }
 async function startSelectedDiscovery(){
+  if (isBusy() || isStartRequestInFlight()) return;
   const options = discoveryOptions();
   if (!hasEnabledProtocol(options)) {
     setMessage('Выберите хотя бы один протокол для проверки', 'bad');

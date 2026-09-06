@@ -7,8 +7,8 @@ INSTALL_WEB="${GP_INSTALL_WEB:-on}"
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
 [ "$(id -u)" -ne 0 ] || fail 'run the clean installer as the GP install user, not root'
-[ -n "$TAG" ] || fail 'GP_BRANCH must name the exact annotated release tag, for example v0.4.0'
-printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'GP_BRANCH must be an exact release tag vX.Y.Z'
+[ -n "$TAG" ] || fail 'GP_BRANCH must name the exact annotated stable or alpha release tag, for example v0.4.1 or v0.4.1-alpha.1'
+printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[1-9][0-9]*)?$' || fail 'GP_BRANCH must be an exact release tag vX.Y.Z or vX.Y.Z-alpha.N'
 case "$INSTALL_WEB" in on|off) ;; *) fail 'GP_INSTALL_WEB must be on or off' ;; esac
 need git; need python3; need sudo
 legacy_state="$HOME/gp/GP-access-control-plane/build/state"
