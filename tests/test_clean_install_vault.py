@@ -195,6 +195,19 @@ class CleanInstallVaultTests(unittest.TestCase):
             self.assertNotIn("the following arguments are required: --state-dir", compatible_resume.stderr)
             self.assertIn("clean-install vault is not ready", compatible_resume.stderr)
 
+            quiet_probe_driver = (
+                "import subprocess, sys\n"
+                "result = subprocess.run(sys.argv[1:], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)\n"
+                "print('initial=off' if result.returncode == 0 else 'initial=on')\n"
+            )
+            quiet_probe = subprocess.run(
+                [sys.executable, "-c", quiet_probe_driver, sys.executable, str(tool), "--verify", "--state-dir", str(placeholder), "--home", str(home)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(quiet_probe.returncode, 0, quiet_probe.stderr)
+            self.assertEqual(quiet_probe.stdout, "initial=on\n")
+            self.assertEqual(quiet_probe.stderr, "")
+
     def test_cli_create_reports_ready_and_publishes_a_pending_vault(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); home = root / "home"; home.mkdir(); source = root / "legacy"; self.seed(source)

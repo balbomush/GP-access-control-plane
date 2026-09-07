@@ -33,7 +33,9 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('canonical v0.4 strategy-finder path escapes state', self.bootstrap)
         self.assertIn('verify_vault() {', self.bootstrap)
         self.assertIn('--verify --state-dir "$1" --home "$HOME"', self.bootstrap)
-        self.assertIn('elif verify_vault "$v040_data_state"; then', self.bootstrap)
+        self.assertIn('if verify_vault "$v040_state" 2>/dev/null; then', self.bootstrap)
+        self.assertIn('elif verify_vault "$v040_data_state" 2>/dev/null; then', self.bootstrap)
+        self.assertIn('verify_vault "$v040_state"\n', self.bootstrap)
         self.assertIn('initial_install=on', self.bootstrap)
         self.assertIn('--initial-install "$initial_install"', self.bootstrap)
         for forbidden in ("latest-stable", "refs/heads", "GP_EXPECTED_SHA", "candidate", "rollback", "clean-remove"):
@@ -112,7 +114,9 @@ class CleanInstallerTests(unittest.TestCase):
             self.assertIn('v040_data_state="$HOME/gp/.GP-access-control-plane.data/state"', bootstrap)
             self.assertIn('--state-dir "$v040_state" --home "$HOME"', bootstrap)
             self.assertIn('--verify --state-dir "$1" --home "$HOME"', bootstrap)
-            self.assertIn('elif verify_vault "$v040_data_state"; then', bootstrap)
+            self.assertIn('if verify_vault "$v040_state" 2>/dev/null; then', bootstrap)
+            self.assertIn('elif verify_vault "$v040_data_state" 2>/dev/null; then', bootstrap)
+            self.assertIn('verify_vault "$v040_state"\n', bootstrap)
             self.assertIn('both supported v0.4 state sources exist', bootstrap)
 
     def test_root_process_verifies_vault_before_fixed_removal_and_installs_both_topologies(self) -> None:

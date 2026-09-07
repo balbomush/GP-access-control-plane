@@ -58,16 +58,17 @@ if [ -n "$v040_state" ]; then
     || fail "canonical v0.4 state database path escapes state: $v040_sqlite"
   # A pending vault cannot be reused while its source is still live: a failed
   # pre-sudo attempt may have left newer source changes behind.
-  if verify_vault "$v040_state"; then
+  if verify_vault "$v040_state" 2>/dev/null; then
     fail 'pending clean-install vault exists while canonical v0.4 state is still live; nothing was removed'
   fi
   # The exact v0.4 tag creates the vault because immutable legacy tags cannot grow this API.
   python3 "$source_dir/scripts/clean-install-vault.py" --state-dir "$v040_state" --home "$HOME"
+  # This mandatory verification is deliberately not a quiet existence probe.
   verify_vault "$v040_state"
 # v0.4.0 requires --state-dir even for --verify.  Both supported source paths
 # are absent here, so this is only an argparse-compatible placeholder; vault
 # identity and verification remain device-local under --home.
-elif verify_vault "$v040_data_state"; then
+elif verify_vault "$v040_data_state" 2>/dev/null; then
   :
 else
   initial_install=on
