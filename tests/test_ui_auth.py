@@ -1384,6 +1384,8 @@ class ResponsiveLayoutBrowserTests(unittest.TestCase):
                     "initial system status",
                     timeout=15,
                 )
+                page.evaluate("stopRealtimeEvents(); stopRealtimeFallback(); clearInitialSystemStatusRetry();")
+                page.wait_for("!state.finderRunsLoading", "stopped initial history refresh", timeout=15)
                 self.render_safe_dynamic_fixtures(page)
 
                 for width in self.VIEWPORTS:
