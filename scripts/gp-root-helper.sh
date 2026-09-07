@@ -249,6 +249,19 @@ write_owned_run_signal_delivery() {
   fi
 }
 
+write_owned_invalid_status_quarantine() {
+  quarantine_file="$1"
+  umask 077
+  tmp_quarantine="$(mktemp "${quarantine_file}.XXXXXX")" || return 1
+  if ! printf 'helper-invalid-status-v1\n' > "$tmp_quarantine" ||
+    ! chown root:root "$tmp_quarantine" ||
+    ! chmod 0600 "$tmp_quarantine" ||
+    ! mv -f "$tmp_quarantine" "$quarantine_file"; then
+    rm -f "$tmp_quarantine"
+    return 1
+  fi
+}
+
 wait_for_owned_run_ready() {
   ready_file="$1"
   expected_pid="$(validate_pid "$2")"
@@ -256,7 +269,11 @@ wait_for_owned_run_ready() {
   while [ "$ready_waited" -lt 10 ]; do
     if ready_pid="$(read_owned_run_ready "$ready_file")"; then
       [ "$ready_pid" = "$expected_pid" ] || return 2
-      printf '%s\n' "$ready_pid"
+      # Keep the result in the owning shell.  The caller's TERM trap must be
+      # live while this pre-record wait is in progress; command substitution
+      # would move the wait into a subshell that can exit before the trap
+      # reaps the just-created supervisor.
+      owned_ready_pid="$ready_pid"
       return 0
     else
       ready_result="$?"
@@ -276,8 +293,13 @@ wait_for_owned_run_ready() {
 
 read_owned_run_status() {
   status_file="$1"
+  # Test symlinks before `-e`: a dangling link is still hostile status
+  # publication, not an absent status that could be mistaken for a normal
+  # supervisor exit.
+  [ ! -L "$status_file" ] || return 2
   [ -e "$status_file" ] || return 1
-  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 2
+  [ -f "$status_file" ] || return 2
+  [ "$(stat -c '%u:%g:%a' "$status_file" 2>/dev/null || true)" = '0:0:600' ] || return 2
   status_contents="$(cat "$status_file")" || return 2
   case "$status_contents" in
     'helper-status-v1 '*) ;;
@@ -312,14 +334,14 @@ wait_for_owned_run_status() {
       return 1
     else
       group_status="$?"
-      [ "$group_status" -eq 1 ] || return 2
+      [ "$group_status" -eq 1 ] || return 3
     fi
     if managed_process_matches "$known_pid" "$known_pgid" "$known_marker"; then
       :
     else
       managed_status="$?"
       [ "$managed_status" -eq 1 ] && return 1
-      return 2
+      return 3
     fi
     sleep 1
   done
@@ -345,6 +367,7 @@ run_owned_process() {
   ready_file="$lock_dir/supervisor-ready"
   go_file="$lock_dir/supervisor-go"
   status_file="$lock_dir/target-status"
+  invalid_status_file="$lock_dir/target-status-invalid"
   lifecycle_gate="$lock_dir/signal-gate"
   signal_file="$lock_dir/signal-delivery"
   lock_created=0
@@ -388,7 +411,7 @@ run_owned_process() {
       mv -- "$lock_dir" "$terminal_dir" || return 1
       rm -f -- "$record" || return 1
     else
-      rm -f -- "$record" "$ready_file" "$go_file" "$status_file" "$lifecycle_gate"
+      rm -f -- "$record" "$ready_file" "$go_file" "$status_file" "$invalid_status_file" "$lifecycle_gate"
       rmdir -- "$lock_dir" 2>/dev/null || return 1
     fi
     supervisor_attested=0
@@ -427,11 +450,33 @@ run_owned_process() {
     fi
   }
   cleanup_owned_run() {
-    if [ "$lock_created" = 1 ]; then
+    # Before the v2-ready/record attestation there is no public operation
+    # that may safely act on this run.  The current root helper is the only
+    # owner of its just-created lock, so a TERM trap must not depend on a
+    # second flock acquisition while it is unwinding an absent-ready launch.
+    # Once attested, keep the existing gate serialization for every group
+    # signal and artifact transition.
+    if [ "$supervisor_attested" != 1 ]; then
+      cleanup_owned_run_locked
+    elif [ "$lock_created" = 1 ]; then
       with_run_lifecycle_gate "$lifecycle_gate" cleanup_owned_run_locked
     else
       cleanup_owned_run_locked
     fi
+  }
+  quarantine_invalid_owned_lifecycle() {
+    [ "$supervisor_attested" = 1 ] || return 1
+    write_owned_invalid_status_quarantine "$invalid_status_file" || return 1
+    terminate_known_process_group "$pid" "$pgid" "$marker" TERM || return 1
+    set +e; wait "$pid" 2>/dev/null; set -e
+    known_process_group_is_empty "$pid" "$pgid" && managed_process_is_gone "$pid" || return 1
+    # The invalid root-owned lifecycle remains for fail-closed recovery.
+    supervisor_attested=0
+    supervisor_started=0
+    lock_created=0
+  }
+  quarantine_invalid_owned_lifecycle_locked() {
+    quarantine_invalid_owned_lifecycle
   }
   cleanup_owned_lifecycle() {
     if cleanup_owned_run; then
@@ -481,7 +526,9 @@ run_owned_process() {
     ready_file="$2"
     go_file="$3"
     status_file="$4"
-    shift 4
+    lifecycle_gate="$5"
+    record="$6"
+    shift 6
     trap - HUP INT TERM
     umask 077
     tmp_ready="$(mktemp "${ready_file}.XXXXXX")" || exit 125
@@ -508,6 +555,33 @@ run_owned_process() {
     wait "$target_pid"
     target_code="$?"
     set -e
+    # Status publication and signal-run terminal transition share this exact
+    # root-owned gate.  The writer never holds another lifecycle lock, so the
+    # ordering is gate-only: signal-run validates -> TERM -> receipt/record
+    # transition, while a reaped target validates -> publish.  If signal-run
+    # won, its receipt/move (or missing lock/record) suppresses this write.
+    [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || exit 125
+    [ "$(stat -c "%u:%g:%a" "$lock_dir" 2>/dev/null || true)" = "0:0:700" ] || exit 125
+    for owned_file in "$ready_file" "$go_file" "$lifecycle_gate" "$record"; do
+      [ -f "$owned_file" ] && [ ! -L "$owned_file" ] || exit 125
+      [ "$(stat -c "%u:%g:%a" "$owned_file" 2>/dev/null || true)" = "0:0:600" ] || exit 125
+    done
+    exec 8<>"$lifecycle_gate" || exit 125
+    flock -x 8 || exit 125
+    [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || exit 125
+    [ "$(stat -c "%u:%g:%a" "$lock_dir" 2>/dev/null || true)" = "0:0:700" ] || exit 125
+    for owned_file in "$ready_file" "$go_file" "$lifecycle_gate" "$record"; do
+      [ -f "$owned_file" ] && [ ! -L "$owned_file" ] || exit 125
+      [ "$(stat -c "%u:%g:%a" "$owned_file" 2>/dev/null || true)" = "0:0:600" ] || exit 125
+    done
+    ready_contents="$(cat "$ready_file")" || exit 125
+    case "$ready_contents" in "helper-ready-v2 $$ $$ "*) ready_marker="${ready_contents#helper-ready-v2 $$ $$ }" ;; *) exit 125 ;; esac
+    case "$ready_marker" in ""|*[!0-9]*) exit 125 ;; esac
+    [ "$ready_contents" = "helper-ready-v2 $$ $$ $ready_marker" ] || exit 125
+    [ "$(cat "$go_file")" = "helper-go-v1 $$" ] || exit 125
+    [ "$(cat "$record")" = "helper-v1 $$ $$ $ready_marker" ] || exit 125
+    [ ! -e "$status_file" ] && [ ! -L "$status_file" ] || exit 125
+    [ ! -e "$lock_dir/signal-delivery" ] && [ ! -L "$lock_dir/signal-delivery" ] || exit 125
     umask 077
     tmp_status="$(mktemp "${status_file}.XXXXXX")" || exit 125
     if ! printf "helper-status-v1 %s\\n" "$target_code" > "$tmp_status" ||
@@ -517,16 +591,20 @@ run_owned_process() {
       rm -f "$tmp_status"
       exit 125
     fi
+    # Do not retain the lifecycle gate while the supervisor waits for the
+    # owner to consume this immutable status.  signal-run/recovery must be
+    # able to take it for their terminal transition or cleanup.
+    flock -u 8 || exit 125
     trap "" HUP INT TERM
     while :; do
       sleep 2147483647 &
       wait "$!"
     done
-  ' gp-owned-supervisor "$lock_dir" "$ready_file" "$go_file" "$status_file" "$target" "$@" &
+  ' gp-owned-supervisor "$lock_dir" "$ready_file" "$go_file" "$status_file" "$lifecycle_gate" "$record" "$target" "$@" &
   pid="$!"
   supervisor_started=1
-  if ready_pid="$(wait_for_owned_run_ready "$ready_file" "$pid")"; then
-    :
+  if wait_for_owned_run_ready "$ready_file" "$pid"; then
+    ready_pid="$owned_ready_pid"
   else
     ready_result="$?"
     case "$ready_result" in
@@ -556,11 +634,15 @@ run_owned_process() {
     :
   else
     status_result="$?"
-    cleanup_owned_lifecycle || true
     trap - EXIT HUP INT TERM
     if [ "$status_result" -eq 2 ]; then
+      with_run_lifecycle_gate "$lifecycle_gate" quarantine_invalid_owned_lifecycle_locked || fail "managed target status is invalid and cannot be quarantined"
       fail "managed target status is invalid"
     fi
+    if [ "$status_result" -eq 3 ]; then
+      fail "managed target status is unavailable and process identity is indeterminate"
+    fi
+    cleanup_owned_lifecycle || true
     fail "managed supervisor exited before target status"
   fi
   if cleanup_owned_lifecycle; then
@@ -939,6 +1021,37 @@ process_start_time() {
   printf '%s\n' "$start_marker"
 }
 
+process_state() {
+  pid="${1:-}"
+  is_valid_pid "$pid" || return 2
+  stat_file="/proc/$pid/stat"
+  if [ ! -r "$stat_file" ]; then
+    [ ! -e "/proc/$pid" ] && [ ! -L "/proc/$pid" ] && return 1
+    return 2
+  fi
+  if process_state_value="$(awk '
+    NR != 1 { malformed = 1; exit }
+    {
+      separator = 0
+      for (position = length($0) - 1; position >= 1; position--) {
+        if (substr($0, position, 2) == ") ") { separator = position; break }
+      }
+      if (!separator) { malformed = 1; exit }
+      stat_tail = substr($0, separator + 2)
+      if (stat_tail !~ /^[A-Za-z] /) { malformed = 1; exit }
+      print substr(stat_tail, 1, 1)
+    }
+    END { exit malformed ? 2 : (NR == 1 ? 0 : 2) }
+  ' "$stat_file" 2>/dev/null)"; then
+    :
+  else
+    [ ! -e "/proc/$pid" ] && [ ! -L "/proc/$pid" ] && return 1
+    return 2
+  fi
+  [ "${#process_state_value}" -eq 1 ] || return 2
+  printf '%s\n' "$process_state_value"
+}
+
 process_group_id() {
   pid="${1:-}"
   is_valid_pid "$pid" || return 2
@@ -1172,13 +1285,19 @@ EOF
 managed_process_is_gone() {
   known_pid="${1:-}"
   is_valid_pid "$known_pid" || return 2
-  if process_start_time "$known_pid" >/dev/null; then
+  if observed_state="$(process_state "$known_pid")"; then
+    # The caller has already waited for this direct child.  A remaining
+    # zombie is not a runnable member of an owned process group; treating it
+    # as gone permits removal of its pre-record lifecycle lock.  Every other
+    # observed state remains non-gone, and an unreadable/malformed identity
+    # remains indeterminate/fail-closed.
+    [ "$observed_state" = Z ] && return 0
     return 1
   else
-    process_status="$?"
+    state_status="$?"
+    [ "$state_status" -eq 1 ] && return 0
+    return 2
   fi
-  [ "$process_status" -eq 1 ] && return 0
-  return 2
 }
 
 signal_known_process_group() {
@@ -1328,6 +1447,20 @@ signal_registered_process_run() {
   fail "run lock is unsafe: $run_id"
 }
 
+revalidate_signal_run_lifecycle_after_gate() {
+  run_id="$(validate_run_id "${1:-}")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  status_file="$lock_dir/target-status"
+  # The caller holds signal-gate.  Repeat the complete lifecycle validation
+  # here, rather than relying on its pre-gate snapshot: status publication may
+  # have changed while signal-run was waiting for that gate.  No signal,
+  # receipt, or record mutation is allowed before this succeeds.
+  recovery_validate_run_lock "$run_id" || return 2
+  if [ -e "$status_file" ] || [ -L "$status_file" ]; then
+    read_owned_run_status "$status_file" >/dev/null || return 2
+  fi
+}
+
 signal_registered_process_run_locked() {
   run_id="$(validate_run_id "$1")"
   signal="$(validate_signal "$2")"
@@ -1336,7 +1469,7 @@ signal_registered_process_run_locked() {
   ready_file="$lock_dir/supervisor-ready"
   go_file="$lock_dir/supervisor-go"
   signal_file="$lock_dir/signal-delivery"
-  recovery_validate_run_lock "$run_id" || return 2
+  revalidate_signal_run_lifecycle_after_gate "$run_id" || return 2
   if [ ! -e "$go_file" ] && [ ! -L "$go_file" ]; then
     if read_owned_run_ready "$ready_file" >/dev/null || read_owned_run_attestation "$ready_file" >/dev/null; then
       fail "root run attestation is pending: $run_id"
@@ -1581,6 +1714,92 @@ recovery_validate_run_lifecycle_dir() {
   fi
 }
 
+# An invalid status is never a target outcome.  The writer leaves this marker
+# only after the root-owned v2 lifecycle was attested and the supervisor group
+# was stopped.  Recovery intentionally does not read, stat, or follow the
+# invalid target-status entry; it only removes that fixed directory entry after
+# re-checking the paired record and that the attested group is gone.
+recovery_invalid_status_marker_is_safe() {
+  quarantine_file="$1"
+  [ -f "$quarantine_file" ] && [ ! -L "$quarantine_file" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$quarantine_file" 2>/dev/null || true)" = '0:0:600' ] || return 1
+  [ "$(cat "$quarantine_file" 2>/dev/null || true)" = 'helper-invalid-status-v1' ]
+}
+
+invalid_status_quarantine_marker_is_present() {
+  run_id="$(validate_run_id "${1:-}")"
+  quarantine_file="$(recovery_lock_path "$run_id")/target-status-invalid"
+  [ -e "$quarantine_file" ] || [ -L "$quarantine_file" ]
+}
+
+invalid_status_quarantine_status_leaf_is_present() {
+  lock_dir="$1"
+  # `find -P` performs lstat-style directory enumeration and never follows a
+  # symlink.  In particular, do not replace this with `[ -e "$status_file" ]`:
+  # that shell builtin resolves a quarantined symlink to an existing target
+  # before the marker path can reject it as untrusted.
+  status_leaf="$(/usr/bin/find -P "$lock_dir" -maxdepth 1 -mindepth 1 -name target-status -printf '%f\n' 2>/dev/null)" || return 1
+  [ "$status_leaf" = target-status ]
+}
+
+recovery_validate_invalid_status_quarantine_lock() {
+  run_id="$(validate_run_id "${1:-}")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  go_file="$lock_dir/supervisor-go"
+  status_file="$lock_dir/target-status"
+  quarantine_file="$lock_dir/target-status-invalid"
+  lifecycle_gate="$lock_dir/signal-gate"
+  ready_present=0
+  go_present=0
+  status_present=0
+  quarantine_present=0
+  gate_present=0
+
+  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$lock_dir" 2>/dev/null || true)" = '0:0:700' ] || return 1
+  for lifecycle_file in "$lock_dir"/* "$lock_dir"/.[!.]* "$lock_dir"/..?*; do
+    lifecycle_name="${lifecycle_file##*/}"
+    case "$lifecycle_name" in
+      target-status)
+        # Dispatch this untrusted leaf before *any* generic presence test.
+        # Its content, identity and symlink target are never a recovery input.
+        [ "$status_present" = 0 ] || return 1
+        invalid_status_quarantine_status_leaf_is_present "$lock_dir" || return 1
+        status_present=1
+        ;;
+      *)
+        [ -e "$lifecycle_file" ] || [ -L "$lifecycle_file" ] || continue
+        case "$lifecycle_name" in
+      supervisor-ready)
+        [ "$ready_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        ready_present=1
+        ;;
+      supervisor-go)
+        [ "$go_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        go_present=1
+        ;;
+      target-status-invalid)
+        [ "$quarantine_present" = 0 ] && recovery_invalid_status_marker_is_safe "$lifecycle_file" || return 1
+        quarantine_present=1
+        ;;
+      signal-gate)
+        [ "$gate_present" = 0 ] && recovery_lifecycle_file_is_safe "$lifecycle_file" || return 1
+        gate_present=1
+        ;;
+      *) return 1 ;;
+        esac
+        ;;
+    esac
+  done
+  [ "$ready_present" = 1 ] && [ "$go_present" = 1 ] && [ "$status_present" = 1 ] &&
+    [ "$quarantine_present" = 1 ] && [ "$gate_present" = 1 ] || return 1
+  ready_target="$(read_owned_run_attestation "$ready_file")" || return 1
+  ready_pid="${ready_target%% *}"
+  go_pid="$(read_owned_run_go "$go_file")" || return 1
+  [ "$go_pid" = "$ready_pid" ]
+}
+
 recovery_validate_run_lock() {
   run_id="$(validate_run_id "${1:-}")"
   lock_dir="$(recovery_lock_path "$run_id")"
@@ -1612,7 +1831,11 @@ recovery_validate_registry_layout() {
         lock_run_id="${lock_run_id%.lock}"
         [ ".${lock_run_id}.lock" = "$artifact_name" ] || return 1
         validate_run_id "$lock_run_id" >/dev/null 2>&1 || return 1
-        recovery_validate_run_lock "$lock_run_id" || return 1
+        if invalid_status_quarantine_marker_is_present "$lock_run_id"; then
+          recovery_validate_invalid_status_quarantine_lock "$lock_run_id" || return 1
+        else
+          recovery_validate_run_lock "$lock_run_id" || return 1
+        fi
         ;;
       .*.terminal)
         terminal_run_id="${artifact_name#.}"
@@ -1689,7 +1912,6 @@ remove_recovery_run_artifacts() {
     recovery_validate_record "$run_id" || return 2
     [ "$(read_recovery_run_record "$record")" = "$expected_record_target" ] || return 2
   else
-    [ -z "$expected_marker" ] || return 2
     [ ! -e "$record" ] && [ ! -L "$record" ] || return 2
   fi
   recovery_ready_pid_is_safe_to_forget "$ready_file" || return 2
@@ -1727,6 +1949,44 @@ recovery_ready_pid_is_safe_to_forget() {
   is_valid_pid "$1" && is_valid_pid "$2" || return 2
   [ "$1" = "$ready_pid" ] && [ "$2" = "$ready_pid" ] || return 2
   classify_linux_ps_stat "$3"
+}
+
+recover_invalid_status_quarantine_locked() {
+  run_id="$(validate_run_id "${1:-}")"
+  record="$(registry_record_path "$run_id")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  ready_file="$lock_dir/supervisor-ready"
+  go_file="$lock_dir/supervisor-go"
+  status_file="$lock_dir/target-status"
+  quarantine_file="$lock_dir/target-status-invalid"
+  lifecycle_gate="$lock_dir/signal-gate"
+  recovery_validate_invalid_status_quarantine_lock "$run_id" || return 2
+  ready_target="$(read_owned_run_attestation "$ready_file")" || return 2
+  # Invalid-status quarantine is created only by run-owned while its paired
+  # record still exists.  signal-run instead moves the lifecycle to .terminal;
+  # accepting a recordless lock here would authorize an unreachable shape.
+  recovery_validate_record "$run_id" || return 2
+  record_target="$(read_recovery_run_record "$record")" || return 2
+  [ "$record_target" = "$ready_target" ] || return 2
+  # No terminate_known_process_group here: a quarantine is removed only after
+  # the already-attested group is independently confirmed absent.
+  recovery_ready_pid_is_safe_to_forget "$ready_file" || return 2
+  rm -f -- "$ready_file" "$go_file" "$status_file" "$quarantine_file" "$lifecycle_gate" || return 1
+  rmdir -- "$lock_dir" 2>/dev/null || return 1
+  recovery_validate_record "$run_id" || return 2
+  [ "$(read_recovery_run_record "$record")" = "$record_target" ] || return 2
+  rm -f -- "$record" || return 1
+}
+
+recover_invalid_status_quarantine() {
+  run_id="$(validate_run_id "${1:-}")"
+  lock_dir="$(recovery_lock_path "$run_id")"
+  recovery_validate_invalid_status_quarantine_lock "$run_id" || fail "invalid-status quarantine is unsafe: $run_id"
+  with_run_lifecycle_gate "$lock_dir/signal-gate" recover_invalid_status_quarantine_locked "$run_id" || {
+    recovery_status="$?"
+    [ "$recovery_status" -eq 2 ] && fail "invalid-status quarantine changed or remains live: $run_id"
+    fail "cannot remove invalid-status quarantine: $run_id"
+  }
 }
 
 recover_paired_run() {
@@ -1790,8 +2050,13 @@ recover_recordless_run_lock() {
   [ -e "$ready_file" ] || fail "recordless run lock is still starting: $run_id"
   if ready_target="$(read_owned_run_attestation "$ready_file")"; then
     ready_pid="${ready_target%% *}"
+    ready_rest="${ready_target#* }"
+    ready_pgid="${ready_rest%% *}"
+    ready_marker="${ready_rest#* }"
+    [ "$ready_pgid" = "$ready_pid" ] || fail "run lock attestation is invalid: $run_id"
   else
     ready_pid="$(read_owned_run_ready "$ready_file")" || fail "run lock is unsafe: $run_id"
+    ready_marker=""
   fi
   if recovery_ready_pid_is_safe_to_forget "$ready_file"; then
     :
@@ -1800,7 +2065,7 @@ recover_recordless_run_lock() {
     [ "$recovery_status" -eq 1 ] && fail "run lock supervisor is still live: $run_id"
     fail "run lock supervisor cannot be safely inspected: $run_id"
   fi
-  if remove_recovery_run_artifacts "$run_id" "$ready_pid" "" ""; then
+  if remove_recovery_run_artifacts "$run_id" "$ready_pid" "$ready_marker" ""; then
     :
   else
     removal_status="$?"
@@ -1818,6 +2083,8 @@ recover_registered_process_runs() {
     terminal_dir="$(recovery_terminal_path "$run_id")"
     if [ -e "$terminal_dir" ] || [ -L "$terminal_dir" ]; then
       recover_terminal_run "$run_id"
+    elif invalid_status_quarantine_marker_is_present "$run_id"; then
+      recover_invalid_status_quarantine "$run_id"
     else
       recover_paired_run "$run_id"
     fi
@@ -1853,6 +2120,10 @@ recover_quarantined_process_run() {
   # created after the attested launcher has been reaped. Missing artifacts are
   # not proof of termination: an untrusted launcher may still be alive.
   ensure_recovery_run_registry
+  marker_present=0
+  if invalid_status_quarantine_marker_is_present "$run_id"; then
+    marker_present=1
+  fi
   recovery_validate_registry_layout || fail "run registry contains unsafe recovery artifacts"
   if [ -e "$terminal_dir" ] || [ -L "$terminal_dir" ]; then
     recovery_validate_run_terminal "$run_id" || fail "quarantined run terminal is unsafe: $run_id"
@@ -1860,7 +2131,11 @@ recover_quarantined_process_run() {
   else
     [ -f "$record" ] && [ ! -L "$record" ] || fail "quarantined run recovery artifacts are missing: $run_id"
     [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || fail "quarantined run recovery artifacts are missing: $run_id"
-    recover_paired_run "$run_id"
+    if [ "$marker_present" = 1 ]; then
+      recover_invalid_status_quarantine "$run_id"
+    else
+      recover_paired_run "$run_id"
+    fi
   fi
   printf 'recovered-run-v1 %s\n' "$run_id"
 }

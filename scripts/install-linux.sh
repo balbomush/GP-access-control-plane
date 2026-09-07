@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER (--tag vX.Y.Z | --candidate-sha SHA) --web on|off --initial-install on|off' >&2; exit 64; }
+usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER (--tag vX.Y.Z|vX.Y.Z-alpha.N | --candidate-sha SHA) --web on|off --initial-install on|off' >&2; exit 64; }
 [ "$(id -u)" -eq 0 ] || fail 'must be run by the bootstrap sudo process'
 SOURCE_DIR= INSTALL_USER= TAG= CANDIDATE_SHA= INSTALL_WEB= INITIAL_INSTALL=
 while [ "$#" -gt 0 ]; do
@@ -19,18 +19,23 @@ case "$INITIAL_INSTALL" in on|off) ;; *) fail 'initial-install must be on or off
 [ -d "$SOURCE_DIR/.git" ] && [ ! -L "$SOURCE_DIR" ] || fail 'source directory is unsafe'
 [ -z "$TAG" ] || [ -z "$CANDIDATE_SHA" ] || usage
 [ -n "$TAG" ] || [ -n "$CANDIDATE_SHA" ] || usage
+SOURCE_COMMIT="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
+printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || fail 'source checkout has an invalid HEAD commit'
 if [ -n "$TAG" ]; then
-  printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'tag must be an exact release tag'
+  printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[1-9][0-9]*)?$' || fail 'tag must be an exact stable or alpha release tag'
   [ "$(git -C "$SOURCE_DIR" cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ] || fail 'source tag must be annotated'
-  [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+  [ "$SOURCE_COMMIT" = "$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$TAG^{commit}")" ] || fail 'source checkout does not match the exact tag'
+  INSTALL_REF="$TAG"
 else
   printf '%s\n' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$' || fail 'candidate SHA must be a full lowercase commit SHA'
-  [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA" ] || fail 'source checkout does not match the exact candidate SHA'
+  [ "$SOURCE_COMMIT" = "$CANDIDATE_SHA" ] || fail 'source checkout does not match the exact candidate SHA'
+  INSTALL_REF="candidate:$CANDIDATE_SHA"
 fi
 [ -z "$(git -C "$SOURCE_DIR" status --porcelain)" ] || fail 'exact-tag source tree is not clean'
+INSTALL_COMMIT="$SOURCE_COMMIT"
 target_home="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
 [ -n "$target_home" ] && [ -d "$target_home" ] || fail 'install-user home is unavailable'
-gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; legacy_state="$install_dir/build/state"; state_parent="$gp_root/.GP-access-control-plane.data"; state_dir="$state_parent/state"
+gp_root="$target_home/gp"; install_dir="$gp_root/GP-access-control-plane"; state_parent="$gp_root/.GP-access-control-plane.data"; state_dir="$state_parent/state"
 [ "$target_home" = "$(readlink -f -- "$target_home")" ] && [ ! -L "$target_home" ] || fail 'install-user home is not canonical'
 if [ -e "$gp_root" ] || [ -L "$gp_root" ]; then
   [ -d "$gp_root" ] && [ ! -L "$gp_root" ] && [ "$gp_root" = "$(readlink -f -- "$gp_root")" ] || fail 'managed GP root is not canonical'
@@ -44,7 +49,7 @@ vault_tool="$SOURCE_DIR/scripts/clean-install-vault.py"
 [ -f "$vault_tool" ] && [ ! -L "$vault_tool" ] || fail 'exact tag lacks the vault tool'
 # This executes as the install user; root neither reads nor deletes the vault/handoff.
 if [ "$INITIAL_INSTALL" = off ]; then
-  runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify --state-dir "$legacy_state" --home "$target_home" >/dev/null || fail 'vault is absent or corrupt; nothing was removed'
+  runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify --home "$target_home" >/dev/null || fail 'vault is absent or corrupt; nothing was removed'
 fi
 stop_unit() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
 stop_unit gp-control-plane-web.service; stop_unit gp-control-plane-core.service
@@ -74,6 +79,17 @@ install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$state_parent" "$state_dir"
 runuser -u "$INSTALL_USER" -- python3 -m venv "$install_dir/.venv"
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"
+# The application validates the pending vault ID and performs the semantic and
+# SQLite checks itself. Root only invokes that user-owned operation.
+if [ "$INITIAL_INSTALL" = off ]; then
+  runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" "$vault_tool" --restore --target-state-dir "$state_dir" --home "$target_home" \
+    || fail 'clean-install vault restore failed; vault was preserved and services were not started'
+fi
+# The v2fly cache is disposable service data.  A network failure must not undo a
+# successful clean install: the authenticated Web action can retry it later.
+if ! runuser -u "$INSTALL_USER" -- env GP_STATE_DIR="$state_dir" "$install_dir/.venv/bin/gp-control-plane" domain-sources prepare-v2fly; then
+  printf '%s\n' 'WARNING: v2fly catalog was not prepared; start the service and retry from the Web interface.' >&2
+fi
 install -d -m 0755 /usr/local/libexec/gp-control-plane
 install -m 0755 "$install_dir/scripts/gp-root-helper.sh" /usr/local/libexec/gp-control-plane/gp-root-helper
 cat > /etc/sudoers.d/gp-control-plane-root-helper <<EOF
@@ -85,6 +101,8 @@ chmod 0440 /etc/sudoers.d/gp-control-plane-root-helper
 cat > /etc/default/gp-control-plane-core <<EOF
 GP_INSTALL_DIR='$install_dir'
 GP_STATE_DIR='$state_dir'
+GP_INSTALLED_REF='$INSTALL_REF'
+GP_INSTALLED_COMMIT='$INSTALL_COMMIT'
 EOF
 cat > /etc/systemd/system/gp-control-plane-core.service <<EOF
 [Unit]
@@ -106,6 +124,8 @@ if [ "$INSTALL_WEB" = on ]; then
 cat > /etc/default/gp-control-plane-web <<EOF
 GP_INSTALL_DIR='$install_dir'
 GP_STATE_DIR='$state_dir'
+GP_INSTALLED_REF='$INSTALL_REF'
+GP_INSTALLED_COMMIT='$INSTALL_COMMIT'
 EOF
 cat > /etc/systemd/system/gp-control-plane-web.service <<EOF
 [Unit]
