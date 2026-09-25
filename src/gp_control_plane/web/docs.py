@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib.resources import files
 from pathlib import Path
 
 
@@ -17,12 +18,21 @@ CORE_ONLY_OPENAPI_INFO = {
 }
 
 
-def openapi_json_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "openapi.json"
+def _openapi_source_bytes() -> bytes:
+    resource = files("gp_control_plane.web").joinpath("openapi.json")
+    if resource.is_file():
+        return resource.read_bytes()
+    # Source checkout only; never search cwd or ancestors of site-packages.
+    module = Path(__file__).resolve()
+    if module.parent.name == "web" and module.parents[1].name == "gp_control_plane" and module.parents[2].name == "src":
+        root = module.parents[3]
+        if (root / "pyproject.toml").is_file():
+            return (root / "openapi.json").read_bytes()
+    raise FileNotFoundError("packaged OpenAPI contract is unavailable")
 
 
 def openapi_json_bytes(*, core_only: bool = False) -> bytes:
-    data = openapi_json_path().read_bytes()
+    data = _openapi_source_bytes()
     if not core_only:
         return data
 

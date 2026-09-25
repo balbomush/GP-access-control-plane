@@ -27,6 +27,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gp_control_plane.config import AppConfig, InstallConfig, OutputConfig
+from gp_control_plane.application import web_views
 import gp_control_plane.jobs as jobs
 from gp_control_plane.state import read_state, write_state
 from gp_control_plane.storage import SCHEMA_VERSION, append_run, read_app_setting
@@ -125,7 +126,7 @@ class WebUiTests(unittest.TestCase):
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
             expected = {"nfqws2_found": True, "blockcheck_found": True, "root_helper_ready": True}
 
-            with mock.patch.object(web_app, "check_install_cached", return_value=expected):
+            with mock.patch.object(web_views, "check_install_cached", return_value=expected):
                 payload = web_app.web_json_get_payload(config, "/api/web/status", {})
 
             self.assertEqual(payload["zapret2"], expected)
@@ -3488,7 +3489,7 @@ window.addEventListener('load', async () => {
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             authorization = _bearer_authorization_for_state(config.output.state_dir)
-            with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 10):
+            with mock.patch("gp_control_plane.web.http_body.JSON_REQUEST_MAX_BYTES", 10):
                 core_port = start_server(serve_core, config).port
                 web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core_port}").port
 
@@ -3559,20 +3560,20 @@ window.addEventListener('load', async () => {
             self.assertIn("SwaggerUIBundle", swagger_body.decode("utf-8"))
             self.assertEqual(core_status, 502)
             self.assertApiError(json.loads(core_body.decode("utf-8")), "core_unavailable")
-            self.assertEqual(web_system_status, 200)
+            self.assertEqual(web_system_status, 502)
             self.assertEqual(web_system_headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn("zapret2", json.loads(web_system_body.decode("utf-8")))
-            self.assertEqual(web_status, 200)
+            self.assertApiError(json.loads(web_system_body.decode("utf-8")), "core_unavailable")
+            self.assertEqual(web_status, 502)
             self.assertEqual(web_headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn('"run_preferences"', web_body.decode("utf-8"))
-            self.assertEqual(legacy_status, 404)
+            self.assertApiError(json.loads(web_body.decode("utf-8")), "core_unavailable")
+            self.assertEqual(legacy_status, 502)
             self.assertEqual(legacy_headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn("not found", legacy_body.decode("utf-8"))
-            self.assertEqual(unknown_status, 404)
+            self.assertApiError(json.loads(legacy_body.decode("utf-8")), "core_unavailable")
+            self.assertEqual(unknown_status, 502)
             self.assertEqual(unknown_headers.get("content-type"), "application/json; charset=utf-8")
-            self.assertIn("not found", unknown_body.decode("utf-8"))
+            self.assertApiError(json.loads(unknown_body.decode("utf-8")), "core_unavailable")
 
-    def test_web_proxy_returns_local_404_for_unknown_core_service_routes_with_dead_core(self) -> None:
+    def test_web_proxy_reports_core_unavailable_for_unknown_protected_routes_with_dead_core(self) -> None:
         from gp_control_plane.web import proxy as proxy_module
 
         with (
@@ -3582,7 +3583,7 @@ window.addEventListener('load', async () => {
             tmp = Path(raw)
             config = AppConfig(output=OutputConfig(state_dir=tmp / "state"))
             authorization = _bearer_authorization_for_state(config.output.state_dir)
-            with mock.patch.object(proxy_module, "JSON_REQUEST_MAX_BYTES", 8):
+            with mock.patch("gp_control_plane.web.http_body.JSON_REQUEST_MAX_BYTES", 8):
                 web_port = start_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{unused_core_port}").port
 
                 cases = (
@@ -3603,9 +3604,9 @@ window.addEventListener('load', async () => {
                         headers=request_headers,
                     )
                     message = (method, path, response_body.decode("utf-8", errors="replace"))
-                    self.assertEqual(status, 404, message)
+                    self.assertEqual(status, 502, message)
                     self.assertEqual(response_headers.get("content-type"), "application/json; charset=utf-8")
-                    self.assertApiError(json.loads(response_body.decode("utf-8")), "not_found")
+                    self.assertApiError(json.loads(response_body.decode("utf-8")), "core_unavailable")
                     self.assertNotIn("core api is unavailable", response_body.decode("utf-8"), message)
                     self.assertNotIn("request body is too large", response_body.decode("utf-8"), message)
 
@@ -3720,7 +3721,7 @@ window.addEventListener('load', async () => {
 
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            captured = _start_captured_server(serve, config)
+            captured = _captured_active_socket_failure_server((shutdown_failure, close_failure))
             with captured._server._request_handlers_lock:
                 captured._server._active_request_sockets.update((shutdown_failure, close_failure))
 
@@ -3748,7 +3749,7 @@ window.addEventListener('load', async () => {
 
         with tempfile.TemporaryDirectory() as raw:
             config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
-            captured = _start_captured_server(serve, config)
+            captured = _captured_active_socket_failure_server((shutdown_failure, close_failure))
             with self.assertRaisesRegex(AssertionError, "original test failure") as raised:
                 with captured:
                     with captured._server._request_handlers_lock:
@@ -6036,11 +6037,74 @@ def _start_captured_server(
     **kwargs: Any,
 ) -> _CapturedTestServer:
     module = sys.modules[function.__module__]
+    if function.__name__ == "serve_web_proxy" and "core_url" in kwargs:
+        # A5 moves the Web listener to Cheroot.  Keep this legacy test helper
+        # focused on its behavioral assertions while starting the real public
+        # runtime rather than recreating a BaseHTTP test stack.
+        from gp_control_plane.web.proxy import create_web_runtime
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = int(reservation.getsockname()[1])
+        runtime = create_web_runtime(config, "127.0.0.1", port, **kwargs)
+        thread = threading.Thread(target=runtime.serve_forever, daemon=True)
+        thread.start()
+        captured = _CapturedTestServer(port, runtime, thread)
+        try:
+            deadline = time.monotonic() + _startup_timeout
+            while True:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(f"Cheroot Web listener did not start on port {port}")
+                    time.sleep(0.01)
+        except BaseException:
+            captured.close()
+            raise
+        return captured
+
+    if function.__name__ in {"serve", "serve_core"} and function.__module__ in {
+        "gp_control_plane.web.api_server",
+        "gp_control_plane.web.core_server",
+    }:
+        # A6 moves the Core listener onto the same explicit Cheroot runtime as
+        # Web.  This test-only lifecycle owner exercises the real public Core
+        # factory instead of preserving a parallel BaseHTTP test listener.
+        from gp_control_plane.web.core_runtime import create_core_runtime
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = int(reservation.getsockname()[1])
+        runtime = create_core_runtime(
+            config,
+            "127.0.0.1",
+            port,
+            ui_enabled=bool(kwargs.get("ui_enabled", function.__name__ == "serve")),
+        )
+        thread = threading.Thread(target=runtime.serve_forever, daemon=True)
+        thread.start()
+        captured = _CapturedTestServer(port, runtime, thread)
+        try:
+            deadline = time.monotonic() + _startup_timeout
+            while True:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(f"Cheroot Core listener did not start on port {port}")
+                    time.sleep(0.01)
+        except BaseException:
+            captured.close()
+            raise
+        return captured
+
     server_type = _server_type or getattr(module, "ThreadingHTTPServer")
     server_modules = (
         module,
         importlib.import_module("gp_control_plane.web.api_server"),
-        importlib.import_module("gp_control_plane.web.proxy"),
     )
     startup_abandoned = threading.Event()
     listeners = _CapturedListenerRegistry(startup_abandoned)
@@ -6242,6 +6306,48 @@ def _start_captured_server(
         raise_startup_failure("server listener registry was empty")
     port = int(serving_listener.server_address[1])
     return _CapturedTestServer(port, serving_listener, thread, listeners)
+
+
+def _captured_active_socket_failure_server(sockets: tuple[Any, ...]) -> _CapturedTestServer:
+    """Test capture-helper leaf aggregation without the retired HTTP stack."""
+
+    class Listener:
+        def __init__(self) -> None:
+            self._request_handlers_lock = threading.Lock()
+            self._active_request_sockets = set(sockets)
+            self.request_handlers_idle = threading.Event()
+            self.request_handlers_idle.set()
+            self.active_request_handler_count = 0
+            self.serve_forever_started = threading.Event()
+            self.serve_forever_started.set()
+
+        def shutdown(self) -> None:
+            return
+
+        def server_close(self) -> None:
+            return
+
+        def close_active_request_connections(self) -> None:
+            failures: list[tuple[str, BaseException]] = []
+            with self._request_handlers_lock:
+                active = tuple(self._active_request_sockets)
+            for index, active_socket in enumerate(active, start=1):
+                try:
+                    active_socket.shutdown(socket.SHUT_RDWR)
+                except OSError as error:
+                    if not _is_expected_socket_teardown_error(error):
+                        failures.extend(_cleanup_failure_records(error, f"captured HTTP active request socket {index} shutdown"))
+                try:
+                    active_socket.close()
+                except OSError as error:
+                    if not _is_expected_socket_teardown_error(error):
+                        failures.extend(_cleanup_failure_records(error, f"captured HTTP active request socket {index} close"))
+            if failures:
+                raise _CleanupFailureRecords(failures)
+
+    thread = mock.Mock()
+    thread.is_alive.return_value = False
+    return _CapturedTestServer(12345, Listener(), thread)
 
 
 def _close_sse_stream(

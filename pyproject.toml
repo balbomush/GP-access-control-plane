@@ -7,10 +7,21 @@ name = "gp-access-control-plane"
 version = "0.4.1"
 description = "Linux web UI and control plane for zapret2 strategy discovery."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "bottle==0.13.4",
+    "cheroot==11.1.2",
+]
 
 [project.scripts]
 gp-control-plane = "gp_control_plane.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"gp_control_plane.web.ui_assets" = [
+    "templates/*.html",
+    "templates/tabs/*.html",
+    "styles/*.css",
+    "scripts/*.js",
+]

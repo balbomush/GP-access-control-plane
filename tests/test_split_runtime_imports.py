@@ -40,7 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path.cwd() / "src"))
 
 from gp_control_plane.config import AppConfig, OutputConfig
-from gp_control_plane.web import api_server, core_server
+from gp_control_plane.web import api_server, core_runtime, core_server
 
 class BlockWebAppImport(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
@@ -48,15 +48,12 @@ class BlockWebAppImport(importlib.abc.MetaPathFinder):
             raise ImportError("web.app must not be imported by core runtime")
         return None
 
-class FakeServer:
-    def __init__(self, address, handler):
-        self.address = address
-        self.handler = handler
-    def serve_forever(self):
-        print("fake-server-started")
+def fake_core_runtime(config, host, port, *, ui_enabled=False):
+    assert ui_enabled is False
+    print("fake-core-runtime-started")
 
 sys.meta_path.insert(0, BlockWebAppImport())
-api_server.ThreadingHTTPServer = FakeServer
+core_runtime.serve_core_runtime = fake_core_runtime
 with tempfile.TemporaryDirectory() as raw:
     config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
     core_server.serve_core(config, host="127.0.0.1", port=18081)

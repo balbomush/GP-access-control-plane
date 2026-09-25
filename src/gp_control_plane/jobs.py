@@ -78,34 +78,36 @@ class JobRunner:
         func: Callable[[threading.Event, str], Any],
         cancel_hook: Callable[[], Any] | None = None,
     ) -> Run:
-        with self._lock:
-            if str(read_state(self.state_dir).get("current_run_status") or "") == "quarantined":
-                raise RuntimeError("managed runtime recovery is required before starting a new run")
-            if self._active_run_id:
-                raise RuntimeError(f"run already running: {self._active_run_id}")
-            run_id = uuid.uuid4().hex
-            cancel_event = _CancellationToken()
-            state_lock = _StateDirJobLock.acquire(self.state_dir, run_id, name)
-            self._active_run_id = run_id
-            self._active_run_name = name
-            self._active_cancel = cancel_event
-            self._active_cancel_hook = cancel_hook
-            self._active_state_lock = state_lock
-            self._active_quarantined = False
-        created_at = now_iso()
-        run = Run(run_id=run_id, name=name, status="queued", created_at=created_at)
+        run_id: str | None = None
         try:
-            self._record(run_id, name, "queued", created_at)
-            self._persist_queued_run(run)
-            self._set_current_run(run_id, name, "queued")
-            thread = threading.Thread(
-                target=self._run,
-                args=(run_id, name, created_at, func, cancel_event),
-                daemon=True,
-            )
-            thread.start()
+            with self._lock:
+                if str(read_state(self.state_dir).get("current_run_status") or "") == "quarantined":
+                    raise RuntimeError("managed runtime recovery is required before starting a new run")
+                if self._active_run_id:
+                    raise RuntimeError(f"run already running: {self._active_run_id}")
+                run_id = uuid.uuid4().hex
+                cancel_event = _CancellationToken()
+                state_lock = _StateDirJobLock.acquire(self.state_dir, run_id, name)
+                self._active_run_id = run_id
+                self._active_run_name = name
+                self._active_cancel = cancel_event
+                self._active_cancel_hook = cancel_hook
+                self._active_state_lock = state_lock
+                self._active_quarantined = False
+                created_at = now_iso()
+                run = Run(run_id=run_id, name=name, status="queued", created_at=created_at)
+                self._record(run_id, name, "queued", created_at)
+                self._persist_queued_run(run)
+                self._set_current_run_locked(run_id, name, "queued")
+                thread = threading.Thread(
+                    target=self._run,
+                    args=(run_id, name, created_at, func, cancel_event),
+                    daemon=True,
+                )
+                thread.start()
         except Exception:
-            self._clear_active_run(run_id, release_state_lock=True)
+            if run_id is not None:
+                self._clear_active_run(run_id, release_state_lock=True)
             raise
         return run
 
@@ -124,11 +126,14 @@ class JobRunner:
             if cancellation_started:
                 self._active_cancel.set()
                 cancel_hook = self._active_cancel_hook
+                # Keep the state transition ordered with respect to worker
+                # finalisation.  Otherwise a worker can mark this same run as
+                # "saving" and a late Stop write can incorrectly restore
+                # "stopping" while the post-run snapshot is already running.
+                self._record(run_id, name, "stopping", now_iso())
+                self._set_current_run_locked(run_id, name, "stopping")
         if cancel_hook:
             threading.Thread(target=self._run_cancel_hook, args=(cancel_hook,), daemon=True).start()
-        if cancellation_started:
-            self._record(run_id, name, "stopping", now_iso())
-            self._set_current_run_if_active(run_id, name, "stopping")
         return {"run_id": run_id, "name": name, "status": "stopping"}
 
     @staticmethod
@@ -146,8 +151,7 @@ class JobRunner:
         func: Callable[[threading.Event, str], Any],
         cancel_event: _CancellationToken,
     ) -> None:
-        self._record(run_id, name, "running", now_iso())
-        self._set_current_run_if_active(run_id, name, "running")
+        self._mark_run_started(run_id, name, cancel_event)
         last_error: str | None = None
         last_run_status = "failed"
         quarantined = False
@@ -379,6 +383,20 @@ class JobRunner:
     def _set_current_run(self, run_id: str, name: str, status: str) -> None:
         with self._lock:
             self._set_current_run_locked(run_id, name, status)
+
+    def _mark_run_started(self, run_id: str, name: str, cancel_event: _CancellationToken) -> None:
+        """Record ``running`` only when cancellation has not already won startup.
+
+        ``cancel_active()`` and the worker share this lock.  The winner either
+        transitions queued work to ``stopping`` before the worker can emit a
+        misleading running event, or records ``running`` first and lets Stop
+        subsequently replace it with ``stopping``.
+        """
+        with self._lock:
+            if self._active_run_id != run_id or cancel_event.is_set():
+                return
+            self._record(run_id, name, "running", now_iso())
+            self._set_current_run_locked(run_id, name, "running")
 
     def _set_current_run_if_active(self, run_id: str, name: str, status: str) -> None:
         with self._lock:

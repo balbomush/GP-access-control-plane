@@ -54,19 +54,28 @@ def _serve_core_in_process(
     import gp_control_plane.web.api_server as api_server
 
     config = AppConfig(output=OutputConfig(state_dir=Path(state_dir_raw)))
-    server_type = api_server.ThreadingHTTPServer
-
-    class EventControlledServer(server_type):
-        def serve_forever(self, poll_interval: float = 0.5) -> None:
-            del poll_interval
-            self.timeout = 0.1
-            ready.set()
-            while not stop.is_set():
-                self.handle_request()
-
     try:
-        with mock.patch.object(api_server, "ThreadingHTTPServer", EventControlledServer):
-            api_server.serve(config, "127.0.0.1", port, ui_enabled=False)
+        from gp_control_plane.web.core_runtime import create_core_runtime
+
+        runtime = create_core_runtime(config, "127.0.0.1", port, ui_enabled=False)
+        thread = threading.Thread(target=runtime.serve_forever, name="auth-core-cheroot", daemon=True)
+        thread.start()
+        deadline = time.monotonic() + _PROCESS_TIMEOUT_SECONDS
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Core Cheroot child did not become ready")
+                time.sleep(0.01)
+        ready.set()
+        if not stop.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+            raise TimeoutError("parent did not stop Core Cheroot child")
+        runtime.stop()
+        thread.join(timeout=5)
+        if thread.is_alive():
+            raise TimeoutError("Core Cheroot child did not stop")
     except BaseException as error:  # noqa: BLE001 - report child failures to the parent test
         errors.put(repr(error))
         ready.set()
@@ -812,6 +821,79 @@ class BearerAuthHttpTests(unittest.TestCase):
                     for server in reversed(servers):
                         server.close()
 
+    def test_sse_terminal_eof_after_revocation_does_not_require_a_fast_heartbeat(self) -> None:
+        """A4-RV-01: terminal EOF follows auth recheck, not a shortened heartbeat."""
+        from gp_control_plane.web import api_server
+
+        self.assertEqual(api_server._SSE_HEARTBEAT_SECONDS, 15.0)
+        for topology in ("core", "proxy"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as raw:
+                config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+                servers: list[_ManagedServer] = []
+                connection = response = None
+                sleep_entered = threading.Event()
+                release_next_loop = threading.Event()
+                sleep_delays: list[float] = []
+
+                def controlled_sleep(delay: float) -> None:
+                    sleep_delays.append(delay)
+                    sleep_entered.set()
+                    if not release_next_loop.wait(timeout=_PROCESS_TIMEOUT_SECONDS):
+                        raise TimeoutError("test did not release the next SSE authorization check")
+
+                try:
+                    core = _start_managed_server(serve, config, ui_enabled=topology == "core")
+                    servers.append(core)
+                    port = core.port
+                    if topology == "proxy":
+                        proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
+                        servers.append(proxy)
+                        port = proxy.port
+
+                    status, _headers, body = _request(
+                        port,
+                        "/api/auth/login",
+                        method="POST",
+                        body=_json_bytes({"username": "admin", "password": "admin"}),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 200, body)
+                    old_bearer = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
+
+                    with mock.patch.object(api_server.time, "sleep", side_effect=controlled_sleep):
+                        connection, response = _open_sse(port, old_bearer)
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.readline(), b"event: status\n")
+                        self.assertTrue(response.readline().startswith(b"data: "))
+                        self.assertEqual(response.readline(), b"\n")
+                        for _ in range(20):
+                            line = response.readline()
+                            if line == b": keepalive\n":
+                                self.assertEqual(response.readline(), b"\n")
+                                break
+                        else:
+                            self.fail("initial SSE heartbeat did not arrive before the controlled loop sleep")
+                        self.assertTrue(sleep_entered.wait(timeout=_PROCESS_TIMEOUT_SECONDS))
+
+                        status, _headers, body = _request(
+                            port,
+                            "/api/auth/change-password",
+                            method="POST",
+                            body=_json_bytes({"current_password": "admin", "new_password": "newpass8"}),
+                            headers={**old_bearer, "Content-Type": "application/json"},
+                        )
+                        self.assertEqual(status, 200, body)
+                        release_next_loop.set()
+                        self.assertEqual(response.read(), b"")
+                        self.assertTrue(response.isclosed())
+
+                    self.assertEqual(sleep_delays, [1])
+                finally:
+                    release_next_loop.set()
+                    _close_sse(connection, response)
+                    for server in reversed(servers):
+                        server.close()
+
     def test_storage_unavailable_is_a_normalized_503_from_core_and_proxy(self) -> None:
         for error in (
             StorageUnavailableError("storage is temporarily unavailable"),
@@ -859,14 +941,13 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertEqual(status, 200, body)
                 headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}?must-not-log"}
                 expected = {"error": {"code": "storage_unavailable", "message": "Storage is temporarily unavailable.", "details": {}}}
-                for port, patch_target, logger_name in (
-                    (core.port, "gp_control_plane.web.api_server.require_bearer_token", "gp_control_plane.web.api_server"),
-                    (proxy.port, "gp_control_plane.web.proxy.require_bearer_token", "gp_control_plane.web.proxy"),
-                ):
+                for port in (core.port, proxy.port):
                     error = sqlite3.OperationalError("database is locked: /private/path SELECT secret")
                     error.sqlite_errorcode = 517
                     error.sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
-                    with mock.patch(patch_target, side_effect=error), self.assertLogs(logger_name, level="WARNING") as logged:
+                    with mock.patch(
+                        "gp_control_plane.web.api_server.require_bearer_token", side_effect=error
+                    ), self.assertLogs("gp_control_plane.web.api_server", level="WARNING") as logged:
                         status, _response_headers, response_body = _request(port, "/api/core/status?secret=query", headers=headers)
                     self.assertEqual(status, 503, response_body)
                     self.assertEqual(json.loads(response_body), expected)
@@ -880,6 +961,34 @@ class BearerAuthHttpTests(unittest.TestCase):
                     self.assertNotIn("secret=query", record)
                     self.assertNotIn("must-not-log", record)
                     self.assertNotIn("/private/path", record)
+            finally:
+                proxy.close()
+                core.close()
+
+    def test_core_and_proxy_auth_state_permission_error_is_a_generic_503(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = AppConfig(output=OutputConfig(state_dir=Path(raw) / "state"))
+            core = _start_managed_server(serve, config, ui_enabled=False)
+            proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
+            try:
+                status, _headers, body = _request(
+                    core.port,
+                    "/api/auth/login",
+                    method="POST",
+                    body=_json_bytes({"username": "admin", "password": "admin"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200, body)
+                headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
+                with mock.patch(
+                    "gp_control_plane.web.api_server.require_bearer_token",
+                    side_effect=PermissionError("owned state path is temporarily inaccessible"),
+                ):
+                    for port in (core.port, proxy.port):
+                        status, _response_headers, response_body = _request(port, "/api/core/status", headers=headers)
+                        self.assertEqual(status, 503, response_body)
+                        self.assertEqual(json.loads(response_body)["error"]["code"], "storage_unavailable")
+                self.assertEqual(_request(core.port, "/api/health")[0], 200)
             finally:
                 proxy.close()
                 core.close()
@@ -900,17 +1009,18 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
                 error = sqlite3.OperationalError("no such table: runs")
-                with mock.patch.object(core._server, "handle_error") as core_error, mock.patch(
-                    "gp_control_plane.core_api.read_runs", side_effect=error
-                ):
-                    with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError)):
-                        _request(core.port, "/api/core/runs/history", headers=headers)
+                # A6's WSGI listener reports an unexpected Core exception as
+                # an honest 500 response instead of BaseHTTP's socket drop.
+                # It must still never be mistaken for storage-unavailable or
+                # a successful proxy payload.
+                with mock.patch("gp_control_plane.core_api.read_runs", side_effect=error):
+                    core_status, _core_headers, core_body = _request(core.port, "/api/core/runs/history", headers=headers)
                     proxy_status, _proxy_headers, proxy_body = _request(
                         proxy.port, "/api/core/runs/history", headers=headers
                     )
 
-                self.assertEqual(core_error.call_count, 2)
-                self.assertEqual(proxy_status, 502, proxy_body)
+                self.assertEqual(core_status, 500, core_body)
+                self.assertEqual(proxy_status, 500, proxy_body)
                 self.assertNotEqual(proxy_status, 503)
                 self.assertNotEqual(proxy_status, 200)
             finally:
@@ -1048,7 +1158,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                 proxy = _start_managed_server(serve_web_proxy, config, core_url=f"http://127.0.0.1:{core.port}")
                 try:
                     with mock.patch(
-                        "gp_control_plane.web.proxy.require_bearer_token",
+                        "gp_control_plane.web.api_server.require_bearer_token",
                         side_effect=error,
                     ):
                         status, _headers, body = _request(proxy.port, "/api/core/runs/history")
@@ -1074,7 +1184,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
                 with mock.patch(
-                    "gp_control_plane.web.proxy.api_runtime.web_json_get_payload",
+                    "gp_control_plane.application.web_views.get_payload",
                     side_effect=StorageUnavailableError("storage is temporarily unavailable"),
                 ):
                     status, response_headers, body = _request(proxy.port, "/api/web/run-preferences", headers=headers)
@@ -1109,7 +1219,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                         "Content-Type": "application/json",
                     }
                     with mock.patch(
-                        "gp_control_plane.web.proxy.api_runtime.web_json_post_response",
+                        "gp_control_plane.application.web_views.post_response",
                         side_effect=error,
                     ):
                         status, response_headers, body = _request(
@@ -1199,10 +1309,10 @@ class BearerAuthHttpTests(unittest.TestCase):
                 headers = {"Authorization": f"Bearer {json.loads(body)['access_token']}"}
 
                 with mock.patch(
-                    "gp_control_plane.web.proxy.api_runtime.web_event_changes",
-                    side_effect=[iter((("status", {"state": "ready"}),)), _chained_storage_unavailable_517()],
-                ), mock.patch("gp_control_plane.web.proxy.time.sleep", return_value=None), self.assertLogs(
-                    "gp_control_plane.web.proxy", level="WARNING"
+                    "gp_control_plane.web.api_server._event_payloads",
+                    side_effect=[{"status": {"state": "ready"}}, _chained_storage_unavailable_517()],
+                ), mock.patch("gp_control_plane.web.api_server.time.sleep", return_value=None), self.assertLogs(
+                    "gp_control_plane.web.api_server", level="WARNING"
                 ) as logged:
                     connection, response = _open_sse(proxy.port, headers)
                     stream = response.read()
@@ -1217,7 +1327,7 @@ class BearerAuthHttpTests(unittest.TestCase):
                 self.assertNotIn("HTTP/", stream.decode("utf-8"))
                 record = "\n".join(logged.output)
                 self.assertIn("operation=GET", record)
-                self.assertIn("route=/api/web/events/stream", record)
+                self.assertIn("route=/api/internal/web-events/stream", record)
                 self.assertIn("sqlite_primary_code=5", record)
                 self.assertIn("sqlite_extended_code=517", record)
                 self.assertIn("sqlite_errorname=SQLITE_BUSY_SNAPSHOT", record)
@@ -1245,6 +1355,64 @@ class _ManagedServer:
 def _start_managed_server(function: Any, config: AppConfig, **kwargs: Any) -> _ManagedServer:
     port = _free_port()
     module = sys.modules[function.__module__]
+    if function.__name__ == "serve_web_proxy" and "core_url" in kwargs:
+        from gp_control_plane.web.proxy import create_web_runtime
+
+        runtime = create_web_runtime(config, "127.0.0.1", port, **kwargs)
+        startup_errors: list[BaseException] = []
+
+        def run_cheroot() -> None:
+            try:
+                runtime.serve_forever()
+            except BaseException as error:
+                startup_errors.append(error)
+
+        thread = threading.Thread(target=run_cheroot, daemon=True)
+        thread.start()
+        managed = _ManagedServer(port, runtime, thread)
+        try:
+            _wait_for_server(port)
+        except BaseException:
+            managed.close()
+            raise
+        if startup_errors:
+            managed.close()
+            raise AssertionError(f"Cheroot server on port {port} failed during startup") from startup_errors[0]
+        return managed
+
+    if function.__name__ in {"serve", "serve_core"} and function.__module__ in {
+        "gp_control_plane.web.api_server",
+        "gp_control_plane.web.core_server",
+    }:
+        from gp_control_plane.web.core_runtime import create_core_runtime
+
+        runtime = create_core_runtime(
+            config,
+            "127.0.0.1",
+            port,
+            ui_enabled=bool(kwargs.get("ui_enabled", function.__name__ == "serve")),
+        )
+        startup_errors: list[BaseException] = []
+
+        def run_cheroot() -> None:
+            try:
+                runtime.serve_forever()
+            except BaseException as error:
+                startup_errors.append(error)
+
+        thread = threading.Thread(target=run_cheroot, daemon=True)
+        thread.start()
+        managed = _ManagedServer(port, runtime, thread)
+        try:
+            _wait_for_server(port)
+        except BaseException:
+            managed.close()
+            raise
+        if startup_errors:
+            managed.close()
+            raise AssertionError(f"Cheroot Core on port {port} failed during startup") from startup_errors[0]
+        return managed
+
     server_type = getattr(module, "ThreadingHTTPServer")
     server_created = threading.Event()
     server_holder: dict[str, Any] = {}

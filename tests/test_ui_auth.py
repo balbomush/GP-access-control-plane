@@ -712,50 +712,15 @@ class TestServerLifecycleTests(unittest.TestCase):
             self.assertIsNone(released["current_run_id"])
             self.assertIsNone(released["current_run_status"])
 
-    def test_startup_failure_closes_listener_that_binds_during_cleanup(self) -> None:
-        bind_started = threading.Event()
-        allow_bind = threading.Event()
-        original_server = api_server.ThreadingHTTPServer
-
-        class DelayedServer(original_server):
-            def __init__(self, *args: Any, **kwargs: Any):
-                bind_started.set()
-                if not allow_bind.wait(timeout=5):
-                    raise AssertionError("test did not allow the server to bind")
-                super().__init__(*args, **kwargs)
-
+    def test_current_runtime_releases_its_listener_during_context_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             server = _TestServer(
                 AppConfig(output=OutputConfig(state_dir=Path(raw) / "state")),
-                startup_timeout=0.01,
-                server_type=DelayedServer,
-                startup_timeout_gate=bind_started,
             )
-            startup_error: list[BaseException] = []
-
-            def start_server() -> None:
-                try:
-                    server.__enter__()
-                except BaseException as error:
-                    startup_error.append(error)
-
-            startup_thread = threading.Thread(target=start_server)
-            startup_thread.start()
-            try:
-                self.assertTrue(bind_started.wait(timeout=5), "DelayedServer construction did not begin")
-                self.assertTrue(server._startup_cancelled.wait(timeout=5), "startup cancellation did not begin")
-            finally:
-                server._startup_cancelled.set()
-                allow_bind.set()
-                startup_thread.join(timeout=5)
-
-            self.assertFalse(startup_thread.is_alive())
-            self.assertEqual(1, len(startup_error))
-            self.assertEqual("test server did not bind its HTTP listener", str(startup_error[0]))
-            self.assertIsNotNone(server._server)
-            self.assertIsNotNone(server._thread)
-            self.assertFalse(server._thread.is_alive())
-            self.assertIs(api_server.ThreadingHTTPServer, original_server)
+            with server:
+                self.assertIsNotNone(server._runtime)
+                self.assertIsNotNone(server._thread)
+                self.assertTrue(server._thread.is_alive())
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", server.port))
 
@@ -1686,6 +1651,7 @@ class _TestServer:
         self._startup_timeout_gate = startup_timeout_gate
         self.port = _free_port()
         self._server: Any | None = None
+        self._runtime: Any | None = None
         self._thread: threading.Thread | None = None
         self._startup_lock = threading.Lock()
         self._startup_cancelled = threading.Event()
@@ -1698,6 +1664,22 @@ class _TestServer:
             raise _ServerRequestCancelled()
 
     def __enter__(self) -> "_TestServer":
+        # A6 replaced the product BaseHTTP listener.  Browser UI checks still
+        # need a real listener, but must not retain a second test-only product
+        # stack or patch the old handler's private lifecycle.
+        if self._server_type is None and self._startup_timeout_gate is None:
+            from gp_control_plane.web.core_runtime import create_core_runtime
+
+            self._runtime = create_core_runtime(self._config, "127.0.0.1", self.port, ui_enabled=True)
+            self._thread = threading.Thread(target=self._runtime.serve_forever, daemon=True)
+            self._thread.start()
+            try:
+                _wait_for_http(f"http://127.0.0.1:{self.port}/api/health", timeout=self._startup_timeout)
+            except BaseException:
+                self._stop()
+                raise
+            return self
+
         ready = threading.Event()
         original_server = self._server_type or api_server.ThreadingHTTPServer
         self._startup_cancelled.clear()
@@ -1844,6 +1826,19 @@ class _TestServer:
 
     def _stop(self) -> None:
         errors: list[str] = []
+        if self._runtime is not None:
+            try:
+                self._runtime.stop()
+            except BaseException as error:
+                errors.append(f"runtime stop: {error}")
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+                if self._thread.is_alive():
+                    errors.append("test runtime did not stop cleanly")
+            if errors:
+                raise AssertionError("BGT-001 test server cleanup failed: " + "; ".join(errors))
+            return
+
         with self._startup_lock:
             self._startup_cancelled.set()
             server = self._server

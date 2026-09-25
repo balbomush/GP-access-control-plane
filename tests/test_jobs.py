@@ -26,22 +26,42 @@ class _JobRunnerWorkerCapture:
 
     _JOIN_TIMEOUT_SECONDS = 2
 
-    def __init__(self, *release_events: threading.Event) -> None:
+    def __init__(
+        self,
+        *release_events: threading.Event,
+        worker_start_gate: threading.Event | None = None,
+        worker_waiting: threading.Event | None = None,
+    ) -> None:
         self._release_events = list(release_events)
         self._workers: list[tuple[JobRunner, threading.Thread]] = []
         self._thread_factory = threading.Thread
         self._thread_patch = None
+        self._worker_start_gate = worker_start_gate
+        self._worker_waiting = worker_waiting
 
     def __enter__(self) -> "_JobRunnerWorkerCapture":
         def capture_thread(*args: object, **kwargs: object) -> threading.Thread:
-            thread = self._thread_factory(*args, **kwargs)
             target = kwargs.get("target")
+            thread_kwargs = dict(kwargs)
             if (
                 getattr(target, "__func__", None) is JobRunner._run
                 and isinstance(getattr(target, "__self__", None), JobRunner)
             ):
-                self._workers.append((target.__self__, thread))
-            return thread
+                owner = target.__self__
+                if self._worker_start_gate is not None:
+                    original_target = target
+
+                    def gated_target(*target_args: object, **target_kwargs: object) -> None:
+                        if self._worker_waiting is not None:
+                            self._worker_waiting.set()
+                        self._worker_start_gate.wait()
+                        original_target(*target_args, **target_kwargs)
+
+                    thread_kwargs["target"] = gated_target
+                thread = self._thread_factory(*args, **thread_kwargs)
+                self._workers.append((owner, thread))
+                return thread
+            return self._thread_factory(*args, **thread_kwargs)
 
         self._thread_patch = mock.patch(
             "gp_control_plane.jobs.threading.Thread",
@@ -158,6 +178,102 @@ class JobRunnerTests(unittest.TestCase):
         canceller.join(timeout=1)
         self.assertFalse(canceller.is_alive())
         self.assertTrue(token.is_set())
+
+    def test_stop_before_worker_start_keeps_core_status_stopping_until_terminal_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            allow_worker_start = threading.Event()
+            worker_waiting = threading.Event()
+            function_entered = threading.Event()
+            release_function = threading.Event()
+            snapshot_started = threading.Event()
+            release_snapshot = threading.Event()
+            snapshot_calls: list[str] = []
+
+            with _JobRunnerWorkerCapture(
+                allow_worker_start,
+                release_function,
+                release_snapshot,
+                worker_start_gate=allow_worker_start,
+                worker_waiting=worker_waiting,
+            ):
+                def blocking_snapshot() -> dict[str, str]:
+                    snapshot_calls.append("snapshot")
+                    snapshot_started.set()
+                    self.assertTrue(release_snapshot.wait(timeout=2))
+                    return {
+                        "kind": "snapshot",
+                        "status": "success",
+                        "completed_at": "2026-09-14T00:00:00Z",
+                        "snapshot_id": "stop-before-worker-snapshot",
+                    }
+
+                runner = JobRunner(state_dir, on_idle=blocking_snapshot)
+
+                def stopped_job(stop: threading.Event, run_id: str) -> dict[str, str]:
+                    function_entered.set()
+                    self.assertTrue(stop.is_set())
+                    self.assertTrue(release_function.wait(timeout=2))
+                    return {"id": run_id, "status": "stopped"}
+
+                run = runner.start("stop-before-worker", stopped_job)
+                self.assertTrue(worker_waiting.wait(timeout=1))
+                self.assertEqual("stopping", runner.cancel_active()["status"])
+
+                expected_current = {"run_id": run.run_id, "status": "stopping"}
+                self.assertEqual("stopping", read_state(state_dir)["current_run_status"])
+                self.assertEqual(expected_current, status_payload(AppConfig(output=OutputConfig(state_dir=state_dir)))["current_run"])
+                self.assertNotIn("running", [event["status"] for event in _job_records(state_dir)])
+
+                allow_worker_start.set()
+                self.assertTrue(function_entered.wait(timeout=1))
+                self.assertEqual("stopping", read_state(state_dir)["current_run_status"])
+                self.assertEqual(expected_current, status_payload(AppConfig(output=OutputConfig(state_dir=state_dir)))["current_run"])
+                self.assertNotIn("running", [event["status"] for event in _job_records(state_dir)])
+
+                release_function.set()
+                self.assertTrue(snapshot_started.wait(timeout=1))
+                self.assertEqual("saving", read_state(state_dir)["current_run_status"])
+                self.assertEqual(["snapshot"], snapshot_calls)
+
+                release_snapshot.set()
+                finished = _wait_for_idle_state(state_dir)
+                self.assertEqual("stopped", finished["last_run_status"])
+                self.assertEqual(["snapshot"], snapshot_calls)
+                self.assertEqual("stop-before-worker-snapshot", finished["last_snapshot"]["snapshot_id"])
+
+    def test_stop_after_worker_start_replaces_running_with_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
+            state_dir = Path(raw)
+            entered = threading.Event()
+            release = threading.Event()
+            workers.release_on_exit(release)
+            runner = JobRunner(state_dir)
+
+            def stopped_job(stop: threading.Event, run_id: str) -> dict[str, str]:
+                entered.set()
+                self.assertTrue(release.wait(timeout=2))
+                self.assertTrue(stop.is_set())
+                return {"id": run_id, "status": "stopped"}
+
+            run = runner.start("stop-after-worker", stopped_job)
+            self.assertTrue(entered.wait(timeout=1))
+            self.assertEqual("running", read_state(state_dir)["current_run_status"])
+            self.assertEqual(
+                {"run_id": run.run_id, "status": "running"},
+                status_payload(AppConfig(output=OutputConfig(state_dir=state_dir)))["current_run"],
+            )
+
+            self.assertEqual("stopping", runner.cancel_active()["status"])
+            self.assertEqual("stopping", read_state(state_dir)["current_run_status"])
+            self.assertEqual(
+                {"run_id": run.run_id, "status": "stopping"},
+                status_payload(AppConfig(output=OutputConfig(state_dir=state_dir)))["current_run"],
+            )
+
+            release.set()
+            finished = _wait_for_idle_state(state_dir)
+            self.assertEqual("stopped", finished["last_run_status"])
 
     def test_current_job_is_cleared_when_job_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw, _JobRunnerWorkerCapture() as workers:
