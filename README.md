@@ -23,26 +23,22 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 GP_INSTALL_WEB=off bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 GP_INSTALL_WEB=off bash
 ```
 
 ### Alpha/prerelease (только для тестовой обратной связи)
 
-Основные команды выше устанавливают stable release. Пока stable `v0.4.1` ещё
-не опубликован, для утверждённой alpha-сборки используйте отдельно exact ref:
-
-```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1-alpha.1/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1-alpha.1 bash
-```
+Основные команды устанавливают стабильный выпуск. Если опубликована отдельная
+alpha-сборка, её точный тег и команду установки берите из описания этого prerelease.
+Номер стабильной версии не означает, что для неё существует alpha-сборка.
 
 Переход alpha → stable и rollback не поддерживаются: alpha — самостоятельная
 тестовая clean-install сборка, а не этап обновления stable-установки.
@@ -66,7 +62,7 @@ API-контракт доступен здесь:
 
 ### Безопасность и вход
 
-GP Control Plane v0.4.1 рассчитан на доверенную локальную сеть. Веб-интерфейс
+GP Control Plane v0.4.2 рассчитан на доверенную локальную сеть. Веб-интерфейс
 слушает адрес платы на порту `8080`, а при первом запуске намеренно использует
 учётные данные `admin` / `admin`. Это не способ безопасно публиковать сервис в
 интернете или в недоверенной общей сети: не открывайте этот порт наружу и не
@@ -106,8 +102,8 @@ GP_INSTALL_WEB=on
 EOF
 
 set -a; . ./gp-install.env; set +a
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
 ```
 
 Проект ставится в `~/gp/GP-access-control-plane`; clean-install не принимает внешний путь состояния. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
@@ -226,8 +222,8 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 Повторно запустите bootstrap:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.1/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.1 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
 ```
 
 Это односторонний clean-install маршрут только из exact annotated tag. Ветки, `dev`, cache/candidate routes и rollback не являются пользовательскими способами установки.

@@ -22,16 +22,6 @@ class ReadmeInstallationTests(unittest.TestCase):
             for block in re.findall(r"```bash\n(.*?)```", readme, flags=re.DOTALL)
             if re.search(rf"GP_BRANCH={re.escape(expected_tag)}(?:\s|$)", block)
         ]
-        alpha_tag = f"{expected_tag}-alpha.1"
-        alpha_url = (
-            "https://github.com/balbomush/GP-access-control-plane/releases/download/"
-            f"{alpha_tag}/bootstrap-linux.sh"
-        )
-        alpha_blocks = [
-            block
-            for block in re.findall(r"```bash\n(.*?)```", readme, flags=re.DOTALL)
-            if f"GP_BRANCH={alpha_tag}" in block
-        ]
 
         self.assertNotIn("/raw/", readme)
         self.assertNotIn('GP_BRANCH="${GP_BRANCH:-latest-stable}"', readme)
@@ -40,9 +30,7 @@ class ReadmeInstallationTests(unittest.TestCase):
             with self.subTest(block=block):
                 self.assertIn(f"GP_BOOTSTRAP_URL='{expected_url}'", block)
                 self.assertIn(f"GP_BRANCH={expected_tag}", block)
-        self.assertEqual(len(alpha_blocks), 1)
-        self.assertIn(f"GP_BOOTSTRAP_URL='{alpha_url}'", alpha_blocks[0])
-        self.assertIn(f"GP_BRANCH={alpha_tag}", alpha_blocks[0])
+        self.assertNotRegex(readme, r"GP_BRANCH=v\d+\.\d+\.\d+-alpha\.\d+")
         self.assertIn("Переход alpha → stable и rollback не поддерживаются", readme)
         self.assertNotIn('GP_INSTALL_CONFIG', readme)
         self.assertNotIn('GP_STATE_DIR', readme)
