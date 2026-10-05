@@ -3467,11 +3467,15 @@ set -- signal-run "$run_id" TERM
                 self.assertFalse(terminal.exists())
 
                 stale_id = "stale-owned-run"
-                stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target), str(started)], env=env)
+                stale_started = root / "stale-target-started"
+                stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target), str(stale_started)], env=env)
+                stale_attestation = None
                 try:
                     stale_record = registry / stale_id
                     _wait_for_path(stale_record)
-                    version, pid, pgid, _marker = stale_record.read_text(encoding="utf-8").split()
+                    _wait_for_path(stale_started)
+                    stale_attestation = stale_record.read_text(encoding="utf-8")
+                    version, pid, pgid, _marker = stale_attestation.split()
                     stale_record.write_text(f"{version} {pid} {pgid} 202\n", encoding="utf-8")
 
                     stale_signal = subprocess.run(
@@ -3487,8 +3491,27 @@ set -- signal-run "$run_id" TERM
                     self.assertTrue((registry / f".{stale_id}.lock").is_dir())
                 finally:
                     if stale.poll() is None:
-                        stale.terminate()
-                    stale.wait(timeout=5)
+                        # Restore only this fixture's deliberately corrupted
+                        # attestation before asking the helper to clean up.
+                        # Terminating the owner with a stale marker must fail
+                        # closed rather than signal an unverified group.
+                        if stale_attestation is not None:
+                            stale_record.write_text(stale_attestation, encoding="utf-8")
+                            cleanup = subprocess.run(
+                                ["sh", str(helper), "signal-run", stale_id, "TERM"],
+                                env=env, text=True, capture_output=True, check=False,
+                            )
+                            self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+                        else:
+                            stale.terminate()
+                    self.assertEqual(stale.wait(timeout=5), 126)
+                    if stale_attestation is not None:
+                        stale_ack = subprocess.run(
+                            ["sh", str(helper), "ack-run-terminal", stale_id], env=env,
+                            text=True, capture_output=True, check=False,
+                        )
+                        self.assertEqual(stale_ack.returncode, 0, stale_ack.stderr)
+                        self.assertFalse((registry / f".{stale_id}.terminal").exists())
             finally:
                 if managed.poll() is None:
                     subprocess.run(["sh", str(helper), "signal-run", run_id, "KILL"], env=env, check=False)
