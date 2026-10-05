@@ -92,6 +92,7 @@ class ZapretReleaseTests(unittest.TestCase):
                 header = bytearray(20); header[:6] = b"\x7fELF\x02\x01"; struct.pack_into("<H", header, 18, 183)
                 path.write_bytes(header); path.chmod(0o755)
             release.prepare_runtime(root, "aarch64")
+            self.assertEqual((root / "config").read_bytes(), (root / "config.default").read_bytes())
             self.assertEqual(os.readlink(root / "nfq2/nfqws2"), "../binaries/linux-arm64/nfqws2")
             (root / "foreign.cfg").write_text("keep")
             # Test ownership rejection independently of the test process UID.
@@ -104,6 +105,14 @@ class ZapretReleaseTests(unittest.TestCase):
         with patch.object(release.subprocess, "run", side_effect=OSError("cannot execute")):
             with self.assertRaisesRegex(OSError, "cannot execute"):
                 release.probe(Path("/fixture"))
+
+    def test_dry_run_passes_queue_parameter_without_starting_interception(self):
+        result = SimpleNamespace(stdout="127.0.0.1\n")
+        with patch.object(release.subprocess, "run", return_value=result) as run:
+            release.probe(Path("/fixture"))
+        dry_run = run.call_args_list[1].args[0]
+        self.assertIn("--dry-run", dry_run)
+        self.assertIn("--qnum=0", dry_run)
 
     def test_reuse_checks_additional_active_inputs_and_preserves_foreign_files(self):
         # Only UID/mode metadata is modelled; reads and traversal are real. The

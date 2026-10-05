@@ -73,6 +73,12 @@ def prepare_runtime(root: Path, machine: str) -> None:
     for name in required:
         if not (root / name).is_file():
             raise ValueError(f"missing zapret2 runtime file: {name}")
+    # blockcheck normally creates this on first Start. Publish the exact default
+    # as a qualified input now, so normal use does not invalidate safe reuse.
+    config = root / "config"
+    if not config.exists():
+        shutil.copyfile(root / "config.default", config)
+        config.chmod(0o644)
     # Native release binaries only: no compilation or binaries/my fallback.
     for name, target_dir in (("nfqws2", "nfq2"), ("mdig", "mdig"), ("ip2net", "ip2net")):
         binary = root / "binaries" / directory / name
@@ -97,7 +103,7 @@ def prepare_runtime(root: Path, machine: str) -> None:
 
 def probe(root: Path) -> None:
     subprocess.run([str(root / "nfq2/nfqws2"), "--version"], check=True, timeout=15)
-    subprocess.run([str(root / "nfq2/nfqws2"), "--dry-run",
+    subprocess.run([str(root / "nfq2/nfqws2"), "--dry-run", "--qnum=0",
                     f"--lua-init=@{root}/lua/zapret-lib.lua",
                     f"--lua-init=@{root}/lua/zapret-antidpi.lua"], check=True, timeout=15)
     result = subprocess.run([str(root / "ip2net/ip2net")], input="0.0.0.0\n",
