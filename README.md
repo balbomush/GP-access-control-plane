@@ -115,7 +115,7 @@ curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
 Что делает установщик:
 
 - ставит нужные пакеты через `apt-get install`;
-- устанавливает `zapret2` в `/opt/zapret2`;
+- подготавливает закреплённый `zapret2` в `/opt/gp-zapret2/v1.0.5.2-<архитектура>`, сохраняя существующий `/opt/zapret2`;
 - скачивает GP и создает Python-окружение;
 - устанавливает команду `gp-control-plane`;
 - ставит root-helper для запуска `blockcheck2` без интерактивного sudo-пароля;
