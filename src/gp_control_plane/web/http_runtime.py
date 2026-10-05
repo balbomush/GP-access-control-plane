@@ -71,6 +71,11 @@ class WebHttpRuntime:
             self._server.start()
         finally:
             self._start_finished.set()
+            # Cheroot.start() deliberately leaves interrupt handling to its
+            # caller. Reap its non-daemon workers before unwinding the CLI.
+            # Publish completion first so stop() cannot wait on this thread
+            # when startup failed before the listener became ready.
+            self.stop()
 
     def stop(self) -> None:
         """Idempotently stop the owned listener and Cheroot worker resources."""

@@ -45,7 +45,11 @@ _ROOT_HELPER_TRUSTED_PATH_SETUP = "PATH='/usr/sbin:/usr/bin:/sbin:/bin'\nexport 
 
 def _root_helper_test_source(helper: Path) -> str:
     """Return a fixture copy whose explicit command shims remain reachable."""
-    return helper.read_text(encoding="utf-8").replace(_ROOT_HELPER_TRUSTED_PATH_SETUP, "", 1)
+    return helper.read_text(encoding="utf-8").replace(_ROOT_HELPER_TRUSTED_PATH_SETUP, "", 1).replace(
+        '${GP_ROOT_HELPER_CONFIG:-/etc/default/gp-control-plane-root-helper}',
+        '${GP_ROOT_HELPER_CONFIG:-/nonexistent/gp-test-root-helper-config}',
+        1,
+    )
 
 
 class Zapret2Tests(unittest.TestCase):
@@ -413,7 +417,11 @@ class Zapret2Tests(unittest.TestCase):
         def fake_which(name: str) -> str | None:
             return {"nfqws2": "/usr/bin/nfqws2", "blockcheck2.sh": "/usr/bin/blockcheck2.sh"}.get(name)
 
-        with mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=fake_which):
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            mock.patch.dict(os.environ, {"GP_ROOT_HELPER": str(Path(raw) / "missing-helper")}),
+            mock.patch("gp_control_plane.zapret2.shutil.which", side_effect=fake_which),
+        ):
             result = check_install()
 
         self.assertTrue(result["nfqws2_found"])
@@ -1766,7 +1774,9 @@ table inet blockcheck42
                 root=root,
                 registry=registry,
                 extra_env={
-                    "GP_TEST_RECOVERY_PROCESS_TABLE": "",
+                    # A valid unrelated row proves this group absent; empty
+                    # ps output deliberately fails closed before the race.
+                    "GP_TEST_RECOVERY_PROCESS_TABLE": "1 1 S\n",
                     "GP_TEST_RECOVERY_TAMPER_READY_PATH": _posix_shell_path(ready_file),
                     "GP_TEST_RECOVERY_TAMPER_READY_CONTENT": f"helper-ready-v2 {ready_pid} {ready_pid} 202\n",
                 },
@@ -1805,7 +1815,7 @@ table inet blockcheck42
                 root=root,
                 registry=registry,
                 extra_env={
-                    "GP_TEST_RECOVERY_PROCESS_TABLE": "",
+                    "GP_TEST_RECOVERY_PROCESS_TABLE": "1 1 S\n",
                     "GP_TEST_RECOVERY_APPEAR_RECORD_PATH": _posix_shell_path(record),
                     "GP_TEST_RECOVERY_APPEAR_RECORD_CONTENT": f"helper-v1 {ready_pid} {ready_pid} {marker}\n",
                 },
@@ -2869,7 +2879,7 @@ run_owned_multidomain_target "$2" "$3"
         )
         (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (fake_bin / "stat").write_text(
-            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*|*signal-gate*|*signal-delivery*|*/runs/*) printf '0:0:600\\n' ;; */runs) printf '0:0:750\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
+            "#!/bin/sh\ncase \"$*\" in *discovery-update.lock*) printf '0:0:600\\n' ;; *.lock) printf '0:0:700\\n' ;; *signal-gate*|*signal-delivery*|*/runs/*) printf '0:0:600\\n' ;; */runs) printf '0:0:750\\n' ;; *) printf '0:0:700\\n' ;; esac\n",
             encoding="utf-8",
         )
         (fake_bin / "flock").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -3174,10 +3184,10 @@ set -- run-owned "${13}" "${14}" "$4"
             "case \"$*\" in\n"
             "  *'$2 == pgid'*) printf '%s\\n%s\\n' \"$FAKE_LEADER_PID\" \"$FAKE_CHILD_PID\" ;;\n"
             "  *'$1 == pgid'*) [ \"$(cat \"$FAKE_PHASE\")\" = killed ] && exit 1; exit 0 ;;\n"
-            "  *stat_tail*\"/proc/$FAKE_LEADER_PID/stat\"*)\n"
+            "  *'print substr(stat_tail, 1, 1)'*\"/proc/$FAKE_LEADER_PID/stat\"*)\n"
             "    if [ \"$(cat \"$FAKE_PHASE\")\" = killed ]; then printf 'Z\\n'; else printf 'S\\n'; fi\n"
             "    ;;\n"
-            "  *stat_tail*\"/proc/$FAKE_CHILD_PID/stat\"*) printf 'S\\n' ;;\n"
+            "  *'print substr(stat_tail, 1, 1)'*\"/proc/$FAKE_CHILD_PID/stat\"*) printf 'S\\n' ;;\n"
             "  *\"/proc/$FAKE_LEADER_PID/stat\"*)\n"
             "    if [ \"$(cat \"$FAKE_PHASE\")\" = after-term ]; then\n"
             "      [ -n \"$FAKE_LEADER_AFTER_TERM_MARKER\" ] && printf '%s\\n' \"$FAKE_LEADER_AFTER_TERM_MARKER\"\n"
@@ -3401,7 +3411,8 @@ set -- signal-run "$run_id" TERM
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             target = root / "blockcheck2.sh"
-            target.write_text("#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30\n", encoding="utf-8")
+            started = root / "target-started"
+            target.write_text("#!/bin/sh\ntrap 'exit 0' TERM\nprintf started > \"$1\"\nsleep 30\n", encoding="utf-8")
             target.chmod(0o700)
             registry = root / "runs"
             config = root / "gp-root-helper.conf"
@@ -3413,7 +3424,7 @@ set -- signal-run "$run_id" TERM
                 "GP_ROOT_HELPER_RUN_DIR": str(registry),
             }
             run_id = "helper-owned-run"
-            managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target)], env=env)
+            managed = subprocess.Popen(["sh", str(helper), "run-owned", run_id, str(target), str(started)], env=env)
             try:
                 record = registry / run_id
                 _wait_for_path(record)
@@ -3421,6 +3432,9 @@ set -- signal-run "$run_id" TERM
                 ready = registry / f".{run_id}.lock" / "supervisor-ready"
                 _wait_for_path(ready)
                 self.assertEqual(ready.read_text(encoding="utf-8").split()[0], "helper-ready-v2")
+                # The record/attestation deliberately precede GO. A TERM
+                # before target startup cannot prove its exit-0 trap works.
+                _wait_for_path(started)
 
                 rejected = subprocess.run(
                     ["sh", str(helper), "register-run", "foreign-pid", str(os.getpid()), str(os.getpgrp()), "1"],
@@ -3440,7 +3454,7 @@ set -- signal-run "$run_id" TERM
                 self.assertFalse(record.exists())
 
                 stale_id = "stale-owned-run"
-                stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target)], env=env)
+                stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target), str(started)], env=env)
                 try:
                     stale_record = registry / stale_id
                     _wait_for_path(stale_record)

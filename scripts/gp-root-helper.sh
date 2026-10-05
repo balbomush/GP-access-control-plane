@@ -266,7 +266,9 @@ wait_for_owned_run_ready() {
   ready_file="$1"
   expected_pid="$(validate_pid "$2")"
   ready_waited=0
-  while [ "$ready_waited" -lt 10 ]; do
+  # Keep the ten-second readiness budget, but do not add a full second to
+  # each half of the ready/go handshake for an already prepared supervisor.
+  while [ "$ready_waited" -lt 100 ]; do
     if ready_pid="$(read_owned_run_ready "$ready_file")"; then
       [ "$ready_pid" = "$expected_pid" ] || return 2
       # Keep the result in the owning shell.  The caller's TERM trap must be
@@ -285,7 +287,7 @@ wait_for_owned_run_ready() {
       set -e
       return 1
     fi
-    sleep 1
+    sleep 0.1
     ready_waited=$((ready_waited + 1))
   done
   return 3
@@ -547,7 +549,7 @@ run_owned_process() {
         [ "$go_contents" = "helper-go-v1 $$" ] || exit 125
         break
       fi
-      sleep 1
+      sleep 0.1
     done
     ( trap - HUP INT TERM; exec "$@" ) &
     target_pid="$!"
@@ -2029,7 +2031,7 @@ recover_paired_run() {
   else
     recovery_status="$?"
     [ "$registered_stale" -eq 1 ] && [ "$recovery_status" -eq 1 ] &&
-      fail "registered process is stale or invalid"
+      fail "registered process is stale or invalid: $run_id"
     [ "$recovery_status" -eq 1 ] && fail "run lock supervisor is still live: $run_id"
     fail "run lock supervisor cannot be safely inspected: $run_id"
   fi
