@@ -175,21 +175,15 @@ journalctl -u gp-control-plane-core.service -u gp-control-plane-web.service -f
 
 Для headless-установки используйте только `gp-control-plane-core.service`.
 
-## Установка zapret2 Отдельно
+## Зависимость zapret2
 
-Полный установщик GP уже ставит `zapret2`. Если нужен только `zapret2`, запустите отдельный короткий скрипт:
-
-```bash
-GP_ZAPRET_INSTALLER_URL='https://github.com/balbomush/GP-access-control-plane/releases/latest/download/install-zapret2.sh'
-curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
-```
-
-После установки должны появиться:
-
-```text
-/opt/zapret2/blockcheck2.sh
-/opt/zapret2/nfq2/nfqws2
-```
+Штатный установщик GP сам подготавливает закреплённый release `zapret2`.
+`scripts/install-zapret2.sh` — внутренний этап подготовки из полного checkout
+точного тега GP; отдельного запуска через `curl | bash` ему не требуется.
+GP использует runtime из `/opt/gp-zapret2/v1.0.5.2-<архитектура>` через свои
+wrapper в `/usr/local/libexec/gp-control-plane`. Существующая самостоятельная
+установка `/opt/zapret2` сохраняется. Для самостоятельной установки zapret2
+используйте [инструкции upstream](https://github.com/bol-van/zapret2).
 
 ## Как Пользоваться
 

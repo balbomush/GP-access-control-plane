@@ -39,6 +39,8 @@ class ReadmeInstallationTests(unittest.TestCase):
         self.assertIn('При наличии обоих bootstrap останавливается до `sudo`', readme)
         self.assertIn('не входит в scope этой миграции', readme)
         self.assertNotIn('latest-stable', readme)
+        self.assertNotIn('GP_ZAPRET_INSTALLER_URL', readme)
+        self.assertIn('внутренний этап подготовки из полного checkout', readme)
         self.assertIn('TAG="${GP_BRANCH:-}"', bootstrap)
         self.assertIn('exact release tag vX.Y.Z or vX.Y.Z-alpha.N', bootstrap)
         self.assertIn('автоматически восстанавливает vault', readme)

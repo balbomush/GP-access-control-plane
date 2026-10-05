@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("prepare_zapret2", ROOT / "scripts/prepare-zapret2.py")
@@ -103,6 +104,42 @@ class ZapretReleaseTests(unittest.TestCase):
         with patch.object(release.subprocess, "run", side_effect=OSError("cannot execute")):
             with self.assertRaisesRegex(OSError, "cannot execute"):
                 release.probe(Path("/fixture"))
+
+    def test_reuse_checks_additional_active_inputs_and_preserves_foreign_files(self):
+        # Only UID/mode metadata is modelled; reads and traversal are real. The
+        # actual root-owned positive case also runs in the Linux fixture gate.
+        original = Path.lstat
+        def trusted_stat(path):
+            info = original(path)
+            return SimpleNamespace(st_uid=0, st_mode=info.st_mode & ~0o022)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); prepared = root / "prepared"; installed = root / "installed"
+            prepared.mkdir(); installed.mkdir()
+            for path in (prepared / "release.txt", installed / "release.txt"):
+                path.write_text("qualified")
+            with patch.object(Path, "lstat", trusted_stat):
+                release.verify_installed(prepared, installed)
+                (installed / "foreign.txt").write_text("keep")
+                release.verify_installed(prepared, installed)
+                for relative in ("config", "custom.sh", "custom.lua", "blockcheck2.d/standard/foreign.inc"):
+                    target = installed / relative; target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("foreign active input")
+                    with self.assertRaisesRegex(ValueError, "unexpected active"):
+                        release.verify_installed(prepared, installed)
+                    self.assertEqual(target.read_text(), "foreign active input")
+                    target.unlink()
+                    if relative.startswith("blockcheck2.d"):
+                        target.parent.rmdir(); target.parent.parent.rmdir()
+                self.assertEqual((installed / "foreign.txt").read_text(), "keep")
+
+    def test_reuse_rejects_user_writable_extra_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); prepared = root / "prepared"; installed = root / "installed"
+            prepared.mkdir(); installed.mkdir(); extra = installed / "config"
+            extra.write_text("untrusted"); extra.chmod(0o666)
+            with self.assertRaisesRegex(ValueError, "root protected"):
+                release.verify_installed(prepared, installed)
+            self.assertEqual(extra.read_text(), "untrusted")
 
 
 if __name__ == "__main__":

@@ -115,6 +115,21 @@ def verify_installed(prepared: Path, installed: Path) -> None:
     """Reuse matching package-owned files; never replace an existing foreign tree."""
     if installed.is_symlink() or not installed.is_dir():
         raise ValueError("existing managed zapret2 path is unsafe")
+    expected = {path.relative_to(prepared) for path in prepared.rglob("*")}
+    # Upstream sources config and discovers scripts that are not necessarily in
+    # the release member table. Check the installed side too; preserve conflicts
+    # for the owner instead of executing or deleting them.
+    for target in installed.rglob("*"):
+        relative = target.relative_to(installed)
+        info = target.lstat()
+        if info.st_uid != 0 or (not target.is_symlink() and info.st_mode & 0o022):
+            raise ValueError(f"existing managed runtime is not root protected: {target}")
+        if relative not in expected:
+            if (target.is_symlink() or not (target.is_dir() or target.is_file())
+                    or relative.parts[0] in {"common", "lua", "blockcheck2.d", "binaries", "nfq2", "mdig", "ip2net"}
+                    or target.name == "config" or target.name.startswith("config.")
+                    or target.suffix in {".sh", ".lua"}):
+                raise ValueError(f"unexpected active runtime input; preserved for owner: {target}")
     for source in (prepared, *prepared.rglob("*")):
         target = installed / source.relative_to(prepared)
         info = target.lstat()
