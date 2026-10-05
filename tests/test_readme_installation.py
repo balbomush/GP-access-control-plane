@@ -51,7 +51,8 @@ class ReadmeInstallationTests(unittest.TestCase):
 
         self.assertEqual(1, document.count("GET /api/service/releases/available"))
         self.assertIn("exact annotated\nrelease tag в `GP_BRANCH`", document)
-        self.assertIn("`apt`/zapret2/wrapper preparation, кладёт fresh files и создаёт venv", document)
+        self.assertIn("До остановки прежней GP installer завершает подготовку", document)
+        self.assertIn("устанавливает уже проверенные wheels без сети", document)
         self.assertIn("до `domain-sources prepare-v2fly` и до любого `systemctl enable --now`", document)
         for retired_operation in (
             "GET /api/service/releases/install-channel",

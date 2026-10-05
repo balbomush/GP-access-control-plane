@@ -333,8 +333,12 @@ Compatibility-mode:
 
 Legacy-приложение создаёт vault на той же плате. Затем fresh install удаляет
 только фиксированную GP-поверхность и ставит выбранный exact annotated stable
-или alpha release tag. Для existing installation installer сначала завершает
-`apt`/zapret2/wrapper preparation, кладёт fresh files и создаёт venv. Только
+или alpha release tag. До остановки прежней GP installer завершает подготовку
+`apt`, закреплённого release zapret2 (digest, распаковка, архитектура, binaries/Lua)
+и Python wheels GP с проверкой импорта. Существующий `/opt/zapret2` сохраняется;
+GP runtime живёт в отдельном root-owned каталоге `/opt/gp-zapret2/`.
+Затем installer удаляет прежнюю GP-поверхность, создаёт wrapper и fresh files,
+создаёт venv и устанавливает уже проверенные wheels без сети. Только
 после этого он автоматически запускает user-side restore; restore выполняется
 до `domain-sources prepare-v2fly` и до любого `systemctl enable --now` запуска
 сервиса. Продукт проверяет импорт и SQLite. Источник удаляется только при

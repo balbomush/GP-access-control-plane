@@ -3,6 +3,8 @@
 set -Eeuo pipefail
 PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+phase=validation
+trap 'printf "ERROR: clean installation failed in phase=%s; before activation previous GP is preserved; after activation use the preserved vault for recovery\n" "$phase" >&2' ERR
 usage() { printf '%s\n' 'usage: install-linux.sh --source-dir DIR --install-user USER (--tag vX.Y.Z|vX.Y.Z-alpha.N | --candidate-sha SHA) --web on|off --initial-install on|off' >&2; exit 64; }
 [ "$(id -u)" -eq 0 ] || fail 'must be run by the bootstrap sudo process'
 SOURCE_DIR= INSTALL_USER= TAG= CANDIDATE_SHA= INSTALL_WEB= INITIAL_INSTALL=
@@ -51,34 +53,71 @@ vault_tool="$SOURCE_DIR/scripts/clean-install-vault.py"
 if [ "$INITIAL_INSTALL" = off ]; then
   runuser -u "$INSTALL_USER" -- python3 "$vault_tool" --verify --home "$target_home" >/dev/null || fail 'vault is absent or corrupt; nothing was removed'
 fi
+# Finish dependency preparation while the old GP is still running. No network
+# or upstream installation script is needed after the destructive boundary.
+phase=preparation
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64|Linux:i686|Linux:i386|Linux:aarch64|Linux:armv7l|Linux:armv6l) ;;
+  *) fail 'unsupported Linux architecture; previous GP was preserved';;
+esac
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl dnsutils git iproute2 ipset iptables nftables python3 python3-pip python3-venv sudo
+group="$(id -gn "$INSTALL_USER")"
+prepare_dir="$(mktemp -d /tmp/gp-install-prepare.XXXXXX)"
+publish_dir=
+cleanup_preparation() {
+  rm -rf --one-file-system -- "$prepare_dir"
+  [ -z "$publish_dir" ] || rm -rf --one-file-system -- "$publish_dir"
+}
+trap cleanup_preparation EXIT
+chmod 0755 "$prepare_dir"
+bash "$SOURCE_DIR/scripts/install-zapret2.sh" --prepare-dir "$prepare_dir"
+runuser -u "$INSTALL_USER" -- python3 "$SOURCE_DIR/scripts/prepare-zapret2.py" --probe --destination "$prepare_dir/runtime"
+install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$prepare_dir/python"
+runuser -u "$INSTALL_USER" -- python3 -m venv "$prepare_dir/python/venv"
+runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -m pip wheel --wheel-dir "$prepare_dir/python/wheels" "$SOURCE_DIR"
+runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -m pip install --no-index --find-links "$prepare_dir/python/wheels" gp-access-control-plane
+runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -c 'import bottle, cheroot; from gp_control_plane import __version__; from gp_control_plane.web.docs import openapi_json_bytes; assert __version__ == "0.4.3"; assert openapi_json_bytes()'
+# A GP-owned versioned runtime keeps arbitrary /opt/zapret2 git/release layouts
+# and their settings intact. Existing files are checked, never overwritten.
+zapret_parent=/opt/gp-zapret2
+zapret_dir="$zapret_parent/v1.0.5.2-$(uname -m)"
+if [ -e "$zapret_parent" ] || [ -L "$zapret_parent" ]; then
+  [ -d "$zapret_parent" ] && [ ! -L "$zapret_parent" ] && [ "$(readlink -f -- "$zapret_parent")" = "$zapret_parent" ] && [ "$(stat -c '%u:%a' "$zapret_parent")" = 0:755 ] || fail 'managed zapret2 parent is unsafe; nothing was removed'
+else
+  install -d -m 0755 -o root -g root "$zapret_parent"
+fi
+if [ -e "$zapret_dir" ] || [ -L "$zapret_dir" ]; then
+  python3 "$SOURCE_DIR/scripts/prepare-zapret2.py" --destination "$prepare_dir/runtime" --verify-installed "$zapret_dir"
+else
+  publish_dir="$(mktemp -d "$zapret_parent/.prepare.XXXXXX")"
+  cp -a -- "$prepare_dir/runtime" "$publish_dir/runtime"
+  mv -T -- "$publish_dir/runtime" "$zapret_dir"
+fi
+runuser -u "$INSTALL_USER" -- python3 "$SOURCE_DIR/scripts/prepare-zapret2.py" --probe --destination "$zapret_dir"
+phase=activation
 stop_unit() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
 stop_unit gp-control-plane-web.service; stop_unit gp-control-plane-core.service
 rm -f -- /etc/systemd/system/gp-control-plane-core.service /etc/systemd/system/gp-control-plane-web.service
 rm -f -- /etc/default/gp-control-plane-install-profile /etc/default/gp-control-plane-core /etc/default/gp-control-plane-web /etc/default/gp-control-plane-root-helper /etc/sudoers.d/gp-control-plane-root-helper
 rm -rf --one-file-system -- /usr/local/libexec/gp-control-plane /run/gp-control-plane "$install_dir" "$state_parent"
 systemctl daemon-reload
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl dnsutils git iproute2 ipset iptables nftables python3 python3-pip python3-venv sudo
-group="$(id -gn "$INSTALL_USER")"
 install -d -o "$INSTALL_USER" -g "$group" "$gp_root" "$install_dir"
 tar -C "$SOURCE_DIR" --exclude=.git -cf - . | tar -C "$install_dir" -xf -
 chown -R "$INSTALL_USER:$group" "$install_dir"
-ZAPRET_DIR=/opt/zapret2 bash "$install_dir/scripts/install-zapret2.sh"
-[ -x /opt/zapret2/blockcheck2.sh ] && [ -x /opt/zapret2/nfq2/nfqws2 ] || fail 'zapret2 runtime is not ready'
 install -d -m 0755 /usr/local/libexec/gp-control-plane
-cat > /usr/local/libexec/gp-control-plane/nfqws2 <<'EOF'
+cat > /usr/local/libexec/gp-control-plane/nfqws2 <<EOF
 #!/bin/sh
-exec /opt/zapret2/nfq2/nfqws2 "$@"
+exec $zapret_dir/nfq2/nfqws2 "\$@"
 EOF
-cat > /usr/local/libexec/gp-control-plane/blockcheck2.sh <<'EOF'
+cat > /usr/local/libexec/gp-control-plane/blockcheck2.sh <<EOF
 #!/bin/sh
-exec /opt/zapret2/blockcheck2.sh "$@"
+exec $zapret_dir/blockcheck2.sh "\$@"
 EOF
 chmod 0755 /usr/local/libexec/gp-control-plane/nfqws2 /usr/local/libexec/gp-control-plane/blockcheck2.sh
 install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$state_parent" "$state_dir"
 runuser -u "$INSTALL_USER" -- python3 -m venv "$install_dir/.venv"
-runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
-runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"
+runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --no-index --find-links "$prepare_dir/python/wheels" gp-access-control-plane
 # The application validates the pending vault ID and performs the semantic and
 # SQLite checks itself. Root only invokes that user-owned operation.
 if [ "$INITIAL_INSTALL" = off ]; then
@@ -92,6 +131,11 @@ if ! runuser -u "$INSTALL_USER" -- env GP_STATE_DIR="$state_dir" "$install_dir/.
 fi
 install -d -m 0755 /usr/local/libexec/gp-control-plane
 install -m 0755 "$install_dir/scripts/gp-root-helper.sh" /usr/local/libexec/gp-control-plane/gp-root-helper
+cat > /etc/default/gp-control-plane-root-helper <<EOF
+# Managed by the GP clean installer, consumed by the existing root helper.
+ZAPRET_DIR='$zapret_dir'
+EOF
+chmod 0644 /etc/default/gp-control-plane-root-helper
 cat > /etc/sudoers.d/gp-control-plane-root-helper <<EOF
 # Managed by GP clean installer; runtime discovery only.
 $INSTALL_USER ALL=(root) NOPASSWD: /usr/local/libexec/gp-control-plane/gp-root-helper *
@@ -103,6 +147,7 @@ GP_INSTALL_DIR='$install_dir'
 GP_STATE_DIR='$state_dir'
 GP_INSTALLED_REF='$INSTALL_REF'
 GP_INSTALLED_COMMIT='$INSTALL_COMMIT'
+GP_BLOCKCHECK2D='$zapret_dir/blockcheck2.d'
 EOF
 cat > /etc/systemd/system/gp-control-plane-core.service <<EOF
 [Unit]

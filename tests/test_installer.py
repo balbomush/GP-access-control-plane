@@ -145,7 +145,15 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertEqual(self.installer.count('--restore --target-state-dir "$state_dir"'), 1)
         self.assertIn('visudo -cf /etc/sudoers.d/gp-control-plane-root-helper', self.installer)
         self.assertIn('scripts/install-zapret2.sh', self.installer)
-        self.assertIn('zapret2 runtime is not ready', self.installer)
+        zapret_prepare = self.installer.index('bash "$SOURCE_DIR/scripts/install-zapret2.sh" --prepare-dir')
+        runtime_probe = self.installer.index('--probe --destination "$prepare_dir/runtime"')
+        package_probe = self.installer.index('assert openapi_json_bytes()')
+        service_stop = self.installer.index('stop_unit gp-control-plane-web.service')
+        self.assertLess(verify, zapret_prepare)
+        self.assertLess(zapret_prepare, runtime_probe)
+        self.assertLess(runtime_probe, package_probe)
+        self.assertLess(package_probe, service_stop)
+        self.assertLess(service_stop, removal)
         self.assertIn('/usr/local/libexec/gp-control-plane/nfqws2', self.installer)
         self.assertIn('/usr/local/libexec/gp-control-plane/blockcheck2.sh', self.installer)
         self.assertIn('Environment=PATH=/usr/local/libexec/gp-control-plane:', self.installer)
@@ -197,7 +205,7 @@ class CleanInstallerTests(unittest.TestCase):
 
     def test_installer_prepares_v2fly_once_as_install_user_without_blocking_service_start(self) -> None:
         prepare = 'runuser -u "$INSTALL_USER" -- env GP_STATE_DIR="$state_dir" "$install_dir/.venv/bin/gp-control-plane" domain-sources prepare-v2fly'
-        pip_install = 'runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install -e "$install_dir"'
+        pip_install = 'runuser -u "$INSTALL_USER" -- "$install_dir/.venv/bin/python" -m pip install --no-index --find-links "$prepare_dir/python/wheels" gp-access-control-plane'
         first_service_start = 'systemctl daemon-reload; systemctl enable --now gp-control-plane-core.service'
 
         self.assertEqual(self.installer.count(prepare), 1)

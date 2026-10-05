@@ -23,15 +23,15 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 GP_INSTALL_WEB=off bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 GP_INSTALL_WEB=off bash
 ```
 
 ### Alpha/prerelease (только для тестовой обратной связи)
@@ -43,7 +43,7 @@ alpha-сборка, её точный тег и команду установк�
 Переход alpha → stable и rollback не поддерживаются: alpha — самостоятельная
 тестовая clean-install сборка, а не этап обновления stable-установки.
 
-Укажите exact annotated stable tag `vX.Y.Z` или alpha tag `vX.Y.Z-alpha.N` в `GP_BRANCH`. При живом состоянии v0.4 bootstrap сначала валидирует ровно один допустимый source и создаёт fresh device-local vault; найденный pending vault при всё ещё живом source останавливает путь до `sudo`, чтобы не восстановить устаревшие данные. На хосте без source состояния bootstrap использует проверенный pending vault для повтора после уже начатой clean-install, а при отсутствии обоих выполняет non-destructive initial install без vault. Затем один штатный installer-process останавливает сервисы, удаляет только прежнюю GP-поверхность и ставит fresh версию из того же tag. При existing installation после fresh-файлов и venv installer автоматически восстанавливает vault как install user и запускает сервисы только после semantic- и SQLite-проверок; исходный vault удаляется только при успешном restore. При сбое vault до удаления ничего не меняется, а после удаления сохранённый vault остаётся для повторной clean-install или аварийного restore. Откат не поддерживается.
+Укажите exact annotated stable tag `vX.Y.Z` или alpha tag `vX.Y.Z-alpha.N` в `GP_BRANCH`. При живом состоянии v0.4 bootstrap сначала валидирует ровно один допустимый source и создаёт fresh device-local vault; найденный pending vault при всё ещё живом source останавливает путь до `sudo`, чтобы не восстановить устаревшие данные. На хосте без source состояния bootstrap использует проверенный pending vault для повтора после уже начатой clean-install, а при отсутствии обоих выполняет non-destructive initial install без vault. Затем один штатный installer-process сначала скачивает и проверяет закреплённый release zapret2 v1.0.5.2 (SHA-256 архива, безопасная распаковка, архитектура, исполнимые binaries и Lua), собирает и проверяет Python-пакет GP. Только после успешной подготовки останавливает сервисы, удаляет только прежнюю GP-поверхность и ставит fresh версию из того же tag. При existing installation после fresh-файлов и venv installer автоматически восстанавливает vault как install user и запускает сервисы только после semantic- и SQLite-проверок; исходный vault удаляется только при успешном restore. При сбое vault до удаления ничего не меняется, а после удаления сохранённый vault остаётся для повторной clean-install или аварийного restore. Откат не поддерживается.
 
 Установка проверяется на Debian/Ubuntu-like системах с `apt-get` и `systemd`.
 
@@ -62,7 +62,7 @@ API-контракт доступен здесь:
 
 ### Безопасность и вход
 
-GP Control Plane v0.4.2 рассчитан на доверенную локальную сеть. Веб-интерфейс
+GP Control Plane v0.4.3 рассчитан на доверенную локальную сеть. Веб-интерфейс
 слушает адрес платы на порту `8080`, а при первом запуске намеренно использует
 учётные данные `admin` / `admin`. Это не способ безопасно публиковать сервис в
 интернете или в недоверенной общей сети: не открывайте этот порт наружу и не
@@ -102,8 +102,8 @@ GP_INSTALL_WEB=on
 EOF
 
 set -a; . ./gp-install.env; set +a
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
 ```
 
 Проект ставится в `~/gp/GP-access-control-plane`; clean-install не принимает внешний путь состояния. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
@@ -222,8 +222,8 @@ curl -LfsS "$GP_ZAPRET_INSTALLER_URL" | bash
 Повторно запустите bootstrap:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.2/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
 ```
 
 Это односторонний clean-install маршрут только из exact annotated tag. Ветки, `dev`, cache/candidate routes и rollback не являются пользовательскими способами установки.
@@ -245,3 +245,9 @@ curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.2 bash
 При strict clean-install прежние данные, находившиеся внутри каталога проекта, экспортируются в device-local vault и штатно восстанавливаются автоматически до первого запуска сервисов. Ручное подтверждение через HTTP/API относится только к аварийному восстановлению сохранённого pending vault.
 
 Откат кода не откатывает пользовательские данные и не отменяет этот перенос. Для возврата данных используйте созданный ранее бекап. Данные остаются на хосте и никуда не публикуются.
+
+## Лицензия
+
+Собственный код GP распространяется по [MIT](LICENSE), Copyright (c) 2026 balbomush. Сторонние компоненты сохраняют свои условия: [уведомления](THIRD_PARTY_NOTICES.md).
+
+Установщик использует отдельный каталог /opt/gp-zapret2/v1.0.5.2-<архитектура>; существующий /opt/zapret2, его настройки и чужие файлы сохраняются. Повтор использует только совпадающие проверенные файлы GP runtime; конфликт завершает подготовку с ERROR без остановки прежней GP. При сбое подготовки сети, checksum, архива, архитектуры или Python runtime старые службы и данные сохраняются; pending vault при живом source требует устранить причину перед следующим штатным запуском.
