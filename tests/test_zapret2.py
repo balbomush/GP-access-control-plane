@@ -3432,9 +3432,10 @@ set -- signal-run "$run_id" TERM
                 ready = registry / f".{run_id}.lock" / "supervisor-ready"
                 _wait_for_path(ready)
                 self.assertEqual(ready.read_text(encoding="utf-8").split()[0], "helper-ready-v2")
-                # The record/attestation deliberately precede GO. A TERM
-                # before target startup cannot prove its exit-0 trap works.
+                # The record/attestation deliberately precede GO. Exercise
+                # TERM only after the target has entered its own lifecycle.
                 _wait_for_path(started)
+                attestation = ready.read_text(encoding="utf-8")
 
                 rejected = subprocess.run(
                     ["sh", str(helper), "register-run", "foreign-pid", str(os.getpid()), str(os.getpgrp()), "1"],
@@ -3450,8 +3451,20 @@ set -- signal-run "$run_id" TERM
                     ["sh", str(helper), "signal-run", run_id, "TERM"], env=env, text=True, capture_output=True, check=False
                 )
                 self.assertEqual(stopped.returncode, 0, stopped.stderr)
-                self.assertEqual(managed.wait(timeout=5), 0)
+                # Registered TERM stops the attested supervisor too. Its
+                # terminal receipt suppresses target-status publication, so
+                # the owner returns 126 rather than claiming target exit 0.
+                self.assertEqual(managed.wait(timeout=5), 126)
                 self.assertFalse(record.exists())
+                terminal = registry / f".{run_id}.terminal"
+                self.assertEqual((terminal / "supervisor-ready").read_text(encoding="utf-8"), attestation)
+                self.assertTrue((terminal / "signal-delivery").is_file())
+                acknowledged = subprocess.run(
+                    ["sh", str(helper), "ack-run-terminal", run_id], env=env,
+                    text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(acknowledged.returncode, 0, acknowledged.stderr)
+                self.assertFalse(terminal.exists())
 
                 stale_id = "stale-owned-run"
                 stale = subprocess.Popen(["sh", str(helper), "run-owned", stale_id, str(target), str(started)], env=env)
