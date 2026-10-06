@@ -2,6 +2,16 @@
 function createPresetsController({ view, CUSTOM_PRESETS_KEY, CUSTOM_SELECT_VALUE, apiEndpoint, apiUrl, currentSessionEpoch, defaultDomains, el, esc, filterTestedDomains, friendlyDate, getJson: requestJson, hasCompleteSystemStatus, isBusy, parseDomains, postJson: requestPost, prepareCommonCandidateState, refreshCandidates, renderCandidates, renderCandidatesOnly, renderRunLaunchSummary, resetCandidateResult, selectedCommonDomains, sessionIsCurrent, setMessage, setText, showToast, statusMarkup, testedDomains, uniqueDomainCount, uniqueDomains, updateEditorLineNumbers }) {
   const state = view;
   const lifetime = new UiLifetime();
+  function invalidateV2flyDraft(){ lifetime.invalidate("previewV2flyPreset");lifetime.invalidate("importV2flyPreset"); }
+  function invalidateEditorDraft(){
+    for(const key of ["loadPresetEditorFromSelection","buildPresetEditorPreview","savePresetEditor","deletePresetEditor"])lifetime.invalidate(key);
+  }
+  function handleDraftInput(event){
+    const id=event.target?.id || "";
+    if(id.startsWith("v2fly-")) invalidateV2flyDraft();
+    if(id==="preset-editor-domains" || id==="preset-manager-name") invalidateEditorDraft();
+    if(id==="preset-new-name" || id==="preset-new-domains"){lifetime.invalidate("createPresetFromNewForm");}
+  }
   const getJson=(url,options)=>requestJson(url,lifetime.requestOptions(options));
   const postJson=(url,payload)=>requestPost(url,payload,lifetime.requestOptions());
 
@@ -699,7 +709,7 @@ async function buildPresetEditorPreview(){
 }
 
 async function savePresetEditor(){
-  const viewRequest=lifetime.capture(null);
+  const viewRequest=lifetime.capture("savePresetEditor");
   try {
     const preview = await lifetime.result(buildPresetEditorPreview(), viewRequest);
     if (!preview) return;
@@ -726,7 +736,7 @@ async function savePresetEditor(){
 }
 
 async function deletePresetEditor(){
-  const viewRequest=lifetime.capture(null);
+  const viewRequest=lifetime.capture("deletePresetEditor");
   const scope = presetEditorScope();
   const name = presetEditorName();
   const entry = managerPresetEntry(name);
@@ -962,7 +972,7 @@ async function previewV2flyPreset(){
 }
 
 async function importV2flyPreset(){
-  const viewRequest=lifetime.capture(null);
+  const viewRequest=lifetime.capture("importV2flyPreset");
   const payload = v2flyPayload();
   if (!payload.name) {
     setV2flyLocalError('Укажите название пресета.');
@@ -1019,7 +1029,7 @@ async function refreshPresets(){
     setMessage(`Ошибка обновления пресетов: ${error.message}`, 'bad');
   }
 }
-  function dispose(){ lifetime.dispose();  }
+  function dispose(){ lifetime.dispose(); }
 function handleClickPart0(button){
 if (button.dataset.action === 'v2fly-load-categories') {
     loadV2flyCategories(true);
@@ -1038,6 +1048,7 @@ if (button.dataset.action === 'v2fly-update-local-storage') {
 
 function handleClickPart2(button){
 if (button.dataset.action === 'v2fly-select-category') {
+    invalidateV2flyDraft();
     const category = button.dataset.category || '';
     const input = el('v2fly-category-search');
     if (input) input.value = category;
@@ -1162,5 +1173,24 @@ if (event.target && event.target.id === 'preset-manager-name') {
   }
  return false;
 }
-  return { handleClickPart0, handleClickPart1, handleClickPart2, handleClickPart3, handleClickPart4, handleClickPart5, handleClickPart6, handleClickPart7, handleClickPart8, handleClickPart9, handleClickPart10, handleInputPart11, handleChangePart12, handleChangePart13, handleChangePart14, persistCustomPresets, mergeCustomPresets, mergeSystemPresets, normalizeCustomPresetMeta, normalizePresetMeta, customPresetNames, presetScopesForTarget, customPresetSourceScope, customPresetCount, hasCustomPreset, systemPresetNames, systemPresetMeta, systemPresetLabel, systemPresetCount, hasSystemPreset, mergePresetResponse, builtInPresets, presetGroups, presetDomains, managerPresetEntries, managerPresetEntry, renderPresetSelect, renderPresetSelects, markDomainPresetCustom, fetchAllPresetDomains: lifetime.action(fetchAllPresetDomains), fetchStoredPresetDomains: lifetime.action(fetchStoredPresetDomains), usePreset: lifetime.action(usePreset), presetNameForSave, savePreset: lifetime.action(savePreset), deletePreset: lifetime.action(deletePreset), v2flyCategoryName, v2flyAllCategories, v2flyCategoryQuery, v2flyExactCategory, v2flyCategories, clearV2flyDomains, suggestV2flyPresetName, v2flyPayload, renderV2flyPreview, setV2flyLocalError, renderV2flyCategoryCatalog, presetManagerMeta, renderPresetManager, renderPresetEditorPreview, presetEditorDomains, presetEditorScope, presetEditorName, presetEditorKind, loadPresetEditorFromSelection: lifetime.action(loadPresetEditorFromSelection), buildPresetEditorPreview: lifetime.action(buildPresetEditorPreview), savePresetEditor: lifetime.action(savePresetEditor), deletePresetEditor: lifetime.action(deletePresetEditor), presetNewName, presetNewDomains, renderPresetNewPreview, savePresetNew: lifetime.action(savePresetNew), exportPresetEditor: lifetime.action(exportPresetEditor), loadV2flyCategories: lifetime.action(loadV2flyCategories), updateV2flyLocalStorage: lifetime.action(updateV2flyLocalStorage), fetchV2flyCategoryDomains: lifetime.action(fetchV2flyCategoryDomains), buildV2flyClientPreview: lifetime.action(buildV2flyClientPreview), previewV2flyPreset: lifetime.action(previewV2flyPreset), importV2flyPreset: lifetime.action(importV2flyPreset), refreshPresets: lifetime.action(refreshPresets), dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  fetchAllPresetDomains = lifetime.action(fetchAllPresetDomains);
+  fetchStoredPresetDomains = lifetime.action(fetchStoredPresetDomains);
+  usePreset = lifetime.action(usePreset);
+  savePreset = lifetime.action(savePreset);
+  deletePreset = lifetime.action(deletePreset);
+  loadPresetEditorFromSelection = lifetime.action(loadPresetEditorFromSelection);
+  buildPresetEditorPreview = lifetime.action(buildPresetEditorPreview);
+  savePresetEditor = lifetime.action(savePresetEditor);
+  deletePresetEditor = lifetime.action(deletePresetEditor);
+  savePresetNew = lifetime.action(savePresetNew);
+  exportPresetEditor = lifetime.action(exportPresetEditor);
+  loadV2flyCategories = lifetime.action(loadV2flyCategories);
+  updateV2flyLocalStorage = lifetime.action(updateV2flyLocalStorage);
+  fetchV2flyCategoryDomains = lifetime.action(fetchV2flyCategoryDomains);
+  buildV2flyClientPreview = lifetime.action(buildV2flyClientPreview);
+  previewV2flyPreset = lifetime.action(previewV2flyPreset);
+  importV2flyPreset = lifetime.action(importV2flyPreset);
+  refreshPresets = lifetime.action(refreshPresets);
+  return { handleDraftInput, handleClickPart0, handleClickPart1, handleClickPart2, handleClickPart3, handleClickPart4, handleClickPart5, handleClickPart6, handleClickPart7, handleClickPart8, handleClickPart9, handleClickPart10, handleInputPart11, handleChangePart12, handleChangePart13, handleChangePart14, persistCustomPresets, mergeCustomPresets, mergeSystemPresets, normalizeCustomPresetMeta, normalizePresetMeta, customPresetNames, presetScopesForTarget, customPresetSourceScope, customPresetCount, hasCustomPreset, systemPresetNames, systemPresetMeta, systemPresetLabel, systemPresetCount, hasSystemPreset, mergePresetResponse, builtInPresets, presetGroups, presetDomains, managerPresetEntries, managerPresetEntry, renderPresetSelect, renderPresetSelects, markDomainPresetCustom, fetchAllPresetDomains, fetchStoredPresetDomains, usePreset, presetNameForSave, savePreset, deletePreset, v2flyCategoryName, v2flyAllCategories, v2flyCategoryQuery, v2flyExactCategory, v2flyCategories, clearV2flyDomains, suggestV2flyPresetName, v2flyPayload, renderV2flyPreview, setV2flyLocalError, renderV2flyCategoryCatalog, presetManagerMeta, renderPresetManager, renderPresetEditorPreview, presetEditorDomains, presetEditorScope, presetEditorName, presetEditorKind, loadPresetEditorFromSelection, buildPresetEditorPreview, savePresetEditor, deletePresetEditor, presetNewName, presetNewDomains, renderPresetNewPreview, savePresetNew, exportPresetEditor, loadV2flyCategories, updateV2flyLocalStorage, fetchV2flyCategoryDomains, buildV2flyClientPreview, previewV2flyPreset, importV2flyPreset, refreshPresets, dispose };
 }

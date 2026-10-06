@@ -457,5 +457,7 @@ function mergeRunPage(payload, reset){
   }
   return rows;
 }
-  return { runParams, mergeRunPage, handleClickPart0, handleClickPart1, handleClickPart2, handleTogglePart3, renderRuns, runPager, renderRunCard, runDomainKey, runCardClass, runField, runStatusLabel, runPhaseText, phaseLabel, runDomains, runDomainChips, diagnosticShortLabel, diagnosticExplanation, curlCodeLabel, curlCodeDetails, runDiagnosticsSummary, runDiagnostics, diagnosticTableRow, isDiscoveryRun, runMode, runSummary, runCandidateCount, runSettingsText, truthyOption, runPayload, fillRunFormFromPayload, repeatRun, runProgressText, refreshRuns: lifetime.action(refreshRuns), dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  refreshRuns = lifetime.action(refreshRuns);
+  return { runParams, mergeRunPage, handleClickPart0, handleClickPart1, handleClickPart2, handleTogglePart3, renderRuns, runPager, renderRunCard, runDomainKey, runCardClass, runField, runStatusLabel, runPhaseText, phaseLabel, runDomains, runDomainChips, diagnosticShortLabel, diagnosticExplanation, curlCodeLabel, curlCodeDetails, runDiagnosticsSummary, runDiagnostics, diagnosticTableRow, isDiscoveryRun, runMode, runSummary, runCandidateCount, runSettingsText, truthyOption, runPayload, fillRunFormFromPayload, repeatRun, runProgressText, refreshRuns, dispose };
 }

@@ -1,17 +1,19 @@
 # UI package resources
 
-`web.ui.index_html()` remains the compatibility facade.  It delegates to this
-package, which reads fixed UTF-8 resources via `importlib.resources` and emits
-the same single inline HTML document that the legacy endpoints already serve.
+`web.ui.index_html()` remains the compatibility facade. Fixed UTF-8 package
+resources render one inline document without a build tool or module loader.
+Templates own markup; `styles/app.css` owns the existing cascade.
 
-For an existing UI change:
+`app-shell.js` constructs and connects dependencies, routes DOM events and tabs,
+and owns bootstrap/auth teardown. `api-client`, `session-controller`, `run-state`
+and `realtime-controller` retain the accepted A7–A8 request/session/run owners.
+Subject controllers own releases, backups, settings, history, terminal, finder,
+presets/v2fly, candidates and status views. Each receives a finite state view and
+explicit dependencies. `candidate-selection` owns pure selection calculations.
+`ui-lifetime` owns subject request cancellation, channel revisions and scheduled
+work. Both internal event handlers and exported actions use the same stale
+response guard; draft edits invalidate related requests. Teardown releases
+listeners, timers and streams. `legacy-runtime.js` is only a compatibility entry.
 
-- Change the text or structure of **История** in `templates/tabs/history.html`.
-  It does not require Python, HTTP, auth, or runtime changes.
-- Change the appearance of an existing button in `styles/app.css`.  Preserve
-  cascade order; it does not require runtime or data changes.
-
-`scripts/legacy-runtime.js` is intentionally still one byte-preserved legacy
-runtime.  A7 will own request/session boundaries, A8 will own accepted-run and
-realtime state, and A9 will split feature controllers.  Do not introduce a
-generic state bus or placeholder modules in this resource-only checkpoint.
+The resource order is explicit in `SCRIPT_RESOURCES`. Update the fixed renderer
+and resource hashes when intentionally changing assets; retain behavior tests.

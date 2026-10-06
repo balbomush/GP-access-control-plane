@@ -264,5 +264,7 @@ async function refreshLog(incremental = false){
   }
 }
   function dispose(){ lifetime.dispose();  }
-  return { renderLog, renderStderrDiagnostics, renderProgress, progressAttemptText, progressStrategyText, interruptedRunWarning, liveRunStatusText, liveRunCells, latestImportantLogMessage, renderLiveRun, progressLiveElapsedSeconds, progressLiveEtaSeconds, etaModeLabel, etaStatusText, scrollLogToBottom, trimTextLines, appendLogText, latestLogUrl, mergeLogPayload, refreshLog: lifetime.action(refreshLog), dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  refreshLog = lifetime.action(refreshLog);
+  return { renderLog, renderStderrDiagnostics, renderProgress, progressAttemptText, progressStrategyText, interruptedRunWarning, liveRunStatusText, liveRunCells, latestImportantLogMessage, renderLiveRun, progressLiveElapsedSeconds, progressLiveEtaSeconds, etaModeLabel, etaStatusText, scrollLogToBottom, trimTextLines, appendLogText, latestLogUrl, mergeLogPayload, refreshLog, dispose };
 }

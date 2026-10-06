@@ -117,5 +117,7 @@ if (button.dataset.action === 'check-releases') {
   }
  return false;
 }
-  return { handleClickPart0, renderReleaseInfo, releaseVersionLabel, checkReleases: lifetime.action(checkReleases), releaseComparableVersion, normalizeServiceRelease, rememberReleasePayload, dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  checkReleases = lifetime.action(checkReleases);
+  return { handleClickPart0, renderReleaseInfo, releaseVersionLabel, checkReleases, releaseComparableVersion, normalizeServiceRelease, rememberReleasePayload, dispose };
 }

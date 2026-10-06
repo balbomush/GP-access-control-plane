@@ -1,5 +1,15 @@
 /* Application shell: construction, session, tabs, common notifications and wiring. */
 const uiControllers = Object.create(null);
+const shellViewLifetime = new UiLifetime();
+const applicationListeners = [];
+function listen(target,type,callback,options){
+  target.addEventListener(type,callback,options);
+  applicationListeners.push(()=>target.removeEventListener(type,callback,options));
+}
+function teardownViews(){
+  Object.values(uiControllers).forEach(controller=>controller.dispose());
+  shellViewLifetime.dispose();clearTimeout(toastTimer);clearInitialSystemStatusRetry();
+}
 function scopedView(source, keys){
   const view = Object.create(null);
   for(const key of keys) Object.defineProperty(view,key,{enumerable:true,get:()=>source[key],set:value=>{source[key]=value;}});
@@ -164,12 +174,13 @@ function storeAuthToken(payload){
   return token;
 }
 function showLogin(message){
+  teardownViews();
   bootstrapState = 'idle';
   el('app-shell')?.remove();
   el('boot-screen').hidden = true;
   el('login-screen').hidden = false;
   setLoginError(message);
-  requestAnimationFrame(() => el('login-username').focus());
+  shellViewLifetime.requestAnimationFrame(() => el('login-username')?.focus());
 }
 function setLoginError(message){
   const node = el('login-error');
@@ -953,7 +964,7 @@ function selectedCoreProtocols(...args){ return uiControllers["finder"].selected
 function coreStrategyDiscoveryPayload(...args){ return uiControllers["finder"].coreStrategyDiscoveryPayload(...args); }
 function startSelectedDiscovery(...args){ return uiControllers["finder"].startSelectedDiscovery(...args); }
 function stopCurrentJob(...args){ return uiControllers["finder"].stopCurrentJob(...args); }
-document.addEventListener('submit', (event) => {
+listen(document,'submit', (event) => {
   if (event.target && event.target.id === 'login-form') {
     submitLogin(event);
     return;
@@ -962,7 +973,7 @@ document.addEventListener('submit', (event) => {
     event.preventDefault();
     changePassword();
   }
-});document.addEventListener('click', (event) => {
+});listen(document,'click', (event) => {
   const domainSummary = event.target.closest('details.domain-group[data-domain] > summary');
   if(uiControllers["candidates"].handleClickPart0(domainSummary,event)) return;
 const button = event.target.closest('button');
@@ -1025,8 +1036,9 @@ const button = event.target.closest('button');
   if(uiControllers["finder"].handleClickPart1(button)) return;
   if(uiControllers["finder"].handleClickPart2(button)) return;
 });
-document.addEventListener('input', (event) => {
+listen(document,'input', (event) => {
   uiControllers.settings.handleDraftInput(event);
+  uiControllers.presets.handleDraftInput(event);
   if(uiControllers["settings"].handleInputPart1(event)) return;
   if(uiControllers["settings"].handleInputPart2(event)) return;
   if(uiControllers["settings"].handleInputPart3(event)) return;
@@ -1039,11 +1051,12 @@ document.addEventListener('input', (event) => {
   if(uiControllers["candidates"].handleInputPart18(event)) return;
   if(uiControllers["finder"].handleInputPart4(event)) return;
 });
-document.addEventListener('scroll', (event) => {
+listen(document,'scroll', (event) => {
   if(uiControllers["candidates"].handleScrollPart19(event)) return;
 }, true);
-document.addEventListener('change', (event) => {
+listen(document,'change', (event) => {
   uiControllers.settings.handleDraftInput(event);
+  uiControllers.presets.handleDraftInput(event);
   if(uiControllers["settings"].handleChangePart4(event)) return;
   if(uiControllers["settings"].handleChangePart5(event)) return;
   if(uiControllers["settings"].handleChangePart6(event)) return;
@@ -1056,18 +1069,18 @@ document.addEventListener('change', (event) => {
   if(uiControllers["finder"].handleChangePart8(event)) return;
   if(uiControllers["finder"].handleChangePart9(event)) return;
 });
-document.addEventListener('keydown', (event) => {
+listen(document,'keydown', (event) => {
   if (handleTabControlKeydown(event)) return;
   if(uiControllers["candidates"].handleKeydownPart20(event)) return;
   if(uiControllers["candidates"].handleKeydownPart21(event)) return;
 });
-document.addEventListener('focusin', (event) => {
+listen(document,'focusin', (event) => {
   if(uiControllers["candidates"].handleFocusinPart22(event)) return;
 });
-document.addEventListener('focusout', (event) => {
+listen(document,'focusout', (event) => {
   if(uiControllers["candidates"].handleFocusoutPart23(event)) return;
 });
-document.addEventListener('toggle', (event) => {
+listen(document,'toggle', (event) => {
   const details = event.target;
   if (!details || !details.matches) return;
   if(uiControllers["candidates"].handleTogglePart24(details)) return;
@@ -1095,7 +1108,7 @@ function initializeUiControllers(){
     token: { get: authToken, store: storeAuthToken, clear: () => localStorage.removeItem(AUTH_TOKEN_KEY) },
     realtime: realtimeController,
     ui: {
-      begin: () => { Object.values(uiControllers).forEach(controller=>controller.dispose()); runState.resetForSession(); },
+      begin: () => { teardownViews(); runState.resetForSession(); },
       boot: showBoot,
       login: showLogin,
       load: loadBootstrapPayload,
@@ -1124,5 +1137,5 @@ el('boot-retry').addEventListener('click', () => {
 if (authToken()) startAuthenticatedUi();
 else showLogin();
 
-function disposeApplication(){ stopRealtimeEvents();Object.values(uiControllers).forEach(controller=>controller.dispose());clearTimeout(toastTimer);clearInitialSystemStatusRetry(); }
-window.addEventListener("pagehide",disposeApplication);
+function disposeApplication(){ realtimeController?.dispose();teardownViews();applicationListeners.splice(0).forEach(remove=>remove()); }
+listen(window,"pagehide",disposeApplication);

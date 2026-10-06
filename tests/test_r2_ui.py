@@ -62,3 +62,15 @@ try{
             html.write_text(index_html(), encoding="utf-8")
             result = subprocess.run([str(NODE), "-e", harness, str(html), str(runtime)], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=45, env=os.environ | {"PLAYWRIGHT_BROWSERS_PATH": str(runtime / "browsers")})
             self.assertEqual(0, result.returncode, result.stderr or result.stdout)
+
+    def test_confirmed_draft_disposal_raw_response_and_real_click_regressions(self):
+        runtime = NODE.parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            html = Path(raw) / "ui.html"
+            html.write_text(index_html(), encoding="utf-8")
+            result = subprocess.run([str(NODE), str(ROOT / "tests/browser/r2_lifetime.cjs"), str(html), str(runtime)], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=45, env=os.environ | {"PLAYWRIGHT_BROWSERS_PATH": str(runtime / "browsers")})
+            self.assertEqual(0, result.returncode, result.stderr or result.stdout)
+            import json
+            receipt = json.loads(result.stdout)
+            self.assertTrue(receipt["pass"])
+            self.assertEqual(8, len(receipt["scenarios"]))

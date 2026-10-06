@@ -220,5 +220,11 @@ if (event.target && String(event.target.id || '').startsWith('settings-')) {
   }
  return false;
 }
-  return { handleDraftInput, handleClickPart0, handleInputPart1, handleInputPart2, handleInputPart3, handleChangePart4, handleChangePart5, handleChangePart6, renderRunSettingsSummary, scanLevelLabel, renderSettings, currentSettingsFromForm, runSettingsPayloadFromSettings, fetchSettingsPayload: lifetime.action(fetchSettingsPayload), saveRunSettingsPayload: lifetime.action(saveRunSettingsPayload), saveSettingsPayload: lifetime.action(saveSettingsPayload), saveLaunchTimeoutDefaultsNow: lifetime.action(saveLaunchTimeoutDefaultsNow), saveSettings: lifetime.action(saveSettings), dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  fetchSettingsPayload = lifetime.action(fetchSettingsPayload);
+  saveRunSettingsPayload = lifetime.action(saveRunSettingsPayload);
+  saveSettingsPayload = lifetime.action(saveSettingsPayload);
+  saveLaunchTimeoutDefaultsNow = lifetime.action(saveLaunchTimeoutDefaultsNow);
+  saveSettings = lifetime.action(saveSettings);
+  return { handleDraftInput, handleClickPart0, handleInputPart1, handleInputPart2, handleInputPart3, handleChangePart4, handleChangePart5, handleChangePart6, renderRunSettingsSummary, scanLevelLabel, renderSettings, currentSettingsFromForm, runSettingsPayloadFromSettings, fetchSettingsPayload, saveRunSettingsPayload, saveSettingsPayload, saveLaunchTimeoutDefaultsNow, saveSettings, dispose };
 }

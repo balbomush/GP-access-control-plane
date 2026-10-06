@@ -46,9 +46,11 @@ class FixtureAdapter:
                 raise RuntimeError("fixture did not receive cancellation")
             self.cancelled.append(run_id)
             status = "stopped"
-        parsed = parse_blockcheck_stdout("* SUMMARY\ncurl_test_https_tls12 ipv4 youtube.com : nfqws2 --dpi-desync=split2\n")
+        multi = "multi-domain" in spec.name
+        stdout = "* COMMON\ncurl_test_https_tls12 ipv4 : nfqws2 --dpi-desync=split2\n" if multi else "* SUMMARY\ncurl_test_https_tls12 ipv4 youtube.com : nfqws2 --dpi-desync=split2\n"
+        parsed = parse_blockcheck_stdout(stdout)
         upsert_candidates(self.state, parsed, {"id": run_id, "domains": list(spec.payload["domains"])})
-        run = {"id": run_id, "kind": "standard-discovery", "status": status, "timestamp": now_iso(), "domains": list(spec.payload["domains"]), "candidate_count": len(parsed["candidates"])}
+        run = {"id": run_id, "kind": "multi-domain-discovery" if multi else "standard-discovery", "status": status, "timestamp": now_iso(), "domains": list(spec.payload["domains"]), "candidate_count": len(parsed["candidates"]) + len(parsed["common_candidates"])}
         append_run(self.state, run)
         return run
 
@@ -79,6 +81,10 @@ class R2AdapterTests(unittest.TestCase):
                 candidates = core_api.strategy_candidates_payload(config, {"domains": ["youtube.com"]})["candidates"]
                 self.assertTrue(candidates)
                 self.assertEqual("--dpi-desync=split2", candidates[0]["args"])
+                expected_kind = "multi-domain-discovery" if mode == "multi_domain" else "standard-discovery"
+                self.assertTrue(any(row["run_id"] == admitted.run_id and row["kind"] == expected_kind for row in history))
+                if mode == "multi_domain":
+                    self.assertTrue(candidates[0]["common_seen"])
             adapter.failure = True
             failed = service.start_payload({"mode": "standard", "domains": ["youtube.com"]})
             self.assertEqual("failed", self.wait_idle(state)["last_run_status"])

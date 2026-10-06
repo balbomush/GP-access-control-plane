@@ -134,7 +134,7 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         download = self.script_block('async function downloadBackup(url, snapshotId){', 'function formatBytes(value){')
 
         self.assertRegex(backup_url, r"function backupDownloadUrl\(snapshot\)\{[\s\S]*return requestUrl\(apiUrl\('core', 'backupsDownloadArchive', params\)\);\s*\}\s*$")
-        self.assertIn('const { blob, response } = await apiClient.blob(url);', download)
+        self.assertIn('const { blob, response } = await lifetime.result(apiClient.blob(url, lifetime.requestOptions()), viewRequest);', download)
         self.assertIn('URL.createObjectURL(blob)', download)
         self.assertIn('URL.revokeObjectURL(objectUrl)', download)
         self.assertIn('data-backup-download="${esc(id)}"', self.html)

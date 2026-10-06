@@ -313,5 +313,7 @@ function mergeStatusPayload(status){
   if (settingsChanged) renderSettings();
   return settingsChanged;
 }
-  return { mergeStatusPayload, handleClickPart0, statusCheck, zapretDiagnostics, zapretDiagnosticItems, zapretCompactStatus, hasCompleteSystemStatus, clearInitialSystemStatusRetry, scheduleInitialSystemStatusRetry, initialSystemStatusState, testedDomainCount, nextActionStatus, metricJobNoteText, jobStatusClass, renderMetrics, eventRows, diagnosticsText, copyDiagnostics: lifetime.action(copyDiagnostics), renderEvents, dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  copyDiagnostics = lifetime.action(copyDiagnostics);
+  return { mergeStatusPayload, handleClickPart0, statusCheck, zapretDiagnostics, zapretDiagnosticItems, zapretCompactStatus, hasCompleteSystemStatus, clearInitialSystemStatusRetry, scheduleInitialSystemStatusRetry, initialSystemStatusState, testedDomainCount, nextActionStatus, metricJobNoteText, jobStatusClass, renderMetrics, eventRows, diagnosticsText, copyDiagnostics, renderEvents, dispose };
 }

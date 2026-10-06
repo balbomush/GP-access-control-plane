@@ -88,7 +88,7 @@ async function downloadBackup(url, snapshotId){
   const id = String(snapshotId || '').trim();
   const epoch = currentSessionEpoch();
   try {
-    const { blob, response } = await lifetime.result(apiClient.blob(url), viewRequest);
+    const { blob, response } = await lifetime.result(apiClient.blob(url, lifetime.requestOptions()), viewRequest);
     if (!sessionIsCurrent(epoch)) return;
     const disposition = response.headers.get('Content-Disposition') || '';
     const filenameMatch = /filename="?([^";]+)"?/i.exec(disposition);
@@ -235,12 +235,13 @@ async function uploadBackup(){
   }
   let response = null;
   try {
-    response = await lifetime.result(authFetch(apiEndpoint('core', 'backupsUpload'), {
+    response = await authFetch(apiEndpoint('core', 'backupsUpload'), {
       method: 'POST',
       headers: requestHeaders({ 'Content-Type': 'application/zip' }),
       credentials: 'same-origin',
       body: file
-    }), viewRequest);
+    });
+    lifetime.assertCurrent(viewRequest);
     if (!sessionIsCurrent(epoch)) return;
     let data;
     try {
@@ -268,10 +269,8 @@ async function uploadBackup(){
     if (!sessionIsCurrent(epoch)) return;
     setMessage(`Ошибка загрузки бекапа: ${error.message}`, 'bad');
   } finally {
-if(lifetime.isCurrent(viewRequest)){
     apiClient.releaseResponse(response);
   }
-}
 }
   function dispose(){ lifetime.dispose();  }
 function handleClickPart0(button){
@@ -322,5 +321,12 @@ if (button.dataset.action === 'upload-backup') {
   }
  return false;
 }
-  return { handleClickPart0, handleClickPart1, handleClickPart2, handleClickPart3, handleClickPart4, handleClickPart5, renderBackups, backupCard, normalizeBackupSnapshot, backupListFromPayload, backupDownloadUrl, downloadBackup: lifetime.action(downloadBackup), formatBytes, refreshBackups: lifetime.action(refreshBackups), createBackup: lifetime.action(createBackup), restoreBackup: lifetime.action(restoreBackup), deleteBackup: lifetime.action(deleteBackup), isRuntimeBusyError, backupBusyMessage, uploadBackup: lifetime.action(uploadBackup), dispose };
+  // Internal DOM dispatch and exported calls share one stale-action boundary.
+  downloadBackup = lifetime.action(downloadBackup);
+  refreshBackups = lifetime.action(refreshBackups);
+  createBackup = lifetime.action(createBackup);
+  restoreBackup = lifetime.action(restoreBackup);
+  deleteBackup = lifetime.action(deleteBackup);
+  uploadBackup = lifetime.action(uploadBackup);
+  return { handleClickPart0, handleClickPart1, handleClickPart2, handleClickPart3, handleClickPart4, handleClickPart5, renderBackups, backupCard, normalizeBackupSnapshot, backupListFromPayload, backupDownloadUrl, downloadBackup, formatBytes, refreshBackups, createBackup, restoreBackup, deleteBackup, isRuntimeBusyError, backupBusyMessage, uploadBackup, dispose };
 }
