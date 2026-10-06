@@ -8,6 +8,13 @@ from string import Template
 
 
 _PACKAGE = "gp_control_plane.web.ui_assets"
+SCRIPT_RESOURCES = (
+    "api-client.js", "run-state.js", "realtime-controller.js", "session-controller.js",
+    "ui-lifetime.js", "releases-controller.js", "backups-controller.js",
+    "settings-controller.js", "history-controller.js", "terminal-controller.js",
+    "finder-controller.js", "presets-controller.js", "candidate-selection.js", "candidates-controller.js",
+    "status-view-controller.js", "app-shell.js", "legacy-runtime.js",
+)
 
 
 class UiAssetError(RuntimeError):
@@ -47,13 +54,6 @@ def render_index_html() -> str:
         bootstrap=_read_resource("templates/bootstrap.html"),
         shell=shell,
         script="\n".join(
-            _read_resource(path)
-            for path in (
-                "scripts/api-client.js",
-                "scripts/run-state.js",
-                "scripts/realtime-controller.js",
-                "scripts/session-controller.js",
-                "scripts/legacy-runtime.js",
-            )
+            _read_resource("scripts/" + name) for name in SCRIPT_RESOURCES
         ),
     )
