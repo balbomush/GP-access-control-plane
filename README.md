@@ -23,15 +23,15 @@ sudo reboot
 Обычная установка с Core service и Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.4/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.4 bash
 ```
 
 Headless-установка без штатного Web UI:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 GP_INSTALL_WEB=off bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.4/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.4 GP_INSTALL_WEB=off bash
 ```
 
 ### Alpha/prerelease (только для тестовой обратной связи)
@@ -62,7 +62,7 @@ API-контракт доступен здесь:
 
 ### Безопасность и вход
 
-GP Control Plane v0.4.3 рассчитан на доверенную локальную сеть. Веб-интерфейс
+GP Control Plane v0.4.4 рассчитан на доверенную локальную сеть. Веб-интерфейс
 слушает адрес платы на порту `8080`, а при первом запуске намеренно использует
 учётные данные `admin` / `admin`. Это не способ безопасно публиковать сервис в
 интернете или в недоверенной общей сети: не открывайте этот порт наружу и не
@@ -102,8 +102,8 @@ GP_INSTALL_WEB=on
 EOF
 
 set -a; . ./gp-install.env; set +a
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.4/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.4 bash
 ```
 
 Проект ставится в `~/gp/GP-access-control-plane`; clean-install не принимает внешний путь состояния. Для новой рабочей установки постоянные данные хранятся рядом с каталогом проекта: состояние — в `~/gp/.GP-access-control-plane.data/state`, файловые бекапы — в `~/gp/.GP-access-control-plane.data/backups`.
@@ -216,8 +216,8 @@ wrapper в `/usr/local/libexec/gp-control-plane`. Существующая са�
 Повторно запустите bootstrap:
 
 ```bash
-GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.3/bootstrap-linux.sh'
-curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.3 bash
+GP_BOOTSTRAP_URL='https://github.com/balbomush/GP-access-control-plane/releases/download/v0.4.4/bootstrap-linux.sh'
+curl -LfsS "$GP_BOOTSTRAP_URL" | GP_BRANCH=v0.4.4 bash
 ```
 
 Это односторонний clean-install маршрут только из exact annotated tag. Ветки, `dev`, cache/candidate routes и rollback не являются пользовательскими способами установки.
