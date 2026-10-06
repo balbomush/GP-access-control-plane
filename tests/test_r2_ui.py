@@ -73,4 +73,4 @@ try{
             import json
             receipt = json.loads(result.stdout)
             self.assertTrue(receipt["pass"])
-            self.assertEqual(8, len(receipt["scenarios"]))
+            self.assertEqual(10, len(receipt["scenarios"]))

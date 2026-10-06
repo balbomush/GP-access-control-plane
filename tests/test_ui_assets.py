@@ -16,7 +16,7 @@ from gp_control_plane.web.ui import index_html
 from gp_control_plane.web import ui_assets
 
 
-_HTML_SHA256 = "f9087ccd62fce2b93af4db8e0bb2bfba026eb659b84cc8cb47a8de1c569662e5"
+_HTML_SHA256 = "372b15b15f45ef6ab9fd82b234497c7fe46f95fe6e536f0e4b0b94b7bd51335b"
 _CSS_SHA256 = "06f9628dcb7bf57f8a31cb61ed2d09fdfee550c706a1bb154fdba948463a2825"
 _SCRIPT_SHA256S = {
     "api-client.js": "9974e9abcdd283ff36f63c8b96c36ba11221bebc789963461ff282d5aa250203",
@@ -30,7 +30,7 @@ _SCRIPT_SHA256S = {
     "history-controller.js": "7aeb17c3a6c279d88f801c5768e3b923cdac5a7480eca48f2e4b3452868f24cb",
     "terminal-controller.js": "e01b9ff6757f512b0b437738c1357231e5008289dc67b3c0168c36fa4b041872",
     "finder-controller.js": "5908cd7dc454e041f5ca78f6a069f76473fd0969c7cbc7fddc5aae423dd72fe3",
-    "presets-controller.js": "5bd1bde860f2a7b987db75d76f93f63a220545284a9e79609aa21fb4f0049233",
+    "presets-controller.js": "d061de8c9e05f22ad0517ef96782c0d4e4826edbbb8e679c615c084c5b7e2f09",
     "candidate-selection.js": "cf7048a5fe74da043c5ebde8f535660801b50d88a6ce80e4244efd37c23684b5",
     "candidates-controller.js": "a4adeffc8c5a06e7b1b4b488d9f3178c20d772faf5009c5590f3330abf086740",
     "status-view-controller.js": "c0d570f36d63fe57fa283bc67b028467ab0856d80d257ff61564bfbedd702362",

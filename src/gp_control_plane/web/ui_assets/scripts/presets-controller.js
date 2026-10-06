@@ -10,7 +10,12 @@ function createPresetsController({ view, CUSTOM_PRESETS_KEY, CUSTOM_SELECT_VALUE
     const id=event.target?.id || "";
     if(id.startsWith("v2fly-")) invalidateV2flyDraft();
     if(id==="preset-editor-domains" || id==="preset-manager-name") invalidateEditorDraft();
-    if(id==="preset-new-name" || id==="preset-new-domains"){lifetime.invalidate("createPresetFromNewForm");}
+    if(id==="preset-new-name" || id==="preset-new-domains") lifetime.invalidate("savePresetNew");
+    for(const target of ["finder","common"]){
+      if([`${target}-domains`,`${target}-preset-select`,`${target}-preset-name`].includes(id)){
+        for(const action of ["usePreset","savePreset","deletePreset"])lifetime.invalidate(`${action}:${target}`);
+      }
+    }
   }
   const getJson=(url,options)=>requestJson(url,lifetime.requestOptions(options));
   const postJson=(url,payload)=>requestPost(url,payload,lifetime.requestOptions());
@@ -385,7 +390,7 @@ function presetNameForSave(target){
 }
 
 async function savePreset(target){
-  const viewRequest=lifetime.capture(null);
+  const viewRequest=lifetime.capture(`savePreset:${target}`);
   const name = presetNameForSave(target);
   if (!name) {
     showToast('Укажите название пользовательского пресета', 'warn');
@@ -417,7 +422,7 @@ async function savePreset(target){
 }
 
 async function deletePreset(target){
-  const viewRequest=lifetime.capture(null);
+  const viewRequest=lifetime.capture(`deletePreset:${target}`);
   const selected = el(`${target}-preset-select`).value || '';
   if (!selected.startsWith('custom:')) {
     showToast('Этот пресет удалить нельзя', 'warn');
@@ -784,7 +789,7 @@ function renderPresetNewPreview(message, tone){
 }
 
 async function savePresetNew(){
-  const viewRequest=lifetime.capture(null);
+  const viewRequest=lifetime.capture("savePresetNew");
   const scope = 'finder';
   const name = presetNewName();
   const domains = presetNewDomains();
