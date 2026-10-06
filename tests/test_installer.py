@@ -147,7 +147,7 @@ class CleanInstallerTests(unittest.TestCase):
         self.assertIn('scripts/install-zapret2.sh', self.installer)
         zapret_prepare = self.installer.index('bash "$SOURCE_DIR/scripts/install-zapret2.sh" --prepare-dir')
         runtime_probe = self.installer.index('--probe --destination "$prepare_dir/runtime"')
-        package_probe = self.installer.index('assert openapi_json_bytes()')
+        package_probe = self.installer.index('openapi_json_bytes() or sys.exit("ERROR: prepared GP OpenAPI document is empty")')
         service_stop = self.installer.index('stop_unit gp-control-plane-web.service')
         self.assertLess(verify, zapret_prepare)
         self.assertLess(zapret_prepare, runtime_probe)

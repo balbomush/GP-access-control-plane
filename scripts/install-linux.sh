@@ -77,7 +77,9 @@ install -d -m 0700 -o "$INSTALL_USER" -g "$group" "$prepare_dir/python"
 runuser -u "$INSTALL_USER" -- python3 -m venv "$prepare_dir/python/venv"
 runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -m pip wheel --wheel-dir "$prepare_dir/python/wheels" "$SOURCE_DIR"
 runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -m pip install --no-index --find-links "$prepare_dir/python/wheels" gp-access-control-plane
-runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -c 'import bottle, cheroot; from gp_control_plane import __version__; from gp_control_plane.web.docs import openapi_json_bytes; assert __version__ == "0.4.3"; assert openapi_json_bytes()'
+# Match the prepared package to the already validated source, including future
+# releases. A stale or mismatched wheel must fail before stopping the old GP.
+runuser -u "$INSTALL_USER" -- "$prepare_dir/python/venv/bin/python" -c 'import sys, tomllib, bottle, cheroot; from pathlib import Path; from importlib.metadata import version; from gp_control_plane import __version__; from gp_control_plane.web.docs import openapi_json_bytes; expected = tomllib.loads((Path(sys.argv[1]) / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]; (__version__ == expected == version("gp-access-control-plane")) or sys.exit("ERROR: prepared GP version does not match validated source"); openapi_json_bytes() or sys.exit("ERROR: prepared GP OpenAPI document is empty")' "$SOURCE_DIR"
 # A GP-owned versioned runtime keeps arbitrary /opt/zapret2 git/release layouts
 # and their settings intact. Existing files are checked, never overwritten.
 zapret_parent=/opt/gp-zapret2

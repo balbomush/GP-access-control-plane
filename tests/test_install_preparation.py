@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -15,6 +17,43 @@ BASH = shutil.which("bash") or (r"C:\Program Files\Git\bin\bash.exe" if Path(r"C
 def shell_path(path: Path) -> str:
     value = path.resolve().as_posix()
     return f"/{value[0].lower()}{value[2:]}" if len(value) > 2 and value[1] == ":" else value
+
+
+class PreparedPackageVersionTests(unittest.TestCase):
+    def test_installer_executes_source_package_and_metadata_version_check(self):
+        script = (ROOT / "scripts/install-linux.sh").read_text(encoding="utf-8")
+        lines = [line for line in script.splitlines() if line.startswith("runuser ") and " -c " in line]
+        self.assertEqual(len(lines), 1)
+        arguments = shlex.split(lines[0])
+        code = arguments[arguments.index("-c") + 1]
+        self.assertEqual(arguments[-1], "$SOURCE_DIR")
+        self.assertLess(script.index(lines[0]), script.index("phase=activation"))
+        for source, package, metadata, docs, success in (
+            ("0.4.3", "0.4.3", "0.4.3", True, True),
+            ("0.4.4", "0.4.4", "0.4.4", True, True),
+            ("0.4.5", "0.4.5", "0.4.5", True, True),
+            ("0.4.4", "0.4.3", "0.4.4", True, False),
+            ("0.4.4", "0.4.4", "0.4.3", True, False),
+            ("0.4.4", "0.4.4", "0.4.4", False, False),
+        ):
+            with self.subTest(source=source, package=package, metadata=metadata, docs=docs), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                (root / "pyproject.toml").write_text(f'[project]\nversion = "{source}"\n', encoding="utf-8")
+                (root / "bottle.py").write_text("", encoding="utf-8")
+                (root / "cheroot.py").write_text("", encoding="utf-8")
+                web = root / "gp_control_plane/web"
+                web.mkdir(parents=True)
+                (web.parent / "__init__.py").write_text(f'__version__ = "{package}"\n', encoding="utf-8")
+                (web / "__init__.py").write_text("", encoding="utf-8")
+                (web / "docs.py").write_text(f'def openapi_json_bytes():\n    return {b"{}" if docs else b""!r}\n', encoding="utf-8")
+                dist = root / "gp_access_control_plane.dist-info"
+                dist.mkdir()
+                (dist / "METADATA").write_text(f'Name: gp-access-control-plane\nVersion: {metadata}\n', encoding="utf-8")
+                result = subprocess.run([sys.executable, "-I", "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); " + code, str(root)],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                if not success:
+                    self.assertIn("ERROR: prepared GP", result.stderr)
 
 
 @unittest.skipUnless(BASH, "bash is required")
