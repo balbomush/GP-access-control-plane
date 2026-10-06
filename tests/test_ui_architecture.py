@@ -391,10 +391,14 @@ const assert = (ok, message) => { if (!ok) throw new Error(message); };
       const oldTerminalPayload={run_id:'full-race',status:'stopped',stdout_log:'out',stdout_size:11,stdout_tail:'base\nnewer\n'};
       const retiredWhileLive=runState.acceptLog(oldTerminalPayload,false,mergeLogPayload,oldTerminal);
       const retiredWithoutRequest=runState.acceptLog(oldTerminalPayload,false,mergeLogPayload);
+      mergeStatusPayload({current_run:null,zapret2:{ready:true}});
+      const externalHeldUntilHistory=currentRun()?.run_id;
       mergeRunPage({runs:[{run_id:'external-race',status:'stopped'}],total:1},true);
       const externalFinal=runState.acceptLog({run_id:'external-race',status:'stopped',stdout_log:'external.out',stdout_size:15,stdout_tail:'EXTERNAL\nFINAL\n'},false,mergeLogPayload,externalRequest);
       const retiredWhileIdle=runState.acceptLog(oldTerminalPayload,false,mergeLogPayload,oldTerminal);
-      const externalRace={retiredWhileLive,retiredWithoutRequest,retiredWhileIdle,externalFinal,current:currentRun(),tail:state.finderLog.stdout_tail,requestRun:externalRequest.runId};
+      const externalRevived=runState.mergeStatus({current_run:{run_id:'external-race',status:'running'},zapret2:{ready:true}});
+      const externalOldLog=runState.acceptLog({run_id:'external-race',status:'running',stdout_log:'external.out',stdout_size:9,stdout_tail:'EXTERNAL\n'},false,mergeLogPayload,externalRequest);
+      const externalRace={retiredWhileLive,retiredWithoutRequest,retiredWhileIdle,externalFinal,externalHeldUntilHistory,externalRevived,externalOldLog,current:currentRun(),tail:state.finderLog.stdout_tail,requestRun:externalRequest.runId};
 
       // Production mergeLogPayload receives independently overlapping streams.
       const overlapGeneration=acknowledgeRun('browser-overlap'); runState.acceptLog({run_id:'browser-overlap',stdout_log:'out',stdout_size:5,stdout_tail:'base\n',stderr_log:'err',stderr_size:5,stderr_tail:'base\n'},false,mergeLogPayload);
@@ -452,7 +456,7 @@ const assert = (ok, message) => { if (!ok) throw new Error(message); };
     assert(details.panelWhileLogHeld.tab === 'terminal' && details.panelWhileLogHeld.busy && details.panelWhileLogHeld.current === 'panel-external' && details.panelWhileLogHeld.label === 'Идет подбор' && details.panelWhileLogHeld.text.includes('Идет подбор') && !details.panelWhileLogHeld.stopDisabled, 'history-promoted current did not render the live terminal panel before held next-log completion');
     assert(details.finalAfterRefresh === 'base\nFINAL\n' && !details.delayedRunningAccepted, 'acknowledged terminal refresh lost final log or accepted delayed running output');
     assert(details.fullRace.size === 11 && details.fullRace.tail === 'base\nnewer\n' && details.fullRace.percent === 20 && details.fullRace.displayed.includes('newer'), 'late full transport reply regressed live bytes, progress or DOM');
-    assert(!details.externalRace.retiredWhileLive && !details.externalRace.retiredWithoutRequest && !details.externalRace.retiredWhileIdle && details.externalRace.externalFinal && !details.externalRace.current && details.externalRace.requestRun === 'external-race' && details.externalRace.tail === 'EXTERNAL\nFINAL\n', 'retired terminal reply replaced an external run or external terminal convergence lost its valid final log');
+    assert(!details.externalRace.retiredWhileLive && !details.externalRace.retiredWithoutRequest && !details.externalRace.retiredWhileIdle && details.externalRace.externalFinal && details.externalRace.externalHeldUntilHistory === 'external-race' && !details.externalRace.externalRevived && !details.externalRace.externalOldLog && !details.externalRace.current && details.externalRace.requestRun === 'external-race' && details.externalRace.tail === 'EXTERNAL\nFINAL\n', 'retired terminal reply replaced an external run or status-before-history terminal convergence lost its valid final log');
     assert(details.overlapLog.stdout === 'base\nout-1\n' && details.overlapLog.stderr === 'base\nerr-1\n' && details.overlapLog.stderrSize === 11 && details.utfTail === '€', 'independent overlapping streams duplicated/regressed or corrupted UTF-8');
     assert(details.boundedTail.first.secondLines.stdout === 200 && details.boundedTail.first.secondLines.stderr === 200 && details.boundedTail.last.secondLines.stdout === 200 && details.boundedTail.last.secondLines.stderr === 200 && details.boundedTail.allSameOffset && details.boundedTail.allFirstBounded && details.boundedTail.firstLine !== 'base-0' && details.boundedTail.lastLine === 'round-99-9' && !details.boundedTail.displayed.includes('base-0\n') && details.boundedTail.stdoutSize > 1200 && details.boundedTail.stderrSize > 1200, 'production overlapping snapshots bypassed the per-stream 200-line tail limit');
     assert(details.starts.length === 0 && details.token === 'fourth' && !details.accepted, 'old Start used the replacement token/session');

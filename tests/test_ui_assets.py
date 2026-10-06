@@ -16,11 +16,11 @@ from gp_control_plane.web.ui import index_html
 from gp_control_plane.web import ui_assets
 
 
-_HTML_SHA256 = "247e232757e6a6937f79a232c0d9626774db2ab69ece27491874ff16331133d7"
+_HTML_SHA256 = "ee9a03332f999a04fdf51a805f48771f39b9803508654d55a0e870cc43fe5a25"
 _CSS_SHA256 = "06f9628dcb7bf57f8a31cb61ed2d09fdfee550c706a1bb154fdba948463a2825"
 _SCRIPT_SHA256S = {
     "api-client.js": "9974e9abcdd283ff36f63c8b96c36ba11221bebc789963461ff282d5aa250203",
-    "run-state.js": "7f5ce0f81e9559aa83593fb844d8398342f070c80645a2d5a30d5295d02a4c4a",
+    "run-state.js": "9bdfb3c56a9bbfd2e7e74482e488a48923ee2aa019bf6cadc1962b851521d3d6",
     "realtime-controller.js": "2baf5be952f73cd4a9e1a44542cfb6d39ee94911da33dfc2534244b75ac30d54",
     "session-controller.js": "1caf688ea2d6601e0858b6b418884e26b1bd5c748631d882dd648d715ca4c1b8",
     "legacy-runtime.js": "2ca2f6912e4579897df317f5a880672705f36bf075104c7e9762491eac4749f8",

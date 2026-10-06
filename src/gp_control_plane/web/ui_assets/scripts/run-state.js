@@ -124,17 +124,16 @@ class RunState {
       }
       this.view.status = { ...status, current_run: this._accepted };
     } else {
-      if (reported && this._runId(reported) !== this._runId(this.current())) {
-        // An externally started run owns the same request lifetime as a local
-        // acknowledgement. Late responses from the displayed terminal run
-        // must not survive this transition, even after current becomes idle.
-        this._generation += 1;
-        this._logRevision += 1;
-        this.view.runGeneration = this._generation;
-        this.view.finderLog = null;
+      if (reported) {
+        // Bind external runs to the same owner and terminal-history barrier.
+        // A status with current_run:null can arrive before matching history;
+        // retain this identity until history proves the run terminal.
+        this.acknowledge(this._runId(reported));
+        this._accepted = { ...this._accepted, ...reported, run_id: this._runId(reported), generation: this._generation };
+        this.view.acknowledgedRun = this._accepted;
         this._terminalEvidence = null;
       }
-      this.view.status = status;
+      this.view.status = { ...status, current_run: this._accepted };
     }
     this._pendingStatus = null;
     return true;
