@@ -87,14 +87,15 @@ class RunState {
   }
 
   convergeHistory(rows) {
-    if (!this._accepted) return false;
-    const terminal = (rows || []).find((row) => this._runId(row) === this._accepted.run_id && this._terminal(row.status));
+    const current = this.current();
+    if (!current) return false;
+    const runId = this._runId(current);
+    const terminal = (rows || []).find((row) => this._runId(row) === runId && this._terminal(row.status));
     if (!terminal) return false;
-    const accepted = this._accepted;
-    this._retire(accepted.run_id);
-    this._terminalEvidence = { runId: accepted.run_id, generation: accepted.generation };
+    this._retire(runId);
+    this._terminalEvidence = { runId, generation: this._generation };
     this.rejectAccepted();
-    if ((this.view.status || {}).current_run && this._runId(this.view.status.current_run) === accepted.run_id) {
+    if ((this.view.status || {}).current_run && this._runId(this.view.status.current_run) === runId) {
       this.view.status = { ...this.view.status, current_run: null };
     }
     return true;
@@ -123,6 +124,16 @@ class RunState {
       }
       this.view.status = { ...status, current_run: this._accepted };
     } else {
+      if (reported && this._runId(reported) !== this._runId(this.current())) {
+        // An externally started run owns the same request lifetime as a local
+        // acknowledgement. Late responses from the displayed terminal run
+        // must not survive this transition, even after current becomes idle.
+        this._generation += 1;
+        this._logRevision += 1;
+        this.view.runGeneration = this._generation;
+        this.view.finderLog = null;
+        this._terminalEvidence = null;
+      }
       this.view.status = status;
     }
     this._pendingStatus = null;
@@ -133,7 +144,7 @@ class RunState {
     const log = this.view.finderLog || {};
     return {
       generation: this._generation,
-      runId: this._accepted ? this._accepted.run_id : '',
+      runId: this._runId(this.current()) || (this._terminalEvidence || {}).runId || '',
       revision: this._logRevision,
       stdoutLog: log.stdout_log || '',
       stdoutSize: Number(log.stdout_size || 0),
@@ -153,14 +164,15 @@ class RunState {
     const retired = this._retiredRunIds.has(runId);
     if (retired && !this._isTerminalLog(payload)) return false;
     if (!this._accepted && this._terminalEvidence && !retired && !this._isCurrentHistoryRun(payload)) return false;
-    if (this._accepted && this._runId(payload) !== this._accepted.run_id) return false;
+    const currentRunId = this._runId(this.current());
+    if (currentRunId && runId !== currentRunId) return false;
+    if (retired && (!this._terminalEvidence || this._terminalEvidence.runId !== runId || this._terminalEvidence.generation !== this._generation)) return false;
     let next = payload;
     if (request) {
-      const currentRunId = this._accepted ? this._accepted.run_id : '';
-      const terminalCompletion = retired && request.runId === runId && this._isTerminalLog(next);
+      const terminalCompletion = !currentRunId && retired && request.runId === runId && this._isTerminalLog(next);
       if (request.generation !== this._generation || (request.runId !== currentRunId && !terminalCompletion)) return false;
-      if (incremental && request.revision !== this._logRevision) {
-        next = this._advanceIncrementalPayload(payload, request);
+      if (request.revision !== this._logRevision) {
+        next = incremental ? this._advanceIncrementalPayload(payload, request) : this._advanceFullPayload(payload);
         if (!next) return false;
       }
     }
@@ -200,6 +212,22 @@ class RunState {
     const next = { ...payload };
     this._reconcileIncrementalStream(next, payload, request, current, 'stdout', stdoutAhead);
     this._reconcileIncrementalStream(next, payload, request, current, 'stderr', stderrAhead);
+    return next;
+  }
+
+  _advanceFullPayload(payload) {
+    const current = this.view.finderLog || {};
+    if (this._runId(current) !== this._runId(payload)) return payload;
+    const ahead = name => Number(payload[`${name}_size`] || 0) > Number(current[`${name}_size`] || 0);
+    const terminalUpgrade = this._isTerminalLog(payload) && !this._isTerminalLog(current);
+    if (!ahead('stdout') && !ahead('stderr') && !terminalUpgrade) return null;
+    const next = { ...payload };
+    for (const name of ['stdout', 'stderr']) {
+      if (Number(payload[`${name}_size`] || 0) < Number(current[`${name}_size`] || 0)) {
+        for (const field of ['size', 'log', 'tail']) next[`${name}_${field}`] = current[`${name}_${field}`];
+        next[`${name}_append`] = '';
+      }
+    }
     return next;
   }
 

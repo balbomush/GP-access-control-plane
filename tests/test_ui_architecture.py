@@ -366,6 +366,36 @@ const assert = (ok, message) => { if (!ok) throw new Error(message); };
       const delayedRunningAccepted=runState.acceptLog({run_id:'fast-terminal',status:'running',stdout_log:'fast.out',stdout_size:5,stdout_tail:'base\n',progress:{percent:10}},false,mergeLogPayload,lateFastRequest);
       window.fetch = originalRefreshFetch;
 
+      // Full refresh and incremental polling can overlap. A delayed full body
+      // must not roll back bytes, rendered text, or progress already accepted.
+      acknowledgeRun('full-race'); mergeStatusPayload({current_run:{run_id:'full-race',status:'running'},zapret2:{ready:true}});
+      runState.acceptLog({run_id:'full-race',status:'running',stdout_log:'out',stdout_size:5,stdout_tail:'base\n',progress:{percent:10}},false,mergeLogPayload);
+      const raceReplies=[], raceFetch=window.fetch;
+      window.fetch=(url,init)=>String(url).includes('/runs/latest-log')?new Promise(resolve=>raceReplies.push(resolve)):normal(url,init);
+      const staleFull=refreshLog(false), freshIncrement=refreshLog(true); await new Promise(resolve=>setTimeout(resolve,0));
+      const raceReply=data=>new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}});
+      raceReplies[1](raceReply({run_id:'full-race',status:'running',stdout_log:'out',stdout_size:11,stdout_append:'newer\n',progress:{percent:20}})); await freshIncrement;
+      raceReplies[0](raceReply({run_id:'full-race',status:'running',stdout_log:'out',stdout_size:5,stdout_tail:'base\n',progress:{percent:10}})); await staleFull;
+      const fullRace={size:state.finderLog.stdout_size,tail:state.finderLog.stdout_tail,percent:state.finderLog.progress.percent,displayed:document.getElementById('finder-log').textContent};
+      window.fetch=raceFetch;
+
+      // Terminal refresh captured before a history-evidenced external run must
+      // remain stale after that run becomes current and after it completes.
+      mergeRunPage({runs:[{run_id:'full-race',status:'stopped'}],total:1},true);
+      runState.acceptLog({run_id:'full-race',status:'stopped',stdout_log:'out',stdout_size:11,stdout_tail:'base\nnewer\n'},false,mergeLogPayload);
+      const oldTerminal=runState.captureLogRequest();
+      mergeRunPage({runs:[{run_id:'external-race',status:'running'}],total:1},true);
+      mergeStatusPayload({current_run:{run_id:'external-race',status:'running'},zapret2:{ready:true}});
+      const externalRequest=runState.captureLogRequest();
+      runState.acceptLog({run_id:'external-race',status:'running',stdout_log:'external.out',stdout_size:9,stdout_tail:'EXTERNAL\n'},false,mergeLogPayload,externalRequest);
+      const oldTerminalPayload={run_id:'full-race',status:'stopped',stdout_log:'out',stdout_size:11,stdout_tail:'base\nnewer\n'};
+      const retiredWhileLive=runState.acceptLog(oldTerminalPayload,false,mergeLogPayload,oldTerminal);
+      const retiredWithoutRequest=runState.acceptLog(oldTerminalPayload,false,mergeLogPayload);
+      mergeRunPage({runs:[{run_id:'external-race',status:'stopped'}],total:1},true);
+      const externalFinal=runState.acceptLog({run_id:'external-race',status:'stopped',stdout_log:'external.out',stdout_size:15,stdout_tail:'EXTERNAL\nFINAL\n'},false,mergeLogPayload,externalRequest);
+      const retiredWhileIdle=runState.acceptLog(oldTerminalPayload,false,mergeLogPayload,oldTerminal);
+      const externalRace={retiredWhileLive,retiredWithoutRequest,retiredWhileIdle,externalFinal,current:currentRun(),tail:state.finderLog.stdout_tail,requestRun:externalRequest.runId};
+
       // Production mergeLogPayload receives independently overlapping streams.
       const overlapGeneration=acknowledgeRun('browser-overlap'); runState.acceptLog({run_id:'browser-overlap',stdout_log:'out',stdout_size:5,stdout_tail:'base\n',stderr_log:'err',stderr_size:5,stderr_tail:'base\n'},false,mergeLogPayload);
       const overlapA=runState.captureLogRequest(),overlapB=runState.captureLogRequest();
@@ -411,7 +441,7 @@ const assert = (ok, message) => { if (!ok) throw new Error(message); };
         return normal(url, init);
       };
       const oldStart = startSelectedDiscovery(); await startGate; await replace('fourth'); rejectStart(new DOMException('old start abort', 'AbortError')); await oldStart;
-      return {staleCatchMessage, lateSettings, staleDownloadMessage, logUrls, logTail, terminalFlow, statusBeforeRuns, retiredStatus, panelWhileLogHeld, finalAfterRefresh, delayedRunningAccepted, overlapLog, utfTail, boundedTail, starts, token:authToken(), accepted:runState.accepted()};
+      return {staleCatchMessage, lateSettings, staleDownloadMessage, logUrls, logTail, terminalFlow, statusBeforeRuns, retiredStatus, panelWhileLogHeld, finalAfterRefresh, delayedRunningAccepted, fullRace, externalRace, overlapLog, utfTail, boundedTail, starts, token:authToken(), accepted:runState.accepted()};
     });
     assert(!details.staleCatchMessage.includes('Ошибка сохранения'), 'old settings catch wrote the replacement session message');
     assert(!details.lateSettings.settings.old_session_sentinel && details.lateSettings.settings.curl_max_time !== 99, 'old settings body wrote replacement settings');
@@ -421,6 +451,8 @@ const assert = (ok, message) => { if (!ok) throw new Error(message); };
     assert(details.statusBeforeRuns.busy && details.statusBeforeRuns.current === 'sse-external' && details.retiredStatus.busy && details.retiredStatus.current === 'sse-external', 'SSE status-before-runs or retired-status reconciliation lost external current');
     assert(details.panelWhileLogHeld.tab === 'terminal' && details.panelWhileLogHeld.busy && details.panelWhileLogHeld.current === 'panel-external' && details.panelWhileLogHeld.label === 'Идет подбор' && details.panelWhileLogHeld.text.includes('Идет подбор') && !details.panelWhileLogHeld.stopDisabled, 'history-promoted current did not render the live terminal panel before held next-log completion');
     assert(details.finalAfterRefresh === 'base\nFINAL\n' && !details.delayedRunningAccepted, 'acknowledged terminal refresh lost final log or accepted delayed running output');
+    assert(details.fullRace.size === 11 && details.fullRace.tail === 'base\nnewer\n' && details.fullRace.percent === 20 && details.fullRace.displayed.includes('newer'), 'late full transport reply regressed live bytes, progress or DOM');
+    assert(!details.externalRace.retiredWhileLive && !details.externalRace.retiredWithoutRequest && !details.externalRace.retiredWhileIdle && details.externalRace.externalFinal && !details.externalRace.current && details.externalRace.requestRun === 'external-race' && details.externalRace.tail === 'EXTERNAL\nFINAL\n', 'retired terminal reply replaced an external run or external terminal convergence lost its valid final log');
     assert(details.overlapLog.stdout === 'base\nout-1\n' && details.overlapLog.stderr === 'base\nerr-1\n' && details.overlapLog.stderrSize === 11 && details.utfTail === '€', 'independent overlapping streams duplicated/regressed or corrupted UTF-8');
     assert(details.boundedTail.first.secondLines.stdout === 200 && details.boundedTail.first.secondLines.stderr === 200 && details.boundedTail.last.secondLines.stdout === 200 && details.boundedTail.last.secondLines.stderr === 200 && details.boundedTail.allSameOffset && details.boundedTail.allFirstBounded && details.boundedTail.firstLine !== 'base-0' && details.boundedTail.lastLine === 'round-99-9' && !details.boundedTail.displayed.includes('base-0\n') && details.boundedTail.stdoutSize > 1200 && details.boundedTail.stderrSize > 1200, 'production overlapping snapshots bypassed the per-stream 200-line tail limit');
     assert(details.starts.length === 0 && details.token === 'fourth' && !details.accepted, 'old Start used the replacement token/session');
