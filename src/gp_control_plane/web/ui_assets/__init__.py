@@ -46,5 +46,14 @@ def render_index_html() -> str:
         login=_read_resource("templates/login.html"),
         bootstrap=_read_resource("templates/bootstrap.html"),
         shell=shell,
-        script=_read_resource("scripts/legacy-runtime.js"),
+        script="\n".join(
+            _read_resource(path)
+            for path in (
+                "scripts/api-client.js",
+                "scripts/run-state.js",
+                "scripts/realtime-controller.js",
+                "scripts/session-controller.js",
+                "scripts/legacy-runtime.js",
+            )
+        ),
     )

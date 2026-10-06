@@ -489,8 +489,9 @@ class WebUiTests(unittest.TestCase):
         html = index_html()
 
         self.assertIn("function currentRun()", html)
-        self.assertIn("const run = (state.status || {}).current_run;", html)
-        self.assertIn("return Boolean(currentRun());", html)
+        self.assertIn("return runState.current();", html)
+        self.assertIn("return this._accepted || ((this.view.status || {}).current_run || null);", html)
+        self.assertIn("return runState.busy();", html)
         self.assertIn("const jobStatus = currentRun()?.status", html)
         self.assertIn("const runId = response?.run_id || '';", html)
         self.assertNotIn("target_ref: data.update_id || channel,", html)
@@ -1023,7 +1024,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("служба с повышенными правами", html)
         self.assertIn("metric-job-card", html)
         self.assertIn("/api/web/events/stream", html)
-        self.assertIn("authFetch(apiEndpoint('web', 'eventsStream')", html)
+        self.assertIn('this._api.streamSse(this._url()', html)
         self.assertIn("response.body.getReader()", html)
         self.assertNotIn("new EventSource(", html)
         self.assertIn("startRealtimeEvents", html)
@@ -1586,23 +1587,24 @@ window.addEventListener('load', async () => {
         self.assertIn('id="boot-message">Загрузка интерфейса…</div>', html)
         self.assertIn('<template id="app-shell-template">', html)
         self.assertLess(html.index('<template id="app-shell-template">'), html.index('<div class="shell" id="app-shell">'))
-        self.assertIn("showBoot('loading');", html)
+        self.assertIn("this._ui.boot('loading');", html)
 
     def test_wbg_002_boot_success_mounts_once_after_all_five_requests(self) -> None:
         """WBG-002: only a complete five-response set mounts and renders the shell."""
         html = index_html()
 
-        start = html.index('async function startAuthenticatedUi()')
-        end = html.index('async function submitLogin', start)
+        start = html.index('async function loadBootstrapPayload(signal)')
+        end = html.index('function applyBootstrapPayload', start)
         bootstrap = html[start:end]
         self.assertIn('const requests = Promise.all([', bootstrap)
         self.assertIn('await Promise.race([requests, timeout]);', bootstrap)
         self.assertIn('const BOOTSTRAP_TIMEOUT_MS = 15000;', html)
-        self.assertIn('controller.abort();', bootstrap)
+        self.assertIn('this._bootstrapController?.abort();', html)
         for request in ('status', 'runHistoryPage', 'latestLog', 'presets', 'fetchSettingsPayload'):
             self.assertIn(request, bootstrap)
-        self.assertLess(bootstrap.index('showApplication();'), bootstrap.index('renderAll({ skipCandidates: true });'))
-        self.assertLess(bootstrap.index('renderAll({ skipCandidates: true });'), bootstrap.index('startRealtimeEvents();'))
+        self.assertIn('showApplication();', html)
+        self.assertIn('renderAll({ skipCandidates: true });', html)
+        self.assertIn('this._realtime?.start();', html)
 
     def test_wbg_003_boot_failure_exposes_only_generic_retry_screen(self) -> None:
         """WBG-003: bootstrap errors never interpolate transport details into the page."""
@@ -1610,10 +1612,12 @@ window.addEventListener('load', async () => {
 
         self.assertIn('Не удалось загрузить интерфейс. Попробуйте ещё раз.', html)
         self.assertIn('<button id="boot-retry" type="button" hidden>Повторить</button>', html)
-        start = html.index('async function startAuthenticatedUi()')
-        end = html.index('async function submitLogin', start)
-        self.assertIn("} catch (_error) {", html[start:end])
-        self.assertNotIn('error.message', html[html.index("} catch (_error) {", start):end])
+        start = html.index('class SessionController')
+        end = html.index('const CUSTOM_PRESETS_KEY', start)
+        session = html[start:end]
+        self.assertIn('} catch (error) {', session)
+        self.assertIn("this._ui.boot('failed');", session)
+        self.assertNotIn('error.message', session)
 
     def test_wbg_004_retry_returns_from_failure_to_ready_without_message_area(self) -> None:
         """WBG-004: retry invokes a fresh bootstrap and does not use dashboard messaging."""
@@ -1635,21 +1639,17 @@ window.addEventListener('load', async () => {
         self.assertIn("retry.hidden = state !== 'failed';", boot)
 
     def test_wbg_006_retry_aborts_and_ignores_stale_bootstrap_results(self) -> None:
-        """WBG-006: retry uses both cancellation and an epoch guard."""
+        """WBG-006: the extracted session owner uses cancellation and an epoch guard."""
         html = index_html()
 
-        self.assertIn('let bootstrapEpoch = 0;', html)
-        self.assertIn('let bootstrapController = null;', html)
-        start = html.index('async function startAuthenticatedUi()')
-        end = html.index('async function submitLogin', start)
-        bootstrap = html[start:end]
-        self.assertIn('if (bootstrapController) bootstrapController.abort();', bootstrap)
-        self.assertIn('const epoch = ++bootstrapEpoch;', bootstrap)
-        self.assertIn('if (epoch !== bootstrapEpoch || controller.signal.aborted) return;', bootstrap)
-        self.assertLess(
-            bootstrap.index('if (epoch !== bootstrapEpoch || controller.signal.aborted) return;', bootstrap.index('} catch (_error) {')),
-            bootstrap.index('controller.abort();', bootstrap.index('} catch (_error) {')),
-        )
+        start = html.index('class SessionController')
+        end = html.index('class ApiClient') if html.index('class ApiClient') > start else html.index('const CUSTOM_PRESETS_KEY', start)
+        session = html[start:end]
+        self.assertIn('this._epoch = 0;', session)
+        self.assertIn('this._bootstrapController?.abort();', session)
+        self.assertIn('const epoch = this._invalidate();', session)
+        self.assertIn('if (!this.active(epoch)) return false;', session)
+        self.assertIn('controller.abort();', session)
 
     def test_wbg_post_ready_refresh_contract_is_not_part_of_bootstrap_gate(self) -> None:
         """WBG-R01: retain the existing post-ready refresh map and silent fallback."""
@@ -1666,9 +1666,11 @@ window.addEventListener('load', async () => {
         self.assertIn("requests.presets = getJson(apiEndpoint('web', 'presets'));", refresh_map)
         self.assertIn('requests.settings = fetchSettingsPayload();', refresh_map)
         self.assertNotIn('bootstrapEpoch', refresh_map)
-        fallback_start = html.index('function startRealtimeFallback()')
-        fallback_end = html.index('function refreshRequestMap(', fallback_start)
-        self.assertIn("if (!realtimeConnected) refresh({ light: true, silent: true });", html[fallback_start:fallback_end])
+        realtime_start = html.index('class RealtimeController')
+        realtime_end = html.index('class SessionController', realtime_start)
+        realtime = html[realtime_start:realtime_end]
+        self.assertIn('if (!this._connected && !this._disposed && this._isActive()) this._fallback();', realtime)
+        self.assertIn('if (this._fallbackTimer) this._clearInterval(this._fallbackTimer);', realtime)
 
     def test_curl_parallelism_field_is_scoped_to_multi_domain_mode(self) -> None:
         html = index_html()

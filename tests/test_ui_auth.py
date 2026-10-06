@@ -58,7 +58,7 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn(
             'id="login-password" name="password" type="password" autocomplete="current-password" required', self.html
         )
-        self.assertIn("fetch('/api/auth/login'", self.html)
+        self.assertIn("_api.postJson('/api/auth/login'", self.html)
         self.assertIn("method: 'POST'", self.html)
 
     def test_token_is_persisted_and_sent_in_central_request_headers(self) -> None:
@@ -67,32 +67,32 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertIn('localStorage.setItem(AUTH_TOKEN_KEY, token);', self.html)
         self.assertIn('Authorization: `Bearer ${token}`', self.html)
         self.assertIn('async function authFetch(url, options)', self.html)
-        self.assertIn('const response = await authFetch(url);', self.html)
+        self.assertIn('async function authFetch(url, options)', self.html)
+        self.assertIn('return apiClient.request(url, { ...(options || {}), keepSessionSignal: true });', self.html)
         self.assertIn("await authFetch(apiEndpoint('core', 'backupsUpload')", self.html)
 
     def test_unauthorized_response_clears_token_and_returns_to_login(self) -> None:
-        self.assertIn('if (response.status === 401) handleUnauthorized();', self.html)
-        self.assertIn('localStorage.removeItem(AUTH_TOKEN_KEY);', self.html)
-        self.assertIn("showLogin('Your session has expired. Sign in again.');", self.html)
+        self.assertIn('const unauthorized = response.status === 401;', self.html)
+        self.assertIn('if (lifetime.unauthorized && this.isCurrent(lifetime.token, lifetime.epoch)) this._onUnauthorized();', self.html)
+        self.assertIn('clear: () => localStorage.removeItem(AUTH_TOKEN_KEY)', self.html)
+        self.assertIn("this.logout('Your session has expired. Sign in again.');", self.html)
         self.assertIn("data-action=\"logout\"", self.html)
 
     def test_password_change_uses_agreed_contract_and_logs_out_without_storing_replacement_token(self) -> None:
         password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
-        logout = self.script_block('function logout(){', 'async function authFetch(url, options){')
 
         self.assertIn('id="change-password-form"', self.html)
         self.assertIn('name="current_password"', self.html)
         self.assertIn('name="new_password"', self.html)
-        self.assertIn("await postJson('/api/auth/change-password'", password_change)
+        self.assertIn('await sessionController.changePassword({', password_change)
         self.assertIn('current_password: currentPassword', password_change)
         self.assertIn('new_password: newPassword', password_change)
-        self.assertIn('logout();', password_change)
+        self.assertIn("await this._api.postJson('/api/auth/change-password', payload);", self.html)
+        self.assertIn('this.logout();', self.html)
         self.assertNotIn('storeAuthToken(', password_change)
         self.assertNotIn('renewRealtimeEvents(', password_change)
-        self.assertIn('localStorage.removeItem(AUTH_TOKEN_KEY);', logout)
-        self.assertIn('stopRealtimeEvents();', logout)
-        self.assertIn('stopRealtimeFallback();', logout)
-        self.assertIn('showLogin();', logout)
+        self.assertIn('clear: () => localStorage.removeItem(AUTH_TOKEN_KEY)', self.html)
+        self.assertIn('this._realtime?.dispose();', self.html)
 
     def test_password_change_panel_is_independent_accessible_and_has_its_own_lifecycle_messages(self) -> None:
         password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
@@ -124,8 +124,9 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
             "status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.';",
             password_change,
         )
-        self.assertIn("el('settings-current-password').value = '';", password_change)
-        self.assertIn("el('settings-new-password').value = '';", password_change)
+        self.assertIn("currentPasswordInput.value = '';", password_change)
+        self.assertIn("newPasswordInput.value = '';", password_change)
+        self.assertIn('captured nodes stay safe to clear', password_change)
         self.assertNotIn('setMessage(', password_change)
 
     def test_archive_download_is_top_level_and_uses_authenticated_blob_without_token_query_parameter(self) -> None:
@@ -133,8 +134,7 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         download = self.script_block('async function downloadBackup(url, snapshotId){', 'function formatBytes(value){')
 
         self.assertRegex(backup_url, r"function backupDownloadUrl\(snapshot\)\{[\s\S]*return requestUrl\(apiUrl\('core', 'backupsDownloadArchive', params\)\);\s*\}\s*$")
-        self.assertIn('const response = await authFetch(url);', download)
-        self.assertIn('const blob = await response.blob();', download)
+        self.assertIn('const { blob, response } = await apiClient.blob(url);', download)
         self.assertIn('URL.createObjectURL(blob)', download)
         self.assertIn('URL.revokeObjectURL(objectUrl)', download)
         self.assertIn('data-backup-download="${esc(id)}"', self.html)
@@ -142,28 +142,23 @@ class UiBearerAuthSourceContractTests(unittest.TestCase):
         self.assertNotIn('gp_token', backup_url)
 
     def test_realtime_stream_uses_fetch_reader_with_cancellation_and_reconnect(self) -> None:
-        self.assertIn("authFetch(apiEndpoint('web', 'eventsStream')", self.html)
+        self.assertIn('class RealtimeController', self.html)
+        self.assertIn('this._api.streamSse(this._url()', self.html)
         self.assertIn('const controller = new AbortController();', self.html)
         self.assertIn('const reader = response.body.getReader();', self.html)
-        self.assertIn('function parseSseEvent(frame)', self.html)
-        self.assertIn('function scheduleRealtimeReconnect()', self.html)
+        self.assertIn('static parseSseFrame(frame)', self.html)
+        self.assertIn('this._scheduleReconnect(epoch);', self.html)
         self.assertNotIn('new EventSource(', self.html)
 
     def test_password_change_uses_logout_to_stop_realtime_activity(self) -> None:
         password_change = self.script_block('async function changePassword(){', 'function apiEndpoint(namespace, name){')
-        stop = self.script_block('function stopRealtimeEvents(){', 'function renewRealtimeEvents(){')
-        fallback = self.script_block('function stopRealtimeFallback(){', 'function handleUnauthorized(){')
-        logout = self.script_block('function logout(){', 'async function authFetch(url, options){')
 
-        self.assertIn('logout();', password_change)
+        self.assertIn('sessionController.changePassword', password_change)
         self.assertNotIn('storeAuthToken(', password_change)
         self.assertNotIn('renewRealtimeEvents(', password_change)
-        self.assertIn('if (realtimeReconnectTimer) clearTimeout(realtimeReconnectTimer);', stop)
-        self.assertIn('realtimeReconnectTimer = null;', stop)
-        self.assertIn('if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);', fallback)
-        self.assertIn('realtimeFallbackTimer = null;', fallback)
-        self.assertIn('stopRealtimeEvents();', logout)
-        self.assertIn('stopRealtimeFallback();', logout)
+        self.assertIn('if (this._reconnectTimer) this._clearTimeout(this._reconnectTimer);', self.html)
+        self.assertIn('if (this._fallbackTimer) this._clearInterval(this._fallbackTimer);', self.html)
+        self.assertIn('this._realtime?.dispose();', self.html)
 
 class PlaywrightBearerAuthBrowserTests(unittest.TestCase):
 

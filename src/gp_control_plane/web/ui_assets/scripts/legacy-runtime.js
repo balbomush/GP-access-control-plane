@@ -25,16 +25,14 @@ const INITIAL_SYSTEM_STATUS_RETRY_DELAY_MS = 750;
 const INITIAL_SYSTEM_STATUS_RETRY_LIMIT = 3;
 let toastTimer = null;
 let refreshInFlight = false;
-let bootstrapEpoch = 0;
-let bootstrapController = null;
 let bootstrapState = 'idle';
 let initialSystemStatusRetryTimer = null;
 let initialSystemStatusRetryCount = 0;
-let realtimeSource = null;
 let realtimeConnected = false;
-let realtimeFallbackTimer = null;
-let realtimeReconnectTimer = null;
-let realtimeReconnectDelay = 1000;
+let apiClient = null;
+let sessionController = null;
+let realtimeController = null;
+let runState = null;
 let logDirty = false;
 let candidateRefreshTimer = null;
 let candidateRequestSeq = 0;
@@ -134,29 +132,9 @@ function showToast(text, tone){
     }, 180);
   }, 2000);
 }
-async function getJson(url, options){
-  const response = await authFetch(url, options);
-  if (!response.ok) throw new Error(await response.text());
-  return await response.json();
-}
-async function postJson(url, payload){
-  const response = await authFetch(url, {
-    method: 'POST',
-    headers: requestHeaders({'Content-Type': 'application/json'}),
-    body: JSON.stringify(payload || {})
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const apiError = data && typeof data.error === 'object' ? data.error : {};
-    const error = new Error(apiError.message || data.message || response.statusText);
-    error.status = response.status;
-    error.code = apiError.code || '';
-    error.details = apiError.details || {};
-    error.data = data;
-    throw error;
-  }
-  return data;
-}
+// A9 compatibility adapters: callers retain their established arguments and errors.
+async function getJson(url, options){ return apiClient.getJson(url, options); }
+async function postJson(url, payload){ return apiClient.postJson(url, payload); }
 function authToken(){
   return localStorage.getItem(AUTH_TOKEN_KEY) || '';
 }
@@ -170,6 +148,8 @@ function requestHeaders(headers){
 function requestUrl(url){
   return url;
 }
+function currentSessionEpoch(){ return sessionController ? sessionController.epoch() : 0; }
+function sessionIsCurrent(epoch){ return !sessionController || sessionController.isCurrent(epoch); }
 function storeAuthToken(payload){
   const token = String((payload || {}).access_token || (payload || {}).token || '').trim();
   if (!token) throw new Error('The server did not return an authorization token');
@@ -177,9 +157,6 @@ function storeAuthToken(payload){
   return token;
 }
 function showLogin(message){
-  bootstrapEpoch += 1;
-  if (bootstrapController) bootstrapController.abort();
-  bootstrapController = null;
   bootstrapState = 'idle';
   el('app-shell')?.remove();
   el('boot-screen').hidden = true;
@@ -221,59 +198,34 @@ function showBoot(state){
     : 'Загрузка интерфейса…';
 }
 function stopRealtimeEvents(){
-  if (realtimeReconnectTimer) clearTimeout(realtimeReconnectTimer);
-  realtimeReconnectTimer = null;
-  if (realtimeSource) realtimeSource.abort();
-  realtimeSource = null;
-  realtimeConnected = false;
+  realtimeController?.disposeStream();
 }
 function renewRealtimeEvents(){
-  stopRealtimeEvents();
-  realtimeReconnectDelay = 1000;
-  startRealtimeEvents({ alreadyStopped: true });
-}function stopRealtimeFallback(){
-  if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);
-  realtimeFallbackTimer = null;
-}
+  realtimeController?.renew();
+}function stopRealtimeFallback(){ realtimeController?.dispose(); }
 function handleUnauthorized(){
-  if (!authToken()) return;
-  localStorage.removeItem(AUTH_TOKEN_KEY);
-  stopRealtimeEvents();
-  stopRealtimeFallback();
-  showLogin('Your session has expired. Sign in again.');
+  sessionController?.unauthorized();
 }
 function logout(){
-  localStorage.removeItem(AUTH_TOKEN_KEY);
-  stopRealtimeEvents();
-  stopRealtimeFallback();
-  showLogin();
+  sessionController?.logout();
 }
 async function authFetch(url, options){
-  const request = options || {};
-  const response = await fetch(url, {
-    ...request,
-    headers: requestHeaders(request.headers),
-    credentials: 'same-origin'
-  });
-  if (response.status === 401) handleUnauthorized();
-  return response;
+  // Raw callers consume their own body, so keep the request lifetime alive until
+  // they explicitly release it below.
+  return apiClient.request(url, { ...(options || {}), keepSessionSignal: true });
 }
 async function startAuthenticatedUi(){
-  const epoch = ++bootstrapEpoch;
-  if (bootstrapController) bootstrapController.abort();
-  stopRealtimeEvents();
-  stopRealtimeFallback();
-  const controller = new AbortController();
-  bootstrapController = controller;
-  showBoot('loading');
+  return sessionController.bootstrap(loadBootstrapPayload, applyBootstrapPayload);
+}
+async function loadBootstrapPayload(signal){
   let timeoutId = null;
   try {
     const requests = Promise.all([
-      getJson(apiEndpoint('web', 'status'), { signal: controller.signal }),
-      getJson(apiUrl('web', 'runHistoryPage', runParams(0)), { signal: controller.signal }),
-      getJson(apiEndpoint('core', 'latestLog'), { signal: controller.signal }),
-      getJson(apiEndpoint('web', 'presets'), { signal: controller.signal }),
-      fetchSettingsPayload({ signal: controller.signal })
+      getJson(apiEndpoint('web', 'status'), { signal }),
+      getJson(apiUrl('web', 'runHistoryPage', runParams(0)), { signal }),
+      getJson(apiEndpoint('core', 'latestLog'), { signal }),
+      getJson(apiEndpoint('web', 'presets'), { signal }),
+      fetchSettingsPayload({ signal })
     ]);
     const timeout = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
@@ -282,31 +234,22 @@ async function startAuthenticatedUi(){
         reject(error);
       }, BOOTSTRAP_TIMEOUT_MS);
     });
-    const [status, finderRuns, finderLog, presets, settings] = await Promise.race([requests, timeout]);
-    if (epoch !== bootstrapEpoch || controller.signal.aborted) return;
-    state.statusLoading = false;
-    clearInitialSystemStatusRetry();
-    state.status = status;
-    state.settings = (settings || {}).settings || (status || {}).settings || {};
-    if (status && status.run_preferences) state.runPreferences = status.run_preferences;
-    if (status && status.candidate_version) syncCandidateVersion(status.candidate_version);
-    mergeRunPage(finderRuns, true);
-    if (finderLog && finderLog.progress) finderLog.progress.received_at_ms = Date.now();
-    state.finderLog = finderLog;
-    mergePresetResponse(presets);
-    showApplication();
-    renderAll({ skipCandidates: true });
-    bootstrapState = 'ready';
-    startRealtimeEvents();
-    startRealtimeFallback();
-  } catch (_error) {
-    if (epoch !== bootstrapEpoch || controller.signal.aborted) return;
-    controller.abort();
-    showBoot('failed');
+    return await Promise.race([requests, timeout]);
   } finally {
     if (timeoutId !== null) clearTimeout(timeoutId);
-    if (epoch === bootstrapEpoch) bootstrapController = null;
   }
+}
+function applyBootstrapPayload([status, finderRuns, finderLog, presets, settings]){
+  state.statusLoading = false;
+  clearInitialSystemStatusRetry();
+  // Rendering waits for SessionController.ready(), after the shell is mounted.
+  runState.mergeStatus(status);
+  state.settings = (settings || {}).settings || (status || {}).settings || {};
+  if (status && status.run_preferences) state.runPreferences = status.run_preferences;
+  if (status && status.candidate_version) syncCandidateVersion(status.candidate_version);
+  mergeRunPage(finderRuns, true);
+  runState.acceptLog(finderLog, false, mergeLogPayload);
+  mergePresetResponse(presets);
 }
 async function submitLogin(event){
   event.preventDefault();
@@ -315,46 +258,28 @@ async function submitLogin(event){
   const button = form.querySelector('button[type="submit"]');
   setLoginError('');
   button.disabled = true;
-  try {
-    const response = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ username: el('login-username').value, password: el('login-password').value })
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const apiError = data && typeof data.error === 'object' ? data.error : {};
-      throw new Error(apiError.message || data.message || 'Unable to sign in');
-    }
-    storeAuthToken(data);
-    startAuthenticatedUi();
-  } catch (error) {
-    setLoginError(error.message || 'Unable to sign in');
-  } finally {
-    button.disabled = false;
-  }
+  sessionController.login({ username: el('login-username').value, password: el('login-password').value }, (error) => setLoginError(error.message || 'Unable to sign in')).finally(() => { button.disabled = false; });
 }
 async function changePassword(){
   const form = el('change-password-form');
   const submitButton = form.querySelector('[type="submit"]');
   const status = el('change-password-status');
-  const currentPassword = el('settings-current-password').value;
-  const newPassword = el('settings-new-password').value;
+  const currentPasswordInput = el('settings-current-password');
+  const newPasswordInput = el('settings-new-password');
+  const currentPassword = currentPasswordInput.value;
+  const newPassword = newPasswordInput.value;
   form.setAttribute('aria-busy', 'true');
   submitButton.disabled = true;
   status.textContent = 'Пароль изменяется…';
   try {
-    await postJson('/api/auth/change-password', {
+    await sessionController.changePassword({
       current_password: currentPassword,
       new_password: newPassword
-    });
-    logout();
-  } catch (error) {
-    status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.';
+    }, () => { status.textContent = 'Не удалось изменить пароль. Проверьте текущий пароль и повторите попытку.'; });
   } finally {
-    el('settings-current-password').value = '';
-    el('settings-new-password').value = '';
+    // Successful password change removes the shell. These captured nodes stay safe to clear.
+    currentPasswordInput.value = '';
+    newPasswordInput.value = '';
     submitButton.disabled = false;
     form.removeAttribute('aria-busy');
   }
@@ -423,14 +348,18 @@ function runParams(offset){
   return params;
 }
 function mergeRunPage(payload, reset){
-  const rows = latestById((payload || {}).runs || []);
-  state.finderRuns = reset ? rows : latestById([...rows, ...state.finderRuns]);
-  state.finderRunTotal = Number((payload || {}).total || state.finderRuns.length);
-  state.finderRunOffset = Number((payload || {}).offset || 0) + ((payload || {}).runs || []).length;
-  state.finderRunHasMore = Boolean((payload || {}).has_more);
-  state.finderRunsLoaded = true;
-  state.finderRunsLoading = false;
-  convergeAcknowledgedRunFromHistory(rows);
+  const rows = runState.mergeHistory(payload, reset, latestById);
+  // A status-before-runs SSE sequence can establish a live current run while
+  // merging history.  History normally only drives the table/metrics, so make
+  // the status-derived consumers agree immediately instead of waiting for a
+  // later log or status event.  Bootstrap has no mounted shell yet and renders
+  // all views when ready.
+  if (runState.consumeHistoryStatusPromotion() && el('app-shell')) {
+    renderMetrics();
+    renderLiveRun();
+    renderEvents();
+  }
+  return rows;
 }
 function syncActiveTabUi(){
   document.querySelectorAll('.tab-button[data-tab]').forEach((button) => {
@@ -507,15 +436,13 @@ function latestRun(){
   return state.finderRuns.length ? state.finderRuns[state.finderRuns.length - 1] : null;
 }
 function currentRun(){
-  if (state.acknowledgedRun) return state.acknowledgedRun;
-  const run = (state.status || {}).current_run;
-  return run && typeof run === 'object' && run.run_id ? run : null;
+  return runState.current();
 }
 function isBusy(){
-  return Boolean(currentRun());
+  return runState.busy();
 }
 function isStartRequestInFlight(){
-  return Boolean(state.startRequestInFlight);
+  return runState.startInFlight();
 }
 function runIdForRow(row){
   return String((row || {}).run_id || (row || {}).id || '');
@@ -524,23 +451,13 @@ function isTerminalRunStatus(status){
   return ['success', 'failed', 'error', 'stopped', 'timeout'].includes(String(status || '').toLowerCase());
 }
 function acknowledgeRun(runId){
-  const generation = ++state.runGeneration;
-  state.acknowledgedRun = { run_id: runId, status: 'queued', generation };
-  state.finderLog = null;
-  return generation;
+  return runState.acknowledge(runId);
 }
 function acknowledgedRunIsCurrent(generation){
-  return Boolean(state.acknowledgedRun && state.acknowledgedRun.generation === generation);
+  return runState.isGenerationCurrent(generation);
 }
 function convergeAcknowledgedRunFromHistory(rows){
-  const acknowledged = state.acknowledgedRun;
-  if (!acknowledged) return;
-  const terminal = (rows || []).find((row) => runIdForRow(row) === acknowledged.run_id && isTerminalRunStatus(row.status));
-  if (!terminal) return;
-  state.acknowledgedRun = null;
-  if ((state.status || {}).current_run && runIdForRow(state.status.current_run) === acknowledged.run_id) {
-    state.status = { ...state.status, current_run: null };
-  }
+  return runState.convergeHistory(rows);
 }
 function mutatingBlocked(){
   return isBusy();
@@ -789,17 +706,20 @@ function useRunPreferencesOnce(){
     state.runPreferencesApplied = true;
   }
 }
-async function saveRunPreferencesNow(){
-  if (!state.runPreferencesApplied || state.loadingRunPreferences || state.savingRunPreferences) return;
+async function saveRunPreferencesNow(epoch = currentSessionEpoch()){
+  if (!sessionIsCurrent(epoch) || !state.runPreferencesApplied || state.loadingRunPreferences || state.savingRunPreferences) return false;
   state.savingRunPreferences = true;
   const payload = collectRunPreferences();
   try {
     const data = await postJson(apiEndpoint('web', 'runPreferences'), { run_preferences: payload });
+    if (!sessionIsCurrent(epoch)) return false;
     state.runPreferences = (data || {}).run_preferences || payload;
+    return true;
   } catch (_error) {
     // Best-effort persistence: the run itself must not fail because UI state was not saved.
+    return false;
   } finally {
-    state.savingRunPreferences = false;
+    if (sessionIsCurrent(epoch)) state.savingRunPreferences = false;
   }
 }
 const DISCOVERY_PROFILE_CONTROL_IDS = new Set(['scan-level']);
@@ -2703,10 +2623,10 @@ function backupDownloadUrl(snapshot){
 }
 async function downloadBackup(url, snapshotId){
   const id = String(snapshotId || '').trim();
+  const epoch = currentSessionEpoch();
   try {
-    const response = await authFetch(url);
-    if (!response.ok) throw new Error((await response.text()) || response.statusText);
-    const blob = await response.blob();
+    const { blob, response } = await apiClient.blob(url);
+    if (!sessionIsCurrent(epoch)) return;
     const disposition = response.headers.get('Content-Disposition') || '';
     const filenameMatch = /filename="?([^";]+)"?/i.exec(disposition);
     const filename = filenameMatch ? filenameMatch[1] : `gp-backup-${id || 'archive'}.zip`;
@@ -2719,6 +2639,7 @@ async function downloadBackup(url, snapshotId){
     link.remove();
     setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     setMessage(`Archive download failed: ${error.message}`, 'bad');
   }
 }function formatBytes(value){
@@ -3109,26 +3030,35 @@ async function saveSettingsPayload(payload){
   const runSettings = await postJson(apiEndpoint('core', 'saveRunSettings'), { settings: runSettingsPayloadFromSettings(payload) });
   return { settings: runSettings || {} };
 }
-async function saveLaunchTimeoutDefaultsNow(){
+async function saveLaunchTimeoutDefaultsNow(epoch = currentSessionEpoch()){
+  if (!sessionIsCurrent(epoch)) return false;
   const payload = currentSettingsFromForm();
   try {
     const data = await saveRunSettingsPayload(payload);
+    if (!sessionIsCurrent(epoch)) return false;
     state.settings = data.settings || { ...(state.settings || {}), ...payload };
     state.settingsTouched = false;
     renderRunLaunchSummary();
+    return true;
   } catch (_error) {
     // Best-effort persistence: the run payload already contains the selected timeout values.
+    return false;
   }
 }
 async function saveSettings(){
+  const epoch = currentSessionEpoch();
   try {
     const data = await saveSettingsPayload(currentSettingsFromForm());
+    if (!sessionIsCurrent(epoch)) return false;
     state.settings = data.settings || {};
     state.settingsTouched = false;
     renderSettings();
     setMessage('Настройки сохранены', 'good');
+    return true;
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return false;
     setMessage(`Ошибка сохранения настроек: ${error.message}`, 'bad');
+    return false;
   }
 }
 async function checkReleases(options = {}){
@@ -3963,21 +3893,17 @@ function mergeLogPayload(previous, next){
   }
   if (sameStdout && !next.stdout_tail && !next.stdout_append) next.stdout_tail = previous.stdout_tail || '';
   if (sameStderr && !next.stderr_tail && !next.stderr_append) next.stderr_tail = previous.stderr_tail || '';
+  // Snapshot reconciliation can provide an already reconstructed tail instead
+  // of an append.  Apply the same established per-stream window used above so
+  // a larger same-offset reply cannot bypass the 200-line live-tail bound.
+  if (sameStdout && next.stdout_tail) next.stdout_tail = trimTextLines(next.stdout_tail, 200);
+  if (sameStderr && next.stderr_tail) next.stderr_tail = trimTextLines(next.stderr_tail, 200);
   return next;
 }
 function mergeStatusPayload(status){
   if (!status) return false;
   const previousSettings = JSON.stringify(state.settings || {});
-  const acknowledged = state.acknowledgedRun;
-  const reportedRun = status.current_run && typeof status.current_run === 'object' ? status.current_run : null;
-  if (acknowledged) {
-    if (reportedRun && runIdForRow(reportedRun) === acknowledged.run_id) {
-      state.acknowledgedRun = { ...acknowledged, ...reportedRun, run_id: acknowledged.run_id, generation: acknowledged.generation };
-    }
-    state.status = { ...status, current_run: state.acknowledgedRun };
-  } else {
-    state.status = status;
-  }
+  runState.mergeStatus(status);
   if (status.candidate_version) syncCandidateVersion(status.candidate_version);
   if (status.settings) state.settings = status.settings;
   if (status.run_preferences) state.runPreferences = status.run_preferences;
@@ -3989,41 +3915,48 @@ function mergeStatusPayload(status){
   return settingsChanged;
 }
 async function refreshRuns(reset = true){
+  const epoch = currentSessionEpoch();
   const offset = reset ? 0 : state.finderRunOffset;
   state.finderRunsLoading = true;
   renderRuns();
   try {
     const finderRuns = await getJson(apiUrl('web', 'runHistoryPage', runParams(offset)));
+    if (!sessionIsCurrent(epoch)) return;
     mergeRunPage(finderRuns, reset);
     renderRuns();
     renderMetrics();
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     state.finderRunsLoading = false;
     renderRuns();
     setMessage(`Ошибка обновления истории: ${error.message}`, 'bad');
   }
 }
 async function refreshLog(incremental = false){
+  const epoch = currentSessionEpoch();
+  const logRequest = runState.captureLogRequest();
   try {
-    const previous = state.finderLog;
     const payload = await getJson(latestLogUrl(incremental));
-    if (state.acknowledgedRun && runIdForRow(payload) !== state.acknowledgedRun.run_id) return;
-    if (payload.progress) payload.progress.received_at_ms = Date.now();
-    state.finderLog = incremental ? mergeLogPayload(previous, payload) : payload;
+    if (!sessionIsCurrent(epoch)) return;
+    if (!runState.acceptLog(payload, incremental, mergeLogPayload, logRequest)) return;
     logDirty = false;
     renderLog();
     renderMetrics();
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     setMessage(`Ошибка обновления лога: ${error.message}`, 'bad');
   }
 }
 async function refreshPresets(){
+  const epoch = currentSessionEpoch();
   try {
     const presets = await getJson(apiEndpoint('web', 'presets'));
+    if (!sessionIsCurrent(epoch)) return;
     mergePresetResponse(presets);
     renderPresetSelects();
     renderPresetManager();
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     setMessage(`Ошибка обновления пресетов: ${error.message}`, 'bad');
   }
 }
@@ -4040,19 +3973,6 @@ function handleLogEvent(){
 function handleStatusEvent(payload){
   mergeStatusPayload(payload);
 }
-function parseSseEvent(frame){
-  let event = 'message';
-  const data = [];
-  for (const line of frame.split(/\r?\n/)) {
-    if (!line || line.startsWith(':')) continue;
-    const separator = line.indexOf(':');
-    const field = separator < 0 ? line : line.slice(0, separator);
-    const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
-    if (field === 'event') event = value;
-    if (field === 'data') data.push(value);
-  }
-  return { event, data: data.join('\n') };
-}
 function sseJson(data){
   try { return JSON.parse(data || '{}'); }
   catch (_error) { return {}; }
@@ -4065,69 +3985,8 @@ function handleRealtimeEvent(event, data){
   if (event === 'settings' && state.status) renderSettings();
   if (event === 'presets') refreshPresets();
 }
-async function readRealtimeStream(response, signal){
-  if (!response.body) throw new Error('SSE stream is unavailable');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  try {
-    while (!signal.aborted) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      const frames = buffer.split(/\r?\n\r?\n/);
-      buffer = frames.pop() || '';
-      for (const frame of frames) {
-        const parsed = parseSseEvent(frame);
-        if (parsed.data) handleRealtimeEvent(parsed.event, parsed.data);
-      }
-    }
-  } finally {
-    reader.cancel().catch(() => {});
-  }
-}
-function scheduleRealtimeReconnect(){
-  if (!authToken() || realtimeReconnectTimer) return;
-  const delay = realtimeReconnectDelay;
-  realtimeReconnectDelay = Math.min(realtimeReconnectDelay * 2, 30000);
-  realtimeReconnectTimer = setTimeout(() => {
-    realtimeReconnectTimer = null;
-    startRealtimeEvents();
-  }, delay);
-}
-async function connectRealtimeEvents(controller){
-  try {
-    const response = await authFetch(apiEndpoint('web', 'eventsStream'), {
-      headers: { Accept: 'text/event-stream' },
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(response.statusText || 'SSE connection failed');
-    if (controller.signal.aborted) return;
-    realtimeConnected = true;
-    realtimeReconnectDelay = 1000;
-    await readRealtimeStream(response, controller.signal);
-  } catch (error) {
-    if (!controller.signal.aborted) console.warn('Realtime connection stopped', error);
-  } finally {
-    if (realtimeSource === controller) realtimeSource = null;
-    realtimeConnected = false;
-    if (!controller.signal.aborted) scheduleRealtimeReconnect();
-  }
-}
-function startRealtimeEvents(options){
-  const alreadyStopped = Boolean(options && options.alreadyStopped);
-  if (!alreadyStopped) stopRealtimeEvents();
-  if (!authToken()) return;
-  const controller = new AbortController();
-  realtimeSource = controller;
-  connectRealtimeEvents(controller);
-}
-function startRealtimeFallback(){
-  if (realtimeFallbackTimer) clearInterval(realtimeFallbackTimer);
-  realtimeFallbackTimer = setInterval(() => {
-    if (!realtimeConnected) refresh({ light: true, silent: true });
-  }, 30000);
-}
+function startRealtimeEvents(){ realtimeController?.start(); }
+function startRealtimeFallback(){ realtimeController?._startFallback(); }
 function refreshRequestMap(light){
   const bootstrap = !light || !hasCompleteSystemStatus();
   const requests = {
@@ -4151,15 +4010,23 @@ function refreshFailureMessages(results){
     .map(([key, result]) => `${key}: ${result.reason && result.reason.message ? result.reason.message : String(result.reason || 'unknown')}`);
 }
 async function refresh(options = {}){
+  const epoch = currentSessionEpoch();
   if (refreshInFlight) return;
   refreshInFlight = true;
   if (!hasCompleteSystemStatus()) state.statusLoading = true;
   const light = Boolean(options.light);
+  const logRequest = runState.captureLogRequest();
   const { bootstrap, requests } = refreshRequestMap(light);
   const keys = Object.keys(requests);
   try {
     const settled = await Promise.allSettled(keys.map((key) => requests[key]));
+    if (!sessionIsCurrent(epoch)) return;
     const results = Object.fromEntries(keys.map((key, index) => [key, settled[index]]));
+    const finderRuns = settledValue(results, 'finderRuns');
+    // History is identity evidence for a distinct server-observed run. Apply it
+    // before status so post-terminal stale data remains rejected while a fresh
+    // external run is allowed through the same refresh.
+    if (finderRuns) mergeRunPage(finderRuns, true);
     const status = settledValue(results, 'status');
     if (hasCompleteSystemStatus(status)) {
       state.statusLoading = false;
@@ -4172,13 +4039,8 @@ async function refresh(options = {}){
     }
     const settings = settledValue(results, 'settings');
     if (settings) state.settings = (settings || {}).settings || (status || {}).settings || state.settings || {};
-    const finderRuns = settledValue(results, 'finderRuns');
-    if (finderRuns) mergeRunPage(finderRuns, true);
     const finderLog = settledValue(results, 'finderLog');
-    if (finderLog && (!state.acknowledgedRun || runIdForRow(finderLog) === state.acknowledgedRun.run_id)) {
-      if (finderLog.progress) finderLog.progress.received_at_ms = Date.now();
-      state.finderLog = finderLog;
-    }
+    if (finderLog) runState.acceptLog(finderLog, false, mergeLogPayload, logRequest);
     const presets = settledValue(results, 'presets');
     if (presets) mergePresetResponse(presets);
     if (bootstrap) renderAll({ skipCandidates: true });
@@ -4195,12 +4057,15 @@ async function refresh(options = {}){
       setMessage(`${prefix}: ${failures.slice(0, 3).join('; ')}`, failures.length === keys.length ? 'bad' : 'warn');
     }
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     if (!options.silent) setMessage(`Ошибка обновления: ${error.message}`, 'bad');
   } finally {
     refreshInFlight = false;
   }
 }
 async function refreshAcknowledgedRun(generation){
+  const epoch = currentSessionEpoch();
+  const logRequest = runState.captureLogRequest();
   const requests = {
     status: getJson(apiEndpoint('web', 'status')),
     finderRuns: getJson(apiUrl('web', 'runHistoryPage', runParams(0))),
@@ -4208,34 +4073,40 @@ async function refreshAcknowledgedRun(generation){
   };
   const keys = Object.keys(requests);
   const settled = await Promise.allSettled(keys.map((key) => requests[key]));
-  if (!acknowledgedRunIsCurrent(generation)) return;
+  if (!sessionIsCurrent(epoch)) return;
+  // Establish whether this response batch was for the accepted generation
+  // before its matching history is allowed to converge it to terminal.  That
+  // convergence must not discard the final log returned by the same batch.
+  const generationWasCurrent = acknowledgedRunIsCurrent(generation);
+  if (!generationWasCurrent) return;
   const results = Object.fromEntries(keys.map((key, index) => [key, settled[index]]));
+  const finderRuns = settledValue(results, 'finderRuns');
+  if (finderRuns) mergeRunPage(finderRuns, true);
   const status = settledValue(results, 'status');
   if (status) mergeStatusPayload(status);
   const finderLog = settledValue(results, 'finderLog');
-  if (finderLog && acknowledgedRunIsCurrent(generation) && runIdForRow(finderLog) === state.acknowledgedRun.run_id) {
-    if (finderLog.progress) finderLog.progress.received_at_ms = Date.now();
-    state.finderLog = mergeLogPayload(state.finderLog, finderLog);
+  if (finderLog && runState.acceptLog(finderLog, true, mergeLogPayload, logRequest)) {
     logDirty = false;
   }
-  const finderRuns = settledValue(results, 'finderRuns');
-  if (finderRuns && acknowledgedRunIsCurrent(generation)) mergeRunPage(finderRuns, true);
   renderRuns();
   renderLog();
   renderMetrics();
   renderEvents();
 }
 async function refreshBackups(){
+  const epoch = currentSessionEpoch();
   state.backupsLoading = true;
   renderBackups();
   try {
     const data = await getJson(apiEndpoint('core', 'backupsList'));
+    if (!sessionIsCurrent(epoch)) return;
     state.backups = backupListFromPayload(data);
     state.backupsLoaded = true;
     state.backupsUpdatedAt = new Date().toISOString();
     state.backupsLoading = false;
     renderBackups();
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     state.backupsLoading = false;
     renderBackups();
     setMessage(`Ошибка загрузки сохранений: ${error.message}`, 'bad');
@@ -4316,20 +4187,31 @@ function backupBusyMessage(action){
   return 'Подбор идет. Бекап можно создать после остановки или завершения';
 }
 async function uploadBackup(){
+  const epoch = currentSessionEpoch();
   const input = el('backup-upload-file');
   const file = input && input.files ? input.files[0] : null;
   if (!file) {
     setMessage('Выберите ZIP-архив бекапа', 'warn');
     return;
   }
+  let response = null;
   try {
-    const response = await authFetch(apiEndpoint('core', 'backupsUpload'), {
+    response = await authFetch(apiEndpoint('core', 'backupsUpload'), {
       method: 'POST',
       headers: requestHeaders({ 'Content-Type': 'application/zip' }),
       credentials: 'same-origin',
       body: file
     });
-    const data = await response.json().catch(() => ({}));
+    if (!sessionIsCurrent(epoch)) return;
+    let data;
+    try {
+      data = await response.json();
+    } catch (error) {
+      if (response.ok) throw error;
+      data = {};
+    }
+    apiClient.assertResponseCurrent(response);
+    if (!sessionIsCurrent(epoch)) return;
     if (!response.ok) {
       const apiError = data && typeof data.error === 'object' ? data.error : {};
       if (response.status === 409 && apiError.code === 'runtime_busy') {
@@ -4342,20 +4224,25 @@ async function uploadBackup(){
     input.value = '';
     await refreshBackups();
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     setMessage(`Ошибка загрузки бекапа: ${error.message}`, 'bad');
+  } finally {
+    apiClient.releaseResponse(response);
   }
 }
-async function startJob(url, payload, text){
-  if (isBusy() || isStartRequestInFlight()) return null;
-  state.startRequestInFlight = true;
+async function startJob(url, payload, text, expectedEpoch){
+  const epoch = expectedEpoch === undefined ? currentSessionEpoch() : expectedEpoch;
+  if (!sessionIsCurrent(epoch) || isBusy() || isStartRequestInFlight()) return null;
+  runState.setStartInFlight(true);
   renderMetrics();
   try {
     setMessage(`Отправляем запрос на запуск: ${text}`, 'warn');
     const response = await postJson(url, payload || {});
+    if (!sessionIsCurrent(epoch)) return null;
     const runId = response?.run_id || '';
     if (!runId) throw new Error('Сервер не вернул идентификатор принятого запуска');
     const generation = acknowledgeRun(runId);
-    state.startRequestInFlight = false;
+    runState.setStartInFlight(false);
     setMessage(`Запуск подтверждён: ${runId}`, 'good');
     renderAll({ skipCandidates: true });
     refreshAcknowledgedRun(generation).catch((error) => {
@@ -4363,8 +4250,9 @@ async function startJob(url, payload, text){
     });
     return response;
   } catch (error) {
-    state.acknowledgedRun = null;
-    state.startRequestInFlight = false;
+    if (!sessionIsCurrent(epoch)) return null;
+    runState.rejectAccepted();
+    runState.setStartInFlight(false);
     setMessage(error.message, 'bad');
     renderMetrics();
     return null;
@@ -4389,6 +4277,7 @@ function coreStrategyDiscoveryPayload(mode, domains, options, timeout){
 }
 async function startSelectedDiscovery(){
   if (isBusy() || isStartRequestInFlight()) return;
+  const epoch = currentSessionEpoch();
   const options = discoveryOptions();
   if (!hasEnabledProtocol(options)) {
     setMessage('Выберите хотя бы один протокол для проверки', 'bad');
@@ -4402,17 +4291,22 @@ async function startSelectedDiscovery(){
   }
   const timeout = timeoutSecondsOrNull();
   const payload = coreStrategyDiscoveryPayload(mode, domains, options, timeout);
-  await saveLaunchTimeoutDefaultsNow();
-  await saveRunPreferencesNow();
+  await saveLaunchTimeoutDefaultsNow(epoch);
+  if (!sessionIsCurrent(epoch)) return;
+  await saveRunPreferencesNow(epoch);
+  if (!sessionIsCurrent(epoch)) return;
   const title = mode === 'multi' ? 'Все домены на одной стратегии' : 'Поиск стратегий';
-  await startJob(apiEndpoint('core', 'startStrategyDiscoveryRun'), payload, title);
+  await startJob(apiEndpoint('core', 'startStrategyDiscoveryRun'), payload, title, epoch);
 }
 async function stopCurrentJob(){
+  const epoch = currentSessionEpoch();
   try {
     await postJson(apiEndpoint('core', 'stopCurrentStrategyDiscoveryRun'), {});
+    if (!sessionIsCurrent(epoch)) return;
     setMessage('Остановка подбора запрошена', 'warn');
     await refresh();
   } catch (error) {
+    if (!sessionIsCurrent(epoch)) return;
     setMessage(error.message, 'bad');
     await refresh();
   }
@@ -4789,6 +4683,42 @@ document.addEventListener('toggle', (event) => {
     state.openRunDomains[details.dataset.runDomains] = details.open;
   }
 }, true);
+function initializeUiControllers(){
+  runState = new RunState(state, { runId: runIdForRow, terminal: isTerminalRunStatus });
+  apiClient = new ApiClient({
+    getToken: authToken,
+    getEpoch: currentSessionEpoch,
+    isEpochCurrent: sessionIsCurrent,
+    getSignal: () => sessionController ? sessionController.signal() : null,
+    onUnauthorized: handleUnauthorized
+  });
+  realtimeController = new RealtimeController({
+    api: apiClient,
+    url: () => apiEndpoint('web', 'eventsStream'),
+    onEvent: handleRealtimeEvent,
+    onConnection: (connected) => { realtimeConnected = connected; },
+    fallback: () => refresh({ light: true, silent: true }),
+    isActive: () => Boolean(authToken())
+  });
+  sessionController = new SessionController({
+    api: apiClient,
+    token: { get: authToken, store: storeAuthToken, clear: () => localStorage.removeItem(AUTH_TOKEN_KEY) },
+    realtime: realtimeController,
+    ui: {
+      begin: () => runState.resetForSession(),
+      boot: showBoot,
+      login: showLogin,
+      load: loadBootstrapPayload,
+      apply: applyBootstrapPayload,
+      ready: () => {
+        showApplication();
+        renderAll({ skipCandidates: true });
+        bootstrapState = 'ready';
+      }
+    }
+  });
+}
+initializeUiControllers();
 el('boot-retry').addEventListener('click', () => {
   if (bootstrapState === 'failed') startAuthenticatedUi();
 });

@@ -16,9 +16,15 @@ from gp_control_plane.web.ui import index_html
 from gp_control_plane.web import ui_assets
 
 
-_HTML_SHA256 = "14744d583d5ec82157f1fcf111e384151d281b41463730a1f2ac94fda87522a5"
+_HTML_SHA256 = "247e232757e6a6937f79a232c0d9626774db2ab69ece27491874ff16331133d7"
 _CSS_SHA256 = "06f9628dcb7bf57f8a31cb61ed2d09fdfee550c706a1bb154fdba948463a2825"
-_SCRIPT_SHA256 = "5ce28aae08e717f072cf457f946612105be5ca97fbf87ccc8975a4e113c7ecc0"
+_SCRIPT_SHA256S = {
+    "api-client.js": "9974e9abcdd283ff36f63c8b96c36ba11221bebc789963461ff282d5aa250203",
+    "run-state.js": "7f5ce0f81e9559aa83593fb844d8398342f070c80645a2d5a30d5295d02a4c4a",
+    "realtime-controller.js": "2baf5be952f73cd4a9e1a44542cfb6d39ee94911da33dfc2534244b75ac30d54",
+    "session-controller.js": "1caf688ea2d6601e0858b6b418884e26b1bd5c748631d882dd648d715ca4c1b8",
+    "legacy-runtime.js": "2ca2f6912e4579897df317f5a880672705f36bf075104c7e9762491eac4749f8",
+}
 
 
 class UiAssetsTests(unittest.TestCase):
@@ -38,9 +44,11 @@ class UiAssetsTests(unittest.TestCase):
         self.assertEqual(_HTML_SHA256, hashlib.sha256(html.encode("utf-8")).hexdigest())
         self.assertEqual(html, ui_assets.render_index_html())
         css = ui_assets._read_resource("styles/app.css")
-        script = ui_assets._read_resource("scripts/legacy-runtime.js")
+        scripts = [ui_assets._read_resource(f"scripts/{name}") for name in _SCRIPT_SHA256S]
+        script = "\n".join(scripts)
         self.assertEqual(_CSS_SHA256, hashlib.sha256(css.encode("utf-8")).hexdigest())
-        self.assertEqual(_SCRIPT_SHA256, hashlib.sha256(script.encode("utf-8")).hexdigest())
+        for name, expected_hash in _SCRIPT_SHA256S.items():
+            self.assertEqual(expected_hash, hashlib.sha256(ui_assets._read_resource(f"scripts/{name}").encode("utf-8")).hexdigest())
         self.assertIn("<style>" + css + "</style>", html)
         self.assertIn("<script>" + script + "</script>", html)
 
