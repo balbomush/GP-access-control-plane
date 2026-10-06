@@ -1,5 +1,76 @@
 from __future__ import annotations
 
+from . import discovery_progress as _progress_calculation, candidate_queries as _candidate_queries
+from .discovery_constants import CRITICAL_DOMAINS, DIAGNOSTIC_DOMAINS, COVERAGE_DOMAINS, GOOGLE_YOUTUBE_DOMAINS, DISCORD_DOMAINS, CLOUDFLARE_DOMAINS, AMAZON_AWS_DOMAINS, ATTEMPT_TIMEOUT_ESTIMATE_MS, ETA_SAMPLE_MIN_ATTEMPTS, ETA_SAMPLE_MAX_POINTS, ETA_SAMPLE_WINSORIZE_MIN_INTERVALS, ETA_SAMPLE_WINSORIZE_RATIO, ETA_RECALC_SMALL_STEP, ETA_RECALC_LARGE_STEP, ETA_RECALC_LARGE_AFTER, LIVE_CANDIDATE_FLUSH_SIZE, LIVE_CANDIDATE_QUEUE_MAX_BATCHES, LIVE_CANDIDATE_SAMPLE_LIMIT, METRICS_INTERVAL_SECONDS, METRICS_MAX_BYTES, STDOUT_LOG_MAX_BYTES, DEBUG_STDOUT_LOG_MAX_BYTES, LOG_RETENTION_MAX_FILES, LOG_RETENTION_MAX_TOTAL_BYTES, LOG_RETENTION_SUFFIXES, PHASE_CHECK_VPN, PHASE_CHECK_ZAPRET, PHASE_CHECK_DOMAIN, PHASE_DISCOVERY, PHASE_SUMMARY, PHASE_SAVING, PHASE_COMPLETE, PHASE_LABELS, _ATTEMPT_RE, _SCRIPT_RE, _HOSTNAME_RE, _DOMAIN_LIST_PREFIXES, _SERVICE_DOMAIN_SUFFIXES, _CURL_FAILURE_INFO, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, CORE_CANDIDATE_JSON_MAX_RESULTS, CANDIDATE_RELATION_BATCH_SIZE, NFQUEUE_MAXLEN_MISSING_RE
+from .discovery_values import _truthy
+from .discovery_values import _bounded_int
+from .discovery_values import _minimum_int
+from .discovery_domains import domain_sets
+from .discovery_domains import classify_domain_input
+from .discovery_domains import validate_domain_inputs
+from .discovery_domains import curl_failure_info
+from .discovery_domains import _domain_classification
+from .discovery_domains import _is_service_domain
+from .discovery_domains import _clean_domains
+from .discovery_domains import _clean_domain_list
+from .discovery_parsing import classify_stderr_diagnostics
+from .discovery_parsing import parse_blockcheck_stdout
+from .discovery_parsing import _summary_sections
+from .discovery_parsing import _summary_lines
+from .discovery_parsing import _dedupe_candidate_lines
+from .discovery_parsing import _candidate_lines
+from .discovery_parsing import _candidate_from_result_line
+from .discovery_parsing import _parse_result_line
+from .discovery_parsing import _live_success_lines
+from .discovery_parsing import _candidate_from_live_success_line
+from .discovery_parsing import _live_available_lines
+from .discovery_parsing import _diagnostic_counts_from_stdout
+from .discovery_parsing import _increment_nested
+from .discovery_parsing import _curl_summary
+from .discovery_parsing import _live_attempt_line
+from .discovery_parsing import _curl_code_from_line
+from .discovery_parsing import _is_strategy_failure
+from .discovery_parsing import _domain_status_info
+from .discovery_parsing import _domain_diagnostics_from_counts
+from .discovery_parsing import _dominant_failure_from_counts
+from .discovery_parsing import _dominant_status
+from .discovery_parsing import _protocol_from_test
+from .discovery_progress import _strategy_progress_from_attempts
+from .discovery_progress import _attempts_by_script
+from .discovery_progress import _average_attempt_ms
+from .discovery_progress import _winsorized
+from .discovery_progress import _phase_label
+from .discovery_progress import _phase_from_line
+from .discovery_progress import _script_name_from_line
+from .discovery_progress import _eta_parallelism_for_run
+from .discovery_progress import _eta_ms_per_attempt_for_run
+from .discovery_progress import _eta_recalculation_step
+from .discovery_progress import _eta_recalculation_attempts
+from .discovery_progress import _elapsed_average_ms_per_attempt
+from .discovery_progress import _eta_from_remaining_attempts
+from .candidate_queries import _read_candidate_page_sql
+from .candidate_queries import _candidate_core_filters
+from .candidate_queries import _candidate_filter_payload
+from .candidate_queries import _filtered_candidate_total
+from .candidate_queries import _iter_filtered_candidate_rows
+from .candidate_queries import _filtered_candidate_where
+from .candidate_queries import _placeholders
+from .candidate_queries import _unique_nonempty_strings
+from .candidate_queries import _read_candidate_domain_index_sql
+from .candidate_queries import _strategy_query_clause
+from .candidate_queries import _clean_fragmentation_classes
+from .candidate_queries import _fragmentation_query_clause
+from .candidate_queries import _iter_db_candidates
+from .candidate_queries import _candidates_from_db_rows
+from .candidate_queries import _iter_candidates_from_db_rows
+from .candidate_queries import _candidate_domain_maps
+from .candidate_queries import _candidate_from_db
+from .candidate_queries import _tested_domains_from_db
+from .candidate_queries import _candidate_domains
+from .candidate_queries import _candidate_common_domains
+from .candidate_queries import _compact_candidate
+
+
 import hashlib
 import json
 import os
@@ -40,220 +111,9 @@ from .zapret2 import (
 )
 
 
-CRITICAL_DOMAINS = ["youtube.com", "googlevideo.com", "discord.com", "discordcdn.com"]
-DIAGNOSTIC_DOMAINS = ["web.telegram.org"]
-COVERAGE_DOMAINS = [
-    "youtu.be",
-    "googleapis.com",
-    "i.ytimg.com",
-    "i9.ytimg.com",
-    "yt3.ggpht.com",
-    "yt3.googleusercontent.com",
-    "yt4.ggpht.com",
-    "yt4.googleusercontent.com",
-    "gvt1.com",
-    "gstatic.com",
-    "youtube-ui.l.google.com",
-    "ytimg.l.google.com",
-    "ytstatic.l.google.com",
-    "play.google.com",
-    "discord-attachments-uploads-prd.storage.googleapis.com",
-    "dis.gd",
-    "discord.co",
-    "discord.com",
-    "discord.design",
-    "discord.dev",
-    "discord.gg",
-    "discord.gift",
-    "discord.gifts",
-    "discord.media",
-    "discord.new",
-    "discord.store",
-    "discord.tools",
-    "discordapp.com",
-    "discordapp.net",
-    "discordmerch.com",
-    "discordpartygames.com",
-    "discord-activities.com",
-    "discordactivities.com",
-    "discordsays.com",
-    "discordstatus.com",
-    "speedtest.net",
-    "cloudflare-ech.com",
-]
-GOOGLE_YOUTUBE_DOMAINS = [
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
-    "youtube-nocookie.com",
-    "youtubei.googleapis.com",
-    "youtube.googleapis.com",
-    "googlevideo.com",
-    "video.google.com",
-    "i.ytimg.com",
-    "i9.ytimg.com",
-    "ytimg.com",
-    "yt3.ggpht.com",
-    "yt3.googleusercontent.com",
-    "yt4.ggpht.com",
-    "yt4.googleusercontent.com",
-    "ggpht.com",
-    "gstatic.com",
-    "gvt1.com",
-    "googleapis.com",
-    "googleusercontent.com",
-    "play.google.com",
-]
-DISCORD_DOMAINS = [
-    "discord.com",
-    "discord.gg",
-    "discordapp.com",
-    "discordapp.net",
-    "discordcdn.com",
-    "discord.media",
-    "discord.co",
-    "discord.design",
-    "discord.dev",
-    "discord.gift",
-    "discord.gifts",
-    "discord.new",
-    "discord.store",
-    "discord.tools",
-    "discordmerch.com",
-    "discordpartygames.com",
-    "discord-activities.com",
-    "discordactivities.com",
-    "discordsays.com",
-    "discordstatus.com",
-    "dis.gd",
-    "discord-attachments-uploads-prd.storage.googleapis.com",
-]
-CLOUDFLARE_DOMAINS = [
-    "cloudflare.com",
-    "www.cloudflare.com",
-    "cloudflare-dns.com",
-    "cloudflare-ech.com",
-    "cloudflareclient.com",
-    "cloudflareinsights.com",
-    "cdnjs.cloudflare.com",
-    "workers.dev",
-    "pages.dev",
-]
-AMAZON_AWS_DOMAINS = [
-    "amazon.com",
-    "www.amazon.com",
-    "amazonaws.com",
-    "aws.amazon.com",
-    "cloudfront.net",
-    "s3.amazonaws.com",
-    "ec2.amazonaws.com",
-    "globalaccelerator.amazonaws.com",
-    "media-amazon.com",
-    "ssl-images-amazon.com",
-    "images-na.ssl-images-amazon.com",
-]
 
-ATTEMPT_TIMEOUT_ESTIMATE_MS = 2100
-ETA_SAMPLE_MIN_ATTEMPTS = 3
-ETA_SAMPLE_MAX_POINTS = 201
-ETA_SAMPLE_WINSORIZE_MIN_INTERVALS = 20
-ETA_SAMPLE_WINSORIZE_RATIO = 0.1
-ETA_RECALC_SMALL_STEP = 10
-ETA_RECALC_LARGE_STEP = 100
-ETA_RECALC_LARGE_AFTER = 1000
-LIVE_CANDIDATE_FLUSH_SIZE = 50
-LIVE_CANDIDATE_QUEUE_MAX_BATCHES = 128
-LIVE_CANDIDATE_SAMPLE_LIMIT = 200
 _CANDIDATE_WRITER_STOP = object()
-METRICS_INTERVAL_SECONDS = 10.0
-METRICS_MAX_BYTES = 1_000_000
-STDOUT_LOG_MAX_BYTES = 2_000_000
-DEBUG_STDOUT_LOG_MAX_BYTES = 10_000_000
-LOG_RETENTION_MAX_FILES = 120
-LOG_RETENTION_MAX_TOTAL_BYTES = 100_000_000
-LOG_RETENTION_SUFFIXES = (
-    ".stdout.log",
-    ".stderr.log",
-    ".debug.stdout.log",
-    ".progress.json",
-    ".metrics.ndjson",
-    ".summary-fallback.ndjson",
-)
-PHASE_CHECK_VPN = "checking_vpn"
-PHASE_CHECK_ZAPRET = "checking_zapret"
-PHASE_CHECK_DOMAIN = "checking_domain"
-PHASE_DISCOVERY = "strategy_discovery"
-PHASE_SUMMARY = "strategy_summary"
-PHASE_SAVING = "saving_results"
-PHASE_COMPLETE = "complete"
-PHASE_LABELS = {
-    PHASE_CHECK_VPN: "проверка VPN",
-    PHASE_CHECK_ZAPRET: "проверка zapret",
-    PHASE_CHECK_DOMAIN: "проверка доступности домена",
-    PHASE_DISCOVERY: "подбор стратегий",
-    PHASE_SUMMARY: "суммаризация стратегий",
-    PHASE_SAVING: "сохранение результатов",
-    PHASE_COMPLETE: "завершено",
-}
 _ATTEMPT_PLAN_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
-_ATTEMPT_RE = re.compile(r"^-\s+curl_test_")
-_SCRIPT_RE = re.compile(r"^\*\s+script\s+:\s+(.+)$")
-_HOSTNAME_RE = re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
-    re.IGNORECASE,
-)
-_DOMAIN_LIST_PREFIXES = ("domain:", "full:", "keyword:", "regexp:", "include:", "geosite:")
-_SERVICE_DOMAIN_SUFFIXES = (
-    "googlevideo.com",
-    "googleapis.com",
-    "googleusercontent.com",
-    "gstatic.com",
-    "gvt1.com",
-    "ggpht.com",
-    "cloudflare-ech.com",
-    "cloudfront.net",
-    "amazonaws.com",
-    "discordcdn.com",
-)
-_CURL_FAILURE_INFO = {
-    "3": {
-        "status": "invalid_domain",
-        "label": "некорректная строка домена",
-        "message": "curl не смог разобрать строку как домен или URL.",
-    },
-    "6": {
-        "status": "dns_error",
-        "label": "DNS ошибка",
-        "message": "домен не резолвится или DNS не вернул адрес.",
-    },
-    "7": {
-        "status": "quic_connect_error",
-        "label": "QUIC/connect ошибка",
-        "message": "соединение не установилось; для HTTP3/QUIC это отдельный сетевой сбой.",
-    },
-    "28": {
-        "status": "timeout",
-        "label": "таймаут",
-        "message": "соединение не завершилось за лимит времени.",
-    },
-    "35": {
-        "status": "ssl_connect_error",
-        "label": "SSL/connect ошибка",
-        "message": "ошибка TLS/SSL или уровня соединения.",
-    },
-    "60": {
-        "status": "tls_sni_problem",
-        "label": "TLS/SNI проблема",
-        "message": "сертификат или hostname не совпали; для service-доменов это не всегда провал стратегии.",
-    },
-}
-DEFAULT_PAGE_LIMIT = 50
-MAX_PAGE_LIMIT = 200
-CORE_CANDIDATE_JSON_MAX_RESULTS = 1000
-CANDIDATE_RELATION_BATCH_SIZE = 500
-NFQUEUE_MAXLEN_MISSING_RE = re.compile(r"can't set queue maxlen:\s+No such file or directory", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -340,162 +200,22 @@ class DiscoveryOptions:
         }
 
 
-def domain_sets() -> dict[str, list[str]]:
-    return {
-        "critical": list(CRITICAL_DOMAINS),
-        "diagnostic": list(DIAGNOSTIC_DOMAINS),
-        "coverage": list(COVERAGE_DOMAINS),
-        "google-youtube": list(GOOGLE_YOUTUBE_DOMAINS),
-        "discord": list(DISCORD_DOMAINS),
-        "cloudflare": list(CLOUDFLARE_DOMAINS),
-        "amazon-aws": list(AMAZON_AWS_DOMAINS),
-    }
 
 
-def classify_domain_input(value: Any) -> dict[str, Any]:
-    raw = str(value or "").strip()
-    if not raw:
-        return _domain_classification(raw, "", False, "empty", "пустая строка", "строка домена пустая")
-    lowered = raw.lower()
-    if lowered.startswith(_DOMAIN_LIST_PREFIXES):
-        prefix = lowered.split(":", 1)[0]
-        return _domain_classification(
-            raw,
-            "",
-            False,
-            "domain_list_rule",
-            "некорректная строка домена",
-            f"строка выглядит как правило domain-list ({prefix}:), а не как готовый домен",
-        )
-    if raw.startswith("*.") or "*" in raw:
-        return _domain_classification(
-            raw,
-            "",
-            False,
-            "wildcard",
-            "некорректная строка домена",
-            "wildcard-строки нельзя передавать в curl как один домен",
-        )
-    if "://" in raw or any(char in raw for char in "/?#[]@"):
-        return _domain_classification(
-            raw,
-            "",
-            False,
-            "url",
-            "некорректная строка домена",
-            "ожидается домен без схемы, пути и query-параметров",
-        )
-    if ":" in raw:
-        return _domain_classification(
-            raw,
-            "",
-            False,
-            "port_or_ipv6",
-            "некорректная строка домена",
-            "ожидается домен без порта и без IPv6-литерала",
-        )
-    domain = raw.rstrip(".").lower()
-    try:
-        ascii_domain = domain.encode("idna").decode("ascii")
-    except UnicodeError:
-        return _domain_classification(
-            raw,
-            "",
-            False,
-            "idna",
-            "некорректная строка домена",
-            "домен не удалось привести к IDNA-формату",
-        )
-    if not _HOSTNAME_RE.match(ascii_domain):
-        return _domain_classification(
-            raw,
-            "",
-            False,
-            "hostname",
-            "некорректная строка домена",
-            "строка не похожа на обычный DNS hostname",
-        )
-    domain_type = "service" if _is_service_domain(ascii_domain) else "https"
-    label = "service-домен" if domain_type == "service" else "обычный HTTPS-домен"
-    message = (
-        "у service-доменов прямой curl может давать TLS/SNI code=60 из-за hostname/сертификата"
-        if domain_type == "service"
-        else "строка подходит для проверки curl/blockcheck2"
-    )
-    return _domain_classification(raw, ascii_domain, True, domain_type, label, message)
 
 
-def validate_domain_inputs(domains: list[Any], *, default_to_critical: bool = False) -> dict[str, Any]:
-    raw_values = [str(domain).strip() for domain in domains if str(domain or "").strip()]
-    if not raw_values and default_to_critical:
-        raw_values = list(CRITICAL_DOMAINS)
-    valid: list[str] = []
-    seen: set[str] = set()
-    classification: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for raw in raw_values:
-        item = classify_domain_input(raw)
-        if item["valid"]:
-            domain = str(item["domain"])
-            if domain not in seen:
-                valid.append(domain)
-                seen.add(domain)
-                classification.append(item)
-            continue
-        skipped.append(item)
-    summary: dict[str, int] = {}
-    for item in [*classification, *skipped]:
-        status = str(item.get("status") or "unknown")
-        summary[status] = summary.get(status, 0) + 1
-    return {
-        "input_count": len(raw_values),
-        "valid_count": len(valid),
-        "skipped_count": len(skipped),
-        "domains": valid,
-        "domain_classification": classification,
-        "domain_skipped": skipped,
-        "summary": summary,
-    }
 
 
-def curl_failure_info(code: Any, *, test: str = "", domain: str = "") -> dict[str, Any]:
-    code_text = str(code or "").strip()
-    base = dict(
-        _CURL_FAILURE_INFO.get(
-            code_text,
-            {
-                "status": "curl_error",
-                "label": "curl ошибка",
-                "message": "curl вернул ошибку, для которой пока нет отдельной трактовки.",
-            },
-        )
-    )
-    if code_text == "7" and "http3" not in str(test).lower():
-        base["label"] = "connect ошибка"
-        base["message"] = "соединение не установилось."
-    if code_text == "60" and _is_service_domain(str(domain or "")):
-        base["service_domain"] = True
-        base["message"] = (
-            "service-домен вернул TLS/SNI mismatch; это надо показывать отдельно от провала стратегии."
-        )
-    base["code"] = code_text
-    return base
 
 
-def _domain_classification(raw: str, domain: str, valid: bool, status: str, label: str, message: str) -> dict[str, Any]:
-    return {
-        "raw": raw,
-        "domain": domain,
-        "valid": valid,
-        "status": status,
-        "label": label,
-        "message": message,
-    }
 
 
-def _is_service_domain(domain: str) -> bool:
-    value = str(domain or "").lower().rstrip(".")
-    return any(value == suffix or value.endswith(f".{suffix}") for suffix in _SERVICE_DOMAIN_SUFFIXES)
+
+
+
+
+
+
 
 
 def _domain_validation_run_fields(validation: dict[str, Any]) -> dict[str, Any]:
@@ -628,17 +348,8 @@ def run_multi_domain_discovery(
 
 
 def read_candidates(state_dir: Path) -> list[dict[str, Any]]:
-    with connect(state_dir) as conn:
-        rows = conn.execute(
-            """
-            SELECT id, protocol, args, status,
-                   fragmentation_class, fragmentation_safe, fragmentation_reason,
-                   family, family_key, family_rank, family_reason
-            FROM strategies
-            ORDER BY id ASC
-            """
-        ).fetchall()
-        return _candidates_from_db_rows(conn, rows, include_events=True)
+    return _candidate_queries.read_candidates(state_dir, _connect=connect)
+
 
 
 def read_strategy_candidates_filtered(
@@ -652,23 +363,8 @@ def read_strategy_candidates_filtered(
     query: str = "",
     max_results: int = CORE_CANDIDATE_JSON_MAX_RESULTS,
 ) -> dict[str, Any]:
-    filters = _candidate_core_filters(
-        domains=domains or [],
-        strategy_ids=strategy_ids or [],
-        protocols=protocols or [],
-        source_modes=source_modes or [],
-        families=families or [],
-        query=query,
-    )
-    with connect(state_dir) as conn:
-        total = _filtered_candidate_total(conn, filters)
-        if total > max_results:
-            raise ValueError(
-                f"strategy candidate result is too large ({total}); narrow filters or use /api/core/strategy-candidates/export"
-            )
-        rows = list(_iter_filtered_candidate_rows(conn, filters))
-        candidates = _candidates_from_db_rows(conn, rows, include_events=True)
-    return {"candidates": candidates, "total": total, "filters": _candidate_filter_payload(filters)}
+    return _candidate_queries.read_strategy_candidates_filtered(state_dir, domains=domains, strategy_ids=strategy_ids, protocols=protocols, source_modes=source_modes, families=families, query=query, max_results=max_results, _connect=connect)
+
 
 
 def iter_strategy_candidates_filtered(
@@ -681,16 +377,8 @@ def iter_strategy_candidates_filtered(
     families: list[str] | None = None,
     query: str = "",
 ) -> Iterator[dict[str, Any]]:
-    filters = _candidate_core_filters(
-        domains=domains or [],
-        strategy_ids=strategy_ids or [],
-        protocols=protocols or [],
-        source_modes=source_modes or [],
-        families=families or [],
-        query=query,
-    )
-    with connect(state_dir) as conn:
-        yield from _iter_candidates_from_db_rows(conn, _iter_filtered_candidate_rows(conn, filters), include_events=True)
+    return _candidate_queries.iter_strategy_candidates_filtered(state_dir, domains=domains, strategy_ids=strategy_ids, protocols=protocols, source_modes=source_modes, families=families, query=query, _connect=connect)
+
 
 
 def read_candidate_page(
@@ -704,68 +392,13 @@ def read_candidate_page(
     domain: str = "",
     fragmentation_classes: list[str] | None = None,
 ) -> dict[str, Any]:
-    limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
-    offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
-    query = query.strip().lower()
-    view = view if view in {"domain", "common"} else "domain"
-    selected_domains = _clean_domain_list(domains or [])
-    selected_domain = domain.strip()
-    with connect(state_dir) as conn:
-        tested_domains = _tested_domains_from_db(conn)
-        rows, total = _read_candidate_page_sql(
-            conn,
-            limit=limit,
-            offset=offset,
-            query=query,
-            view=view,
-            domains=selected_domains,
-            domain=selected_domain,
-            fragmentation_classes=_clean_fragmentation_classes(fragmentation_classes or []),
-        )
-        candidates = [_compact_candidate(candidate) for candidate in _candidates_from_db_rows(conn, rows, include_events=False)]
-    version = candidate_storage_version(state_dir)
-    return {
-        "candidates": candidates,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + len(rows) < total,
-        "tested_domains": sorted(tested_domains),
-        "version": version,
-    }
+    return _candidate_queries.read_candidate_page(state_dir, limit=limit, offset=offset, query=query, view=view, domains=domains, domain=domain, fragmentation_classes=fragmentation_classes, _connect=connect)
+
 
 
 def candidate_storage_version(state_dir: Path) -> dict[str, int]:
-    with connect(state_dir) as conn:
-        row = conn.execute(
-            """
-            SELECT
-                (SELECT COUNT(*) FROM strategies) AS strategy_count,
-                (SELECT COUNT(*) FROM strategy_domain_results) AS result_count,
-                (SELECT COUNT(DISTINCT domain_id) FROM strategy_domain_results) AS domain_count,
-                (
-                    SELECT COALESCE(SUM(
-                        LENGTH(id) + LENGTH(protocol) + LENGTH(args_hash) + LENGTH(status) +
-                        LENGTH(fragmentation_class) + fragmentation_safe + LENGTH(fragmentation_reason) +
-                        LENGTH(family) + LENGTH(family_key) + family_rank + LENGTH(family_reason)
-                    ), 0)
-                    FROM strategies
-                ) AS strategy_signature,
-                (
-                    SELECT COALESCE(SUM(
-                        LENGTH(strategy_id) + domain_id + LENGTH(protocol) + LENGTH(source_mode)
-                    ), 0)
-                    FROM strategy_domain_results
-                ) AS result_signature
-            """
-        ).fetchone()
-    return {
-        "strategy_count": int(row["strategy_count"] or 0) if row else 0,
-        "result_count": int(row["result_count"] or 0) if row else 0,
-        "domain_count": int(row["domain_count"] or 0) if row else 0,
-        "strategy_signature": int(row["strategy_signature"] or 0) if row else 0,
-        "result_signature": int(row["result_signature"] or 0) if row else 0,
-    }
+    return _candidate_queries.candidate_storage_version(state_dir, _connect=connect)
+
 
 
 def read_candidate_domain_index(
@@ -776,312 +409,44 @@ def read_candidate_domain_index(
     query: str = "",
     fragmentation_classes: list[str] | None = None,
 ) -> dict[str, Any]:
-    limit = _bounded_int(limit, default=DEFAULT_PAGE_LIMIT, minimum=1, maximum=MAX_PAGE_LIMIT)
-    offset = max(0, _bounded_int(offset, default=0, minimum=0, maximum=10_000_000))
-    query = query.strip().lower()
-    clean_fragmentation_classes = _clean_fragmentation_classes(fragmentation_classes or [])
-    with connect(state_dir) as conn:
-        tested_domains = _tested_domains_from_db(conn)
-        rows, total, strategy_total = _read_candidate_domain_index_sql(
-            conn,
-            limit=limit,
-            offset=offset,
-            query=query,
-            fragmentation_classes=clean_fragmentation_classes,
-        )
-    return {
-        "domains": rows,
-        "total": total,
-        "strategy_total": strategy_total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + len(rows) < total,
-        "tested_domains": sorted(tested_domains),
-        "version": candidate_storage_version(state_dir),
-    }
+    return _candidate_queries.read_candidate_domain_index(state_dir, limit=limit, offset=offset, query=query, fragmentation_classes=fragmentation_classes, _connect=connect)
 
 
-def _read_candidate_page_sql(
-    conn: Any,
-    *,
-    limit: int,
-    offset: int,
-    query: str,
-    view: str,
-    domains: list[str],
-    domain: str,
-    fragmentation_classes: list[str],
-) -> tuple[list[Any], int]:
-    query_clause, query_params = _strategy_query_clause(query)
-    fragmentation_clause, fragmentation_params = _fragmentation_query_clause(fragmentation_classes)
-    if view == "common":
-        if len(domains) < 2:
-            return [], 0
-        placeholders = ", ".join("?" for _item in domains)
-        base = f"""
-            FROM strategies s
-            JOIN strategy_domain_results r ON r.strategy_id = s.id
-            JOIN domains d ON d.id = r.domain_id
-            WHERE d.name IN ({placeholders}) {query_clause} {fragmentation_clause}
-            GROUP BY s.id
-            HAVING COUNT(DISTINCT d.name) = ?
-        """
-        params: list[Any] = [*domains, *query_params, *fragmentation_params, len(domains)]
-    elif domain:
-        base = f"""
-            FROM strategies s
-            JOIN strategy_domain_results r ON r.strategy_id = s.id
-            JOIN domains d ON d.id = r.domain_id
-            WHERE d.name = ? {query_clause} {fragmentation_clause}
-            GROUP BY s.id
-        """
-        params = [domain, *query_params, *fragmentation_params]
-    else:
-        base = f"""
-            FROM strategies s
-            JOIN strategy_domain_results r ON r.strategy_id = s.id
-            JOIN domains d ON d.id = r.domain_id
-            WHERE 1 = 1 {query_clause} {fragmentation_clause}
-            GROUP BY s.id
-        """
-        params = [*query_params, *fragmentation_params]
-    total = int(
-        conn.execute(
-            f"SELECT COUNT(*) AS count FROM (SELECT s.id {base}) AS candidate_page",
-            params,
-        ).fetchone()["count"]
-    )
-    rows = conn.execute(
-        f"""
-        SELECT s.id, s.protocol, s.args, s.status
-               , s.fragmentation_class, s.fragmentation_safe, s.fragmentation_reason
-               , s.family, s.family_key, s.family_rank, s.family_reason
-        {base}
-        ORDER BY s.id ASC
-        LIMIT ? OFFSET ?
-        """,
-        [*params, limit, offset],
-    ).fetchall()
-    return rows, total
 
 
-def _candidate_core_filters(
-    *,
-    domains: list[str],
-    strategy_ids: list[str],
-    protocols: list[str],
-    source_modes: list[str],
-    families: list[str],
-    query: str,
-) -> dict[str, Any]:
-    clean_source_modes = [item for item in _unique_nonempty_strings(source_modes) if item in {"single_domain", "multi_domain"}]
-    return {
-        "domains": _clean_domain_list(domains),
-        "strategy_ids": _unique_nonempty_strings(strategy_ids),
-        "protocols": _unique_nonempty_strings([item.lower() for item in protocols]),
-        "source_modes": clean_source_modes,
-        "families": _unique_nonempty_strings([item.lower() for item in families]),
-        "query": str(query or "").strip().lower(),
-    }
 
 
-def _candidate_filter_payload(filters: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in filters.items() if value}
 
 
-def _filtered_candidate_total(conn: Any, filters: dict[str, Any]) -> int:
-    where_sql, params = _filtered_candidate_where(filters)
-    return int(conn.execute(f"SELECT COUNT(*) AS count FROM strategies s WHERE {where_sql}", params).fetchone()["count"])
 
 
-def _iter_filtered_candidate_rows(conn: Any, filters: dict[str, Any]) -> Iterator[Any]:
-    where_sql, params = _filtered_candidate_where(filters)
-    cursor = conn.execute(
-        f"""
-        SELECT id, protocol, args, status,
-               fragmentation_class, fragmentation_safe, fragmentation_reason,
-               family, family_key, family_rank, family_reason
-        FROM strategies s
-        WHERE {where_sql}
-        ORDER BY id ASC
-        """,
-        params,
-    )
-    yield from cursor
 
 
-def _filtered_candidate_where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
-    clauses = ["1 = 1"]
-    params: list[Any] = []
-    strategy_ids = list(filters.get("strategy_ids") or [])
-    protocols = list(filters.get("protocols") or [])
-    families = list(filters.get("families") or [])
-    source_modes = list(filters.get("source_modes") or [])
-    domains = list(filters.get("domains") or [])
-    query = str(filters.get("query") or "")
-    if strategy_ids:
-        clauses.append(f"s.id IN ({_placeholders(strategy_ids)})")
-        params.extend(strategy_ids)
-    if protocols:
-        clauses.append(f"LOWER(s.protocol) IN ({_placeholders(protocols)})")
-        params.extend(protocols)
-    if families:
-        clauses.append(f"LOWER(s.family) IN ({_placeholders(families)})")
-        params.extend(families)
-    if domains or source_modes:
-        subclauses = ["r.strategy_id = s.id"]
-        subparams: list[Any] = []
-        domain_join = ""
-        if domains:
-            domain_join = "JOIN domains d ON d.id = r.domain_id"
-            subclauses.append(f"d.name IN ({_placeholders(domains)})")
-            subparams.extend(domains)
-        if source_modes:
-            subclauses.append(f"r.source_mode IN ({_placeholders(source_modes)})")
-            subparams.extend(source_modes)
-        clauses.append(
-            f"""
-            EXISTS (
-                SELECT 1
-                FROM strategy_domain_results r
-                {domain_join}
-                WHERE {' AND '.join(subclauses)}
-            )
-            """
-        )
-        params.extend(subparams)
-    if query:
-        pattern = f"%{query}%"
-        clauses.append(
-            """
-            (
-                LOWER(s.id) LIKE ?
-                OR LOWER(s.protocol) LIKE ?
-                OR LOWER(s.args) LIKE ?
-                OR LOWER(s.family) LIKE ?
-                OR LOWER(s.family_key) LIKE ?
-                OR EXISTS (
-                    SELECT 1
-                    FROM strategy_domain_results qr
-                    JOIN domains qd ON qd.id = qr.domain_id
-                    WHERE qr.strategy_id = s.id AND LOWER(qd.name) LIKE ?
-                )
-            )
-            """
-        )
-        params.extend([pattern, pattern, pattern, pattern, pattern, pattern])
-    return " AND ".join(clauses), params
 
 
-def _placeholders(values: list[Any]) -> str:
-    return ", ".join("?" for _item in values)
 
 
-def _unique_nonempty_strings(values: list[str]) -> list[str]:
-    result: list[str] = []
-    for value in values:
-        item = str(value or "").strip()
-        if item and item not in result:
-            result.append(item)
-    return result
 
 
-def _read_candidate_domain_index_sql(
-    conn: Any,
-    *,
-    limit: int,
-    offset: int,
-    query: str,
-    fragmentation_classes: list[str],
-) -> tuple[list[dict[str, Any]], int, int]:
-    query_clause, query_params = _strategy_query_clause(query)
-    fragmentation_clause, fragmentation_params = _fragmentation_query_clause(fragmentation_classes)
-    base = f"""
-        FROM domains d
-        JOIN strategy_domain_results r ON r.domain_id = d.id
-        JOIN strategies s ON s.id = r.strategy_id
-        WHERE 1 = 1 {query_clause} {fragmentation_clause}
-        GROUP BY d.id, d.name
-    """
-    count_row = conn.execute(
-        f"""
-        SELECT COUNT(*) AS count, COALESCE(SUM(strategy_count), 0) AS strategy_total
-        FROM (
-            SELECT d.id, COUNT(DISTINCT r.strategy_id) AS strategy_count
-            {base}
-        ) domain_index
-        """,
-        [*query_params, *fragmentation_params],
-    ).fetchone()
-    total = int(count_row["count"] or 0) if count_row else 0
-    strategy_total = int(count_row["strategy_total"] or 0) if count_row else 0
-    domain_rows = conn.execute(
-        f"""
-        SELECT d.name AS domain, COUNT(DISTINCT r.strategy_id) AS strategy_count
-        {base}
-        ORDER BY d.name ASC
-        LIMIT ? OFFSET ?
-        """,
-        [*query_params, *fragmentation_params, limit, offset],
-    ).fetchall()
-    page_domains = [str(row["domain"]) for row in domain_rows]
-    if not page_domains:
-        return [], total, strategy_total
-    page_placeholders = ", ".join("?" for _item in page_domains)
-    protocol_rows = conn.execute(
-        f"""
-        SELECT d.name AS domain, r.protocol AS protocol, COUNT(DISTINCT r.strategy_id) AS count
-        FROM domains d
-        JOIN strategy_domain_results r ON r.domain_id = d.id
-        JOIN strategies s ON s.id = r.strategy_id
-        WHERE d.name IN ({page_placeholders}) {query_clause} {fragmentation_clause}
-        GROUP BY d.id, d.name, r.protocol
-        ORDER BY d.name ASC, r.protocol ASC
-        """,
-        [*page_domains, *query_params, *fragmentation_params],
-    ).fetchall()
-    protocols: dict[str, list[dict[str, Any]]] = {}
-    for row in protocol_rows:
-        protocols.setdefault(str(row["domain"]), []).append(
-            {"protocol": str(row["protocol"] or "unknown"), "count": int(row["count"] or 0)}
-        )
-    rows = [
-        {
-            "domain": str(row["domain"]),
-            "strategy_count": int(row["strategy_count"] or 0),
-            "protocols": protocols.get(str(row["domain"]), []),
-        }
-        for row in domain_rows
-    ]
-    return rows, total, strategy_total
 
 
-def _strategy_query_clause(query: str) -> tuple[str, list[Any]]:
-    if not query:
-        return "", []
-    pattern = f"%{query.lower()}%"
-    return (
-        "AND (LOWER(s.id) LIKE ? OR LOWER(s.protocol) LIKE ? OR LOWER(s.args) LIKE ? OR LOWER(d.name) LIKE ?)",
-        [pattern, pattern, pattern, pattern],
-    )
 
 
-def _clean_fragmentation_classes(values: list[str]) -> list[str]:
-    allowed = {"position_free", "position_safe", "position_risky", "unknown"}
-    result: list[str] = []
-    for raw in values:
-        for item in str(raw or "").split(","):
-            clean = item.strip()
-            if clean in allowed and clean not in result:
-                result.append(clean)
-    return result
 
 
-def _fragmentation_query_clause(classes: list[str]) -> tuple[str, list[Any]]:
-    if not classes:
-        return "", []
-    placeholders = ", ".join("?" for _item in classes)
-    return f"AND s.fragmentation_class IN ({placeholders})", list(classes)
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def read_runs(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
@@ -1257,33 +622,7 @@ def latest_log_tail(
     }
 
 
-def classify_stderr_diagnostics(stderr_text: str) -> list[dict[str, str]]:
-    diagnostics: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for line in stderr_text.splitlines():
-        text = line.strip()
-        if not text:
-            continue
-        if NFQUEUE_MAXLEN_MISSING_RE.search(text):
-            status = "nfqueue_maxlen_sysctl_missing"
-            if status in seen:
-                continue
-            seen.add(status)
-            diagnostics.append(
-                {
-                    "severity": "warning",
-                    "status": status,
-                    "label": "NFQUEUE maxlen недоступен",
-                    "message": (
-                        "На этой системе нет sysctl для queue maxlen. "
-                        "Это совместимость ядра/NFQUEUE: подбор может продолжаться, "
-                        "строка не считается фатальной ошибкой GP."
-                    ),
-                    "source": "stderr",
-                    "line": text,
-                }
-            )
-    return diagnostics
+
 
 
 def _run_settings_for_progress(run: dict[str, Any]) -> dict[str, Any]:
@@ -1353,31 +692,7 @@ def _read_latest_metrics(run: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def parse_blockcheck_stdout(stdout: str) -> dict[str, Any]:
-    sections = _summary_sections(stdout)
-    summary = sections["summary"]
-    common = sections["common"]
-    live_summary = _live_available_lines(stdout)
-    candidates = _dedupe_candidate_lines([*_candidate_lines(summary, scope="domain"), *_candidate_lines(live_summary, scope="domain")])
-    common_candidates = _candidate_lines(common, scope="common")
-    results = [_parse_result_line(line) for line in summary if _parse_result_line(line)]
-    common_results = [_parse_result_line(line) for line in common if _parse_result_line(line)]
-    diagnostic_counts, diagnostic_codes, curl_diagnostics = _diagnostic_counts_from_stdout(stdout, results)
-    return {
-        "summary": summary,
-        "common": common,
-        "live_summary": live_summary,
-        "candidates": candidates,
-        "common_candidates": common_candidates,
-        "results": results,
-        "common_results": common_results,
-        "direct_available": [item for item in results if item.get("result") == "working without bypass"],
-        "not_working": [item for item in results if "not working" in str(item.get("result") or "")],
-        "domain_diagnostics": _domain_diagnostics_from_counts(diagnostic_counts, diagnostic_codes),
-        "curl_diagnostics": curl_diagnostics,
-        "curl_diagnostics_summary": _curl_summary(curl_diagnostics),
-        "dominant_failure": _dominant_failure_from_counts(diagnostic_counts),
-    }
+
 
 
 def upsert_candidates(state_dir: Path, parsed: dict[str, Any], run: dict[str, Any]) -> int:
@@ -2684,27 +1999,7 @@ def _run_blockcheck_command_live(
 
 
 def progress_from_stdout(stdout: str, run: dict[str, Any]) -> dict[str, Any]:
-    lines = stdout.splitlines()
-    attempted = sum(1 for line in lines if _ATTEMPT_RE.match(line.strip()))
-    attempts_by_script = _attempts_by_script(lines)
-    parsed = parse_blockcheck_stdout(stdout)
-    successful = len(
-        {
-            (str(item.get("protocol") or ""), str(item.get("args") or ""))
-            for item in [*parsed["candidates"], *parsed["common_candidates"]]
-        }
-    )
-    scripts = [_script_name_from_line(line) for line in lines if _script_name_from_line(line)]
-    current_script = scripts[-1] if scripts else ""
-    phase = PHASE_SUMMARY if any(line.strip() in {"* SUMMARY", "* COMMON"} for line in lines) else (PHASE_DISCOVERY if current_script else PHASE_CHECK_VPN)
-    return _progress_from_counts(
-        run=run,
-        attempted=attempted,
-        attempts_by_script=attempts_by_script,
-        successful=successful,
-        current_script=current_script,
-        phase=phase,
-    )
+    return _progress_from_counts(run=run, **_progress_calculation.stdout_observations(stdout))
 
 
 def _progress_from_counts(
@@ -2724,241 +2019,34 @@ def _progress_from_counts(
     eta_elapsed_seconds_override: int | None = None,
 ) -> dict[str, Any]:
     attempt_plan = _attempt_plan_for_run(run, current_script)
-    script_order = [str(item) for item in attempt_plan.get("script_order") or []]
-    script_attempt_totals = attempt_plan.get("scripts") if isinstance(attempt_plan.get("scripts"), dict) else {}
-    attempt_total = int(attempt_plan.get("total") or 0)
-    strategy_progress = _strategy_progress_from_attempts(attempt_plan, attempts_by_script, current_script)
-    current_script_attempted = attempts_by_script.get(current_script, 0)
-    current_script_attempt_total = int(script_attempt_totals.get(current_script) or 0)
-    script_total = len(script_order) if script_order else (_standard_script_total() if current_script.startswith("standard/") else 0)
-    script_index = _standard_script_index(current_script, script_order) if current_script else 0
-    if script_total and script_index > script_total:
-        script_index = script_total
-    status = str(run.get("status") or "")
-    finished = status in {"success", "failed", "timeout", "stopped"}
-    completed = status == "success"
-    if finished and phase == PHASE_SAVING:
-        phase = PHASE_COMPLETE
-    if completed and script_total:
-        script_index = script_total
-    progress_status = "unknown"
-    effective_attempt_total = attempt_total
-    remaining_attempts = max(0, attempt_total - attempted) if attempt_total else None
-    if finished:
-        remaining_attempts = None
-    if attempt_total:
-        progress_status = "exact" if str(attempt_plan.get("source") or "") in {"shell", "test"} else "estimated"
-    current_script_underestimated = bool(
-        attempt_total
-        and current_script_attempt_total
-        and current_script_attempted > current_script_attempt_total
+    observed_scripts = [f"standard/{path.name}" for path in _standard_scripts()] if not attempt_plan.get("script_order") and current_script.startswith("standard/") else []
+    return _progress_calculation._progress_from_counts(
+        run=run, attempted=attempted, attempts_by_script=attempts_by_script, successful=successful, current_script=current_script, phase=phase, runtime_ms_per_attempt=runtime_ms_per_attempt, runtime_sample_count=runtime_sample_count, summary_verified=summary_verified, summary_fallbacks=summary_fallbacks, elapsed_seconds_override=elapsed_seconds_override, eta_recalculation_attempts_override=eta_recalculation_attempts_override, eta_elapsed_seconds_override=eta_elapsed_seconds_override,
+        attempt_plan=attempt_plan, observed_script_order=observed_scripts,
+        observed_elapsed_seconds=_elapsed_seconds(run.get("started_at") or run.get("timestamp")) if elapsed_seconds_override is None else elapsed_seconds_override,
     )
-    if attempt_total and not finished and (attempted >= attempt_total or current_script_underestimated):
-        progress_status = "underestimated"
-        if current_script_underestimated and attempted < attempt_total:
-            remaining_attempts = None
-            effective_attempt_total = attempt_total
-        else:
-            script_remaining = current_script_attempt_total - current_script_attempted if current_script_attempt_total else 0
-            if script_remaining > 0:
-                remaining_attempts = script_remaining
-                effective_attempt_total = attempted + script_remaining
-            else:
-                remaining_attempts = None
-                effective_attempt_total = attempted
-    if effective_attempt_total:
-        if completed:
-            percent = 100.0
-        elif remaining_attempts is None and progress_status == "underestimated":
-            if effective_attempt_total and attempted < effective_attempt_total:
-                percent = min(99.0, (attempted / effective_attempt_total) * 100.0)
-            else:
-                percent = 99.0
-        else:
-            percent = min(99.9, (attempted / effective_attempt_total) * 100.0)
-    else:
-        percent = (script_index / script_total * 100.0) if script_total else None
-    elapsed = (
-        elapsed_seconds_override
-        if elapsed_seconds_override is not None
-        else _elapsed_seconds(run.get("started_at") or run.get("timestamp"))
-    )
-    eta_parallelism = 1
-    eta_configured_parallelism = _eta_parallelism_for_run(run)
-    eta_recalculation_step = _eta_recalculation_step(attempted)
-    eta_recalculation_attempts = (
-        eta_recalculation_attempts_override
-        if eta_recalculation_attempts_override is not None
-        else attempted
-    )
-    eta_elapsed = eta_elapsed_seconds_override if eta_elapsed_seconds_override is not None else elapsed
-    eta_ms_per_attempt = _elapsed_average_ms_per_attempt(eta_elapsed, eta_recalculation_attempts)
-    estimate_ms_per_attempt = eta_ms_per_attempt or 0
-    eta_status = "elapsed_average" if eta_ms_per_attempt else "calculating"
-    eta_method = "elapsed_average" if eta_ms_per_attempt else "waiting_for_attempts"
-    if finished and not completed:
-        eta = None
-        eta_status = status or "finished"
-        eta_method = "finished"
-    elif remaining_attempts is None and not completed:
-        eta = None
-        if progress_status == "underestimated":
-            eta_status = "underestimated"
-    elif completed:
-        eta = 0
-        eta_status = "complete"
-        eta_method = "complete"
-    elif eta_status == "calculating":
-        eta = None
-    else:
-        eta = _eta_from_remaining_attempts(remaining_attempts, completed, eta_parallelism, eta_ms_per_attempt)
-    return {
-        "attempted": attempted,
-        "attempt_total": attempt_total,
-        "effective_attempt_total": effective_attempt_total,
-        "remaining_attempts": remaining_attempts,
-        "successful": successful,
-        "strategy_checked": strategy_progress["checked"],
-        "strategy_total": strategy_progress["total"],
-        "current_script_strategy_checked": strategy_progress["current_script_checked"],
-        "current_script_strategy_total": strategy_progress["current_script_total"],
-        "current_script": current_script,
-        "current_script_attempted": current_script_attempted,
-        "current_script_attempt_total": current_script_attempt_total,
-        "script_index": script_index,
-        "script_total": script_total,
-        "percent": percent,
-        "elapsed_seconds": elapsed,
-        "eta_seconds": eta,
-        "eta_estimate_ms_per_attempt": estimate_ms_per_attempt,
-        "eta_ms_per_attempt": eta_ms_per_attempt,
-        "eta_status": eta_status,
-        "eta_parallelism": eta_parallelism,
-        "eta_configured_parallelism": eta_configured_parallelism,
-        "eta_method": eta_method,
-        "eta_sample_count": runtime_sample_count or 0,
-        "eta_sample_window": ETA_SAMPLE_MAX_POINTS - 1,
-        "eta_recalculation_step": eta_recalculation_step,
-        "eta_recalculation_attempts": eta_recalculation_attempts,
-        "eta_elapsed_seconds": eta_elapsed,
-        "repeats": _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10),
-        "repeat_parallel": _truthy(run.get("repeat_parallel"), default=False),
-        "attempt_plan_source": attempt_plan.get("source") or "",
-        "progress_status": progress_status,
-        "phase": phase,
-        "phase_label": _phase_label(phase),
-        "summary_verified": summary_verified,
-        "summary_fallbacks": summary_fallbacks,
-    }
 
 
-def _strategy_progress_from_attempts(
-    attempt_plan: dict[str, Any],
-    attempts_by_script: dict[str, int],
-    current_script: str,
-) -> dict[str, int]:
-    script_order = [str(item) for item in attempt_plan.get("script_order") or []]
-    script_attempt_totals = attempt_plan.get("scripts") if isinstance(attempt_plan.get("scripts"), dict) else {}
-    raw_strategy_scripts = attempt_plan.get("strategy_scripts") if isinstance(attempt_plan.get("strategy_scripts"), dict) else {}
-    domain_count = max(1, int(attempt_plan.get("domain_count") or 0))
-    ip_version_count = max(1, int(attempt_plan.get("ip_version_count") or 1))
-    default_attempts_per_strategy = max(1, domain_count * ip_version_count)
-    strategy_scripts: dict[str, int] = {}
-    for script in script_order:
-        raw_total = int(raw_strategy_scripts.get(script) or 0)
-        if raw_total <= 0:
-            raw_total = int(script_attempt_totals.get(script) or 0) // default_attempts_per_strategy
-        strategy_scripts[script] = max(0, raw_total)
-    strategy_total = int(attempt_plan.get("strategy_total") or sum(strategy_scripts.values()))
-    checked = 0
-    current_checked = 0
-    current_total = strategy_scripts.get(current_script, 0)
-    for script in script_order:
-        script_strategy_total = strategy_scripts.get(script, 0)
-        if script_strategy_total <= 0:
-            continue
-        script_attempt_total = int(script_attempt_totals.get(script) or 0)
-        attempts_per_strategy = max(1, script_attempt_total // script_strategy_total) if script_attempt_total else default_attempts_per_strategy
-        script_checked = min(script_strategy_total, int(attempts_by_script.get(script, 0)) // attempts_per_strategy)
-        if script == current_script:
-            current_checked = script_checked
-        checked += script_checked
-    return {
-        "checked": min(strategy_total, checked),
-        "total": strategy_total,
-        "current_script_checked": current_checked,
-        "current_script_total": current_total,
-    }
 
 
-def _attempts_by_script(lines: list[str]) -> dict[str, int]:
-    current_script = ""
-    result: dict[str, int] = {}
-    for line in lines:
-        script = _script_name_from_line(line)
-        if script:
-            current_script = script
-            result.setdefault(current_script, 0)
-            continue
-        if _ATTEMPT_RE.match(line.strip()):
-            result[current_script] = result.get(current_script, 0) + 1
-    return result
 
 
-def _average_attempt_ms(samples: deque[float]) -> int | None:
-    if len(samples) < ETA_SAMPLE_MIN_ATTEMPTS:
-        return None
-    values = list(samples)
-    intervals = [right - left for left, right in zip(values, values[1:]) if right >= left]
-    if not intervals:
-        return None
-    if len(intervals) >= ETA_SAMPLE_WINSORIZE_MIN_INTERVALS:
-        intervals = _winsorized(intervals, ETA_SAMPLE_WINSORIZE_RATIO)
-    return max(1, int((sum(intervals) / len(intervals)) * 1000))
 
 
-def _winsorized(values: list[float], ratio: float) -> list[float]:
-    if not values:
-        return []
-    ordered = sorted(values)
-    edge = int(len(ordered) * ratio)
-    if edge <= 0 or edge * 2 >= len(ordered):
-        return values
-    low = ordered[edge]
-    high = ordered[-edge - 1]
-    return [min(max(value, low), high) for value in values]
 
 
-def _phase_label(phase: str) -> str:
-    return PHASE_LABELS.get(phase, phase or "-")
 
 
-def _phase_from_line(line: str, current: str) -> str:
-    text = line.strip().lower()
-    if not text:
-        return current
-    if text in {"* summary", "* common"}:
-        return PHASE_SUMMARY
-    if _ATTEMPT_RE.match(line.strip()) or _live_attempt_line(line):
-        return PHASE_DISCOVERY
-    if text.startswith("* script"):
-        return PHASE_DISCOVERY
-    if text.startswith("* checking"):
-        if "vpn" in text:
-            return PHASE_CHECK_VPN
-        if "dpi" in text or "bypass" in text or "zapret" in text or "nfqws" in text:
-            return PHASE_CHECK_ZAPRET
-        if "dns" in text or "domain" in text or "ip" in text or "port" in text or "http" in text:
-            return PHASE_CHECK_DOMAIN
-        if current in {PHASE_CHECK_VPN, PHASE_CHECK_ZAPRET, PHASE_CHECK_DOMAIN}:
-            return current
-        return PHASE_CHECK_DOMAIN
-    return current
 
 
-def _script_name_from_line(line: str) -> str:
-    match = _SCRIPT_RE.match(line.strip())
-    return match.group(1).strip() if match else ""
+
+
+
+
+
+
+
+
 
 
 def _attempt_plan_for_run(run: dict[str, Any], current_script: str) -> dict[str, Any]:
@@ -3174,386 +2262,88 @@ def _shell_word_count(value: str) -> int:
         return len([part for part in value.split() if part])
 
 
-def _eta_parallelism_for_run(run: dict[str, Any]) -> int:
-    if str(run.get("kind") or "") != "multi-domain-discovery":
-        return 1
-    return _minimum_int(run.get("curl_parallelism"), default=4, minimum=1)
 
 
-def _eta_ms_per_attempt_for_run(run: dict[str, Any]) -> int:
-    repeats = _bounded_int(run.get("repeats"), default=1, minimum=1, maximum=10)
-    if _truthy(run.get("repeat_parallel"), default=False):
-        repeats = 1
-    return ATTEMPT_TIMEOUT_ESTIMATE_MS * repeats
 
 
-def _eta_recalculation_step(attempted: int) -> int:
-    return ETA_RECALC_LARGE_STEP if attempted >= ETA_RECALC_LARGE_AFTER else ETA_RECALC_SMALL_STEP
 
 
-def _eta_recalculation_attempts(attempted: int) -> int:
-    if attempted <= 0:
-        return 0
-    if attempted < ETA_RECALC_SMALL_STEP:
-        return attempted
-    step = _eta_recalculation_step(attempted)
-    return max(step, (attempted // step) * step)
 
 
-def _elapsed_average_ms_per_attempt(elapsed_seconds: int | None, attempted: int) -> int | None:
-    if elapsed_seconds is None or attempted <= 0:
-        return None
-    return max(1, int((max(0, elapsed_seconds) * 1000) / attempted))
 
 
-def _eta_from_remaining_attempts(
-    remaining: int | None,
-    completed: bool,
-    parallelism: int = 1,
-    ms_per_attempt: int = ATTEMPT_TIMEOUT_ESTIMATE_MS,
-) -> int | None:
-    if completed:
-        return 0
-    if remaining is None:
-        return None
-    if remaining <= 0:
-        return 0
-    effective_remaining = (remaining + max(1, parallelism) - 1) // max(1, parallelism)
-    return max(0, int((effective_remaining * max(1, ms_per_attempt)) / 1000))
 
 
-def _truthy(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    return default
 
 
-def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(minimum, min(maximum, number))
 
 
-def _minimum_int(value: Any, default: int, minimum: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(minimum, number)
 
 
-def _summary_sections(stdout: str) -> dict[str, list[str]]:
-    lines = [line.strip() for line in stdout.splitlines()]
-    summary: list[str] = []
-    common: list[str] = []
-    section = ""
-    for index, line in enumerate(lines):
-        if line == "* SUMMARY":
-            section = "summary"
-            continue
-        if line == "* COMMON":
-            section = "common"
-            continue
-        if not line:
-            continue
-        if section == "summary":
-            summary.append(line)
-        elif section == "common":
-            common.append(line)
-    if summary or common:
-        return {"summary": summary, "common": common}
-    return {"summary": _live_success_lines(stdout), "common": []}
 
 
-def _summary_lines(stdout: str) -> list[str]:
-    return _summary_sections(stdout)["summary"]
 
 
-def _dedupe_candidate_lines(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
-    for candidate in candidates:
-        key = (
-            str(candidate.get("scope") or ""),
-            str(candidate.get("test") or ""),
-            str(candidate.get("ip_version") or ""),
-            str(candidate.get("domain") or ""),
-            str(candidate.get("args") or ""),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(candidate)
-    return result
 
 
-def _candidate_lines(summary: list[str], scope: str) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for line in summary:
-        parsed = _candidate_from_result_line(line, scope)
-        if parsed:
-            candidates.append(parsed)
-    return candidates
 
 
-def _candidate_from_result_line(line: str, scope: str) -> dict[str, Any] | None:
-    parsed = _parse_result_line(line)
-    if not parsed:
-        return None
-    raw_result = str(parsed.get("result") or "")
-    if not raw_result.startswith("nfqws2 ") or raw_result == "nfqws2 not working":
-        return None
-    args = raw_result.removeprefix("nfqws2 ").strip()
-    return {
-        "domain": parsed["domain"],
-        "test": parsed["test"],
-        "ip_version": parsed["ip_version"],
-        "protocol": _protocol_from_test(str(parsed["test"])),
-        "args": args,
-        "raw": line,
-        "scope": scope,
-    }
 
 
-def _parse_result_line(line: str) -> dict[str, Any] | None:
-    left, sep, result = line.partition(" : ")
-    if not sep:
-        return None
-    parts = left.split()
-    if len(parts) == 2 and parts[1].startswith("ipv"):
-        domain = ""
-    elif len(parts) >= 3 and parts[1].startswith("ipv"):
-        domain = parts[2]
-    else:
-        return None
-    return {
-        "test": parts[0],
-        "ip_version": parts[1].removeprefix("ipv"),
-        "domain": domain,
-        "result": result.strip(),
-    }
 
 
-def _live_success_lines(stdout: str) -> list[str]:
-    result: list[str] = []
-    for line in stdout.splitlines():
-        candidate = _candidate_from_live_success_line(line.strip())
-        if candidate:
-            result.append(
-                f"{candidate['test']} ipv{candidate['ip_version']} {candidate['domain']} : "
-                f"nfqws2 {candidate['args']}"
-            )
-    return result
 
 
-def _candidate_from_live_success_line(line: str) -> dict[str, Any] | None:
-    pattern = re.compile(
-        r"^!!!!!\s+(?P<test>\S+): working strategy found for ipv(?P<ip_version>\d+)\s+"
-        r"(?P<domain>\S+)\s+:\s+nfqws2\s+(?P<args>.*?)\s+!!!!!$"
-    )
-    match = pattern.match(line.strip())
-    if not match:
-        return None
-    result_line = (
-        f"{match.group('test')} ipv{match.group('ip_version')} {match.group('domain')} : "
-        f"nfqws2 {match.group('args').strip()}"
-    )
-    return _candidate_from_result_line(result_line, scope="domain")
 
 
-def _live_available_lines(stdout: str) -> list[str]:
-    result: list[str] = []
-    pending: str | None = None
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        attempt = _live_attempt_line(line)
-        if attempt:
-            pending = attempt
-            continue
-        if line == "!!!!! AVAILABLE !!!!!" and pending:
-            result.append(pending)
-            pending = None
-            continue
-        if line.startswith("UNAVAILABLE") or line.startswith("FAILED"):
-            pending = None
-    return result
 
 
-def _diagnostic_counts_from_stdout(
-    stdout: str,
-    summary_results: list[dict[str, Any] | None],
-) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]], list[dict[str, Any]]]:
-    status_counts: dict[str, dict[str, int]] = {}
-    code_counts: dict[str, dict[str, int]] = {}
-    diagnostics: list[dict[str, Any]] = []
-    pending: str | None = None
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        attempt = _live_attempt_line(line)
-        if attempt:
-            pending = attempt
-            continue
-        if (line.startswith("UNAVAILABLE") or line.startswith("FAILED")) and pending:
-            parsed = _parse_result_line(pending)
-            if parsed:
-                domain = str(parsed.get("domain") or "")
-                test = str(parsed.get("test") or "")
-                code = _curl_code_from_line(line)
-                info = curl_failure_info(code, test=test, domain=domain)
-                _increment_nested(status_counts, domain, str(info.get("status") or "curl_error"))
-                if code:
-                    _increment_nested(code_counts, domain, code)
-                if len(diagnostics) < LIVE_CANDIDATE_SAMPLE_LIMIT:
-                    diagnostics.append(
-                        {
-                            "domain": domain,
-                            "test": test,
-                            "protocol": _protocol_from_test(test),
-                            "code": code,
-                            "status": info.get("status") or "curl_error",
-                            "label": info.get("label") or "curl ошибка",
-                            "message": info.get("message") or "",
-                            "strategy_failure": _is_strategy_failure(info),
-                        }
-                    )
-            pending = None
-            continue
-        if line == "!!!!! AVAILABLE !!!!!":
-            pending = None
-    for item in summary_results:
-        if not item:
-            continue
-        domain = str(item.get("domain") or "")
-        result = str(item.get("result") or "")
-        if result == "working without bypass":
-            _increment_nested(status_counts, domain, "direct_available")
-        elif "not working" in result:
-            _increment_nested(status_counts, domain, "needs_discovery")
-    return status_counts, code_counts, diagnostics
 
 
-def _increment_nested(target: dict[str, dict[str, int]], first: str, second: str) -> None:
-    if not first or not second:
-        return
-    counts = target.setdefault(first, {})
-    counts[second] = counts.get(second, 0) + 1
 
 
-def _curl_summary(diagnostics: list[dict[str, Any]]) -> dict[str, int]:
-    result: dict[str, int] = {}
-    for item in diagnostics:
-        code = str(item.get("code") or "")
-        if not code:
-            continue
-        result[code] = result.get(code, 0) + 1
-    return result
 
 
-def _live_attempt_line(line: str) -> str | None:
-    if not line.startswith("- "):
-        return None
-    normalized = line[2:].strip()
-    parsed = _parse_result_line(normalized)
-    if not parsed:
-        return None
-    result = str(parsed.get("result") or "")
-    if result.startswith("nfqws2 ") and result != "nfqws2 not working":
-        return normalized
-    return None
 
 
-def _curl_code_from_line(line: str) -> str:
-    match = re.search(r"(?:code|код)\s*=\s*(\d+)", line, re.IGNORECASE)
-    return match.group(1) if match else ""
 
 
-def _is_strategy_failure(info: dict[str, Any]) -> bool:
-    status = str(info.get("status") or "")
-    return status not in {"invalid_domain", "dns_error", "tls_sni_problem"}
 
 
-def _domain_status_info(status: str) -> dict[str, str]:
-    mapping = {
-        "direct_available": {
-            "label": "прямой доступ",
-            "message": "домен открывается без zapret; подбор стратегии для него не нужен.",
-        },
-        "needs_discovery": {
-            "label": "нужен подбор",
-            "message": "домен не открылся напрямую и может требовать подбора стратегии.",
-        },
-    }
-    if status in mapping:
-        return mapping[status]
-    for item in _CURL_FAILURE_INFO.values():
-        if item["status"] == status:
-            return {"label": str(item["label"]), "message": str(item["message"])}
-    return {"label": status or "неизвестно", "message": ""}
 
 
-def _domain_diagnostics_from_counts(
-    domain_status_counts: dict[str, dict[str, int]],
-    domain_code_counts: dict[str, dict[str, int]],
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for domain, counts in sorted(domain_status_counts.items()):
-        status = _dominant_status(counts)
-        info = _domain_status_info(status)
-        codes = domain_code_counts.get(domain, {})
-        result.append(
-            {
-                "domain": domain,
-                "status": status,
-                "label": info["label"],
-                "message": info["message"],
-                "count": int(counts.get(status, 0)),
-                "total": int(sum(counts.values())),
-                "codes": dict(sorted(codes.items(), key=lambda item: (-item[1], item[0]))),
-            }
-        )
-    return result
 
 
-def _dominant_failure_from_counts(domain_status_counts: dict[str, dict[str, int]]) -> dict[str, Any]:
-    totals: dict[str, int] = {}
-    for counts in domain_status_counts.values():
-        for status, count in counts.items():
-            if status == "direct_available":
-                continue
-            totals[status] = totals.get(status, 0) + int(count)
-    if not totals:
-        return {}
-    status = _dominant_status(totals)
-    info = _domain_status_info(status)
-    return {"status": status, "label": info["label"], "message": info["message"], "count": totals[status]}
 
 
-def _dominant_status(counts: dict[str, int]) -> str:
-    priority = {
-        "invalid_domain": 90,
-        "dns_error": 80,
-        "tls_sni_problem": 70,
-        "ssl_connect_error": 60,
-        "quic_connect_error": 55,
-        "timeout": 50,
-        "needs_discovery": 40,
-        "curl_error": 30,
-        "direct_available": 10,
-    }
-    if not counts:
-        return ""
-    return sorted(counts.items(), key=lambda item: (-int(item[1]), -priority.get(item[0], 0), item[0]))[0][0]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _standard_script_total() -> int:
@@ -3571,26 +2361,17 @@ def _standard_script_index(current_script: str, script_order: list[str] | None =
 
 
 def _elapsed_seconds(value: Any) -> int | None:
+    # Observe wall time here; the calculation accepts an explicit clock value.
     if not value:
         return None
-    text = str(value).replace("Z", "+00:00")
     try:
-        started = datetime.fromisoformat(text)
+        started = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
-    if started.tzinfo is None:
-        now = datetime.now()
-    else:
-        now = datetime.now(started.tzinfo)
-    return max(0, int((now - started).total_seconds()))
+    return _progress_calculation.elapsed_seconds(value, datetime.now(started.tzinfo))
 
 
-def _protocol_from_test(test: str) -> str:
-    if "http3" in test:
-        return "quic"
-    if "http_" in test and "https" not in test:
-        return "http"
-    return "tls"
+
 
 
 def _write_multidomain_runner(root: Path, blockcheck: Path) -> Path:
@@ -3858,12 +2639,10 @@ report_print
 '''
 
 
-def _clean_domains(domains: list[str]) -> list[str]:
-    return _clean_domain_list(domains) or list(CRITICAL_DOMAINS)
 
 
-def _clean_domain_list(domains: list[str]) -> list[str]:
-    return list(validate_domain_inputs(list(domains), default_to_critical=False)["domains"])
+
+
 
 
 def _finder_dir(state_dir: Path) -> Path:
@@ -3907,205 +2686,22 @@ def _cleanup_old_strategy_logs(logs: Path) -> dict[str, int]:
     return {"removed_files": removed_files, "removed_bytes": removed_bytes}
 
 
-def _iter_db_candidates(conn: Any) -> Iterator[dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT id, protocol, args, status,
-               fragmentation_class, fragmentation_safe, fragmentation_reason,
-               family, family_key, family_rank, family_reason
-        FROM strategies
-        ORDER BY id ASC
-        """
-    ).fetchall()
-    yield from _iter_candidates_from_db_rows(conn, rows, include_events=False)
 
 
-def _candidates_from_db_rows(conn: Any, rows: list[Any], *, include_events: bool) -> list[dict[str, Any]]:
-    rows_list = list(rows)
-    if not rows_list:
-        return []
-    strategy_ids = [str(row["id"] or "") for row in rows_list]
-    seen_domain_map, common_domain_map = _candidate_domain_maps(conn, strategy_ids)
-    return [
-        _candidate_from_db(
-            conn,
-            row,
-            include_events=include_events,
-            seen_domain_map=seen_domain_map,
-            common_domain_map=common_domain_map,
-        )
-        for row in rows_list
-    ]
 
 
-def _iter_candidates_from_db_rows(conn: Any, rows: Iterator[Any], *, include_events: bool) -> Iterator[dict[str, Any]]:
-    batch: list[Any] = []
-    for row in rows:
-        batch.append(row)
-        if len(batch) >= CANDIDATE_RELATION_BATCH_SIZE:
-            yield from _candidates_from_db_rows(conn, batch, include_events=include_events)
-            batch = []
-    if batch:
-        yield from _candidates_from_db_rows(conn, batch, include_events=include_events)
 
 
-def _candidate_domain_maps(conn: Any, strategy_ids: list[str]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    unique_ids = _unique_nonempty_strings(strategy_ids)
-    seen_domain_map: dict[str, list[str]] = {strategy_id: [] for strategy_id in unique_ids}
-    common_domain_map: dict[str, list[str]] = {strategy_id: [] for strategy_id in unique_ids}
-    for start in range(0, len(unique_ids), CANDIDATE_RELATION_BATCH_SIZE):
-        chunk = unique_ids[start : start + CANDIDATE_RELATION_BATCH_SIZE]
-        if not chunk:
-            continue
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT r.strategy_id AS strategy_id, r.source_mode AS source_mode, d.name AS domain
-            FROM strategy_domain_results r
-            JOIN domains d ON d.id = r.domain_id
-            WHERE r.strategy_id IN ({_placeholders(chunk)})
-              AND r.source_mode IN ('single_domain', 'multi_domain')
-            ORDER BY r.strategy_id ASC, r.source_mode ASC, d.name ASC
-            """,
-            chunk,
-        ).fetchall()
-        for row in rows:
-            strategy_id = str(row["strategy_id"] or "")
-            domain = str(row["domain"] or "").strip()
-            if not strategy_id or not domain:
-                continue
-            target = common_domain_map if str(row["source_mode"] or "") == "multi_domain" else seen_domain_map
-            if domain not in target.setdefault(strategy_id, []):
-                target[strategy_id].append(domain)
-    return seen_domain_map, common_domain_map
 
 
-def _candidate_from_db(
-    conn: Any,
-    row: Any,
-    *,
-    include_events: bool,
-    seen_domain_map: dict[str, list[str]] | None = None,
-    common_domain_map: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
-    row_keys = set(row.keys()) if hasattr(row, "keys") else set()
-    analysis = analyze_strategy(str(row["protocol"] or ""), str(row["args"] or ""))
-    candidate = {
-        "id": row["id"],
-        "protocol": row["protocol"],
-        "args": row["args"],
-        "status": row["status"],
-        "first_seen_at": row["first_seen_at"] if "first_seen_at" in row_keys else "",
-        "last_seen_at": row["last_seen_at"] if "last_seen_at" in row_keys else "",
-        "fragmentation_class": (
-            str(row["fragmentation_class"] or "") if "fragmentation_class" in row_keys else ""
-        )
-        or analysis.fragmentation_class,
-        "fragmentation_safe": (
-            bool(row["fragmentation_safe"]) if "fragmentation_safe" in row_keys else analysis.fragmentation_safe
-        ),
-        "fragmentation_reason": (
-            str(row["fragmentation_reason"] or "") if "fragmentation_reason" in row_keys else ""
-        )
-        or analysis.fragmentation_reason,
-        "family": (str(row["family"] or "") if "family" in row_keys else "") or analysis.family,
-        "family_key": (str(row["family_key"] or "") if "family_key" in row_keys else "") or analysis.family_key,
-        "family_rank": int(row["family_rank"] or 0) if "family_rank" in row_keys else analysis.family_rank,
-        "family_reason": (str(row["family_reason"] or "") if "family_reason" in row_keys else "") or analysis.family_reason,
-    }
-    strategy_id = str(row["id"] or "")
-    if seen_domain_map is not None and common_domain_map is not None:
-        seen_domains = seen_domain_map.get(strategy_id, [])
-        common_domains = common_domain_map.get(strategy_id, [])
-        if include_events:
-            candidate["seen"] = [
-                {
-                    "run_id": "",
-                    "domain": domain,
-                    "test": "",
-                    "ip_version": "",
-                    "seen_at": "",
-                }
-                for domain in seen_domains
-            ]
-        else:
-            candidate["seen"] = [{"domain": domain} for domain in seen_domains]
-        if common_domains:
-            candidate["common_seen"] = [{"domains": common_domains}]
-        return candidate
-
-    if include_events:
-        seen_rows = conn.execute(
-            """
-            SELECT d.name AS domain
-            FROM strategy_domain_results r
-            JOIN domains d ON d.id = r.domain_id
-            WHERE r.strategy_id = ? AND r.source_mode = 'single_domain'
-            ORDER BY d.name ASC
-            """,
-            (row["id"],),
-        ).fetchall()
-        common_rows = conn.execute(
-            """
-            SELECT DISTINCT d.name AS domain
-            FROM strategy_domain_results r
-            JOIN domains d ON d.id = r.domain_id
-            WHERE r.strategy_id = ? AND r.source_mode = 'multi_domain'
-            ORDER BY d.name ASC
-            """,
-            (row["id"],),
-        ).fetchall()
-        candidate["seen"] = [
-            {
-                "run_id": "",
-                "domain": item["domain"],
-                "test": "",
-                "ip_version": "",
-                "seen_at": "",
-            }
-            for item in seen_rows
-        ]
-        common_domains = [str(item["domain"]) for item in common_rows]
-        if common_domains:
-            candidate["common_seen"] = [{"domains": common_domains}]
-        return candidate
-
-    domain_rows = conn.execute(
-        """
-        SELECT DISTINCT d.name AS domain
-        FROM strategy_domain_results r
-        JOIN domains d ON d.id = r.domain_id
-        WHERE r.strategy_id = ? AND r.source_mode = 'single_domain'
-        ORDER BY d.name ASC
-        """,
-        (row["id"],),
-    ).fetchall()
-    common_domain_rows = conn.execute(
-        """
-        SELECT DISTINCT d.name AS domain
-        FROM strategy_domain_results r
-        JOIN domains d ON d.id = r.domain_id
-        WHERE r.strategy_id = ? AND r.source_mode = 'multi_domain'
-        ORDER BY d.name ASC
-        """,
-        (row["id"],),
-    ).fetchall()
-    candidate["seen"] = [{"domain": item["domain"]} for item in domain_rows]
-    common_domains = [str(item["domain"]) for item in common_domain_rows]
-    if common_domains:
-        candidate["common_seen"] = [{"domains": common_domains}]
-    return candidate
 
 
-def _tested_domains_from_db(conn: Any) -> set[str]:
-    rows = conn.execute(
-        """
-        SELECT DISTINCT d.name AS domain
-        FROM domains d
-        JOIN strategy_domain_results r ON r.domain_id = d.id
-        ORDER BY d.name ASC
-        """
-    ).fetchall()
-    return {str(row["domain"]).strip() for row in rows if str(row["domain"]).strip()}
+
+
+
+
+
+
 
 
 def _storage_version(state_dir: Path) -> dict[str, int]:
@@ -4157,44 +2753,10 @@ def _file_version(path: Path) -> dict[str, int]:
     return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
 
 
-def _candidate_domains(candidate: dict[str, Any]) -> list[str]:
-    seen = candidate.get("seen")
-    if not isinstance(seen, list):
-        return []
-    return sorted({str(item.get("domain") or "").strip() for item in seen if isinstance(item, dict) and str(item.get("domain") or "").strip()})
 
 
-def _candidate_common_domains(candidate: dict[str, Any]) -> list[str]:
-    common_seen = candidate.get("common_seen")
-    if not isinstance(common_seen, list):
-        return []
-    domains: set[str] = set()
-    for item in common_seen:
-        if not isinstance(item, dict) or not isinstance(item.get("domains"), list):
-            continue
-        domains.update(str(domain or "").strip() for domain in item["domains"] if str(domain or "").strip())
-    return sorted(domains)
 
 
-def _compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    domains = _candidate_domains(candidate)
-    common_domains = _candidate_common_domains(candidate)
-    result = {
-        "id": candidate.get("id"),
-        "protocol": candidate.get("protocol"),
-        "args": candidate.get("args"),
-        "status": candidate.get("status"),
-        "first_seen_at": candidate.get("first_seen_at"),
-        "last_seen_at": candidate.get("last_seen_at"),
-        "fragmentation_class": candidate.get("fragmentation_class"),
-        "fragmentation_safe": bool(candidate.get("fragmentation_safe")),
-        "fragmentation_reason": candidate.get("fragmentation_reason"),
-        "family": candidate.get("family"),
-        "family_key": candidate.get("family_key"),
-        "family_rank": candidate.get("family_rank"),
-        "family_reason": candidate.get("family_reason"),
-        "seen": [{"domain": domain} for domain in domains],
-    }
-    if common_domains:
-        result["common_seen"] = [{"domains": common_domains}]
-    return result
+
+
+

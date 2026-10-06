@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from .repositories import runs as _runs_repository, candidates as _candidates_repository, presets as _presets_repository
+from .repositories.primitives import _args_hash, _upsert_strategy_conn, _upsert_domain_conn, _save_domain_preset_conn, _ensure_system_domain_presets_conn, _unique_nonempty, SYSTEM_DOMAIN_PRESETS, SYSTEM_DOMAIN_PRESET_NAMES
+from .repositories.run_payload import compact_run_payload, _compact_payload_value
+from .repositories.runs import _page_int
+from .repositories.runs import _decode_run_payload_rows
+from .repositories.candidates import _upsert_candidate_event_conn
+from .repositories.candidates import _upsert_strategy_domain_result_conn
+from .repositories.presets import _empty_preset_domains_page
+
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 import json
@@ -34,32 +44,6 @@ _OMITTED = object()
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _SQLITE_SIDECAR_SUFFIXES = ("", "-wal", "-shm")
-_RUN_PAYLOAD_DROP_KEYS = {
-    "summary",
-    "common",
-    "live_summary",
-    "results",
-    "common_results",
-    "direct_available",
-    "not_working",
-    "candidates",
-    "common_candidates",
-    "attempts",
-    "attempt_results",
-    "candidate_events",
-    "candidate_samples",
-    "common_candidate_samples",
-}
-_RUN_PAYLOAD_STRUCTURED_LIST_KEYS = {"domains"}
-_RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS = {
-    "domain_skipped",
-    "domain_classification",
-    "domain_diagnostics",
-    "curl_diagnostics",
-}
-_RUN_PAYLOAD_MAX_SCALAR_LIST = 500
-_RUN_PAYLOAD_MAX_OBJECT_LIST = 100
-_RUN_PAYLOAD_MAX_STRING = 8192
 _RUN_PAYLOAD_COMPACT_BATCH_SIZE = 100
 _LEGACY_RUNTIME_FILES = ("available.ndjson", "runs.jsonl", "candidates.json")
 _LEGACY_STORAGE_TABLES = (
@@ -69,24 +53,6 @@ _LEGACY_STORAGE_TABLES = (
     "candidates",
     "presets",
 )
-SYSTEM_DOMAIN_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
-    "finder": {
-        "required": {
-            "label": "Обязательные домены",
-            "domains": [],
-        },
-        "desired": {
-            "label": "Желательные домены",
-            "domains": [],
-        },
-    },
-    "common": {},
-}
-SYSTEM_DOMAIN_PRESET_NAMES = {
-    (scope, name)
-    for scope, scoped in SYSTEM_DOMAIN_PRESETS.items()
-    for name in scoped
-}
 
 
 class StorageUnavailableError(RuntimeError):
@@ -967,48 +933,10 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def compact_run_payload(run: dict[str, Any]) -> dict[str, Any]:
-    compact: dict[str, Any] = {}
-    for key, value in run.items():
-        cleaned = _compact_payload_value(str(key), value, depth=0)
-        if cleaned is not _OMITTED:
-            compact[str(key)] = cleaned
-    return compact
 
 
-def _compact_payload_value(key: str, value: Any, *, depth: int) -> Any:
-    if key in _RUN_PAYLOAD_DROP_KEYS:
-        return _OMITTED
-    if value is None or isinstance(value, bool | int | float):
-        return value
-    if isinstance(value, str):
-        if len(value) <= _RUN_PAYLOAD_MAX_STRING:
-            return value
-        return value[:_RUN_PAYLOAD_MAX_STRING] + "...[truncated]"
-    if isinstance(value, list):
-        if key in _RUN_PAYLOAD_STRUCTURED_LIST_KEYS:
-            return [str(item) for item in value if str(item or "").strip()]
-        if key in _RUN_PAYLOAD_COMPACT_OBJECT_LIST_KEYS:
-            return [
-                _compact_payload_value("", item, depth=depth + 1)
-                for item in value[:_RUN_PAYLOAD_MAX_OBJECT_LIST]
-            ]
-        if all(item is None or isinstance(item, bool | int | float | str) for item in value):
-            return [
-                _compact_payload_value("", item, depth=depth + 1)
-                for item in value[:_RUN_PAYLOAD_MAX_SCALAR_LIST]
-            ]
-        return {"omitted_count": len(value), "omitted_reason": "large structured list"}
-    if isinstance(value, dict):
-        if depth >= 5:
-            return {"omitted_reason": "nested object too deep"}
-        compact: dict[str, Any] = {}
-        for child_key, child_value in value.items():
-            cleaned = _compact_payload_value(str(child_key), child_value, depth=depth + 1)
-            if cleaned is not _OMITTED:
-                compact[str(child_key)] = cleaned
-        return compact
-    return str(value)
+
+
 
 
 def _compact_run_payloads(conn: sqlite3.Connection) -> None:
@@ -1161,258 +1089,45 @@ def _state_has_active_job(state_dir: Path) -> bool:
     return has_active_runtime(state_dir)
 
 
-def _args_hash(args: str) -> str:
-    return hashlib.sha256(str(args or "").encode("utf-8")).hexdigest()
 
 
-def _upsert_strategy_conn(
-    conn: sqlite3.Connection,
-    *,
-    strategy_id: str,
-    protocol: str,
-    args: str,
-    status: str,
-    seen_at: str,
-) -> None:
-    strategy_id = str(strategy_id or "").strip()
-    if not strategy_id:
-        return
-    analysis = analyze_strategy(protocol, args)
-    conn.execute(
-        """
-        INSERT INTO strategies(
-            id, protocol, args, args_hash, status,
-            fragmentation_class, fragmentation_safe, fragmentation_reason,
-            family, family_key, family_rank, family_reason
-        )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            protocol = excluded.protocol,
-            args = excluded.args,
-            args_hash = excluded.args_hash,
-            status = excluded.status,
-            fragmentation_class = excluded.fragmentation_class,
-            fragmentation_safe = excluded.fragmentation_safe,
-            fragmentation_reason = excluded.fragmentation_reason,
-            family = excluded.family,
-            family_key = excluded.family_key,
-            family_rank = excluded.family_rank,
-            family_reason = excluded.family_reason
-        WHERE strategies.protocol != excluded.protocol
-           OR strategies.args != excluded.args
-           OR strategies.args_hash != excluded.args_hash
-           OR strategies.status != excluded.status
-           OR strategies.fragmentation_class != excluded.fragmentation_class
-           OR strategies.fragmentation_safe != excluded.fragmentation_safe
-           OR strategies.fragmentation_reason != excluded.fragmentation_reason
-           OR strategies.family != excluded.family
-           OR strategies.family_key != excluded.family_key
-           OR strategies.family_rank != excluded.family_rank
-           OR strategies.family_reason != excluded.family_reason
-        """,
-        (
-            strategy_id,
-            protocol,
-            args,
-            _args_hash(args),
-            status or "candidate",
-            analysis.fragmentation_class,
-            1 if analysis.fragmentation_safe else 0,
-            analysis.fragmentation_reason,
-            analysis.family,
-            analysis.family_key,
-            analysis.family_rank,
-            analysis.family_reason,
-        ),
-    )
 
 
-def _upsert_domain_conn(
-    conn: sqlite3.Connection,
-    name: str,
-    *,
-    service_group: str = "",
-    created_at: str = "",
-    updated_at: str = "",
-) -> int | None:
-    domain = str(name or "").strip()
-    if not domain:
-        return None
-    conn.execute(
-        """
-        INSERT INTO domains(name, service_group)
-        VALUES(?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            service_group = excluded.service_group
-        WHERE domains.service_group = '' AND excluded.service_group != ''
-        """,
-        (domain, service_group),
-    )
-    row = conn.execute("SELECT id FROM domains WHERE name = ?", (domain,)).fetchone()
-    return int(row["id"]) if row else None
 
 
-def _save_domain_preset_conn(
-    conn: sqlite3.Connection,
-    *,
-    scope: str,
-    name: str,
-    kind: str,
-    domains: list[str],
-    updated_at: str,
-    source_json: str = "{}",
-) -> None:
-    clean_name = str(name or "").strip()
-    clean_scope = str(scope or "").strip()
-    clean_kind = str(kind or "user").strip() or "user"
-    if not clean_scope or not clean_name:
-        return
-    conn.execute(
-        """
-        INSERT INTO domain_presets(scope, name, kind, label, source_json)
-        VALUES(?, ?, ?, ?, ?)
-        ON CONFLICT(scope, name, kind) DO UPDATE SET
-            label = excluded.label,
-            source_json = excluded.source_json
-        WHERE domain_presets.label != excluded.label
-           OR domain_presets.source_json != excluded.source_json
-        """,
-        (clean_scope, clean_name, clean_kind, clean_name, source_json or "{}"),
-    )
-    preset = conn.execute(
-        "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = ?",
-        (clean_scope, clean_name, clean_kind),
-    ).fetchone()
-    if not preset:
-        return
-    preset_id = int(preset["id"])
-    conn.execute("DELETE FROM preset_domains WHERE preset_id = ?", (preset_id,))
-    for position, domain in enumerate(_unique_nonempty(domains)):
-        domain_id = _upsert_domain_conn(conn, domain)
-        if domain_id is None:
-            continue
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO preset_domains(preset_id, domain_id, position, enabled)
-            VALUES(?, ?, ?, 1)
-            """,
-            (preset_id, domain_id, position),
-        )
 
 
-def _ensure_system_domain_presets_conn(conn: sqlite3.Connection) -> None:
-    for scope, scoped in SYSTEM_DOMAIN_PRESETS.items():
-        for name, preset in scoped.items():
-            label = str(preset.get("label") or name)
-            source_json = json.dumps({"type": "system"}, ensure_ascii=False, separators=(",", ":"))
-            row = conn.execute(
-                "SELECT id FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'system'",
-                (scope, name),
-            ).fetchone()
-            if row:
-                conn.execute(
-                    """
-                    UPDATE domain_presets
-                    SET label = ?, source_json = ?
-                    WHERE id = ? AND (label != ? OR source_json != ?)
-                    """,
-                    (label, source_json, int(row["id"]), label, source_json),
-                )
-                continue
-            _save_domain_preset_conn(
-                conn,
-                scope=scope,
-                name=name,
-                kind="system",
-                domains=[str(item or "") for item in preset.get("domains") or []],
-                updated_at="",
-                source_json=source_json,
-            )
+
+
+
+
+
 
 
 def append_run(state_dir: Path, run: dict[str, Any]) -> None:
-    payload = compact_run_payload(run)
-    with connect(state_dir) as conn:
-        conn.execute(
-            """
-            INSERT INTO runs(id, kind, status, timestamp, payload_json)
-            VALUES(?, ?, ?, ?, ?)
-            """,
-            (
-                str(run.get("id") or ""),
-                str(run.get("kind") or ""),
-                str(run.get("status") or ""),
-                str(run.get("timestamp") or ""),
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-            ),
-        )
+    return _runs_repository.append_run(state_dir, run, _connect=connect)
 
 
-def _page_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
+
+
 
 
 def read_run_payloads(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-    limit = _page_int(limit, default=50, minimum=1, maximum=1000)
-    offset = _page_int(offset, default=0, minimum=0, maximum=10_000_000)
-    with connect(state_dir) as conn:
-        rows = conn.execute(
-            "SELECT payload_json FROM runs ORDER BY seq DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
-    return _decode_run_payload_rows(rows)
+    return _runs_repository.read_run_payloads(state_dir, limit, offset, _connect=connect)
+
 
 
 def read_latest_run_payloads(state_dir: Path, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-    limit = _page_int(limit, default=50, minimum=1, maximum=1000)
-    offset = _page_int(offset, default=0, minimum=0, maximum=10_000_000)
-    with connect(state_dir) as conn:
-        rows = conn.execute(
-            """
-            SELECT r.payload_json
-            FROM runs r
-            JOIN (
-                SELECT MAX(seq) AS seq
-                FROM runs
-                GROUP BY CASE WHEN id = '' THEN 'seq:' || seq ELSE id END
-            ) latest ON latest.seq = r.seq
-            ORDER BY r.seq DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        ).fetchall()
-    return _decode_run_payload_rows(rows)
+    return _runs_repository.read_latest_run_payloads(state_dir, limit, offset, _connect=connect)
+
 
 
 def count_latest_run_payloads(state_dir: Path) -> int:
-    with connect(state_dir) as conn:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM (
-                SELECT 1
-                FROM runs
-                GROUP BY CASE WHEN id = '' THEN 'seq:' || seq ELSE id END
-            ) latest
-            """
-        ).fetchone()
-    return int(row["count"] or 0) if row else 0
+    return _runs_repository.count_latest_run_payloads(state_dir, _connect=connect)
 
 
-def _decode_run_payload_rows(rows: list[Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for row in reversed(rows):
-        try:
-            data = json.loads(str(row["payload_json"]))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            result.append(compact_run_payload(data))
-    return result
+
+
 
 
 def upsert_candidate_event(
@@ -1430,21 +1145,8 @@ def upsert_candidate_event(
     seen_at: str,
     common: bool,
 ) -> None:
-    with connect(state_dir) as conn:
-        _upsert_candidate_event_conn(
-            conn,
-            candidate_id=candidate_id,
-            protocol=protocol,
-            args=args,
-            status=status,
-            run_id=run_id,
-            domain=domain,
-            domains=domains,
-            test=test,
-            ip_version=ip_version,
-            seen_at=seen_at,
-            common=common,
-        )
+    return _candidates_repository.upsert_candidate_event(state_dir, candidate_id=candidate_id, protocol=protocol, args=args, status=status, run_id=run_id, domain=domain, domains=domains, test=test, ip_version=ip_version, seen_at=seen_at, common=common, _connect=connect)
+
 
 
 def upsert_candidate_event_conn(
@@ -1462,20 +1164,8 @@ def upsert_candidate_event_conn(
     seen_at: str,
     common: bool,
 ) -> None:
-    _upsert_candidate_event_conn(
-        conn,
-        candidate_id=candidate_id,
-        protocol=protocol,
-        args=args,
-        status=status,
-        run_id=run_id,
-        domain=domain,
-        domains=domains,
-        test=test,
-        ip_version=ip_version,
-        seen_at=seen_at,
-        common=common,
-    )
+    return _candidates_repository.upsert_candidate_event_conn(conn, candidate_id=candidate_id, protocol=protocol, args=args, status=status, run_id=run_id, domain=domain, domains=domains, test=test, ip_version=ip_version, seen_at=seen_at, common=common)
+
 
 
 def read_app_setting(state_dir: Path, key: str) -> Any | None:
@@ -1533,132 +1223,31 @@ def save_app_setting(state_dir: Path, key: str, value: Any, updated_at: str) -> 
 
 
 def read_custom_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
-    with connect(state_dir) as conn:
-        rows = conn.execute(
-            """
-            SELECT p.scope, p.name, d.name AS domain
-            FROM domain_presets p
-            LEFT JOIN preset_domains pd ON pd.preset_id = p.id
-            LEFT JOIN domains d ON d.id = pd.domain_id
-            WHERE p.kind = 'user' AND COALESCE(pd.enabled, 1) = 1
-            ORDER BY p.scope, p.name, pd.position, d.name
-            """
-        ).fetchall()
-    result: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
-    for row in rows:
-        scope = str(row["scope"] or "")
-        name = str(row["name"] or "")
-        if not scope or not name:
-            continue
-        result.setdefault(scope, {}).setdefault(name, [])
-        domain = str(row["domain"] or "").strip()
-        if domain and domain not in result[scope][name]:
-            result[scope][name].append(domain)
-    return result
+    return _presets_repository.read_custom_presets(state_dir, _connect=connect)
+
 
 
 def read_system_presets(state_dir: Path) -> dict[str, dict[str, list[str]]]:
-    with connect(state_dir) as conn:
-        _ensure_system_domain_presets_conn(conn)
-        rows = conn.execute(
-            """
-            SELECT p.scope, p.name, d.name AS domain
-            FROM domain_presets p
-            LEFT JOIN preset_domains pd ON pd.preset_id = p.id
-            LEFT JOIN domains d ON d.id = pd.domain_id
-            WHERE p.kind = 'system' AND COALESCE(pd.enabled, 1) = 1
-            ORDER BY p.scope, p.name, pd.position, d.name
-            """
-        ).fetchall()
-    result: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
-    for scope, scoped in SYSTEM_DOMAIN_PRESETS.items():
-        result.setdefault(scope, {})
-        for name in scoped:
-            result[scope].setdefault(name, [])
-    for row in rows:
-        scope = str(row["scope"] or "")
-        name = str(row["name"] or "")
-        if not scope or not name:
-            continue
-        result.setdefault(scope, {}).setdefault(name, [])
-        domain = str(row["domain"] or "").strip()
-        if domain and domain not in result[scope][name]:
-            result[scope][name].append(domain)
-    return result
+    return _presets_repository.read_system_presets(state_dir, _connect=connect)
+
 
 
 def read_custom_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
-    return _read_domain_preset_index(state_dir, kind="user")
+    return _presets_repository.read_custom_preset_index(state_dir, _connect=connect)
+
 
 
 def read_system_preset_index(state_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
-    return _read_domain_preset_index(state_dir, kind="system")
+    return _presets_repository.read_system_preset_index(state_dir, _connect=connect)
 
 
-def _read_domain_preset_index(state_dir: Path, *, kind: str) -> dict[str, dict[str, dict[str, Any]]]:
-    clean_kind = str(kind or "user").strip() or "user"
-    with connect(state_dir) as conn:
-        if clean_kind == "system":
-            _ensure_system_domain_presets_conn(conn)
-        rows = conn.execute(
-            """
-            SELECT p.scope, p.name, p.kind, p.label,
-                   COUNT(pd.domain_id) AS total_count,
-                   COUNT(CASE WHEN pd.domain_id IS NOT NULL AND COALESCE(pd.enabled, 1) = 1 THEN 1 END) AS enabled_count
-            FROM domain_presets p
-            LEFT JOIN preset_domains pd ON pd.preset_id = p.id
-            WHERE p.kind = ?
-            GROUP BY p.id, p.scope, p.name, p.kind, p.label
-            ORDER BY p.scope, p.name
-            """,
-            (clean_kind,),
-        ).fetchall()
-    result: dict[str, dict[str, dict[str, Any]]] = {"finder": {}, "common": {}}
-    for row in rows:
-        scope = str(row["scope"] or "")
-        name = str(row["name"] or "")
-        if not scope or not name:
-            continue
-        result.setdefault(scope, {})[name] = {
-            "name": name,
-            "kind": str(row["kind"] or clean_kind),
-            "label": str(row["label"] or name),
-            "enabled_count": int(row["enabled_count"] or 0),
-            "total_count": int(row["total_count"] or 0),
-            "updated_at": "",
-        }
-    return result
+
+
 
 
 def save_custom_presets(state_dir: Path, presets: dict[str, Any], updated_at: str) -> dict[str, dict[str, list[str]]]:
-    clean: dict[str, dict[str, list[str]]] = {"finder": {}, "common": {}}
-    for scope in ("finder", "common"):
-        raw_scope = presets.get(scope) if isinstance(presets, dict) else {}
-        if not isinstance(raw_scope, dict):
-            continue
-        for raw_name, raw_domains in raw_scope.items():
-            name = str(raw_name or "").strip()
-            if not name or not isinstance(raw_domains, list):
-                continue
-            if (scope, name) in SYSTEM_DOMAIN_PRESET_NAMES:
-                continue
-            clean[scope][name] = _unique_nonempty([str(item or "") for item in raw_domains])
-    with connect(state_dir) as conn:
-        user_presets = conn.execute("SELECT id FROM domain_presets WHERE kind = 'user'").fetchall()
-        for row in user_presets:
-            conn.execute("DELETE FROM preset_domains WHERE preset_id = ?", (int(row["id"]),))
-        conn.execute("DELETE FROM domain_presets WHERE kind = 'user'")
-        for scope, scoped in clean.items():
-            for name, domains in scoped.items():
-                _save_domain_preset_conn(
-                    conn,
-                    scope=scope,
-                    name=name,
-                    kind="user",
-                    domains=domains,
-                    updated_at=updated_at,
-                )
-    return clean
+    return _presets_repository.save_custom_presets(state_dir, presets, updated_at, _connect=connect)
+
 
 
 def save_custom_preset(
@@ -1670,29 +1259,8 @@ def save_custom_preset(
     updated_at: str,
     source: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, list[str]]]:
-    clean_scope = str(scope or "").strip()
-    clean_name = str(name or "").strip()
-    if clean_scope not in {"finder", "common"}:
-        raise ValueError("scope must be finder or common")
-    if not clean_name:
-        raise ValueError("preset name is required")
-    if (clean_scope, clean_name) in SYSTEM_DOMAIN_PRESET_NAMES:
-        raise ValueError("preset name is reserved for a system list")
-    clean_domains = _unique_nonempty([str(item or "") for item in domains])
-    if not clean_domains:
-        raise ValueError("preset must contain at least one domain")
-    source_json = json.dumps(source or {}, ensure_ascii=False, separators=(",", ":"))
-    with connect(state_dir) as conn:
-        _save_domain_preset_conn(
-            conn,
-            scope=clean_scope,
-            name=clean_name,
-            kind="user",
-            domains=clean_domains,
-            updated_at=updated_at,
-            source_json=source_json,
-        )
-    return read_custom_presets(state_dir)
+    return _presets_repository.save_custom_preset(state_dir, scope=scope, name=name, domains=domains, updated_at=updated_at, source=source, _connect=connect)
+
 
 
 def save_system_preset(
@@ -1703,65 +1271,18 @@ def save_system_preset(
     domains: list[str],
     updated_at: str,
 ) -> dict[str, dict[str, list[str]]]:
-    clean_scope = str(scope or "").strip()
-    clean_name = str(name or "").strip()
-    if (clean_scope, clean_name) not in SYSTEM_DOMAIN_PRESET_NAMES:
-        raise ValueError("unknown system preset")
-    clean_domains = _unique_nonempty([str(item or "") for item in domains])
-    preset = SYSTEM_DOMAIN_PRESETS[clean_scope][clean_name]
-    source_json = json.dumps({"type": "system"}, ensure_ascii=False, separators=(",", ":"))
-    with connect(state_dir) as conn:
-        _save_domain_preset_conn(
-            conn,
-            scope=clean_scope,
-            name=clean_name,
-            kind="system",
-            domains=clean_domains,
-            updated_at=updated_at,
-            source_json=source_json,
-        )
-        label = str(preset.get("label") or clean_name)
-        conn.execute(
-            """
-            UPDATE domain_presets
-            SET label = ?
-            WHERE scope = ? AND name = ? AND kind = 'system' AND label != ?
-            """,
-            (label, clean_scope, clean_name, label),
-        )
-    return read_system_presets(state_dir)
+    return _presets_repository.save_system_preset(state_dir, scope=scope, name=name, domains=domains, updated_at=updated_at, _connect=connect)
+
 
 
 def delete_custom_preset(state_dir: Path, *, scope: str, name: str) -> dict[str, dict[str, dict[str, Any]]]:
-    clean_scope = str(scope or "").strip()
-    clean_name = str(name or "").strip()
-    if clean_scope not in {"finder", "common"}:
-        raise ValueError("scope must be finder or common")
-    if not clean_name:
-        raise ValueError("preset name is required")
-    with connect(state_dir) as conn:
-        conn.execute(
-            "DELETE FROM domain_presets WHERE scope = ? AND name = ? AND kind = 'user'",
-            (clean_scope, clean_name),
-        )
-    return read_custom_preset_index(state_dir)
+    return _presets_repository.delete_custom_preset(state_dir, scope=scope, name=name, _connect=connect)
+
 
 
 def delete_user_presets(state_dir: Path, *, scope: str, names: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
-    clean_scope = str(scope or "").strip()
-    if clean_scope not in {"finder", "common"}:
-        raise ValueError("scope must be finder or common")
-    clean_names = [str(name or "").strip() for name in names]
-    clean_names = [name for name in clean_names if name and (clean_scope, name) not in SYSTEM_DOMAIN_PRESET_NAMES]
-    if not clean_names:
-        raise ValueError("user preset name is required")
-    placeholders = ",".join("?" for _ in clean_names)
-    with connect(state_dir) as conn:
-        conn.execute(
-            f"DELETE FROM domain_presets WHERE scope = ? AND kind = 'user' AND name IN ({placeholders})",
-            (clean_scope, *clean_names),
-        )
-    return read_custom_preset_index(state_dir)
+    return _presets_repository.delete_user_presets(state_dir, scope=scope, names=names, _connect=connect)
+
 
 
 def read_preset_domains_page(
@@ -1775,67 +1296,8 @@ def read_preset_domains_page(
     offset: int = 0,
     include_disabled: bool = True,
 ) -> dict[str, Any]:
-    clean_scope = str(scope or "").strip()
-    clean_name = str(name or "").strip()
-    clean_kind = str(kind or "user").strip() or "user"
-    clean_query = str(query or "").strip().lower()
-    clean_limit = max(1, min(int(limit or 200), 1000))
-    clean_offset = max(0, int(offset or 0))
-    if not clean_scope or not clean_name:
-        return _empty_preset_domains_page(clean_scope, clean_name, clean_kind, clean_query, clean_limit, clean_offset)
-    filters = ["p.scope = ?", "p.name = ?", "p.kind = ?"]
-    params: list[Any] = [clean_scope, clean_name, clean_kind]
-    if clean_query:
-        filters.append("LOWER(d.name) LIKE ?")
-        params.append(f"%{clean_query}%")
-    if not include_disabled:
-        filters.append("COALESCE(pd.enabled, 1) = 1")
-    where = " AND ".join(filters)
-    with connect(state_dir) as conn:
-        if clean_kind == "system":
-            _ensure_system_domain_presets_conn(conn)
-        total_row = conn.execute(
-            f"""
-            SELECT COUNT(*) AS count
-            FROM domain_presets p
-            JOIN preset_domains pd ON pd.preset_id = p.id
-            JOIN domains d ON d.id = pd.domain_id
-            WHERE {where}
-            """,
-            params,
-        ).fetchone()
-        total = int(total_row["count"]) if total_row else 0
-        rows = conn.execute(
-            f"""
-            SELECT d.name AS domain, pd.position, COALESCE(pd.enabled, 1) AS enabled
-            FROM domain_presets p
-            JOIN preset_domains pd ON pd.preset_id = p.id
-            JOIN domains d ON d.id = pd.domain_id
-            WHERE {where}
-            ORDER BY pd.position, d.name
-            LIMIT ? OFFSET ?
-            """,
-            [*params, clean_limit, clean_offset],
-        ).fetchall()
-    domains = [
-        {
-            "domain": str(row["domain"] or ""),
-            "position": int(row["position"] or 0),
-            "enabled": bool(row["enabled"]),
-        }
-        for row in rows
-    ]
-    return {
-        "scope": clean_scope,
-        "name": clean_name,
-        "kind": clean_kind,
-        "query": clean_query,
-        "limit": clean_limit,
-        "offset": clean_offset,
-        "total": total,
-        "has_more": clean_offset + len(domains) < total,
-        "domains": domains,
-    }
+    return _presets_repository.read_preset_domains_page(state_dir, scope=scope, name=name, kind=kind, query=query, limit=limit, offset=offset, include_disabled=include_disabled, _connect=connect)
+
 
 
 def set_preset_domain_enabled(
@@ -1848,145 +1310,17 @@ def set_preset_domain_enabled(
     updated_at: str,
     kind: str = "user",
 ) -> dict[str, Any]:
-    clean_scope = str(scope or "").strip()
-    clean_name = str(name or "").strip()
-    clean_domain = str(domain or "").strip()
-    clean_kind = str(kind or "user").strip() or "user"
-    if clean_kind not in {"user", "system"}:
-        raise ValueError("preset kind must be user or system")
-    if clean_scope not in {"finder", "common"}:
-        raise ValueError("scope must be finder or common")
-    if not clean_name:
-        raise ValueError("preset name is required")
-    if not clean_domain:
-        raise ValueError("domain is required")
-    with connect(state_dir) as conn:
-        if clean_kind == "system":
-            _ensure_system_domain_presets_conn(conn)
-        row = conn.execute(
-            """
-            SELECT pd.preset_id, pd.domain_id
-            FROM domain_presets p
-            JOIN preset_domains pd ON pd.preset_id = p.id
-            JOIN domains d ON d.id = pd.domain_id
-            WHERE p.scope = ? AND p.name = ? AND p.kind = ? AND d.name = ?
-            """,
-            (clean_scope, clean_name, clean_kind, clean_domain),
-        ).fetchone()
-        if not row:
-            raise ValueError("preset domain was not found")
-        conn.execute(
-            "UPDATE preset_domains SET enabled = ? WHERE preset_id = ? AND domain_id = ?",
-            (1 if enabled else 0, int(row["preset_id"]), int(row["domain_id"])),
-        )
-    return {
-        "scope": clean_scope,
-        "name": clean_name,
-        "kind": clean_kind,
-        "domain": clean_domain,
-        "enabled": bool(enabled),
-    }
+    return _presets_repository.set_preset_domain_enabled(state_dir, scope=scope, name=name, domain=domain, enabled=enabled, updated_at=updated_at, kind=kind, _connect=connect)
 
 
-def _empty_preset_domains_page(
-    scope: str,
-    name: str,
-    kind: str,
-    query: str,
-    limit: int,
-    offset: int,
-) -> dict[str, Any]:
-    return {
-        "scope": scope,
-        "name": name,
-        "kind": kind,
-        "query": query,
-        "limit": limit,
-        "offset": offset,
-        "total": 0,
-        "has_more": False,
-        "domains": [],
-    }
 
 
-def _upsert_candidate_event_conn(
-    conn: sqlite3.Connection,
-    *,
-    candidate_id: str,
-    protocol: str,
-    args: str,
-    status: str,
-    run_id: str,
-    domain: str,
-    domains: list[str],
-    test: str,
-    ip_version: str,
-    seen_at: str,
-    common: bool,
-) -> None:
-    _upsert_strategy_domain_result_conn(
-        conn,
-        strategy_id=candidate_id,
-        protocol=protocol,
-        args=args,
-        status=status,
-        run_id=run_id,
-        domain=domain,
-        domains=domains,
-        test=test,
-        ip_version=ip_version,
-        seen_at=seen_at,
-        common=common,
-    )
 
 
-def _upsert_strategy_domain_result_conn(
-    conn: sqlite3.Connection,
-    *,
-    strategy_id: str,
-    protocol: str,
-    args: str,
-    status: str,
-    run_id: str,
-    domain: str,
-    domains: list[str],
-    test: str,
-    ip_version: str,
-    seen_at: str,
-    common: bool,
-) -> None:
-    _upsert_strategy_conn(
-        conn,
-        strategy_id=strategy_id,
-        protocol=protocol,
-        args=args,
-        status=status,
-        seen_at=seen_at,
-    )
-    source_mode = "multi_domain" if common else "single_domain"
-    target_domains = domains if common else ([domain] if domain else [])
-    for item in _unique_nonempty([str(value or "") for value in target_domains]):
-        domain_id = _upsert_domain_conn(conn, item, created_at=seen_at, updated_at=seen_at)
-        if domain_id is None:
-            continue
-        conn.execute(
-            """
-            INSERT INTO strategy_domain_results(
-                strategy_id, domain_id, protocol, source_mode
-            )
-            VALUES(?, ?, ?, ?)
-            ON CONFLICT(strategy_id, domain_id, source_mode) DO UPDATE SET
-                protocol = excluded.protocol
-            WHERE strategy_domain_results.protocol != excluded.protocol
-            """,
-            (strategy_id, domain_id, protocol, source_mode),
-        )
 
 
-def _unique_nonempty(values: list[str]) -> list[str]:
-    result: list[str] = []
-    for value in values:
-        item = str(value or "").strip()
-        if item and item not in result:
-            result.append(item)
-    return result
+
+
+
+
+
